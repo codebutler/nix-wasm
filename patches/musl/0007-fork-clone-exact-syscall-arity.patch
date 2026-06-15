@@ -1,0 +1,20 @@
+diff --git a/src/process/_Fork.c b/src/process/_Fork.c
+index 9c07792..ac59b14 100644
+--- a/src/process/_Fork.c
++++ b/src/process/_Fork.c
+@@ -35,7 +35,14 @@ pid_t _Fork(void)
+ #ifdef SYS_fork
+ 	ret = __syscall(SYS_fork);
+ #else
+-	ret = __syscall(SYS_clone, SIGCHLD, 0);
++	/* pc (linux-wasm #139): pad clone to the kernel's 5-arg arity. On wasm,
++	 * syscalls are typed indirect calls — a 2-arg call site into 5-arg
++	 * sys_clone (SYSCALL_DEFINE5) is a signature mismatch -> kernel-mode
++	 * trap -> "Aiee" panic. fork() was the last unpadded clone shortcut
++	 * (the clone() library path is already full-arity); Nix's builder
++	 * fork()s, so every in-guest derivation hit this. The extra ptid/tls/
++	 * ctid are 0 (no CLONE_*_SETTID/SETTLS set) so semantics are unchanged. */
++	ret = __syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+ #endif
+ 	__post_Fork(ret);
+ 	__restore_sigs(&set);

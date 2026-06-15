@@ -1,0 +1,230 @@
+diff --git a/include/paths.h b/include/paths.h
+index 67de6b3..e101f59 100644
+--- a/include/paths.h
++++ b/include/paths.h
+@@ -18,9 +18,9 @@
+ #define	_PATH_SHADOW	"/etc/shadow"
+ #define	_PATH_SHELLS	"/etc/shells"
+ #define	_PATH_TTY	"/dev/tty"
+-#define _PATH_UTMP	"/dev/null/utmp"
++#define _PATH_UTMP	"/var/run/utmp"
+ #define	_PATH_VI	"/usr/bin/vi"
+-#define _PATH_WTMP	"/dev/null/wtmp"
++#define _PATH_WTMP	"/var/log/wtmp"
+ 
+ #define	_PATH_DEV	"/dev/"
+ #define	_PATH_TMP	"/tmp/"
+diff --git a/include/utmp.h b/include/utmp.h
+index 48a400d..a21df87 100644
+--- a/include/utmp.h
++++ b/include/utmp.h
+@@ -37,8 +37,8 @@ int utmpname(const char *);
+ 
+ int login_tty(int);
+ 
+-#define _PATH_UTMP "/dev/null/utmp"
+-#define _PATH_WTMP "/dev/null/wtmp"
++#define _PATH_UTMP "/var/run/utmp"
++#define _PATH_WTMP "/var/log/wtmp"
+ 
+ #define UTMP_FILE _PATH_UTMP
+ #define WTMP_FILE _PATH_WTMP
+diff --git a/src/legacy/utmpx.c b/src/legacy/utmpx.c
+index 7aa65da..ff7f0e1 100644
+--- a/src/legacy/utmpx.c
++++ b/src/legacy/utmpx.c
+@@ -1,44 +1,188 @@
+ #define _GNU_SOURCE
+ #include <utmpx.h>
++#include <paths.h>
+ #include <stddef.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
+ #include <errno.h>
++#include <sys/file.h>
++
++/* pc (linux-wasm) patch: file-backed utmp/utmpx.
++ *
++ * Upstream musl deliberately stubs the whole utmp API out (and points
++ * _PATH_UTMP at /dev/null/utmp), on the grounds that a world-writable
++ * shared accounting file needs a daemon to be done safely. pc's guest is a
++ * single-user, everything-root PoC, so the classic glibc file semantics are
++ * fine — and BusyBox's getty/login/wall/who/w/last/uptime all expect them.
++ *
++ * Semantics mirrored from glibc's login/utmp_file.c (BusyBox's
++ * libbb/utmp.c update_utmp() depends on the details):
++ *  - getutxent() reads sequentially, returning a pointer to a static record
++ *    and remembering it as the "last read" slot;
++ *  - pututxline() overwrites the last-read slot when it matches the record
++ *    by getutxid() criteria (so a getutxent() scan positions the write),
++ *    otherwise searches forward from the current position, otherwise
++ *    appends at the end;
++ *  - updwtmpx() appends, and does NOT create the file ("man utmp": wtmp is
++ *    never created automagically — the system provides it; pc-init does).
++ *
++ * Locking is best-effort flock() (ignored on failure, e.g. if the kernel
++ * lacks CONFIG_FILE_LOCKING); the guest is single-CPU and the writers are
++ * short-lived getty/login/init, so contention is minimal. Not thread-safe,
++ * matching the single-threaded BusyBox users.
++ */
++
++static int fd = -1;
++static off_t off;
++static struct utmpx last;
++static int last_valid;
++static char namebuf[256];
++static const char *utfile = _PATH_UTMP;
++
++static int open_file(void)
++{
++	if (fd >= 0) return 0;
++	fd = open(utfile, O_RDWR|O_CLOEXEC);
++	if (fd < 0) fd = open(utfile, O_RDONLY|O_CLOEXEC);
++	if (fd < 0) return -1;
++	off = 0;
++	last_valid = 0;
++	return 0;
++}
+ 
+ void endutxent(void)
+ {
++	if (fd >= 0) close(fd);
++	fd = -1;
++	off = 0;
++	last_valid = 0;
+ }
+ 
+ void setutxent(void)
+ {
++	if (fd < 0) open_file();
++	off = 0;
++	last_valid = 0;
+ }
+ 
+ struct utmpx *getutxent(void)
+ {
+-	return NULL;
++	ssize_t n;
++	if (fd < 0 && open_file()) return 0;
++	flock(fd, LOCK_SH);
++	n = pread(fd, &last, sizeof last, off);
++	flock(fd, LOCK_UN);
++	if (n != sizeof last) {
++		last_valid = 0;
++		return 0;
++	}
++	off += sizeof last;
++	last_valid = 1;
++	return &last;
++}
++
++/* getutxid() match: time-keeping types match on ut_type alone; process
++ * types (and anything else) match any of the four process types with the
++ * same ut_id. */
++static int id_match(const struct utmpx *ref, const struct utmpx *rec)
++{
++	switch (ref->ut_type) {
++	case RUN_LVL:
++	case BOOT_TIME:
++	case NEW_TIME:
++	case OLD_TIME:
++		return rec->ut_type == ref->ut_type;
++	}
++	switch (rec->ut_type) {
++	case INIT_PROCESS:
++	case LOGIN_PROCESS:
++	case USER_PROCESS:
++	case DEAD_PROCESS:
++		return !memcmp(rec->ut_id, ref->ut_id, sizeof rec->ut_id);
++	}
++	return 0;
+ }
+ 
+ struct utmpx *getutxid(const struct utmpx *ut)
+ {
+-	return NULL;
++	while (getutxent())
++		if (id_match(ut, &last)) return &last;
++	return 0;
+ }
+ 
+ struct utmpx *getutxline(const struct utmpx *ut)
+ {
+-	return NULL;
++	while (getutxent())
++		if ((last.ut_type == USER_PROCESS || last.ut_type == LOGIN_PROCESS)
++		 && !strncmp(last.ut_line, ut->ut_line, sizeof last.ut_line))
++			return &last;
++	return 0;
+ }
+ 
+ struct utmpx *pututxline(const struct utmpx *ut)
+ {
+-	return NULL;
++	struct utmpx rec = *ut; /* ut may alias the static `last` */
++	off_t at = -1;
++	ssize_t n;
++
++	if (fd < 0 && open_file()) return 0;
++	flock(fd, LOCK_EX);
++	if (last_valid && id_match(&rec, &last)) {
++		at = off - (off_t)sizeof last;
++	} else {
++		for (;;) {
++			n = pread(fd, &last, sizeof last, off);
++			if (n != sizeof last) break;
++			off += sizeof last;
++			last_valid = 1;
++			if (id_match(&rec, &last)) {
++				at = off - (off_t)sizeof last;
++				break;
++			}
++		}
++		if (at < 0) {
++			at = lseek(fd, 0, SEEK_END);
++			if (at < 0) {
++				flock(fd, LOCK_UN);
++				return 0;
++			}
++			at -= at % (off_t)sizeof rec; /* clamp over a torn tail */
++		}
++	}
++	n = pwrite(fd, &rec, sizeof rec, at);
++	flock(fd, LOCK_UN);
++	if (n != sizeof rec) {
++		last_valid = 0;
++		return 0;
++	}
++	off = at + sizeof rec;
++	last = rec;
++	last_valid = 1;
++	return &last;
+ }
+ 
+ void updwtmpx(const char *f, const struct utmpx *u)
+ {
++	int wfd = open(f, O_WRONLY|O_APPEND|O_CLOEXEC);
++	if (wfd < 0) return;
++	flock(wfd, LOCK_EX);
++	write(wfd, u, sizeof *u);
++	flock(wfd, LOCK_UN);
++	close(wfd);
+ }
+ 
+ static int __utmpxname(const char *f)
+ {
+-	errno = ENOTSUP;
+-	return -1;
++	size_t l = strlen(f);
++	if (l >= sizeof namebuf) {
++		errno = EINVAL;
++		return -1;
++	}
++	endutxent();
++	memcpy(namebuf, f, l+1);
++	utfile = namebuf;
++	return 0;
+ }
+ 
+ weak_alias(endutxent, endutent);

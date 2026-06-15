@@ -1,0 +1,108 @@
+diff --git a/src/env/__init_tls.c b/src/env/__init_tls.c
+index a93141e..8bc0483 100644
+--- a/src/env/__init_tls.c
++++ b/src/env/__init_tls.c
+@@ -129,6 +129,17 @@ static void static_init_tls(size_t *aux)
+ #endif
+ 		+ main_tls.size + main_tls.align
+ 		+ MIN_TLS_ALIGN-1 & -MIN_TLS_ALIGN;
++#ifdef __wasm__
++	/* Room for each thread's LLVM TLS block (see pthread_create.c —
++	 * carved just below the struct pthread inside the tls region). The
++	 * size/align come from the final module's linker-synthesized TLS
++	 * globals, not anything musl was compiled against. */
++	{
++		uintptr_t a = __builtin_wasm_tls_align();
++		if (a < MIN_TLS_ALIGN) a = MIN_TLS_ALIGN;
++		libc.tls_size += __builtin_wasm_tls_size() + 2*a;
++	}
++#endif
+ 
+ 	if (libc.tls_size > sizeof builtin_tls) {
+ #ifndef SYS_mmap2
+diff --git a/src/thread/pthread_create.c b/src/thread/pthread_create.c
+index 087f620..902a3e7 100644
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -189,12 +189,48 @@ struct start_args {
+ 	void *start_arg;
+ 	volatile int control;
+ 	unsigned long sig_mask[_NSIG/8/sizeof(long)];
++#ifdef __wasm__
++	pthread_t td;
++#endif
+ };
+ 
++#ifdef __wasm__
++/* LLVM owns the wasm TLS segment (variables are addressed as
++ * __tls_base + offset; there is no PT_TLS, so libc.tls_cnt==0 and musl's
++ * generic TLS machinery knows nothing about it). Each new thread needs a
++ * real, initialized TLS block: we carve it out of the thread map just
++ * below the struct pthread (static_init_tls reserves the room), pass it
++ * as the clone TLS argument (the host runtime loads that into the child's
++ * __tls_base), and the child copies the TLS images in and points
++ * __musl_tp at its struct pthread before anything touches TLS. Without
++ * this, a child's __tls_base aliased its struct pthread — which "worked"
++ * only while __musl_tp was the program's sole TLS variable, sitting at
++ * offset 0 over the self field; any module with real TLS (the C++
++ * runtime, #139) broke it and corrupted the struct.
++ * __wasm_init_tls / __builtin_wasm_tls_{size,align} resolve against the
++ * linker-synthesized TLS globals of the FINAL module, so precompiled musl
++ * picks up each program's actual TLS layout. */
++extern void __wasm_init_tls(void *);
++static void *__wasm_tls_block(struct pthread *td)
++{
++	uintptr_t a = __builtin_wasm_tls_align();
++	if (!a) a = sizeof(void *);
++	return (void *)(((uintptr_t)td - __builtin_wasm_tls_size()) & -a);
++}
++#define WASM_CHILD_TLS_INIT(args) do { \
++	__wasm_init_tls(__wasm_tls_block((args)->td)); \
++	__set_thread_area((args)->td); \
++} while (0)
++#endif
++
+ static int start(void *p)
+ {
+ 	struct start_args *args = p;
+-	int state = args->control;
++	int state;
++#ifdef __wasm__
++	WASM_CHILD_TLS_INIT(args);
++#endif
++	state = args->control;
+ 	if (state) {
+ 		if (a_cas(&args->control, 1, 2)==1)
+ 			__wait(&args->control, 0, 2, 1);
+@@ -211,6 +247,9 @@ static int start(void *p)
+ static int start_c11(void *p)
+ {
+ 	struct start_args *args = p;
++#ifdef __wasm__
++	WASM_CHILD_TLS_INIT(args);
++#endif
+ 	int (*start)(void*) = (int(*)(void*)) args->start_func;
+ 	__pthread_exit((void *)(uintptr_t)start(args->start_arg));
+ 	return 0;
+@@ -337,6 +376,9 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
+ 	args->start_func = entry;
+ 	args->start_arg = arg;
+ 	args->control = attr._a_sched ? 1 : 0;
++#ifdef __wasm__
++	args->td = new;
++#endif
+ 
+ 	/* Application signals (but not the synccall signal) must be
+ 	 * blocked before the thread list lock can be taken, to ensure
+@@ -352,7 +394,11 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
+ 
+ 	__tl_lock();
+ 	if (!libc.threads_minus_1++) libc.need_locks = 1;
++#ifdef __wasm__
++	ret = __clone((c11 ? start_c11 : start), stack, flags, args, &new->tid, __wasm_tls_block(new), &__thread_list_lock);
++#else
+ 	ret = __clone((c11 ? start_c11 : start), stack, flags, args, &new->tid, TP_ADJ(new), &__thread_list_lock);
++#endif
+ 
+ 	/* All clone failures translate to EAGAIN. If explicit scheduling
+ 	 * was requested, attempt it before unlocking the thread list so

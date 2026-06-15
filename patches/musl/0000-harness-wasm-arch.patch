@@ -1,0 +1,2461 @@
+From a72025e6e5394cf8b7a7cc9ead40f21bda716487 Mon Sep 17 00:00:00 2001
+From: Joel Severin <joel.severin@icemanor.se>
+Date: Wed, 27 Mar 2024 22:13:53 +0100
+Subject: [PATCH] NOMERGE: Hacks to get Linux/Wasm to compile (minimal and
+ incorrect)
+
+---
+ arch/wasm/arch.mak                         |   1 +
+ arch/wasm/atomic_arch.h                    |  21 ++
+ arch/wasm/bits/alltypes.h.in               |  21 ++
+ arch/wasm/bits/asm.h                       |  23 ++
+ arch/wasm/bits/fenv.h                      |  10 +
+ arch/wasm/bits/float.h                     |  15 +
+ arch/wasm/bits/ipcstat.h                   |   1 +
+ arch/wasm/bits/msg.h                       |  18 ++
+ arch/wasm/bits/posix.h                     |   2 +
+ arch/wasm/bits/ptrace.h                    |   2 +
+ arch/wasm/bits/reg.h                       |   7 +
+ arch/wasm/bits/sem.h                       |  13 +
+ arch/wasm/bits/setjmp.h                    |   1 +
+ arch/wasm/bits/shm.h                       |  31 ++
+ arch/wasm/bits/signal.h                    |  85 ++++++
+ arch/wasm/bits/stat.h                      |  25 ++
+ arch/wasm/bits/stdint.h                    |  29 ++
+ arch/wasm/bits/syscall.h.in                | 336 +++++++++++++++++++++
+ arch/wasm/bits/user.h                      |   8 +
+ arch/wasm/crt_arch.h                       |  40 +++
+ arch/wasm/kstat.h                          |  21 ++
+ arch/wasm/pthread_arch.h                   |  15 +
+ arch/wasm/reloc.h                          |  13 +
+ arch/wasm/syscall_arch.h                   |  12 +
+ configure                                  |  13 +-
+ include/elf.h                              |  56 ++++
+ include/unistd.h                           |   5 +-
+ src/internal/pthread_impl.h                |   9 +-
+ src/internal/syscall.h                     |  55 ++--
+ src/linux/clone.c                          |  21 +-
+ src/linux/reboot.c                         |   2 +-
+ src/misc/syscall.c                         |  56 +++-
+ src/misc/syscalls.c                        |   0
+ src/misc/wasm/syscalls.S                   | 113 +++++++
+ src/network/accept.c                       |   2 +-
+ src/network/accept4.c                      |   2 +-
+ src/network/bind.c                         |   2 +-
+ src/network/connect.c                      |   2 +-
+ src/network/getpeername.c                  |   2 +-
+ src/network/getsockname.c                  |   2 +-
+ src/network/getsockopt.c                   |   6 +-
+ src/network/listen.c                       |   2 +-
+ src/network/recvmsg.c                      |   2 +-
+ src/network/sendmsg.c                      |   2 +-
+ src/network/setsockopt.c                   |   6 +-
+ src/network/shutdown.c                     |   2 +-
+ src/network/socket.c                       |   5 +-
+ src/network/socketpair.c                   |   5 +-
+ src/process/posix_spawn.c                  |   3 +-
+ src/process/vfork.c                        |  12 +-
+ src/setjmp/longjmp.c                       |  19 ++
+ src/setjmp/wasm/longjmp.S                  |  17 ++
+ src/setjmp/wasm/setjmp.S                   |   8 +
+ src/signal/wasm/restore.S                  | 103 +++++++
+ src/signal/wasm/sigsetjmp.S                |   8 +
+ src/thread/__syscall_cp.c                  |  18 --
+ src/thread/__timedwait.c                   |   6 +-
+ src/thread/__wait.c                        |   4 +-
+ src/thread/pthread_barrier_wait.c          |   4 +-
+ src/thread/pthread_cancel.c                | 108 +++++--
+ src/thread/pthread_cond_timedwait.c        |   4 +-
+ src/thread/pthread_mutex_timedlock.c       |   6 +-
+ src/thread/pthread_mutex_trylock.c         |   2 +-
+ src/thread/pthread_mutex_unlock.c          |   2 +-
+ src/thread/pthread_mutexattr_setprotocol.c |   2 +-
+ src/thread/wasm/__set_thread_area.c        |   9 +
+ src/thread/wasm/clone.S                    | 167 ++++++++++
+ src/unistd/access.c                        |   2 +-
+ src/unistd/faccessat.c                     |   2 +-
+ 69 files changed, 1487 insertions(+), 141 deletions(-)
+ create mode 100644 arch/wasm/arch.mak
+ create mode 100644 arch/wasm/atomic_arch.h
+ create mode 100644 arch/wasm/bits/alltypes.h.in
+ create mode 100644 arch/wasm/bits/asm.h
+ create mode 100644 arch/wasm/bits/fenv.h
+ create mode 100644 arch/wasm/bits/float.h
+ create mode 100644 arch/wasm/bits/ipcstat.h
+ create mode 100644 arch/wasm/bits/msg.h
+ create mode 100644 arch/wasm/bits/posix.h
+ create mode 100644 arch/wasm/bits/ptrace.h
+ create mode 100644 arch/wasm/bits/reg.h
+ create mode 100644 arch/wasm/bits/sem.h
+ create mode 100644 arch/wasm/bits/setjmp.h
+ create mode 100644 arch/wasm/bits/shm.h
+ create mode 100644 arch/wasm/bits/signal.h
+ create mode 100644 arch/wasm/bits/stat.h
+ create mode 100644 arch/wasm/bits/stdint.h
+ create mode 100644 arch/wasm/bits/syscall.h.in
+ create mode 100644 arch/wasm/bits/user.h
+ create mode 100644 arch/wasm/crt_arch.h
+ create mode 100644 arch/wasm/kstat.h
+ create mode 100644 arch/wasm/pthread_arch.h
+ create mode 100644 arch/wasm/reloc.h
+ create mode 100644 arch/wasm/syscall_arch.h
+ create mode 100644 src/misc/syscalls.c
+ create mode 100644 src/misc/wasm/syscalls.S
+ create mode 100644 src/setjmp/wasm/longjmp.S
+ create mode 100644 src/setjmp/wasm/setjmp.S
+ create mode 100644 src/signal/wasm/restore.S
+ create mode 100644 src/signal/wasm/sigsetjmp.S
+ create mode 100644 src/thread/wasm/__set_thread_area.c
+ create mode 100644 src/thread/wasm/clone.S
+
+diff --git a/arch/wasm/arch.mak b/arch/wasm/arch.mak
+new file mode 100644
+index 0000000..aa4d05c
+--- /dev/null
++++ b/arch/wasm/arch.mak
+@@ -0,0 +1 @@
++COMPAT_SRC_DIRS = compat/time32
+diff --git a/arch/wasm/atomic_arch.h b/arch/wasm/atomic_arch.h
+new file mode 100644
+index 0000000..1f38df0
+--- /dev/null
++++ b/arch/wasm/atomic_arch.h
+@@ -0,0 +1,21 @@
++#define a_cas a_cas
++static inline int a_cas(volatile int *p, int t, int s)
++{
++	__atomic_compare_exchange_n(p, &t, s, (_Bool)0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++	return t;
++}
++
++#define a_cas_p a_cas_p
++static inline void *a_cas_p(volatile void *p, void *t, void *s)
++{
++	return (void *)a_cas((volatile int *)p, (long)t, (long)s);
++}
++
++extern void __wasm_abort();
++
++#define a_crash a_crash
++static inline void a_crash()
++{
++	__wasm_abort();
++	__builtin_unreachable();
++}
+diff --git a/arch/wasm/bits/alltypes.h.in b/arch/wasm/bits/alltypes.h.in
+new file mode 100644
+index 0000000..a18a9c0
+--- /dev/null
++++ b/arch/wasm/bits/alltypes.h.in
+@@ -0,0 +1,21 @@
++#define _REDIR_TIME64 1
++#define _Addr long
++#define _Int64 long long
++#define _Reg long
++
++#define __BYTE_ORDER 1234
++
++#if __SIZEOF_LONG__ == 4
++#define __LONG_MAX 0x7fffffffL
++#else
++#define __LONG_MAX 0x7fffffffffffffffL
++#endif
++
++#ifndef __cplusplus
++TYPEDEF int wchar_t;
++#endif
++
++TYPEDEF float float_t;
++TYPEDEF double double_t;
++
++TYPEDEF struct { long long __ll; long double __ld; } max_align_t;
+diff --git a/arch/wasm/bits/asm.h b/arch/wasm/bits/asm.h
+new file mode 100644
+index 0000000..8b21d71
+--- /dev/null
++++ b/arch/wasm/bits/asm.h
+@@ -0,0 +1,23 @@
++#if __SIZEOF_LONG__ == 4
++#define iLONG i32
++#define INSN_32_64(insn32, insn64) insn32
++#else
++#define iLONG i64
++#define INSN_32_64(insn32, insn64) insn64
++#endif
++
++#define CALL_INDIRECT_FIXUP INSN_32_64(, i32.wrap_i64)
++
++#define SIZEOF_INT	__SIZEOF_INT__
++#define SIZEOF_LONG	__SIZEOF_LONG__
++
++.globaltype __stack_pointer, iLONG
++.globaltype __tls_base, iLONG
++
++.functype __wasm_syscall_0(iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_1(iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_2(iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_3(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_4(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_5(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++.functype __wasm_syscall_6(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
+diff --git a/arch/wasm/bits/fenv.h b/arch/wasm/bits/fenv.h
+new file mode 100644
+index 0000000..edbdea2
+--- /dev/null
++++ b/arch/wasm/bits/fenv.h
+@@ -0,0 +1,10 @@
++#define FE_ALL_EXCEPT 0
++#define FE_TONEAREST  0
++
++typedef unsigned long fexcept_t;
++
++typedef struct {
++	unsigned long __cw;
++} fenv_t;
++
++#define FE_DFL_ENV      ((const fenv_t *) -1)
+diff --git a/arch/wasm/bits/float.h b/arch/wasm/bits/float.h
+new file mode 100644
+index 0000000..97ba282
+--- /dev/null
++++ b/arch/wasm/bits/float.h
+@@ -0,0 +1,15 @@
++
++#define LDBL_TRUE_MIN 6.47517511943802511092443895822764655e-4966L
++#define LDBL_MIN 3.36210314311209350626267781732175260e-4932L
++#define LDBL_MAX 1.18973149535723176508575932662800702e+4932L
++#define LDBL_EPSILON 1.92592994438723585305597794258492732e-34L
++
++#define LDBL_MANT_DIG 113
++#define LDBL_MIN_EXP (-16381)
++#define LDBL_MAX_EXP 16384
++
++#define LDBL_DIG 33
++#define LDBL_MIN_10_EXP (-4931)
++#define LDBL_MAX_10_EXP 4932
++
++#define DECIMAL_DIG 36
+diff --git a/arch/wasm/bits/ipcstat.h b/arch/wasm/bits/ipcstat.h
+new file mode 100644
+index 0000000..4f4fcb0
+--- /dev/null
++++ b/arch/wasm/bits/ipcstat.h
+@@ -0,0 +1 @@
++#define IPC_STAT 0x102
+diff --git a/arch/wasm/bits/msg.h b/arch/wasm/bits/msg.h
+new file mode 100644
+index 0000000..7bbbb2b
+--- /dev/null
++++ b/arch/wasm/bits/msg.h
+@@ -0,0 +1,18 @@
++struct msqid_ds {
++	struct ipc_perm msg_perm;
++	unsigned long __msg_stime_lo;
++	unsigned long __msg_stime_hi;
++	unsigned long __msg_rtime_lo;
++	unsigned long __msg_rtime_hi;
++	unsigned long __msg_ctime_lo;
++	unsigned long __msg_ctime_hi;
++	unsigned long msg_cbytes;
++	msgqnum_t msg_qnum;
++	msglen_t msg_qbytes;
++	pid_t msg_lspid;
++	pid_t msg_lrpid;
++	unsigned long __unused[2];
++	time_t msg_stime;
++	time_t msg_rtime;
++	time_t msg_ctime;
++};
+diff --git a/arch/wasm/bits/posix.h b/arch/wasm/bits/posix.h
+new file mode 100644
+index 0000000..30a3871
+--- /dev/null
++++ b/arch/wasm/bits/posix.h
+@@ -0,0 +1,2 @@
++#define _POSIX_V6_ILP32_OFFBIG  1
++#define _POSIX_V7_ILP32_OFFBIG  1
+diff --git a/arch/wasm/bits/ptrace.h b/arch/wasm/bits/ptrace.h
+new file mode 100644
+index 0000000..da93e7a
+--- /dev/null
++++ b/arch/wasm/bits/ptrace.h
+@@ -0,0 +1,2 @@
++#define PTRACE_GET_THREAD_AREA	25
++#define PTRACE_SINGLEBLOCK	33
+diff --git a/arch/wasm/bits/reg.h b/arch/wasm/bits/reg.h
+new file mode 100644
+index 0000000..8c24f2a
+--- /dev/null
++++ b/arch/wasm/bits/reg.h
+@@ -0,0 +1,7 @@
++#undef __WORDSIZE
++#if __SIZEOF_LONG__ == 4
++#define __WORDSIZE 32
++#else
++#define __WORDSIZE 64
++#endif
++/* FIXME */
+diff --git a/arch/wasm/bits/sem.h b/arch/wasm/bits/sem.h
+new file mode 100644
+index 0000000..6566154
+--- /dev/null
++++ b/arch/wasm/bits/sem.h
+@@ -0,0 +1,13 @@
++struct semid_ds {
++	struct ipc_perm sem_perm;
++	unsigned long __sem_otime_lo;
++	unsigned long __sem_otime_hi;
++	unsigned long __sem_ctime_lo;
++	unsigned long __sem_ctime_hi;
++	unsigned short sem_nsems;
++	char __sem_nsems_pad[sizeof(long)-sizeof(short)];
++	long __unused3;
++	long __unused4;
++	time_t sem_otime;
++	time_t sem_ctime;
++};
+diff --git a/arch/wasm/bits/setjmp.h b/arch/wasm/bits/setjmp.h
+new file mode 100644
+index 0000000..55e3a95
+--- /dev/null
++++ b/arch/wasm/bits/setjmp.h
+@@ -0,0 +1 @@
++typedef unsigned long long __jmp_buf[32];
+diff --git a/arch/wasm/bits/shm.h b/arch/wasm/bits/shm.h
+new file mode 100644
+index 0000000..725fb46
+--- /dev/null
++++ b/arch/wasm/bits/shm.h
+@@ -0,0 +1,31 @@
++#define SHMLBA 4096
++
++struct shmid_ds {
++	struct ipc_perm shm_perm;
++	size_t shm_segsz;
++	unsigned long __shm_atime_lo;
++	unsigned long __shm_atime_hi;
++	unsigned long __shm_dtime_lo;
++	unsigned long __shm_dtime_hi;
++	unsigned long __shm_ctime_lo;
++	unsigned long __shm_ctime_hi;
++	pid_t shm_cpid;
++	pid_t shm_lpid;
++	unsigned long shm_nattch;
++	unsigned long __pad1;
++	unsigned long __pad2;
++	unsigned long __pad3;
++	time_t shm_atime;
++	time_t shm_dtime;
++	time_t shm_ctime;
++};
++
++struct shminfo {
++	unsigned long shmmax, shmmin, shmmni, shmseg, shmall, __unused[4];
++};
++
++struct shm_info {
++	int __used_ids;
++	unsigned long shm_tot, shm_rss, shm_swp;
++	unsigned long __swap_attempts, __swap_successes;
++};
+diff --git a/arch/wasm/bits/signal.h b/arch/wasm/bits/signal.h
+new file mode 100644
+index 0000000..ab24d3d
+--- /dev/null
++++ b/arch/wasm/bits/signal.h
+@@ -0,0 +1,85 @@
++#if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) \
++ || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
++
++#if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
++#define MINSIGSTKSZ 2048
++#define SIGSTKSZ 8192
++#endif
++
++#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
++typedef unsigned long greg_t, gregset_t[2];
++typedef struct sigcontext {
++	unsigned long stack_pointer;
++	unsigned long tls;
++} mcontext_t;
++#else
++typedef struct {
++	unsigned long __regs[2];
++} mcontext_t;
++#endif
++
++#if defined(_GNU_SOURCE)
++#define REG_SP 0
++#define REG_TP 1
++#endif
++
++struct sigaltstack {
++	void *ss_sp;
++	int ss_flags;
++	size_t ss_size;
++};
++
++typedef struct __ucontext {
++	struct __ucontext *uc_link;
++	sigset_t uc_sigmask;
++	stack_t uc_stack;
++	mcontext_t uc_mcontext;
++} ucontext_t;
++
++#define SA_NOCLDSTOP  1
++#define SA_NOCLDWAIT  2
++#define SA_SIGINFO    4
++#define SA_ONSTACK    0x08000000
++#define SA_RESTART    0x10000000
++#define SA_NODEFER    0x40000000
++#define SA_RESETHAND  0x80000000
++#define SA_RESTORER   0x04000000
++
++#endif
++
++#define SIGHUP    1
++#define SIGINT    2
++#define SIGQUIT   3
++#define SIGILL    4
++#define SIGTRAP   5
++#define SIGABRT   6
++#define SIGIOT    SIGABRT
++#define SIGBUS    7
++#define SIGFPE    8
++#define SIGKILL   9
++#define SIGUSR1   10
++#define SIGSEGV   11
++#define SIGUSR2   12
++#define SIGPIPE   13
++#define SIGALRM   14
++#define SIGTERM   15
++#define SIGSTKFLT 16
++#define SIGCHLD   17
++#define SIGCONT   18
++#define SIGSTOP   19
++#define SIGTSTP   20
++#define SIGTTIN   21
++#define SIGTTOU   22
++#define SIGURG    23
++#define SIGXCPU   24
++#define SIGXFSZ   25
++#define SIGVTALRM 26
++#define SIGPROF   27
++#define SIGWINCH  28
++#define SIGIO     29
++#define SIGPOLL   29
++#define SIGPWR    30
++#define SIGSYS    31
++#define SIGUNUSED SIGSYS
++
++#define _NSIG 65
+diff --git a/arch/wasm/bits/stat.h b/arch/wasm/bits/stat.h
+new file mode 100644
+index 0000000..8a4d509
+--- /dev/null
++++ b/arch/wasm/bits/stat.h
+@@ -0,0 +1,25 @@
++/* copied from kernel definition, but with padding replaced
++ * by the corresponding correctly-sized userspace types. */
++
++struct stat {
++	dev_t st_dev;
++	ino_t st_ino;
++	mode_t st_mode;
++	nlink_t st_nlink;
++	uid_t st_uid;
++	gid_t st_gid;
++	dev_t st_rdev;
++	long long __st_rdev_padding;
++	off_t st_size;
++	blksize_t st_blksize;
++	int __st_blksize_padding;
++	blkcnt_t st_blocks;
++	struct {
++		long tv_sec;
++		long tv_nsec;
++	} __st_atim32, __st_mtim32, __st_ctim32;
++	unsigned __unused[2];
++	struct timespec st_atim;
++	struct timespec st_mtim;
++	struct timespec st_ctim;
++};
+diff --git a/arch/wasm/bits/stdint.h b/arch/wasm/bits/stdint.h
+new file mode 100644
+index 0000000..8ad6a9b
+--- /dev/null
++++ b/arch/wasm/bits/stdint.h
+@@ -0,0 +1,29 @@
++typedef int32_t int_fast16_t;
++typedef int32_t int_fast32_t;
++typedef uint32_t uint_fast16_t;
++typedef uint32_t uint_fast32_t;
++
++#define INT_FAST16_MIN  INT32_MIN
++#define INT_FAST32_MIN  INT32_MIN
++
++#define INT_FAST16_MAX  INT32_MAX
++#define INT_FAST32_MAX  INT32_MAX
++
++#define UINT_FAST16_MAX UINT32_MAX
++#define UINT_FAST32_MAX UINT32_MAX
++
++#if __SIZEOF_LONG__ == 4
++#define INTPTR_MIN      INT32_MIN
++#define INTPTR_MAX      INT32_MAX
++#define UINTPTR_MAX     UINT32_MAX
++#define PTRDIFF_MIN     INT32_MIN
++#define PTRDIFF_MAX     INT32_MAX
++#define SIZE_MAX        UINT32_MAX
++#else
++#define INTPTR_MIN      INT64_MIN
++#define INTPTR_MAX      INT64_MAX
++#define UINTPTR_MAX     UINT64_MAX
++#define PTRDIFF_MIN     INT64_MIN
++#define PTRDIFF_MAX     INT64_MAX
++#define SIZE_MAX        UINT64_MAX
++#endif
+diff --git a/arch/wasm/bits/syscall.h.in b/arch/wasm/bits/syscall.h.in
+new file mode 100644
+index 0000000..9eb9ab7
+--- /dev/null
++++ b/arch/wasm/bits/syscall.h.in
+@@ -0,0 +1,336 @@
++#define __NR_io_setup 0
++#define __NR_io_destroy 1
++#define __NR_io_submit 2
++#define __NR_io_cancel 3
++#define __NR_setxattr 5
++#define __NR_lsetxattr 6
++#define __NR_fsetxattr 7
++#define __NR_getxattr 8
++#define __NR_lgetxattr 9
++#define __NR_fgetxattr 10
++#define __NR_listxattr 11
++#define __NR_llistxattr 12
++#define __NR_flistxattr 13
++#define __NR_removexattr 14
++#define __NR_lremovexattr 15
++#define __NR_fremovexattr 16
++#define __NR_getcwd 17
++#define __NR_lookup_dcookie 18
++#define __NR_eventfd2 19
++#define __NR_epoll_create1 20
++#define __NR_epoll_ctl 21
++#define __NR_epoll_pwait 22
++#define __NR_dup 23
++#define __NR_dup3 24
++#define __NR_fcntl 25
++#define __NR_inotify_init1 26
++#define __NR_inotify_add_watch 27
++#define __NR_inotify_rm_watch 28
++#define __NR_ioctl 29
++#define __NR_ioprio_set 30
++#define __NR_ioprio_get 31
++#define __NR_flock 32
++#define __NR_mknodat 33
++#define __NR_mkdirat 34
++#define __NR_unlinkat 35
++#define __NR_symlinkat 36
++#define __NR_linkat 37
++#define __NR_umount2 39
++#define __NR_mount 40
++#define __NR_pivot_root 41
++#define __NR_nfsservctl 42
++#define __NR_statfs64 43
++#define __NR_fstatfs64 44
++#define __NR_truncate 45
++#define __NR_ftruncate 46
++#define __NR_fallocate 47
++#define __NR_faccessat 48
++#define __NR_chdir 49
++#define __NR_fchdir 50
++#define __NR_chroot 51
++#define __NR_fchmod 52
++#define __NR_fchmodat 53
++#define __NR_fchownat 54
++#define __NR_fchown 55
++#define __NR_openat 56
++#define __NR_close 57
++#define __NR_vhangup 58
++#define __NR_pipe2 59
++#define __NR_quotactl 60
++#define __NR_getdents64 61
++#define __NR_lseek 62
++#define __NR_read 63
++#define __NR_write 64
++#define __NR_readv 65
++#define __NR_writev 66
++#define __NR_pread64 67
++#define __NR_pwrite64 68
++#define __NR_preadv 69
++#define __NR_pwritev 70
++#define __NR_sendfile 71
++#define __NR_signalfd4 74
++#define __NR_vmsplice 75
++#define __NR_splice 76
++#define __NR_tee 77
++#define __NR_readlinkat 78
++#define __NR_fstat 80
++#define __NR_sync 81
++#define __NR_fsync 82
++#define __NR_fdatasync 83
++#define __NR_sync_file_range 84
++#define __NR_timerfd_create 85
++#define __NR_acct 89
++#define __NR_capget 90
++#define __NR_capset 91
++#define __NR_personality 92
++#define __NR_exit 93
++#define __NR_exit_group 94
++#define __NR_waitid 95
++#define __NR_set_tid_address 96
++#define __NR_unshare 97
++#define __NR_set_robust_list 99
++#define __NR_get_robust_list 100
++#define __NR_getitimer 102
++#define __NR_setitimer 103
++#define __NR_kexec_load 104
++#define __NR_init_module 105
++#define __NR_delete_module 106
++#define __NR_timer_create 107
++#define __NR_timer_getoverrun 109
++#define __NR_timer_delete 111
++#define __NR_syslog 116
++#define __NR_ptrace 117
++#define __NR_sched_setparam 118
++#define __NR_sched_setscheduler 119
++#define __NR_sched_getscheduler 120
++#define __NR_sched_getparam 121
++#define __NR_sched_setaffinity 122
++#define __NR_sched_getaffinity 123
++#define __NR_sched_yield 124
++#define __NR_sched_get_priority_max 125
++#define __NR_sched_get_priority_min 126
++#define __NR_restart_syscall 128
++#define __NR_kill 129
++#define __NR_tkill 130
++#define __NR_tgkill 131
++#define __NR_sigaltstack 132
++#define __NR_rt_sigsuspend 133
++#define __NR_rt_sigaction 134
++#define __NR_rt_sigprocmask 135
++#define __NR_rt_sigpending 136
++#define __NR_rt_sigqueueinfo 138
++#define __NR_rt_sigreturn 139
++#define __NR_setpriority 140
++#define __NR_getpriority 141
++#define __NR_reboot 142
++#define __NR_setregid 143
++#define __NR_setgid 144
++#define __NR_setreuid 145
++#define __NR_setuid 146
++#define __NR_setresuid 147
++#define __NR_getresuid 148
++#define __NR_setresgid 149
++#define __NR_getresgid 150
++#define __NR_setfsuid 151
++#define __NR_setfsgid 152
++#define __NR_times 153
++#define __NR_setpgid 154
++#define __NR_getpgid 155
++#define __NR_getsid 156
++#define __NR_setsid 157
++#define __NR_getgroups 158
++#define __NR_setgroups 159
++#define __NR_uname 160
++#define __NR_sethostname 161
++#define __NR_setdomainname 162
++#define __NR_getrusage 165
++#define __NR_umask 166
++#define __NR_prctl 167
++#define __NR_getcpu 168
++#define __NR_getpid 172
++#define __NR_getppid 173
++#define __NR_getuid 174
++#define __NR_geteuid 175
++#define __NR_getgid 176
++#define __NR_getegid 177
++#define __NR_gettid 178
++#define __NR_sysinfo 179
++#define __NR_mq_open 180
++#define __NR_mq_unlink 181
++#define __NR_mq_notify 184
++#define __NR_mq_getsetattr 185
++#define __NR_msgget 186
++#define __NR_msgctl 187
++#define __NR_msgrcv 188
++#define __NR_msgsnd 189
++#define __NR_semget 190
++#define __NR_semctl 191
++#define __NR_semop 193
++#define __NR_shmget 194
++#define __NR_shmctl 195
++#define __NR_shmat 196
++#define __NR_shmdt 197
++#define __NR_socket 198
++#define __NR_socketpair 199
++#define __NR_bind 200
++#define __NR_listen 201
++#define __NR_accept 202
++#define __NR_connect 203
++#define __NR_getsockname 204
++#define __NR_getpeername 205
++#define __NR_sendto 206
++#define __NR_recvfrom 207
++#define __NR_setsockopt 208
++#define __NR_getsockopt 209
++#define __NR_shutdown 210
++#define __NR_sendmsg 211
++#define __NR_recvmsg 212
++#define __NR_readahead 213
++#define __NR_brk 214
++#define __NR_munmap 215
++#define __NR_mremap 216
++#define __NR_add_key 217
++#define __NR_request_key 218
++#define __NR_keyctl 219
++#define __NR_clone 220
++#define __NR_execve 221
++#define __NR_mmap2 222
++#define __NR_fadvise64 223
++#define __NR_rt_tgsigqueueinfo 240
++#define __NR_perf_event_open 241
++#define __NR_accept4 242
++#define __NR_arch_specific_syscall 244
++#define __NR_prlimit64 261
++#define __NR_fanotify_init 262
++#define __NR_fanotify_mark 263
++#define __NR_name_to_handle_at 264
++#define __NR_open_by_handle_at 265
++#define __NR_syncfs 267
++#define __NR_setns 268
++#define __NR_sendmmsg 269
++#define __NR_process_vm_readv 270
++#define __NR_process_vm_writev 271
++#define __NR_kcmp 272
++#define __NR_finit_module 273
++#define __NR_sched_setattr 274
++#define __NR_sched_getattr 275
++#define __NR_renameat2 276
++#define __NR_seccomp 277
++#define __NR_getrandom 278
++#define __NR_memfd_create 279
++#define __NR_bpf 280
++#define __NR_execveat 281
++#define __NR_userfaultfd 282
++#define __NR_membarrier 283
++#define __NR_mlock2 284
++#define __NR_copy_file_range 285
++#define __NR_preadv2 286
++#define __NR_pwritev2 287
++#define __NR_pkey_mprotect 288
++#define __NR_pkey_alloc 289
++#define __NR_pkey_free 290
++#define __NR_statx 291
++#define __NR_rseq 293
++#define __NR_kexec_file_load 294
++
++#define __NR_clock_gettime64 403
++#define __NR_clock_settime64 404
++#define __NR_clock_adjtime64 405
++#define __NR_clock_getres_time64 406
++#define __NR_clock_nanosleep_time64 407
++#define __NR_timer_gettime64 408
++#define __NR_timer_settime64 409
++#define __NR_timerfd_gettime64 410
++#define __NR_timerfd_settime64 411
++#define __NR_utimensat_time64 412
++#define __NR_pselect6_time64 413
++#define __NR_ppoll_time64 414
++#define __NR_io_pgetevents_time64 416
++#define __NR_recvmmsg_time64 417
++#define __NR_mq_timedsend_time64 418
++#define __NR_mq_timedreceive_time64 419
++#define __NR_semtimedop_time64 420
++#define __NR_rt_sigtimedwait_time64 421
++#define __NR_futex_time64 422
++#define __NR_sched_rr_get_interval_time64 423
++
++#define __NR_pidfd_send_signal 424
++#define __NR_io_uring_setup 425
++#define __NR_io_uring_enter 426
++#define __NR_io_uring_register 427
++#define __NR_open_tree 428
++#define __NR_move_mount 429
++#define __NR_fsopen 430
++#define __NR_fsconfig 431
++#define __NR_fsmount 432
++#define __NR_fspick 433
++#define __NR_pidfd_open 434
++#define __NR_clone3 435
++#define __NR_close_range 436
++#define __NR_openat2 437
++#define __NR_pidfd_getfd 438
++#define __NR_faccessat2 439
++#define __NR_process_madvise 440
++#define __NR_epoll_pwait2 441
++#define __NR_mount_setattr 442
++#define __NR_quotactl_fd 443
++#define __NR_landlock_create_ruleset 444
++#define __NR_landlock_add_rule 445
++#define __NR_landlock_restrict_self 446
++#define __NR_process_mrelease 448
++#define __NR_futex_waitv 449
++#define __NR_set_mempolicy_home_node 450
++#define __NR_cachestat		451
++#define __NR_fchmodat2		452
++
++/* We need it for 64-bit but it can't be present for 32-bit. */
++#if __SIZEOF_LONG__ == 8 /* The Makefile removes all lines not containing __NR_. Do not remove this comment. */
++#define __NR_clock_gettime 113
++#define __NR_clock_settime 112
++#define __NR_clock_getres 114
++#define __NR_clock_nanosleep 115
++#define __NR_clock_adjtime 266
++#define __NR_timer_gettime 108
++#define __NR_timer_settime 110
++#define __NR_timerfd_gettime 87
++#define __NR_timerfd_settime 86
++#define __NR_utimensat 88
++#define __NR_pselect6 72
++#define __NR_ppoll 73
++#define __NR_io_pgetevents 292
++#define __NR_recvmmsg 243
++#define __NR_mq_timedsend 182
++#define __NR_mq_timedreceive 183
++#define __NR_semtimedop 192
++#define __NR_rt_sigtimedwait 137
++#define __NR_futex 98
++#define __NR_sched_rr_get_interval 127
++#endif /* The Makefile removes all lines not containing __NR_. Do not remove this comment. */
++
++/* These ones are NOT supported but required by musl - will return -ENOSYS. */
++#define __NR_nanosleep 101
++#define __NR_settimeofday 170
++#define __NR_swapon 224
++#define __NR_swapoff 225
++#define __NR_mprotect 226
++#define __NR_msync 227
++#define __NR_mlock 228
++#define __NR_munlock 229
++#define __NR_mlockall 230
++#define __NR_munlockall 231
++#define __NR_mincore 232
++#define __NR_madvise 233
++#define __NR_remap_file_pages 234
++#define __NR_mbind 235
++#define __NR_get_mempolicy 236
++#define __NR_set_mempolicy 237
++#define __NR_migrate_pages 238
++#define __NR_move_pages 239
++
++/*
++ * Required by musl to select the correct prototype on 32-bit. However, does not
++ * work on 64-bit. Notice the double __.
++ */
++#if __SIZEOF_LONG__ == 4 /* The Makefile removes all lines not containing "__NR_". Do not remove this comment. */
++#define SYS__llseek __NR_lseek
++#endif /* The Makefile removes all lines not containing "__NR_". Do not remove this comment. */
+diff --git a/arch/wasm/bits/user.h b/arch/wasm/bits/user.h
+new file mode 100644
+index 0000000..7954679
+--- /dev/null
++++ b/arch/wasm/bits/user.h
+@@ -0,0 +1,8 @@
++struct user_regs_struct {
++	unsigned long stack_pointer;
++	unsigned long tls;
++};
++
++typedef unsigned long elf_greg_t;
++typedef struct user_regs_struct elf_gregset_t;
++#define ELF_NGREG (sizeof(elf_gregset_t) / sizeof(elf_greg_t))
+diff --git a/arch/wasm/crt_arch.h b/arch/wasm/crt_arch.h
+new file mode 100644
+index 0000000..fe3ce01
+--- /dev/null
++++ b/arch/wasm/crt_arch.h
+@@ -0,0 +1,40 @@
++/*
++ * We provide a prototype for main here (it's declared without prototype in crt1.c etc.). The reason
++ * we have to do this is to avoid an issue with LLVM wrapping and renaming it __original_main, which
++ * will fail when programs later on provide a real main with correct prototype and link it.
++ *
++ * Oh, and then it comes along and renames it __main_argc_argv because it has parameters, so we have
++ * to alias that as well and main will now be called __main_argc_argv. This cannot be a direct alias
++ * as it is not defined yet, so we just call it...
++ *
++ * To add salt to the injury, musl insists to call the 3-argument version with envp which is non-
++ * standard. What a wonderful mess... We need to clean this up someday, maybe auto-detect somehow.
++ */
++int __main_argc_argv(int argc, char *argv[]);
++int main(int argc, char *argv[], char *envp[])
++{
++	(void)envp;
++	return __main_argc_argv(argc, argv);
++}
++
++/*
++ * This must really be written in assembly (to capture the stack pointer properly), but we know that
++ * the initial stack pointer is page aligned, so we can cheat a bit and align it to the next page...
++ * The problem is that LLVM does not seem to work when functions are defined with inline asm (in C).
++ * TODO: fix this hack by refactoring musl and moving things into a .S file.
++ */
++#ifndef SHARED
++void _start(void)
++{
++	void _start_c(/* no prototype on purpose */);
++	int dummy;
++	_start_c(((unsigned long)(void*)&dummy + 4095UL) & ~4095UL);
++}
++#else
++void _dlstart(void)
++{
++	void _dlstart_c(/* no prototype on purpose */);
++	int dummy;
++	_dlstart_c(((unsigned long)(void*)&dummy + 4095UL) & ~4095UL);
++}
++#endif
+diff --git a/arch/wasm/kstat.h b/arch/wasm/kstat.h
+new file mode 100644
+index 0000000..c144957
+--- /dev/null
++++ b/arch/wasm/kstat.h
+@@ -0,0 +1,21 @@
++struct kstat {
++	dev_t st_dev;
++	ino_t st_ino;
++	mode_t st_mode;
++	nlink_t st_nlink;
++	uid_t st_uid;
++	gid_t st_gid;
++	dev_t st_rdev;
++	long long __st_rdev_padding;
++	off_t st_size;
++	blksize_t st_blksize;
++	int __st_blksize_padding;
++	blkcnt_t st_blocks;
++	long st_atime_sec;
++	long st_atime_nsec;
++	long st_mtime_sec;
++	long st_mtime_nsec;
++	long st_ctime_sec;
++	long st_ctime_nsec;
++	unsigned __unused[2];
++};
+diff --git a/arch/wasm/pthread_arch.h b/arch/wasm/pthread_arch.h
+new file mode 100644
+index 0000000..0625bd1
+--- /dev/null
++++ b/arch/wasm/pthread_arch.h
+@@ -0,0 +1,15 @@
++#include <stdint.h>
++
++/*
++ * Wasm (as compiled with LLVM) handles TLS data directly, instead of the
++ * indirect approach used for ELF targets (where musl manages all TLS). There is
++ * still a pthread TLS area to keep track of, and musl manages that by these
++ * functions. In other words, __musl_tp will point to a struct pthread.
++ */
++
++extern _Thread_local uintptr_t __musl_tp;
++
++static inline uintptr_t __get_tp(void)
++{
++	return __musl_tp;
++}
+diff --git a/arch/wasm/reloc.h b/arch/wasm/reloc.h
+new file mode 100644
+index 0000000..833a2f5
+--- /dev/null
++++ b/arch/wasm/reloc.h
+@@ -0,0 +1,13 @@
++#define LDSO_ARCH "wasm"
++
++#define TPOFF_K 0
++
++#define REL_SYMBOLIC    R_WASM_64
++#define REL_PLT         R_WASM_JUMP_SLOT
++#define REL_RELATIVE    R_WASM_RELATIVE
++#define REL_COPY        R_WASM_COPY
++#define REL_DTPMOD      R_WASM_TLS_DTPMOD64
++#define REL_DTPOFF      R_WASM_TLS_DTPREL64
++#define REL_TPOFF       R_WASM_TLS_TPREL64
++
++#define CRTJMP(pc,sp) abort()
+diff --git a/arch/wasm/syscall_arch.h b/arch/wasm/syscall_arch.h
+new file mode 100644
+index 0000000..1e06877
+--- /dev/null
++++ b/arch/wasm/syscall_arch.h
+@@ -0,0 +1,12 @@
++#define __SYSCALL_LL_E(x) \
++((union { long long ll; long l[2]; }){ .ll = x }).l[0], \
++((union { long long ll; long l[2]; }){ .ll = x }).l[1]
++#define __SYSCALL_LL_O(x) __SYSCALL_LL_E((x))
++
++extern long __syscall0(long n);
++extern long __syscall1(long n, long a);
++extern long __syscall2(long n, long a, long b);
++extern long __syscall3(long n, long a, long b, long c);
++extern long __syscall4(long n, long a, long b, long c, long d);
++extern long __syscall5(long n, long a, long b, long c, long d, long e);
++extern long __syscall6(long n, long a, long b, long c, long d, long e, long f);
+diff --git a/configure b/configure
+index bc9fbe4..b44705b 100755
+--- a/configure
++++ b/configure
+@@ -340,6 +340,7 @@ riscv64*) ARCH=riscv64 ;;
+ riscv32*) ARCH=riscv32 ;;
+ sh[1-9bel-]*|sh|superh*) ARCH=sh ;;
+ s390x*) ARCH=s390x ;;
++wasm*) ARCH=wasm ;;
+ unknown) fail "$0: unable to detect target arch; try $0 --target=..." ;;
+ *) fail "$0: unknown or unsupported target \"$target\"" ;;
+ esac
+@@ -586,33 +587,33 @@ fi
+ # Reduce space lost to padding for alignment purposes by sorting data
+ # objects according to their alignment reqirements. This approximates
+ # optimal packing.
+-tryldflag LDFLAGS_AUTO -Wl,--sort-section,alignment
+-tryldflag LDFLAGS_AUTO -Wl,--sort-common
++#tryldflag LDFLAGS_AUTO -Wl,--sort-section,alignment
++#tryldflag LDFLAGS_AUTO -Wl,--sort-common
+ 
+ # When linking shared library, drop dummy weak definitions that were
+ # replaced by strong definitions from other translation units.
+ tryldflag LDFLAGS_AUTO -Wl,--gc-sections
+ 
+ # Some patched GCC builds have these defaults messed up...
+-tryldflag LDFLAGS_AUTO -Wl,--hash-style=both
++#tryldflag LDFLAGS_AUTO -Wl,--hash-style=both
+ 
+ # Prevent linking if there are undefined symbols; if any exist,
+ # libc.so will crash at runtime during relocation processing.
+ # The common way this can happen is failure to link the compiler
+ # runtime library; implementation error is also a possibility.
+-tryldflag LDFLAGS_AUTO -Wl,--no-undefined
++#tryldflag LDFLAGS_AUTO -Wl,--no-undefined
+ 
+ # Avoid exporting symbols from compiler runtime libraries. They
+ # should be hidden anyway, but some toolchains including old gcc
+ # versions built without shared library support and pcc are broken.
+-tryldflag LDFLAGS_AUTO -Wl,--exclude-libs=ALL
++#tryldflag LDFLAGS_AUTO -Wl,--exclude-libs=ALL
+ 
+ # Public data symbols must be interposable to allow for copy
+ # relocations, but otherwise we want to bind symbols at libc link
+ # time to eliminate startup relocations and PLT overhead. Use
+ # --dynamic-list rather than -Bsymbolic-functions for greater
+ # control over what symbols are left unbound.
+-tryldflag LDFLAGS_AUTO -Wl,--dynamic-list="$srcdir/dynamic.list"
++#tryldflag LDFLAGS_AUTO -Wl,--dynamic-list="$srcdir/dynamic.list"
+ 
+ # Find compiler runtime library
+ test -z "$LIBCC" && tryldflag LIBCC -lgcc && tryldflag LIBCC -lgcc_eh
+diff --git a/include/elf.h b/include/elf.h
+index 3d5e13e..3620e8b 100644
+--- a/include/elf.h
++++ b/include/elf.h
+@@ -3310,6 +3310,62 @@ enum
+ #define R_RISCV_TLSDESC_ADD_LO12  64
+ #define R_RISCV_TLSDESC_CALL    65
+ 
++#define R_WASM_NONE		0
++#define R_WASM_32		1
++#define R_WASM_64		2
++#define R_WASM_RELATIVE	3
++#define R_WASM_COPY		4
++#define R_WASM_JUMP_SLOT	5
++#define R_WASM_TLS_DTPMOD32	6
++#define R_WASM_TLS_DTPMOD64	7
++#define R_WASM_TLS_DTPREL32	8
++#define R_WASM_TLS_DTPREL64	9
++#define R_WASM_TLS_TPREL32	10
++#define R_WASM_TLS_TPREL64	11
++
++#define R_WASM_BRANCH		16
++#define R_WASM_JAL		17
++#define R_WASM_CALL		18
++#define R_WASM_CALL_PLT	19
++#define R_WASM_GOT_HI20	20
++#define R_WASM_TLS_GOT_HI20	21
++#define R_WASM_TLS_GD_HI20	22
++#define R_WASM_PCREL_HI20	23
++#define R_WASM_PCREL_LO12_I	24
++#define R_WASM_PCREL_LO12_S	25
++#define R_WASM_HI20		26
++#define R_WASM_LO12_I		27
++#define R_WASM_LO12_S		28
++#define R_WASM_TPREL_HI20	29
++#define R_WASM_TPREL_LO12_I	30
++#define R_WASM_TPREL_LO12_S	31
++#define R_WASM_TPREL_ADD	32
++#define R_WASM_ADD8		33
++#define R_WASM_ADD16		34
++#define R_WASM_ADD32		35
++#define R_WASM_ADD64		36
++#define R_WASM_SUB8		37
++#define R_WASM_SUB16		38
++#define R_WASM_SUB32		39
++#define R_WASM_SUB64		40
++#define R_WASM_GNU_VTINHERIT	41
++#define R_WASM_GNU_VTENTRY	42
++#define R_WASM_ALIGN		43
++#define R_WASM_RVC_BRANCH	44
++#define R_WASM_RVC_JUMP	45
++#define R_WASM_LUI		46
++#define R_WASM_GPREL_I		47
++#define R_WASM_GPREL_S		48
++#define R_WASM_TPREL_I		49
++#define R_WASM_TPREL_S		50
++#define R_WASM_RELAX		51
++#define R_WASM_SUB6		52
++#define R_WASM_SET6		53
++#define R_WASM_SET8		54
++#define R_WASM_SET16		55
++#define R_WASM_SET32		56
++#define R_WASM_32_PCREL	57
++
+ #define EF_LARCH_ABI_MODIFIER_MASK    0x07
+ #define EF_LARCH_ABI_SOFT_FLOAT       0x01
+ #define EF_LARCH_ABI_SINGLE_FLOAT     0x02
+diff --git a/include/unistd.h b/include/unistd.h
+index 5bc7f79..ca939bd 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -177,7 +177,10 @@ void setusershell(void);
+ void endusershell(void);
+ char *getusershell(void);
+ int acct(const char *);
+-long syscall(long, ...);
++#define __syscall_nargs_x(a,b,c,d,e,f,g,h,n,...) n
++#define __syscall_nargs(...) __syscall_nargs_x(__VA_ARGS__,7,6,5,4,3,2,1,0,)
++long syscall(long, long, ...);
++#define syscall(...) syscall(__syscall_nargs(__VA_ARGS__), __VA_ARGS__)
+ int execvpe(const char *, char *const [], char *const []);
+ int issetugid(void);
+ int getentropy(void *, size_t);
+diff --git a/src/internal/pthread_impl.h b/src/internal/pthread_impl.h
+index de2b9d8..e2ac283 100644
+--- a/src/internal/pthread_impl.h
++++ b/src/internal/pthread_impl.h
+@@ -158,6 +158,7 @@ extern hidden void *__pthread_tsd_main[];
+ extern hidden volatile int __eintr_valid_flag;
+ 
+ hidden int __clone(int (*)(void *), void *, int, void *, ...);
++hidden int _Clone(int (*)(void *), void *, int, void *, pid_t *, void *, pid_t *);
+ hidden int __set_thread_area(void *);
+ hidden int __libc_sigaction(int, const struct sigaction *, struct sigaction *);
+ hidden void __unmapself(void *, size_t);
+@@ -169,14 +170,14 @@ static inline void __wake(volatile void *addr, int cnt, int priv)
+ {
+ 	if (priv) priv = FUTEX_PRIVATE;
+ 	if (cnt<0) cnt = INT_MAX;
+-	__syscall(SYS_futex, addr, FUTEX_WAKE|priv, cnt) != -ENOSYS ||
+-	__syscall(SYS_futex, addr, FUTEX_WAKE, cnt);
++	__syscall(SYS_futex, addr, FUTEX_WAKE|priv, cnt, 0, 0, 0) != -ENOSYS ||
++	__syscall(SYS_futex, addr, FUTEX_WAKE, cnt, 0, 0, 0);
+ }
+ static inline void __futexwait(volatile void *addr, int val, int priv)
+ {
+ 	if (priv) priv = FUTEX_PRIVATE;
+-	__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS ||
+-	__syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
++	__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0, 0, 0) != -ENOSYS ||
++	__syscall(SYS_futex, addr, FUTEX_WAIT, val, 0, 0, 0);
+ }
+ 
+ hidden void __acquire_ptc(void);
+diff --git a/src/internal/syscall.h b/src/internal/syscall.h
+index 33d981f..590b6cb 100644
+--- a/src/internal/syscall.h
++++ b/src/internal/syscall.h
+@@ -23,9 +23,14 @@
+ typedef long syscall_arg_t;
+ #endif
+ 
+-hidden long __syscall_ret(unsigned long),
+-	__syscall_cp(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t,
+-	             syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_ret(unsigned long);
++hidden long __syscall_cp_c0(syscall_arg_t);
++hidden long __syscall_cp_c1(syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c2(syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c3(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c4(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c5(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c6(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
+ 
+ #define __syscall1(n,a) __syscall1(n,__scc(a))
+ #define __syscall2(n,a,b) __syscall2(n,__scc(a),__scc(b))
+@@ -44,36 +49,22 @@ hidden long __syscall_ret(unsigned long),
+ #define __syscall(...) __SYSCALL_DISP(__syscall,__VA_ARGS__)
+ #define syscall(...) __syscall_ret(__syscall(__VA_ARGS__))
+ 
+-#define socketcall(nm,a,b,c,d,e,f) __syscall_ret(__socketcall(nm,a,b,c,d,e,f))
+-#define socketcall_cp(nm,a,b,c,d,e,f) __syscall_ret(__socketcall_cp(nm,a,b,c,d,e,f))
++#define socketcall(...) __syscall_ret(__socketcall(__VA_ARGS__))
++#define socketcall_cp(...) __syscall_ret(__socketcall_cp(__VA_ARGS__))
+ 
+-#define __syscall_cp0(n) (__syscall_cp)(n,0,0,0,0,0,0)
+-#define __syscall_cp1(n,a) (__syscall_cp)(n,__scc(a),0,0,0,0,0)
+-#define __syscall_cp2(n,a,b) (__syscall_cp)(n,__scc(a),__scc(b),0,0,0,0)
+-#define __syscall_cp3(n,a,b,c) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),0,0,0)
+-#define __syscall_cp4(n,a,b,c,d) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),__scc(d),0,0)
+-#define __syscall_cp5(n,a,b,c,d,e) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),0)
+-#define __syscall_cp6(n,a,b,c,d,e,f) (__syscall_cp)(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),__scc(f))
++#define __syscall_cp0(n) __syscall_cp_c0(n)
++#define __syscall_cp1(n,a) __syscall_cp_c1(n,__scc(a))
++#define __syscall_cp2(n,a,b) __syscall_cp_c2(n,__scc(a),__scc(b))
++#define __syscall_cp3(n,a,b,c) __syscall_cp_c3(n,__scc(a),__scc(b),__scc(c))
++#define __syscall_cp4(n,a,b,c,d) __syscall_cp_c4(n,__scc(a),__scc(b),__scc(c),__scc(d))
++#define __syscall_cp5(n,a,b,c,d,e) __syscall_cp_c5(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e))
++#define __syscall_cp6(n,a,b,c,d,e,f) __syscall_cp_c6(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),__scc(f))
+ 
+ #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
+ #define syscall_cp(...) __syscall_ret(__syscall_cp(__VA_ARGS__))
+ 
+-static inline long __alt_socketcall(int sys, int sock, int cp, syscall_arg_t a, syscall_arg_t b, syscall_arg_t c, syscall_arg_t d, syscall_arg_t e, syscall_arg_t f)
+-{
+-	long r;
+-	if (cp) r = __syscall_cp(sys, a, b, c, d, e, f);
+-	else r = __syscall(sys, a, b, c, d, e, f);
+-	if (r != -ENOSYS) return r;
+-#ifdef SYS_socketcall
+-	if (cp) r = __syscall_cp(SYS_socketcall, sock, ((long[6]){a, b, c, d, e, f}));
+-	else r = __syscall(SYS_socketcall, sock, ((long[6]){a, b, c, d, e, f}));
+-#endif
+-	return r;
+-}
+-#define __socketcall(nm, a, b, c, d, e, f) __alt_socketcall(SYS_##nm, __SC_##nm, 0, \
+-	__scc(a), __scc(b), __scc(c), __scc(d), __scc(e), __scc(f))
+-#define __socketcall_cp(nm, a, b, c, d, e, f) __alt_socketcall(SYS_##nm, __SC_##nm, 1, \
+-	__scc(a), __scc(b), __scc(c), __scc(d), __scc(e), __scc(f))
++#define __socketcall(nm, ...) __syscall(SYS_##nm, __VA_ARGS__)
++#define __socketcall_cp(nm, ...) __syscall_cp(SYS_##nm, __VA_ARGS__)
+ 
+ /* fixup legacy 16-bit junk */
+ 
+@@ -374,14 +365,14 @@ static inline long __alt_socketcall(int sys, int sock, int cp, syscall_arg_t a,
+ #endif
+ 
+ #ifdef SYS_open
+-#define __sys_open2(x,pn,fl) __syscall2(SYS_open, pn, (fl)|O_LARGEFILE)
++#define __sys_open2(x,pn,fl) __syscall3(SYS_open, pn, (fl)|O_LARGEFILE, 0)
+ #define __sys_open3(x,pn,fl,mo) __syscall3(SYS_open, pn, (fl)|O_LARGEFILE, mo)
+-#define __sys_open_cp2(x,pn,fl) __syscall_cp2(SYS_open, pn, (fl)|O_LARGEFILE)
++#define __sys_open_cp2(x,pn,fl) __syscall_cp3(SYS_open, pn, (fl)|O_LARGEFILE, 0)
+ #define __sys_open_cp3(x,pn,fl,mo) __syscall_cp3(SYS_open, pn, (fl)|O_LARGEFILE, mo)
+ #else
+-#define __sys_open2(x,pn,fl) __syscall3(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE)
++#define __sys_open2(x,pn,fl) __syscall4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, 0)
+ #define __sys_open3(x,pn,fl,mo) __syscall4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
+-#define __sys_open_cp2(x,pn,fl) __syscall_cp3(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE)
++#define __sys_open_cp2(x,pn,fl) __syscall_cp4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, 0)
+ #define __sys_open_cp3(x,pn,fl,mo) __syscall_cp4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
+ #endif
+ 
+diff --git a/src/linux/clone.c b/src/linux/clone.c
+index 257c1ce..e3e8aa0 100644
+--- a/src/linux/clone.c
++++ b/src/linux/clone.c
+@@ -31,7 +31,7 @@ int clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
+ 	/* Flags that produce an invalid thread/TLS state are disallowed. */
+ 	int badflags = CLONE_THREAD | CLONE_SETTLS | CLONE_CHILD_CLEARTID;
+ 
+-	if ((flags & badflags) || !stack)
++	if ((flags & badflags) || (!stack && !(flags & CLONE_VFORK)))
+ 		return __syscall_ret(-EINVAL);
+ 
+ 	va_start(ap, arg);
+@@ -63,3 +63,22 @@ int clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
+ 	__restore_sigs(&csa.sigmask);
+ 	return __syscall_ret(ret);
+ }
++
++int __clone(int (*fn)(void *), void *stack, int flags, void *arg, ...)
++{
++	/* Avoid calling assembler functions with va_args (fails on Wasm). */
++	va_list ap;
++	pid_t *ptid = 0, *ctid = 0;
++	void  *tls = 0;
++
++	va_start(ap, arg);
++	if (flags & (CLONE_PIDFD | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID))
++		ptid = va_arg(ap, pid_t *);
++	if (flags & CLONE_CHILD_SETTID) {
++		tls = va_arg(ap, void *);
++		ctid = va_arg(ap, pid_t *);
++	}
++	va_end(ap);
++
++	return _Clone(fn, stack, flags, arg, ptid, tls, ctid);
++}
+diff --git a/src/linux/reboot.c b/src/linux/reboot.c
+index 7f12af7..f131745 100644
+--- a/src/linux/reboot.c
++++ b/src/linux/reboot.c
+@@ -3,5 +3,5 @@
+ 
+ int reboot(int type)
+ {
+-	return syscall(SYS_reboot, 0xfee1dead, 672274793, type);
++	return syscall(SYS_reboot, 0xfee1dead, 672274793, type, 0);
+ }
+diff --git a/src/misc/syscall.c b/src/misc/syscall.c
+index 6f3ef65..471a9b2 100644
+--- a/src/misc/syscall.c
++++ b/src/misc/syscall.c
+@@ -5,17 +5,57 @@
+ 
+ #undef syscall
+ 
+-long syscall(long n, ...)
++long syscall(long count, long n, ...)
+ {
+ 	va_list ap;
+ 	syscall_arg_t a,b,c,d,e,f;
+ 	va_start(ap, n);
+-	a=va_arg(ap, syscall_arg_t);
+-	b=va_arg(ap, syscall_arg_t);
+-	c=va_arg(ap, syscall_arg_t);
+-	d=va_arg(ap, syscall_arg_t);
+-	e=va_arg(ap, syscall_arg_t);
+-	f=va_arg(ap, syscall_arg_t);
++	switch (count) {
++		case 0:
++			va_end(ap);
++			return __syscall_ret(__syscall(n));
++		case 1:
++			a =  va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a));
++		case 2:
++			a = va_arg(ap, syscall_arg_t);
++			b = va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a, b));
++		case 3:
++			a = va_arg(ap, syscall_arg_t);
++			b = va_arg(ap, syscall_arg_t);
++			c = va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a, b, c));
++		case 4:
++			a = va_arg(ap, syscall_arg_t);
++			b = va_arg(ap, syscall_arg_t);
++			c = va_arg(ap, syscall_arg_t);
++			d = va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a, b, c, d));
++		case 5:
++			a = va_arg(ap, syscall_arg_t);
++			b = va_arg(ap, syscall_arg_t);
++			c = va_arg(ap, syscall_arg_t);
++			d = va_arg(ap, syscall_arg_t);
++			e = va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a, b, c, d, e));
++		case 6:
++			a = va_arg(ap, syscall_arg_t);
++			b = va_arg(ap, syscall_arg_t);
++			c = va_arg(ap, syscall_arg_t);
++			d = va_arg(ap, syscall_arg_t);
++			e = va_arg(ap, syscall_arg_t);
++			f = va_arg(ap, syscall_arg_t);
++			va_end(ap);
++			return __syscall_ret(__syscall(n, a, b, c, d, e, f));
++		default:
++			break;
++	}
+ 	va_end(ap);
+-	return __syscall_ret(__syscall(n,a,b,c,d,e,f));
++	return -ENOSYS;
+ }
+diff --git a/src/misc/syscalls.c b/src/misc/syscalls.c
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/misc/wasm/syscalls.S b/src/misc/wasm/syscalls.S
+new file mode 100644
+index 0000000..4fc4c55
+--- /dev/null
++++ b/src/misc/wasm/syscalls.S
+@@ -0,0 +1,113 @@
++#include <bits/asm.h>
++
++.macro __SYSCALL_HEAD
++	global.get __stack_pointer
++	global.get __tls_base
++	local.get 0
++.endm
++
++.macro __SYSCALL_FOOT
++	/*
++	 * The kernel never changes __stack_pointer or __tls_base during most
++	 * syscalls. The ones where it does (clone, signals, exec) are handled
++	 * separately and don't go via this function, making it safe to ignore.
++	 */
++.endm
++
++.globl __syscall0
++.hidden __syscall0
++__syscall0:
++	.functype __syscall0(iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	call __wasm_syscall_0
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall1
++.hidden __syscall1
++__syscall1:
++	.functype __syscall1(iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	call __wasm_syscall_1
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall2
++.hidden __syscall2
++__syscall2:
++	.functype __syscall2(iLONG, iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	local.get 2
++	call __wasm_syscall_2
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall3
++.hidden __syscall3
++__syscall3:
++	.functype __syscall3(iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	local.get 2
++	local.get 3
++	call __wasm_syscall_3
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall4
++.hidden __syscall4
++__syscall4:
++	.functype __syscall4(iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	local.get 2
++	local.get 3
++	local.get 4
++	call __wasm_syscall_4
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall5
++.hidden __syscall5
++__syscall5:
++	.functype __syscall5(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	local.get 2
++	local.get 3
++	local.get 4
++	local.get 5
++	call __wasm_syscall_5
++	__SYSCALL_FOOT
++
++	end_function
++
++.globl __syscall6
++.hidden __syscall6
++__syscall6:
++	.functype __syscall6(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++
++	__SYSCALL_HEAD
++	local.get 1
++	local.get 2
++	local.get 3
++	local.get 4
++	local.get 5
++	local.get 6
++	call __wasm_syscall_6
++	__SYSCALL_FOOT
++
++	end_function
+diff --git a/src/network/accept.c b/src/network/accept.c
+index a92406f..5fa901a 100644
+--- a/src/network/accept.c
++++ b/src/network/accept.c
+@@ -3,5 +3,5 @@
+ 
+ int accept(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
+ {
+-	return socketcall_cp(accept, fd, addr, len, 0, 0, 0);
++	return socketcall_cp(accept, fd, addr, len);
+ }
+diff --git a/src/network/accept4.c b/src/network/accept4.c
+index 765a38e..91575d1 100644
+--- a/src/network/accept4.c
++++ b/src/network/accept4.c
+@@ -7,7 +7,7 @@
+ int accept4(int fd, struct sockaddr *restrict addr, socklen_t *restrict len, int flg)
+ {
+ 	if (!flg) return accept(fd, addr, len);
+-	int ret = socketcall_cp(accept4, fd, addr, len, flg, 0, 0);
++	int ret = socketcall_cp(accept4, fd, addr, len, flg);
+ 	if (ret>=0 || (errno != ENOSYS && errno != EINVAL)) return ret;
+ 	if (flg & ~(SOCK_CLOEXEC|SOCK_NONBLOCK)) {
+ 		errno = EINVAL;
+diff --git a/src/network/bind.c b/src/network/bind.c
+index 07bb669..0ff11d9 100644
+--- a/src/network/bind.c
++++ b/src/network/bind.c
+@@ -3,5 +3,5 @@
+ 
+ int bind(int fd, const struct sockaddr *addr, socklen_t len)
+ {
+-	return socketcall(bind, fd, addr, len, 0, 0, 0);
++	return socketcall(bind, fd, addr, len);
+ }
+diff --git a/src/network/connect.c b/src/network/connect.c
+index 289127b..ace2add 100644
+--- a/src/network/connect.c
++++ b/src/network/connect.c
+@@ -3,5 +3,5 @@
+ 
+ int connect(int fd, const struct sockaddr *addr, socklen_t len)
+ {
+-	return socketcall_cp(connect, fd, addr, len, 0, 0, 0);
++	return socketcall_cp(connect, fd, addr, len);
+ }
+diff --git a/src/network/getpeername.c b/src/network/getpeername.c
+index 6567b45..fc366a3 100644
+--- a/src/network/getpeername.c
++++ b/src/network/getpeername.c
+@@ -3,5 +3,5 @@
+ 
+ int getpeername(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
+ {
+-	return socketcall(getpeername, fd, addr, len, 0, 0, 0);
++	return socketcall(getpeername, fd, addr, len);
+ }
+diff --git a/src/network/getsockname.c b/src/network/getsockname.c
+index 7885fc1..2a4d3eb 100644
+--- a/src/network/getsockname.c
++++ b/src/network/getsockname.c
+@@ -3,5 +3,5 @@
+ 
+ int getsockname(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
+ {
+-	return socketcall(getsockname, fd, addr, len, 0, 0, 0);
++	return socketcall(getsockname, fd, addr, len);
+ }
+diff --git a/src/network/getsockopt.c b/src/network/getsockopt.c
+index d3640d9..aaf0b7c 100644
+--- a/src/network/getsockopt.c
++++ b/src/network/getsockopt.c
+@@ -8,7 +8,7 @@ int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t
+ 	long tv32[2];
+ 	struct timeval *tv;
+ 
+-	int r = __socketcall(getsockopt, fd, level, optname, optval, optlen, 0);
++	int r = __socketcall(getsockopt, fd, level, optname, optval, optlen);
+ 
+ 	if (r==-ENOPROTOOPT) switch (level) {
+ 	case SOL_SOCKET:
+@@ -20,7 +20,7 @@ int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t
+ 			if (optname==SO_RCVTIMEO) optname=SO_RCVTIMEO_OLD;
+ 			if (optname==SO_SNDTIMEO) optname=SO_SNDTIMEO_OLD;
+ 			r = __socketcall(getsockopt, fd, level, optname,
+-				tv32, (socklen_t[]){sizeof tv32}, 0);
++				tv32, (socklen_t[]){sizeof tv32});
+ 			if (r<0) break;
+ 			tv = optval;
+ 			tv->tv_sec = tv32[0];
+@@ -33,7 +33,7 @@ int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t
+ 			if (optname==SO_TIMESTAMP) optname=SO_TIMESTAMP_OLD;
+ 			if (optname==SO_TIMESTAMPNS) optname=SO_TIMESTAMPNS_OLD;
+ 			r = __socketcall(getsockopt, fd, level,
+-				optname, optval, optlen, 0);
++				optname, optval, optlen);
+ 			break;
+ 		}
+ 	}
+diff --git a/src/network/listen.c b/src/network/listen.c
+index f84ad03..87eec05 100644
+--- a/src/network/listen.c
++++ b/src/network/listen.c
+@@ -3,5 +3,5 @@
+ 
+ int listen(int fd, int backlog)
+ {
+-	return socketcall(listen, fd, backlog, 0, 0, 0, 0);
++	return socketcall(listen, fd, backlog);
+ }
+diff --git a/src/network/recvmsg.c b/src/network/recvmsg.c
+index 0364162..8f9b81d 100644
+--- a/src/network/recvmsg.c
++++ b/src/network/recvmsg.c
+@@ -59,7 +59,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags)
+ 		msg = &h;
+ 	}
+ #endif
+-	r = socketcall_cp(recvmsg, fd, msg, flags, 0, 0, 0);
++	r = socketcall_cp(recvmsg, fd, msg, flags);
+ 	if (r >= 0) __convert_scm_timestamps(msg, orig_controllen);
+ #if LONG_MAX > INT_MAX
+ 	if (orig) *orig = h;
+diff --git a/src/network/sendmsg.c b/src/network/sendmsg.c
+index acdfdf2..611186d 100644
+--- a/src/network/sendmsg.c
++++ b/src/network/sendmsg.c
+@@ -28,5 +28,5 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags)
+ 		}
+ 	}
+ #endif
+-	return socketcall_cp(sendmsg, fd, msg, flags, 0, 0, 0);
++	return socketcall_cp(sendmsg, fd, msg, flags);
+ }
+diff --git a/src/network/setsockopt.c b/src/network/setsockopt.c
+index 612a194..d97ce57 100644
+--- a/src/network/setsockopt.c
++++ b/src/network/setsockopt.c
+@@ -12,7 +12,7 @@ int setsockopt(int fd, int level, int optname, const void *optval, socklen_t opt
+ 	time_t s;
+ 	suseconds_t us;
+ 
+-	int r = __socketcall(setsockopt, fd, level, optname, optval, optlen, 0);
++	int r = __socketcall(setsockopt, fd, level, optname, optval, optlen);
+ 
+ 	if (r==-ENOPROTOOPT) switch (level) {
+ 	case SOL_SOCKET:
+@@ -30,7 +30,7 @@ int setsockopt(int fd, int level, int optname, const void *optval, socklen_t opt
+ 			if (optname==SO_SNDTIMEO) optname=SO_SNDTIMEO_OLD;
+ 
+ 			r = __socketcall(setsockopt, fd, level, optname,
+-				((long[]){s, CLAMP(us)}), 2*sizeof(long), 0);
++				((long[]){s, CLAMP(us)}), 2*sizeof(long));
+ 			break;
+ 		case SO_TIMESTAMP:
+ 		case SO_TIMESTAMPNS:
+@@ -38,7 +38,7 @@ int setsockopt(int fd, int level, int optname, const void *optval, socklen_t opt
+ 			if (optname==SO_TIMESTAMP) optname=SO_TIMESTAMP_OLD;
+ 			if (optname==SO_TIMESTAMPNS) optname=SO_TIMESTAMPNS_OLD;
+ 			r = __socketcall(setsockopt, fd, level,
+-				optname, optval, optlen, 0);
++				optname, optval, optlen);
+ 			break;
+ 		}
+ 	}
+diff --git a/src/network/shutdown.c b/src/network/shutdown.c
+index 10ca21a..fa51bfc 100644
+--- a/src/network/shutdown.c
++++ b/src/network/shutdown.c
+@@ -3,5 +3,5 @@
+ 
+ int shutdown(int fd, int how)
+ {
+-	return socketcall(shutdown, fd, how, 0, 0, 0, 0);
++	return socketcall(shutdown, fd, how);
+ }
+diff --git a/src/network/socket.c b/src/network/socket.c
+index afa1a7f..d2beb31 100644
+--- a/src/network/socket.c
++++ b/src/network/socket.c
+@@ -5,12 +5,11 @@
+ 
+ int socket(int domain, int type, int protocol)
+ {
+-	int s = __socketcall(socket, domain, type, protocol, 0, 0, 0);
++	int s = __socketcall(socket, domain, type, protocol);
+ 	if ((s==-EINVAL || s==-EPROTONOSUPPORT)
+ 	    && (type&(SOCK_CLOEXEC|SOCK_NONBLOCK))) {
+ 		s = __socketcall(socket, domain,
+-			type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK),
+-			protocol, 0, 0, 0);
++			type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK), protocol);
+ 		if (s < 0) return __syscall_ret(s);
+ 		if (type & SOCK_CLOEXEC)
+ 			__syscall(SYS_fcntl, s, F_SETFD, FD_CLOEXEC);
+diff --git a/src/network/socketpair.c b/src/network/socketpair.c
+index f348962..28603ed 100644
+--- a/src/network/socketpair.c
++++ b/src/network/socketpair.c
+@@ -5,12 +5,11 @@
+ 
+ int socketpair(int domain, int type, int protocol, int fd[2])
+ {
+-	int r = socketcall(socketpair, domain, type, protocol, fd, 0, 0);
++	int r = socketcall(socketpair, domain, type, protocol, fd);
+ 	if (r<0 && (errno==EINVAL || errno==EPROTONOSUPPORT)
+ 	    && (type&(SOCK_CLOEXEC|SOCK_NONBLOCK))) {
+ 		r = socketcall(socketpair, domain,
+-			type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK),
+-			protocol, fd, 0, 0);
++			type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK), protocol, fd);
+ 		if (r < 0) return r;
+ 		if (type & SOCK_CLOEXEC) {
+ 			__syscall(SYS_fcntl, fd[0], F_SETFD, FD_CLOEXEC);
+diff --git a/src/process/posix_spawn.c b/src/process/posix_spawn.c
+index 8294598..668694d 100644
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -175,12 +175,13 @@ int posix_spawn(pid_t *restrict res, const char *restrict path,
+ 	char stack[1024+PATH_MAX];
+ 	int ec=0, cs;
+ 	struct args args;
++	const posix_spawnattr_t dummy = {0};
+ 
+ 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+ 
+ 	args.path = path;
+ 	args.fa = fa;
+-	args.attr = attr ? attr : &(const posix_spawnattr_t){0};
++	args.attr = attr ? attr : &dummy;
+ 	args.argv = argv;
+ 	args.envp = envp;
+ 	pthread_sigmask(SIG_BLOCK, SIGALL_SET, &args.oldmask);
+diff --git a/src/process/vfork.c b/src/process/vfork.c
+index d430c13..0b16b9d 100644
+--- a/src/process/vfork.c
++++ b/src/process/vfork.c
+@@ -1,14 +1,12 @@
+ #define _GNU_SOURCE
+-#include <unistd.h>
++#include <stdlib.h>
++#include <stdio.h>
+ #include <signal.h>
+ #include "syscall.h"
+ 
+ pid_t vfork(void)
+ {
+-	/* vfork syscall cannot be made from C code */
+-#ifdef SYS_fork
+-	return syscall(SYS_fork);
+-#else
+-	return syscall(SYS_clone, SIGCHLD, 0);
+-#endif
++	fprintf(stderr,
++		"vfork() is not implemented yet, use clone() instead!\n");
++	abort();
+ }
+diff --git a/src/setjmp/longjmp.c b/src/setjmp/longjmp.c
+index e69de29..d03b171 100644
+--- a/src/setjmp/longjmp.c
++++ b/src/setjmp/longjmp.c
+@@ -0,0 +1,19 @@
++
++#include <stdlib.h>
++#include <setjmp.h>
++
++/*
++ * setjmp/sigsetjmp/longjmp is currently not supported (but it can be,
++ * LLVM has support for it with some fixup logic needed). Since some
++ * programs use setjmp but only longjmp when for example an error occurs,
++ * we can allow setjmp/sigsetjmp (by doing nothing). When it actually
++ * wants to longjmp we have to abort, let's just hope that never happens.
++ */
++_Noreturn void longjmp(jmp_buf env, int status);
++{
++	(void)env;
++	(void)status;
++
++	fprintf(stderr, "longjmp() is not implemented yet!\n");
++	abort();
++}
+diff --git a/src/setjmp/wasm/longjmp.S b/src/setjmp/wasm/longjmp.S
+new file mode 100644
+index 0000000..292afbd
+--- /dev/null
++++ b/src/setjmp/wasm/longjmp.S
+@@ -0,0 +1,17 @@
++#include <bits/asm.h>
++
++.functype abort() -> ()
++
++.globl longjmp
++longjmp:
++	.functype longjmp(iLONG, i32) -> ()
++	/*
++	 * setjmp/sigsetjmp/longjmp is currently not supported (but it can be,
++	 * LLVM has support for it with some fixup logic needed). Since some
++	 * programs use setjmp but only longjmp when for example an error occurs,
++	 * we can allow setjmp/sigsetjmp (by doing nothing). When it actually
++	 * wants to longjmp we have to abort, let's just hope that never happens.
++	*/
++	call abort
++
++	end_function
+diff --git a/src/setjmp/wasm/setjmp.S b/src/setjmp/wasm/setjmp.S
+new file mode 100644
+index 0000000..0a6c5b4
+--- /dev/null
++++ b/src/setjmp/wasm/setjmp.S
+@@ -0,0 +1,8 @@
++#include <bits/asm.h>
++
++.globl setjmp
++setjmp:
++	.functype setjmp(iLONG) -> (i32)
++	/* We allow this, but do nothing. longjmp() is forbidden though. */
++	i32.const 0
++	end_function
+diff --git a/src/signal/wasm/restore.S b/src/signal/wasm/restore.S
+new file mode 100644
+index 0000000..a3b2abf
+--- /dev/null
++++ b/src/signal/wasm/restore.S
+@@ -0,0 +1,103 @@
++#include <bits/asm.h>
++
++.globl __restore_rt
++.hidden __restore_rt
++__restore_rt:
++	.functype __restore_rt() -> ()
++
++	global.get __stack_pointer
++	global.get __tls_base
++	iLONG.const 139 # SYS_rt_sigreturn
++	call __wasm_syscall_0
++	unreachable
++
++	end_function
++
++.globl __restore
++.hidden __restore
++__restore:
++	.functype __restore() -> ()
++
++	call __restore_rt
++
++	end_function
++
++/* TODO: Move this to a better place... */
++.globl __libc_handle_signal
++__libc_handle_signal:
++	.functype __libc_handle_signal() -> ()
++	/* 0: sig_param */
++	/* 1: info_param */
++	/* 2: uc_param */
++	/* 3: sa_handler */
++	.local i32, iLONG, iLONG, iLONG
++
++	/* sig_param */
++	global.get __stack_pointer
++	i32.load 0
++	/*
++	 * LLVM complains for some reason if we leave this on the Wasm stack. We
++	 * put it in a local instead and then everything works, somehow...
++	 */
++	local.set 0
++
++	/* (4 bytes padding for alignment on 64-bit.) */
++
++	/* info_param */
++	global.get __stack_pointer
++	iLONG.const 4
++	INSN_32_64(i32.const 4, i64.const 8)
++	iLONG.add
++	iLONG.load 0
++	local.set 1
++
++	/* uc_param */
++	global.get __stack_pointer
++	INSN_32_64(i32.const 8, i64.const 16)
++	iLONG.add
++	iLONG.load 0
++	local.set 2
++
++	/* sa_handler */
++	global.get __stack_pointer
++	INSN_32_64(i32.const 12, i64.const 24)
++	iLONG.add
++	iLONG.load 0
++	local.set 3
++
++	/* (__stack_pointer is already 16-byte aligned by the kernel.) */
++
++	/* !SA_SIGINFO */
++	block
++		local.get 1
++		INSN_32_64(, i64.eqz)
++		INSN_32_64(, i32.eqz)
++		br_if 0
++
++		local.get 0 /* sig_param */
++		local.get 3 /* sa_handler cast to handler */
++		/* handler(sig) */
++		CALL_INDIRECT_FIXUP
++		call_indirect (i32) -> ()
++	end_block
++
++	/* SA_SIGINFO */
++	block
++		local.get 1
++		iLONG.eqz
++		br_if 0
++
++		local.get 0 /* sig _param*/
++		local.get 1 /* info_param */
++		local.get 2 /* uc_param */
++		local.get 3 /* sa_handler cast to sigaction */
++		/* sigaction(sig_param, info_param, uc_param) */
++		CALL_INDIRECT_FIXUP
++		call_indirect (i32, iLONG, iLONG) -> ()
++	end_block
++
++	/* Unless the handler itself calls SYS_rt_sigreturn we have to do it. */
++	call __restore_rt
++	unreachable
++
++	end_function
+diff --git a/src/signal/wasm/sigsetjmp.S b/src/signal/wasm/sigsetjmp.S
+new file mode 100644
+index 0000000..eed8254
+--- /dev/null
++++ b/src/signal/wasm/sigsetjmp.S
+@@ -0,0 +1,8 @@
++#include <bits/asm.h>
++
++.globl sigsetjmp
++sigsetjmp:
++	.functype sigsetjmp(iLONG, i32) -> (i32)
++	/* We allow this, but do nothing. longjmp() is forbidden though. */
++	i32.const 0
++	end_function
+diff --git a/src/thread/__syscall_cp.c b/src/thread/__syscall_cp.c
+index 42a0167..f33c5d0 100644
+--- a/src/thread/__syscall_cp.c
++++ b/src/thread/__syscall_cp.c
+@@ -1,20 +1,2 @@
+ #include "pthread_impl.h"
+ #include "syscall.h"
+-
+-hidden long __syscall_cp_c();
+-
+-static long sccp(syscall_arg_t nr,
+-                 syscall_arg_t u, syscall_arg_t v, syscall_arg_t w,
+-                 syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
+-{
+-	return __syscall(nr, u, v, w, x, y, z);
+-}
+-
+-weak_alias(sccp, __syscall_cp_c);
+-
+-long (__syscall_cp)(syscall_arg_t nr,
+-                    syscall_arg_t u, syscall_arg_t v, syscall_arg_t w,
+-                    syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
+-{
+-	return __syscall_cp_c(nr, u, v, w, x, y, z);
+-}
+diff --git a/src/thread/__timedwait.c b/src/thread/__timedwait.c
+index 666093b..ffa12cc 100644
+--- a/src/thread/__timedwait.c
++++ b/src/thread/__timedwait.c
+@@ -17,13 +17,13 @@ static int __futex4_cp(volatile void *addr, int op, int val, const struct timesp
+ 	r = -ENOSYS;
+ 	if (SYS_futex == SYS_futex_time64 || !IS32BIT(s))
+ 		r = __syscall_cp(SYS_futex_time64, addr, op, val,
+-			to ? ((long long[]){s, ns}) : 0);
++			to ? ((long long[]){s, ns}) : 0, 0, 0);
+ 	if (SYS_futex == SYS_futex_time64 || r!=-ENOSYS) return r;
+ 	to = to ? (void *)(long[]){CLAMP(s), ns} : 0;
+ #endif
+-	r = __syscall_cp(SYS_futex, addr, op, val, to);
++	r = __syscall_cp(SYS_futex, addr, op, val, to, 0, 0);
+ 	if (r != -ENOSYS) return r;
+-	return __syscall_cp(SYS_futex, addr, op & ~FUTEX_PRIVATE, val, to);
++	return __syscall_cp(SYS_futex, addr, op & ~FUTEX_PRIVATE, val, to, 0, 0);
+ }
+ 
+ static volatile int dummy = 0;
+diff --git a/src/thread/__wait.c b/src/thread/__wait.c
+index dc33c1a..847de07 100644
+--- a/src/thread/__wait.c
++++ b/src/thread/__wait.c
+@@ -10,8 +10,8 @@ void __wait(volatile int *addr, volatile int *waiters, int val, int priv)
+ 	}
+ 	if (waiters) a_inc(waiters);
+ 	while (*addr==val) {
+-		__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS
+-		|| __syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
++		__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0, 0, 0) != -ENOSYS
++		|| __syscall(SYS_futex, addr, FUTEX_WAIT, val, 0, 0, 0);
+ 	}
+ 	if (waiters) a_dec(waiters);
+ }
+diff --git a/src/thread/pthread_barrier_wait.c b/src/thread/pthread_barrier_wait.c
+index cc2a8bb..e2fa679 100644
+--- a/src/thread/pthread_barrier_wait.c
++++ b/src/thread/pthread_barrier_wait.c
+@@ -84,8 +84,8 @@ int pthread_barrier_wait(pthread_barrier_t *b)
+ 			a_spin();
+ 		a_inc(&inst->finished);
+ 		while (inst->finished == 1)
+-			__syscall(SYS_futex,&inst->finished,FUTEX_WAIT|FUTEX_PRIVATE,1,0) != -ENOSYS
+-			|| __syscall(SYS_futex,&inst->finished,FUTEX_WAIT,1,0);
++			__syscall(SYS_futex,&inst->finished,FUTEX_WAIT|FUTEX_PRIVATE,1,0,0,0) != -ENOSYS
++			|| __syscall(SYS_futex,&inst->finished,FUTEX_WAIT,1,0,0,0);
+ 		return PTHREAD_BARRIER_SERIAL_THREAD;
+ 	}
+ 
+diff --git a/src/thread/pthread_cancel.c b/src/thread/pthread_cancel.c
+index 139a6fc..4ba7b8e 100644
+--- a/src/thread/pthread_cancel.c
++++ b/src/thread/pthread_cancel.c
+@@ -3,9 +3,7 @@
+ #include "pthread_impl.h"
+ #include "syscall.h"
+ 
+-hidden long __cancel(), __syscall_cp_asm(), __syscall_cp_c();
+-
+-long __cancel()
++hidden long __cancel()
+ {
+ 	pthread_t self = __pthread_self();
+ 	if (self->canceldisable == PTHREAD_CANCEL_ENABLE || self->cancelasync)
+@@ -14,27 +12,85 @@ long __cancel()
+ 	return -ECANCELED;
+ }
+ 
+-long __syscall_cp_asm(volatile void *, syscall_arg_t,
+-                      syscall_arg_t, syscall_arg_t, syscall_arg_t,
+-                      syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm0(volatile void *, syscall_arg_t);
++hidden long __syscall_cp_asm1(volatile void *, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm2(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm3(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm4(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm5(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_asm6(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++
++long __syscall_cp_asm0(volatile void *, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm1(volatile void *, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm2(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm3(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm4(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm5(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++long __syscall_cp_asm6(volatile void *, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t) { abort(); /* TODO */ }
++
++hidden long __syscall_cp_c0(syscall_arg_t);
++hidden long __syscall_cp_c1(syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c2(syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c3(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c4(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c5(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++hidden long __syscall_cp_c6(syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t, syscall_arg_t);
++
++/* It's a TODO to handle this... */
++/*
++#define SYSCALL_CP_C(num, ...) do {\
++		pthread_t self; \
++		long r; \
++		int st; \
++		\
++		if ((st=(self=__pthread_self())->canceldisable) \
++			&& (st==PTHREAD_CANCEL_DISABLE || nr==SYS_close)) \
++			return __syscall(__VA_ARGS__); \
++		\
++		r = __syscall_cp_asm##num(&self->cancel, __VA_ARGS__); \
++		if (r==-EINTR && nr!=SYS_close && self->cancel && \
++			self->canceldisable != PTHREAD_CANCEL_DISABLE) \
++			r = __cancel(); \
++		return r; \
++	} while(0)
++*/
++#define SYSCALL_CP_C(num, ...) do {\
++		return __syscall(__VA_ARGS__); \
++	} while(0)
++
++long __syscall_cp_c0(syscall_arg_t nr)
++{
++	SYSCALL_CP_C(0, nr);
++}
++
++long __syscall_cp_c1(syscall_arg_t nr, syscall_arg_t u)
++{
++	SYSCALL_CP_C(1, nr, u);
++}
++
++long __syscall_cp_c2(syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v)
++{
++	SYSCALL_CP_C(2, nr, u, v);
++}
+ 
+-long __syscall_cp_c(syscall_arg_t nr,
+-                    syscall_arg_t u, syscall_arg_t v, syscall_arg_t w,
+-                    syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
++long __syscall_cp_c3(syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v, syscall_arg_t w)
+ {
+-	pthread_t self;
+-	long r;
+-	int st;
+-
+-	if ((st=(self=__pthread_self())->canceldisable)
+-	    && (st==PTHREAD_CANCEL_DISABLE || nr==SYS_close))
+-		return __syscall(nr, u, v, w, x, y, z);
+-
+-	r = __syscall_cp_asm(&self->cancel, nr, u, v, w, x, y, z);
+-	if (r==-EINTR && nr!=SYS_close && self->cancel &&
+-	    self->canceldisable != PTHREAD_CANCEL_DISABLE)
+-		r = __cancel();
+-	return r;
++	SYSCALL_CP_C(3, nr, u, v, w);
++}
++
++long __syscall_cp_c4(syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v, syscall_arg_t w, syscall_arg_t x)
++{
++	SYSCALL_CP_C(4, nr, u, v, w, x);
++}
++
++long __syscall_cp_c5(syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v, syscall_arg_t w, syscall_arg_t x, syscall_arg_t y)
++{
++	SYSCALL_CP_C(5, nr, u, v, w, x, y);
++}
++
++long __syscall_cp_c6(syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v, syscall_arg_t w, syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
++{
++	SYSCALL_CP_C(6, nr, u, v, w, x, y, z);
+ }
+ 
+ static void _sigaddset(sigset_t *set, int sig)
+@@ -49,7 +105,7 @@ static void cancel_handler(int sig, siginfo_t *si, void *ctx)
+ {
+ 	pthread_t self = __pthread_self();
+ 	ucontext_t *uc = ctx;
+-	uintptr_t pc = uc->uc_mcontext.MC_PC;
++	uintptr_t pc;
+ 
+ 	a_barrier();
+ 	if (!self->cancel || self->canceldisable == PTHREAD_CANCEL_DISABLE) return;
+@@ -61,6 +117,8 @@ static void cancel_handler(int sig, siginfo_t *si, void *ctx)
+ 		__cancel();
+ 	}
+ 
++#ifdef MC_PC
++	pc = uc->uc_mcontext.MC_PC;
+ 	if (pc >= (uintptr_t)__cp_begin && pc < (uintptr_t)__cp_end) {
+ 		uc->uc_mcontext.MC_PC = (uintptr_t)__cp_cancel;
+ #ifdef CANCEL_GOT
+@@ -68,6 +126,10 @@ static void cancel_handler(int sig, siginfo_t *si, void *ctx)
+ #endif
+ 		return;
+ 	}
++#else
++	/* TODO: handle this. */
++	abort();
++#endif
+ 
+ 	__syscall(SYS_tkill, self->tid, SIGCANCEL);
+ }
+diff --git a/src/thread/pthread_cond_timedwait.c b/src/thread/pthread_cond_timedwait.c
+index 6b76145..fc6793e 100644
+--- a/src/thread/pthread_cond_timedwait.c
++++ b/src/thread/pthread_cond_timedwait.c
+@@ -49,8 +49,8 @@ static inline void unlock_requeue(volatile int *l, volatile int *r, int w)
+ {
+ 	a_store(l, 0);
+ 	if (w) __wake(l, 1, 1);
+-	else __syscall(SYS_futex, l, FUTEX_REQUEUE|FUTEX_PRIVATE, 0, 1, r) != -ENOSYS
+-		|| __syscall(SYS_futex, l, FUTEX_REQUEUE, 0, 1, r);
++	else __syscall(SYS_futex, l, FUTEX_REQUEUE|FUTEX_PRIVATE, 0, 1, r, 0) != -ENOSYS
++		|| __syscall(SYS_futex, l, FUTEX_REQUEUE, 0, 1, r, 0);
+ }
+ 
+ enum {
+diff --git a/src/thread/pthread_mutex_timedlock.c b/src/thread/pthread_mutex_timedlock.c
+index 9279fc5..9615429 100644
+--- a/src/thread/pthread_mutex_timedlock.c
++++ b/src/thread/pthread_mutex_timedlock.c
+@@ -11,11 +11,11 @@ static int __futex4(volatile void *addr, int op, int val, const struct timespec
+ 	int r = -ENOSYS;
+ 	if (SYS_futex == SYS_futex_time64 || !IS32BIT(s))
+ 		r = __syscall(SYS_futex_time64, addr, op, val,
+-			to ? ((long long[]){s, ns}) : 0);
++			to ? ((long long[]){s, ns}) : 0, 0, 0);
+ 	if (SYS_futex == SYS_futex_time64 || r!=-ENOSYS) return r;
+ 	to = to ? (void *)(long[]){CLAMP(s), ns} : 0;
+ #endif
+-	return __syscall(SYS_futex, addr, op, val, to);
++	return __syscall(SYS_futex, addr, op, val, to, 0, 0);
+ }
+ 
+ static int pthread_mutex_timedlock_pi(pthread_mutex_t *restrict m, const struct timespec *restrict at)
+@@ -36,7 +36,7 @@ static int pthread_mutex_timedlock_pi(pthread_mutex_t *restrict m, const struct
+ 		/* Catch spurious success for non-robust mutexes. */
+ 		if (!(type&4) && ((m->_m_lock & 0x40000000) || m->_m_waiters)) {
+ 			a_store(&m->_m_waiters, -1);
+-			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv, 0, 0, 0, 0);
+ 			self->robust_list.pending = 0;
+ 			break;
+ 		}
+diff --git a/src/thread/pthread_mutex_trylock.c b/src/thread/pthread_mutex_trylock.c
+index a24e7c5..fc6dc8d 100644
+--- a/src/thread/pthread_mutex_trylock.c
++++ b/src/thread/pthread_mutex_trylock.c
+@@ -43,7 +43,7 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
+ success:
+ 	if ((type&8) && m->_m_waiters) {
+ 		int priv = (type & 128) ^ 128;
+-		__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++		__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv, 0, 0, 0, 0);
+ 		self->robust_list.pending = 0;
+ 		return (type&4) ? ENOTRECOVERABLE : EBUSY;
+ 	}
+diff --git a/src/thread/pthread_mutex_unlock.c b/src/thread/pthread_mutex_unlock.c
+index b66423e..69f1a9c 100644
+--- a/src/thread/pthread_mutex_unlock.c
++++ b/src/thread/pthread_mutex_unlock.c
+@@ -33,7 +33,7 @@ int __pthread_mutex_unlock(pthread_mutex_t *m)
+ 	if (type&8) {
+ 		if (old<0 || a_cas(&m->_m_lock, old, new)!=old) {
+ 			if (new) a_store(&m->_m_waiters, -1);
+-			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv);
++			__syscall(SYS_futex, &m->_m_lock, FUTEX_UNLOCK_PI|priv, 0, 0, 0, 0);
+ 		}
+ 		cont = 0;
+ 		waiters = 0;
+diff --git a/src/thread/pthread_mutexattr_setprotocol.c b/src/thread/pthread_mutexattr_setprotocol.c
+index 8b80c1c..b98cbc2 100644
+--- a/src/thread/pthread_mutexattr_setprotocol.c
++++ b/src/thread/pthread_mutexattr_setprotocol.c
+@@ -14,7 +14,7 @@ int pthread_mutexattr_setprotocol(pthread_mutexattr_t *a, int protocol)
+ 		r = check_pi_result;
+ 		if (r < 0) {
+ 			volatile int lk = 0;
+-			r = -__syscall(SYS_futex, &lk, FUTEX_LOCK_PI, 0, 0);
++			r = -__syscall(SYS_futex, &lk, FUTEX_LOCK_PI, 0, 0, 0, 0);
+ 			a_store(&check_pi_result, r);
+ 		}
+ 		if (r) return r;
+diff --git a/src/thread/wasm/__set_thread_area.c b/src/thread/wasm/__set_thread_area.c
+new file mode 100644
+index 0000000..f703c34
+--- /dev/null
++++ b/src/thread/wasm/__set_thread_area.c
+@@ -0,0 +1,9 @@
++#include "pthread_impl.h"
++
++_Thread_local uintptr_t __musl_tp = 0U;
++
++int __set_thread_area(void *p)
++{
++	__musl_tp = (uintptr_t)p;
++	return 0;
++}
+diff --git a/src/thread/wasm/clone.S b/src/thread/wasm/clone.S
+new file mode 100644
+index 0000000..566f15d
+--- /dev/null
++++ b/src/thread/wasm/clone.S
+@@ -0,0 +1,167 @@
++#include <bits/asm.h>
++
++.globl __get_tls_base
++__get_tls_base:
++	.functype __get_tls_base() -> (iLONG)
++	global.get __tls_base
++	end_function
++
++/* The runtime expects to be able to set __tls_base as part of it's clone setup. */
++.globl __set_tls_base
++__set_tls_base:
++	.functype __set_tls_base(iLONG) -> ()
++	local.get 0
++	global.set __tls_base
++	end_function
++
++/* This function gets called by the host once it detects a clone happening. */
++.globl __libc_clone_callback
++__libc_clone_callback:
++	.functype __libc_clone_callback() -> (i32)
++
++	iLONG.const 0 /* sp (no care) */
++	iLONG.const 0 /* tp (no care) */
++	iLONG.const 93 /* SYS_exit (will be used at the end of this function) */
++
++	/* Extract arg. */
++	global.get __stack_pointer
++	iLONG.const SIZEOF_LONG
++	iLONG.add
++	iLONG.load 0
++
++	/* Extract fn. */
++	global.get __stack_pointer
++	iLONG.load 0
++
++	/* Deallocate fn+arg+alignemnt (alignment only on 32-bit). */
++	global.get __stack_pointer
++	iLONG.const 16
++	iLONG.add
++	global.set __stack_pointer
++
++	/* Call fn(arg). */
++	CALL_INDIRECT_FIXUP
++	call_indirect (iLONG) -> (i32)
++
++	/* 64: Sign extend return value from handler (int) to syscall arg (long). */
++	INSN_32_64(, i64.extend_i32_s)
++
++	/* syscall(SYS_exit, the return value from the callback) */
++	call __wasm_syscall_1
++
++	/* 64: Return the result of SYS_exit (long) cast to int. */
++	INSN_32_64(, i32.wrap_i64)
++	end_function
++
++.globl _Clone
++_Clone:
++	/*
++	 * int _Clone(fn, stack, flags, arg, ptid, tls, ctid);
++	 * .local     0   1      2      3    4     5    6
++	 */
++	.functype _Clone(iLONG, iLONG, i32, iLONG, iLONG, iLONG, iLONG) -> (i32)
++	.local iLONG /* 7: child_stack */
++
++	/*
++	 * We save fn+arg on the stack. There are two distincs cases for stack:
++	 * * stack is NULL: the kernel will in this special case copy the value
++	 *   of __stack_pointer to the new task. This means we should fill in fn
++	 *   and arg on our stack. This also implies that the caller uses
++	 *   CLONE_VFORK which pauses the calling task (or it does not care about
++	 *   the stack being corrupted in the caller, which is a very odd case).
++	 * * stack is not NULL: the kernel will in this case set the stack
++	 *   pointer of the new task to the value of the stack argument.
++	 *
++	 * In either case we don't really need to "allocate" space on these
++	 * stacks, but we do it anyway, should the syscall wrappers change in the
++	 * future to call C code. In that case we also need to align the stack.
++	 */
++
++	/*
++	 * If stack was NULL, store into __stack_pointer instead. The kernel will
++	 * in this special case copy the value of the stack pointer to the new
++	 * task in the clone syscall. (Allocating space on these stacks is not
++	 * strictly necessary but a nice thing if the syscall function changes
++	 * to a C function in the future - in that case we should also align the
++	 * stack to 16 bytes.) To be consistent, also allocate on non-NULL stack.
++	 */
++	block
++		local.get 1
++		INSN_32_64(, i64.eqz)
++		INSN_32_64(, i32.eqz)
++		br_if 0		/* if (stack != NULL): break to block 0; */
++				/* else if (stack == NULL): */
++
++		global.get __stack_pointer
++		iLONG.const 16
++		iLONG.sub
++		local.tee 7
++		global.set __stack_pointer
++	end_block
++
++	block
++		local.get 1
++		iLONG.eqz
++		br_if 0		/* if (stack == NULL): break to block 0; */
++				/* else if (stack != NULL): */
++
++		local.get 1
++		iLONG.const 16
++		iLONG.sub
++		local.tee 7
++		local.set 1
++	end_block
++
++	/*
++	 * At this point:
++	 * local 1 contains the decremented stack address or NULL.
++	 * local 7 contains the decremented stack address (never NULL).
++	 * i.e. we don't pass the decremented __stack_pointer if stack == NULL.
++	 */
++
++	/* Store fn at the lowest address. */
++	local.get 7
++	local.get 0
++	iLONG.store 0
++
++	/* Store arg at the next-lowest address. */
++	local.get 7
++	iLONG.const SIZEOF_LONG
++	iLONG.add
++	local.get 3
++	iLONG.store 0
++
++	/* syscall(SYS_clone, clone_flags, newsp, parent_tidptr, child_tidptr, tls) */
++	global.get __stack_pointer /* our sp (used when newsp is NULL) */
++	global.get __tls_base /* our tp (used when CLONE_SETTLS is not set) */
++	iLONG.const 220 /* SYS_clone */
++	local.get 2 /* clone_flags */
++	INSN_32_64(, i64.extend_i32_s)
++	local.get 1 /* newsp (maybe NULL) */
++	local.get 4 /* ptid */
++	local.get 6 /* ctid */
++	local.get 5 /* tls */
++	call __wasm_syscall_5
++
++	/*
++	 * On Wasm, we don't end up returning twice - instead wasm_clone_callback
++	 * is called and we can extract fn and arg from __stack_pointer. This
++	 * means that we for sure currently are in the parent when returning.
++	 */
++
++	block
++		local.get 1
++		INSN_32_64(, i64.eqz)
++		INSN_32_64(, i32.eqz)
++		br_if 0		/* if (stack != NULL): break to block 0; */
++				/* else if(stack == NULL): */
++
++		global.get __stack_pointer
++		iLONG.const 16
++		iLONG.add
++		global.set __stack_pointer
++	end_block
++
++	/* Pass on (64: cast) return value from the above syscall to the caller. */
++	INSN_32_64(, i32.wrap_i64)
++	end_function
+diff --git a/src/unistd/access.c b/src/unistd/access.c
+index d6eed68..449f9b4 100644
+--- a/src/unistd/access.c
++++ b/src/unistd/access.c
+@@ -7,6 +7,6 @@ int access(const char *filename, int amode)
+ #ifdef SYS_access
+ 	return syscall(SYS_access, filename, amode);
+ #else
+-	return syscall(SYS_faccessat, AT_FDCWD, filename, amode, 0);
++	return syscall(SYS_faccessat2, AT_FDCWD, filename, amode, 0);
+ #endif
+ }
+diff --git a/src/unistd/faccessat.c b/src/unistd/faccessat.c
+index 43052dd..56d650c 100644
+--- a/src/unistd/faccessat.c
++++ b/src/unistd/faccessat.c
+@@ -18,7 +18,7 @@ static int checker(void *p)
+ 	if (__syscall(SYS_setregid, __syscall(SYS_getegid), -1)
+ 	    || __syscall(SYS_setreuid, __syscall(SYS_geteuid), -1))
+ 		__syscall(SYS_exit, 1);
+-	ret = __syscall(SYS_faccessat, c->fd, c->filename, c->amode, 0);
++	ret = __syscall(SYS_faccessat2, c->fd, c->filename, c->amode, 0);
+ 	__syscall(SYS_write, c->p, &ret, sizeof ret);
+ 	return 0;
+ }
+-- 
+2.53.0
+

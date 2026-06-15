@@ -1,0 +1,83 @@
+# nix-wasm
+
+Build the **Nix package manager** — and the entire toolchain it needs — for the
+`wasm32-linux-musl` **NOMMU** guest that runs inside [pc](https://github.com/codebutler/pc)'s
+in-browser Linux, **entirely through Nix derivations**. No hand-rolled build
+scripts, no fake stubs: every artifact is a reproducible Nix build.
+
+The end goal is bigger than `nix.wasm`: it's that **the pc-linux userspace is
+created by Nix** — "NixOS, in the browser." `nix.wasm` is the keystone (once the
+guest has a working Nix, it can install packages); this repo builds it and the
+toolchain it stands on.
+
+## Status (2026-06-15)
+
+| Layer | State |
+|---|---|
+| **wasm toolchain** (musl, compiler-rt, libc++, kernel headers, sysroot) | ✅ **built & validated** against the known-good linux-wasm artifacts |
+| **crossSystem cc-wrapper** (clang-21 over the nix-built sysroot) | ✅ builds C packages (`cross.zlib` proven) |
+| **C dependency closure** (zlib, sqlite, openssl, curl, libgit2, boost, …) | 🔧 **in progress** — fixing nixpkgs-cross-wasm gaps in the overlay |
+| **`nix.wasm`** (Nix 2.34.7 itself) | ⬜ derivation written (`nix-wasm.nix`), blocked on the dep closure |
+| userspace / guest-clang / kernel / CI (the rest of "NixOS in wasm") | ⬜ planned (`docs/plan-environment.md`) |
+
+See **[docs/STATUS.md](docs/STATUS.md)** for the detailed log: what works, what's
+next, and what didn't work (the dead-ends, so they're not repeated).
+
+## How to build
+
+The Nix daemon here runs as root, so commands are `sudo`, and flakes must be
+enabled:
+
+```sh
+export NIX_CONFIG="experimental-features = nix-command flakes"
+
+# A toolchain stage (these all work today):
+sudo -E nix build .#musl --no-link --print-out-paths
+sudo -E nix build .#libcxx --no-link --print-out-paths
+
+# A cross-compiled C dependency (the smoke test):
+sudo -E nix build .#crossZlib --no-link --print-out-paths
+
+# The goal (blocked on the dep closure):
+sudo -E nix build .#nix-wasm --print-out-paths
+```
+
+LLVM 21 is the toolchain; on `aarch64-linux` the binary cache lacks the exact
+LLVM build, so the **first** build compiles LLVM from source (~1–2 h, cached
+after). On `x86_64-linux` (and CI) it substitutes from cache.
+
+## Repo layout
+
+```
+flake.nix              entry point — exposes the toolchain stages, cross set, nix-wasm
+flake.lock             pinned nixpkgs (nixos-unstable @ 9ae611a, has clang 21.1.8)
+wasm-cross.nix         the crossSystem: clang-21 cc-wrapper over the nix-built sysroot
+deps-overlay.nix       per-dep cross fixes (static-only, compiler-rt triple, kernel headers, trims)
+nix-wasm.nix           builds Nix 2.34.7 → nix.wasm (meson compile + the wasm hand-link)
+toolchain/             the wasm toolchain, as focused Nix derivations:
+  musl.nix             musl 1.2.5 + 8 patches (harness wasm-arch + 7 pc fixes)
+  compiler-rt.nix      LLVM-21 compiler-rt builtins for wasm32
+  kernel-headers.nix   joelseverin/linux wasm UAPI headers
+  libcxx.nix           LLVM-21 libc++/libc++abi/libunwind for wasm
+  sysroot.nix          assembles musl + kernel headers into the cc sysroot
+patches/               the kernel/musl/nix source patches
+docs/                  the plans + the detailed STATUS log
+legacy/                the known-good SHELL-SCRIPT approach (reference / fallback only)
+```
+
+## Two layers — important distinction
+
+- **`nix.wasm`'s own build deps** (the ~13 libs Nix links): a closed, fixed set.
+- **Packages users install in the guest** (`sl`, `hello`, …): an open set that
+  comes from **nixpkgs via the crossSystem** — *not* hand-written.
+
+The fixes in `deps-overlay.nix` override `cross.curl`/`cross.openssl`/… at the
+package-set level, so they are **shared**: the same fix serves `nix.wasm` *and*
+every user-installable package that uses that dep. That's why this repo builds
+deps through nixpkgs (fixing the cross machinery) rather than writing private
+per-package recipes — the latter wouldn't generalize to user installs.
+
+## License
+
+Patches under `patches/` and `legacy/` derive from musl, the Linux kernel, LLVM,
+and Nix — see their respective upstream licenses.

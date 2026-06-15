@@ -1,0 +1,32 @@
+diff --git a/src/unistd/setxid.c b/src/unistd/setxid.c
+index a629ed4..ac55f4e 100644
+--- a/src/unistd/setxid.c
++++ b/src/unistd/setxid.c
+@@ -12,7 +12,26 @@ static void do_setxid(void *p)
+ {
+ 	struct ctx *c = p;
+ 	if (c->ret<0) return;
+-	int ret = __syscall(c->nr, c->id, c->eid, c->sid);
++	/* pc (linux-wasm) patch: issue each set*id syscall with its EXACT
++	 * argument count. On wasm, syscalls are typed indirect calls into the
++	 * kernel's table — calling 1-arg sys_setuid/sys_setgid (or 2-arg
++	 * sys_setreuid/sys_setregid) through the generic 3-arg invocation
++	 * below is a wasm signature mismatch → kernel-mode trap → "Aiee"
++	 * panic. Native ABIs ignore the extra register args; wasm can't. */
++	int ret;
++	switch (c->nr) {
++	case SYS_setuid:
++	case SYS_setgid:
++		ret = __syscall(c->nr, c->id);
++		break;
++	case SYS_setreuid:
++	case SYS_setregid:
++		ret = __syscall(c->nr, c->id, c->eid);
++		break;
++	default:
++		ret = __syscall(c->nr, c->id, c->eid, c->sid);
++		break;
++	}
+ 	if (ret && !c->ret) {
+ 		/* If one thread fails to set ids after another has already
+ 		 * succeeded, forcibly killing the process is the only safe

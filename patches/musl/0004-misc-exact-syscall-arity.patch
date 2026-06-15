@@ -1,0 +1,138 @@
+diff --git a/src/linux/ptrace.c b/src/linux/ptrace.c
+index a3f393d..dbce8bb 100644
+--- a/src/linux/ptrace.c
++++ b/src/linux/ptrace.c
+@@ -22,7 +22,8 @@ long ptrace(int req, ...)
+ 	va_end(ap);
+ 
+ 	if (req-1U < 3) data = &result;
+-	ret = syscall(SYS_ptrace, req, pid, addr, data, addr2);
++	ret = syscall(SYS_ptrace, req, pid, addr, data);
++	(void)addr2;
+ 
+ 	if (ret < 0 || req-1U >= 3) return ret;
+ 	return result;
+diff --git a/src/process/posix_spawn.c b/src/process/posix_spawn.c
+index 668694d..fb878f8 100644
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -111,7 +111,7 @@ static int child(void *args_vp)
+ 					if ((ret=__sys_dup2(fd, op->fd))<0)
+ 						goto fail;
+ 				} else {
+-					ret = __syscall(SYS_fcntl, fd, F_GETFD);
++					ret = __syscall(SYS_fcntl, fd, F_GETFD, 0);
+ 					ret = __syscall(SYS_fcntl, fd, F_SETFD,
+ 					                ret & ~FD_CLOEXEC);
+ 					if (ret<0)
+diff --git a/src/stat/fchmod.c b/src/stat/fchmod.c
+index 7a503ee..f4353a5 100644
+--- a/src/stat/fchmod.c
++++ b/src/stat/fchmod.c
+@@ -6,7 +6,7 @@
+ int fchmod(int fd, mode_t mode)
+ {
+ 	int ret = __syscall(SYS_fchmod, fd, mode);
+-	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD) < 0)
++	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD, 0) < 0)
+ 		return __syscall_ret(ret);
+ 
+ 	char buf[15+3*sizeof(int)];
+diff --git a/src/stat/fchmodat.c b/src/stat/fchmodat.c
+index 92c9d1b..dd56a89 100644
+--- a/src/stat/fchmodat.c
++++ b/src/stat/fchmodat.c
+@@ -22,7 +22,7 @@ int fchmodat(int fd, const char *path, mode_t mode, int flag)
+ 	if (S_ISLNK(st.st_mode))
+ 		return __syscall_ret(-EOPNOTSUPP);
+ 
+-	if ((fd2 = __syscall(SYS_openat, fd, path, O_RDONLY|O_PATH|O_NOFOLLOW|O_NOCTTY|O_CLOEXEC)) < 0) {
++	if ((fd2 = __syscall(SYS_openat, fd, path, O_RDONLY|O_PATH|O_NOFOLLOW|O_NOCTTY|O_CLOEXEC, 0)) < 0) {
+ 		if (fd2 == -ELOOP)
+ 			return __syscall_ret(-EOPNOTSUPP);
+ 		return __syscall_ret(fd2);
+diff --git a/src/stdio/__fdopen.c b/src/stdio/__fdopen.c
+index 116e78e..5024f9c 100644
+--- a/src/stdio/__fdopen.c
++++ b/src/stdio/__fdopen.c
+@@ -30,8 +30,15 @@ FILE *__fdopen(int fd, const char *mode)
+ 	if (strchr(mode, 'e')) __syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
+ 
+ 	/* Set append mode on fd if opened for append */
++	/* pc (linux-wasm) patch: pad fcntl to the kernel's 3-arg arity. On
++	 * wasm, syscalls are typed indirect calls — a 2-arg call site into
++	 * 3-arg sys_fcntl64 is a signature mismatch → kernel-mode trap →
++	 * "Aiee" panic (every fopen(…, "a") hit this). Same pad applied to
++	 * the other 2-arg fcntl probes (dup2, fchmod/fchown/fchdir,
++	 * posix_spawn), 3-arg openat (fchmodat), 4-arg ppoll (pause),
++	 * 0-arg exit (__unmapself), 5-arg ptrace. */
+ 	if (*mode == 'a') {
+-		int flags = __syscall(SYS_fcntl, fd, F_GETFL);
++		int flags = __syscall(SYS_fcntl, fd, F_GETFL, 0);
+ 		if (!(flags & O_APPEND))
+ 			__syscall(SYS_fcntl, fd, F_SETFL, flags | O_APPEND);
+ 		f->flags |= F_APP;
+diff --git a/src/thread/__unmapself.c b/src/thread/__unmapself.c
+index 31d94e6..2071271 100644
+--- a/src/thread/__unmapself.c
++++ b/src/thread/__unmapself.c
+@@ -11,7 +11,7 @@ static char shared_stack[256];
+ static void do_unmap()
+ {
+ 	__syscall(SYS_munmap, unmap_base, unmap_size);
+-	__syscall(SYS_exit);
++	__syscall(SYS_exit, 0);
+ }
+ 
+ void __unmapself(void *base, size_t size)
+diff --git a/src/unistd/dup2.c b/src/unistd/dup2.c
+index 8f43c6d..02a0900 100644
+--- a/src/unistd/dup2.c
++++ b/src/unistd/dup2.c
+@@ -10,7 +10,7 @@ int dup2(int old, int new)
+ 	while ((r=__syscall(SYS_dup2, old, new))==-EBUSY);
+ #else
+ 	if (old==new) {
+-		r = __syscall(SYS_fcntl, old, F_GETFD);
++		r = __syscall(SYS_fcntl, old, F_GETFD, 0);
+ 		if (r >= 0) return old;
+ 	} else {
+ 		while ((r=__syscall(SYS_dup3, old, new, 0))==-EBUSY);
+diff --git a/src/unistd/fchdir.c b/src/unistd/fchdir.c
+index dee45ba..8b4787c 100644
+--- a/src/unistd/fchdir.c
++++ b/src/unistd/fchdir.c
+@@ -6,7 +6,7 @@
+ int fchdir(int fd)
+ {
+ 	int ret = __syscall(SYS_fchdir, fd);
+-	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD) < 0)
++	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD, 0) < 0)
+ 		return __syscall_ret(ret);
+ 
+ 	char buf[15+3*sizeof(int)];
+diff --git a/src/unistd/fchown.c b/src/unistd/fchown.c
+index 737b367..023e25a 100644
+--- a/src/unistd/fchown.c
++++ b/src/unistd/fchown.c
+@@ -6,7 +6,7 @@
+ int fchown(int fd, uid_t uid, gid_t gid)
+ {
+ 	int ret = __syscall(SYS_fchown, fd, uid, gid);
+-	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD) < 0)
++	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD, 0) < 0)
+ 		return __syscall_ret(ret);
+ 
+ 	char buf[15+3*sizeof(int)];
+diff --git a/src/unistd/pause.c b/src/unistd/pause.c
+index 90bbf4c..1ee1f29 100644
+--- a/src/unistd/pause.c
++++ b/src/unistd/pause.c
+@@ -6,6 +6,6 @@ int pause(void)
+ #ifdef SYS_pause
+ 	return syscall_cp(SYS_pause);
+ #else
+-	return syscall_cp(SYS_ppoll, 0, 0, 0, 0);
++	return syscall_cp(SYS_ppoll, 0, 0, 0, 0, 0);
+ #endif
+ }

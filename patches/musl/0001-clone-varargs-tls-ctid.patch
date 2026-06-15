@@ -1,0 +1,65 @@
+diff --git a/src/linux/clone.c b/src/linux/clone.c
+index e3e8aa0..ee6c9f9 100644
+--- a/src/linux/clone.c
++++ b/src/linux/clone.c
+@@ -34,13 +34,26 @@ int clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
+ 	if ((flags & badflags) || (!stack && !(flags & CLONE_VFORK)))
+ 		return __syscall_ret(-EINVAL);
+ 
++	/* The variadic tail is positional: (pid_t *parent_tid, void *tls,
++	 * pid_t *child_tid). A later argument can only be reached by also
++	 * consuming the earlier positions, and each is needed iff a flag
++	 * referencing it is set. The previous gating keyed tls+ctid solely on
++	 * CLONE_CHILD_SETTID, so the pthread flag set (CLONE_SETTLS |
++	 * CLONE_CHILD_CLEARTID, no CHILD_SETTID) silently dropped both: the new
++	 * thread got TP=0 (pthread_self()=NULL -> __pthread_exit's lone-thread
++	 * check exit(0)s the whole process) and a NULL ctid (no clear/wake of
++	 * __thread_list_lock on exit -> pthread_join hangs). */
++	int need_ctid = flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID);
++	int need_tls = flags & CLONE_SETTLS;
++	int need_ptid = flags & (CLONE_PIDFD | CLONE_PARENT_SETTID);
++
+ 	va_start(ap, arg);
+-	if (flags & (CLONE_PIDFD | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID))
+-	 	ptid = va_arg(ap, pid_t *);
+-	if (flags & CLONE_CHILD_SETTID) {
++	if (need_ptid || need_tls || need_ctid)
++		ptid = va_arg(ap, pid_t *);
++	if (need_tls || need_ctid)
+ 		tls = va_arg(ap, void *);
++	if (need_ctid)
+ 		ctid = va_arg(ap, pid_t *);
+-	}
+ 	va_end(ap);
+ 
+ 	/* If CLONE_VM is used, it's impossible to give the child a consistent
+@@ -71,13 +84,26 @@ int __clone(int (*fn)(void *), void *stack, int flags, void *arg, ...)
+ 	pid_t *ptid = 0, *ctid = 0;
+ 	void  *tls = 0;
+ 
++	/* The variadic tail is positional: (pid_t *parent_tid, void *tls,
++	 * pid_t *child_tid). A later argument can only be reached by also
++	 * consuming the earlier positions, and each is needed iff a flag
++	 * referencing it is set. The previous gating keyed tls+ctid solely on
++	 * CLONE_CHILD_SETTID, so the pthread flag set (CLONE_SETTLS |
++	 * CLONE_CHILD_CLEARTID, no CHILD_SETTID) silently dropped both: the new
++	 * thread got TP=0 (pthread_self()=NULL -> __pthread_exit's lone-thread
++	 * check exit(0)s the whole process) and a NULL ctid (no clear/wake of
++	 * __thread_list_lock on exit -> pthread_join hangs). */
++	int need_ctid = flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID);
++	int need_tls = flags & CLONE_SETTLS;
++	int need_ptid = flags & (CLONE_PIDFD | CLONE_PARENT_SETTID);
++
+ 	va_start(ap, arg);
+-	if (flags & (CLONE_PIDFD | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID))
++	if (need_ptid || need_tls || need_ctid)
+ 		ptid = va_arg(ap, pid_t *);
+-	if (flags & CLONE_CHILD_SETTID) {
++	if (need_tls || need_ctid)
+ 		tls = va_arg(ap, void *);
++	if (need_ctid)
+ 		ctid = va_arg(ap, pid_t *);
+-	}
+ 	va_end(ap);
+ 
+ 	return _Clone(fn, stack, flags, arg, ptid, tls, ctid);

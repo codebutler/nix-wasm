@@ -1,0 +1,27 @@
+diff --git a/src/internal/libc.c b/src/internal/libc.c
+index cb05181..9a54a94 100644
+--- a/src/internal/libc.c
++++ b/src/internal/libc.c
+@@ -1,6 +1,22 @@
+ #include "libc.h"
+ 
++#ifdef __wasm__
++/* The wasm host runtime (linux-wasm runtime/kernel-worker.js,
++ * user_executable_run) runs the program's constructors — __wasm_call_ctors,
++ * i.e. the C++/init_array static initializers — BEFORE calling _start, and
++ * _start → __libc_start_main → __init_libc is what normally sets page_size
++ * from AT_PAGESZ. So any heap allocation made from a constructor (LLVM's
++ * global ctors do plenty) runs while page_size is still 0. mallocng's
++ * alloc_group then computes `needed += -needed & (pagesize-1)`, which with
++ * pagesize==0 wraps `needed` to exactly 0; mmap(0, 0, …) fails EINVAL,
++ * malloc returns 0 and the C++ runtime throws std::bad_alloc (#139 Gate
++ * 0.2 — clang/wasm-ld could not start in-guest). Seed a sane default so the
++ * early-constructor window is safe; __init_libc overwrites it with the real
++ * AT_PAGESZ value (also 4096) immediately afterwards. */
++struct __libc __libc = { .page_size = 4096 };
++#else
+ struct __libc __libc;
++#endif
+ 
+ size_t __hwcap;
+ char *__progname=0, *__progname_full=0;

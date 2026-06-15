@@ -1,0 +1,457 @@
+diff --git a/src/libexpr/meson.build b/src/libexpr/meson.build
+index 0b594dc..c9d13f9 100644
+--- a/src/libexpr/meson.build
++++ b/src/libexpr/meson.build
+@@ -38,14 +38,7 @@ foreach funcspec : check_funcs
+   configdata_priv.set(define_name, define_value)
+ endforeach
+ 
+-boost = dependency(
+-  'boost',
+-  modules : [
+-    'container',
+-    'context',
+-  ],
+-  include_type : 'system',
+-)
++boost = declare_dependency(link_args: ['-L/home/vbvntv/nixdeps/sysroot/lib', '-lboost_url'])
+ # boost is a public dependency, but not a pkg-config dependency unfortunately, so we
+ # put in `deps_other`.
+ deps_other += boost
+@@ -77,12 +70,7 @@ endif
+ # Used in public header. Affects ABI!
+ configdata_pub.set('NIX_USE_BOEHMGC', bdw_gc.found().to_int())
+ 
+-toml11 = dependency(
+-  'toml11',
+-  version : '>=3.7.0',
+-  method : 'cmake',
+-  include_type : 'system',
+-)
++toml11 = declare_dependency()
+ 
+ configdata_priv.set(
+   'HAVE_TOML11_4',
+diff --git a/src/libstore/gc.cc b/src/libstore/gc.cc
+index 16b81ab..bc3d394 100644
+--- a/src/libstore/gc.cc
++++ b/src/libstore/gc.cc
+@@ -16,7 +16,6 @@
+ 
+ #include <boost/unordered/unordered_flat_map.hpp>
+ #include <boost/unordered/unordered_flat_set.hpp>
+-#include <boost/regex.hpp>
+ #include <queue>
+ #include <thread>
+ #include <errno.h>
+diff --git a/src/libstore/http-binary-cache-store.cc b/src/libstore/http-binary-cache-store.cc
+index b3678ae..39fe61f 100644
+--- a/src/libstore/http-binary-cache-store.cc
++++ b/src/libstore/http-binary-cache-store.cc
+@@ -149,7 +149,7 @@ void HttpBinaryCacheStore::upload(
+         std::ranges::move(std::move(*headers), std::back_inserter(req.headers));
+     }
+ 
+-    req.data = {sizeHint, source};
++    req.data = {static_cast<std::size_t>(sizeHint), source};  // wasm32 port (#139): uint64->size_t
+     req.mimeType = mimeType;
+ 
+     fileTransfer->upload(req);
+diff --git a/src/libstore/include/nix/store/binary-cache-store.hh b/src/libstore/include/nix/store/binary-cache-store.hh
+index 2c3fbdc..ffef9f2 100644
+--- a/src/libstore/include/nix/store/binary-cache-store.hh
++++ b/src/libstore/include/nix/store/binary-cache-store.hh
+@@ -92,9 +92,9 @@ protected:
+     /**
+      * The prefix under which realisation infos will be stored
+      */
+-    constexpr const static std::string realisationsPrefix = "realisations";
++    inline const static std::string realisationsPrefix = "realisations";
+ 
+-    constexpr const static std::string cacheInfoFile = "nix-cache-info";
++    inline const static std::string cacheInfoFile = "nix-cache-info";
+ 
+     BinaryCacheStore(Config &);
+ 
+diff --git a/src/libstore/local-gc.cc b/src/libstore/local-gc.cc
+index e3c74f3..f2e13ac 100644
+--- a/src/libstore/local-gc.cc
++++ b/src/libstore/local-gc.cc
+@@ -5,7 +5,7 @@
+ #include "nix/util/types.hh"
+ #include "nix/store/local-gc.hh"
+ #include <filesystem>
+-#include <boost/regex.hpp>
++#include <regex>  // wasm32 port (#139): std::regex replaces boost.regex (drops compiled boost.regex)
+ 
+ #if !defined(__linux__)
+ // For shelling out to lsof
+@@ -43,8 +43,8 @@ static void readProcLink(const std::filesystem::path & file, UncheckedRoots & ro
+ 
+ static std::string quoteRegexChars(const std::string & raw)
+ {
+-    static auto specialRegex = boost::regex(R"([.^$\\*+?()\[\]{}|])");
+-    return boost::regex_replace(raw, specialRegex, R"(\\$&)");
++    static auto specialRegex = std::regex(R"([.^$\\*+?()\[\]{}|])");
++    return std::regex_replace(raw, specialRegex, R"(\\$&)");
+ }
+ 
+ #ifdef __linux__
+@@ -66,12 +66,12 @@ Roots findRuntimeRootsUnchecked(const StoreDirConfig & config)
+     auto procDir = AutoCloseDir{opendir("/proc")};
+     if (procDir) {
+         struct dirent * ent;
+-        static const auto digitsRegex = boost::regex(R"(^\d+$)");
+-        static const auto mapRegex = boost::regex(R"(^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(/\S+)\s*$)");
+-        auto storePathRegex = boost::regex(quoteRegexChars(config.storeDir) + R"(/[0-9a-z]+[0-9a-zA-Z\+\-\._\?=]*)");
++        static const auto digitsRegex = std::regex(R"(^\d+$)");
++        static const auto mapRegex = std::regex(R"(^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(/\S+)\s*$)");
++        auto storePathRegex = std::regex(quoteRegexChars(config.storeDir) + R"(/[0-9a-z]+[0-9a-zA-Z\+\-\._\?=]*)");
+         while (errno = 0, ent = readdir(procDir.get())) {
+             checkInterrupt();
+-            if (boost::regex_match(ent->d_name, digitsRegex)) {
++            if (std::regex_match(ent->d_name, digitsRegex)) {
+                 try {
+                     readProcLink(fmt("/proc/%s/exe", ent->d_name), unchecked);
+                     readProcLink(fmt("/proc/%s/cwd", ent->d_name), unchecked);
+@@ -98,15 +98,15 @@ Roots findRuntimeRootsUnchecked(const StoreDirConfig & config)
+                     std::filesystem::path mapFile = fmt("/proc/%s/maps", ent->d_name);
+                     auto mapLines = tokenizeString<std::vector<std::string>>(readFile(mapFile.string()), "\n");
+                     for (const auto & line : mapLines) {
+-                        auto match = boost::smatch{};
+-                        if (boost::regex_match(line, match, mapRegex))
++                        auto match = std::smatch{};
++                        if (std::regex_match(line, match, mapRegex))
+                             unchecked[match[1]].emplace(mapFile.string());
+                     }
+ 
+                     auto envFile = fmt("/proc/%s/environ", ent->d_name);
+                     auto envString = readFile(envFile);
+-                    auto env_end = boost::sregex_iterator{};
+-                    for (auto i = boost::sregex_iterator{envString.begin(), envString.end(), storePathRegex};
++                    auto env_end = std::sregex_iterator{};
++                    for (auto i = std::sregex_iterator{envString.begin(), envString.end(), storePathRegex};
+                          i != env_end;
+                          ++i)
+                         unchecked[i->str()].emplace(envFile);
+@@ -127,12 +127,12 @@ Roots findRuntimeRootsUnchecked(const StoreDirConfig & config)
+     // Because of this we disable lsof when running the tests.
+     if (getEnv("_NIX_TEST_NO_LSOF") != "1") {
+         try {
+-            boost::regex lsofRegex(R"(^n(/.*)$)");
++            std::regex lsofRegex(R"(^n(/.*)$)");
+             auto lsofLines = tokenizeString<std::vector<std::string>>(
+                 runProgram(LSOF, true, {OS_STR("-n"), OS_STR("-w"), OS_STR("-F"), OS_STR("n")}), "\n");
+             for (const auto & line : lsofLines) {
+-                boost::smatch match;
+-                if (boost::regex_match(line, match, lsofRegex))
++                std::smatch match;
++                if (std::regex_match(line, match, lsofRegex))
+                     unchecked[match[1].str()].emplace("{lsof}");
+             }
+         } catch (ExecError & e) {
+diff --git a/src/libstore/meson.build b/src/libstore/meson.build
+index edc476a..8b2c220 100644
+--- a/src/libstore/meson.build
++++ b/src/libstore/meson.build
+@@ -106,16 +106,7 @@ endif
+ 
+ subdir('nix-meson-build-support/libatomic')
+ 
+-boost = dependency(
+-  'boost',
+-  modules : [
+-    'container',
+-    # Shouldn't list, because can header-only, and Meson currently looks for libs
+-    #'regex',
+-    'url',
+-  ],
+-  include_type : 'system',
+-)
++boost = declare_dependency(link_args: ['-L/home/vbvntv/nixdeps/sysroot/lib', '-lboost_url'])
+ # boost is a public dependency, but not a pkg-config dependency unfortunately, so we
+ # put in `deps_other`.
+ deps_other += boost
+diff --git a/src/libutil/file-system.cc b/src/libutil/file-system.cc
+index e1efca0..827e9d7 100644
+--- a/src/libutil/file-system.cc
++++ b/src/libutil/file-system.cc
+@@ -21,8 +21,6 @@
+ #include <sys/time.h>
+ #include <unistd.h>
+ 
+-#include <boost/iostreams/device/mapped_file.hpp>
+-#include <boost/filesystem/path.hpp>
+ 
+ #ifdef __FreeBSD__
+ #  include <sys/param.h>
+@@ -271,21 +269,10 @@ std::string readFile(const std::filesystem::path & path)
+ 
+ void readFile(const std::filesystem::path & path, Sink & sink, bool memory_map)
+ {
+-    // Memory-map the file for faster processing where possible.
+-    if (memory_map) {
+-        try {
+-            /* mapped_file_source can't be constructed from a std::filesystem::path. */
+-            boost::iostreams::mapped_file_source mmap(boost::filesystem::path(path.native()));
+-            if (mmap.is_open()) {
+-                sink({mmap.data(), mmap.size()});
+-                return;
+-            }
+-        } catch (const boost::exception & e) {
+-        }
+-        debug("memory-mapping failed for path: %s", PathFmt(path));
+-    }
+-
+-    // Stream the file instead if memory-mapping fails or is disabled.
++    // wasm32 port (#139): boost.iostreams mapped_file_source dropped — no mmap
++    // benefit on NOMMU, and it pulls compiled boost.iostreams + boost.filesystem.
++    // The streaming path below is functionally equivalent.
++    (void) memory_map;
+     auto fd = openFileReadonly(std::filesystem::path(path));
+     if (!fd)
+         throw NativeSysError("opening file %s", PathFmt(path));
+diff --git a/src/libutil/meson.build b/src/libutil/meson.build
+index 71bea97..800663a 100644
+--- a/src/libutil/meson.build
++++ b/src/libutil/meson.build
+@@ -62,17 +62,7 @@ blake3 = dependency(
+ )
+ deps_private += blake3
+ 
+-boost = dependency(
+-  'boost',
+-  modules : [
+-    'context',
+-    'coroutine',
+-    'iostreams',
+-    'url',
+-  ],
+-  include_type : 'system',
+-  version : '>=1.87.0',
+-)
++boost = declare_dependency(link_args: ['-L/home/vbvntv/nixdeps/sysroot/lib', '-lboost_url'])
+ # boost is a public dependency, but not a pkg-config dependency unfortunately, so we
+ # put in `deps_other`.
+ deps_other += boost
+diff --git a/src/libutil/serialise.cc b/src/libutil/serialise.cc
+index 22b3565..d975dca 100644
+--- a/src/libutil/serialise.cc
++++ b/src/libutil/serialise.cc
+@@ -9,8 +9,6 @@
+ #include <cerrno>
+ #include <memory>
+ 
+-#include <boost/coroutine2/coroutine.hpp>
+-#include <boost/coroutine2/protected_fixedsize_stack.hpp>
+ 
+ #ifdef _WIN32
+ #  include <fileapi.h>
+@@ -307,57 +305,31 @@ CompressedSource::CompressedSource(RestartableSource & source, CompressionAlgo c
+ 
+ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
+ {
++    /* wasm32 port (#139): the upstream implementation uses a boost stackful
++       coroutine so `reader` can pull lazily as data is pushed. wasm has no
++       fcontext stack-switch backend, so we buffer all pushed bytes and run
++       `reader` over the complete buffer at finish(). Loses streaming (the whole
++       input is held in memory) but is functionally equivalent for a consumer
++       that reads to EOF. */
+     struct SourceToSink : FinishSink
+     {
+-        typedef boost::coroutines2::coroutine<bool> coro_t;
+-
+         fun<void(Source &)> reader;
+-        std::optional<coro_t::push_type> coro;
++        std::string buffer;
+ 
+         SourceToSink(fun<void(Source &)> reader)
+             : reader(reader)
+         {
+         }
+ 
+-        std::string_view cur;
+-
+         void operator()(std::string_view in) override
+         {
+-            if (in.empty())
+-                return;
+-            cur = in;
+-
+-            if (!coro) {
+-                coro =
+-                    coro_t::push_type(boost::coroutines2::protected_fixedsize_stack(), [&](coro_t::pull_type & yield) {
+-                        LambdaSource source([&](char * out, size_t out_len) {
+-                            if (cur.empty()) {
+-                                yield();
+-                                if (yield.get())
+-                                    throw EndOfFile("coroutine has finished");
+-                            }
+-
+-                            size_t n = cur.copy(out, out_len);
+-                            cur.remove_prefix(n);
+-                            return n;
+-                        });
+-                        reader(source);
+-                    });
+-            }
+-
+-            if (!*coro) {
+-                unreachable();
+-            }
+-
+-            if (!cur.empty()) {
+-                (*coro)(false);
+-            }
++            buffer.append(in);
+         }
+ 
+         void finish() override
+         {
+-            if (coro && *coro)
+-                (*coro)(true);
++            StringSource source(buffer);
++            reader(source);
+         }
+     };
+ 
+@@ -366,13 +338,16 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
+ 
+ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
+ {
++    /* wasm32 port (#139): boost-coroutine-free counterpart of the above. Run
++       `writer` eagerly into a buffer on first read, then serve reads from it;
++       call eof() once drained. Same streaming-vs-memory tradeoff. */
+     struct SinkToSource : Source
+     {
+-        typedef boost::coroutines2::coroutine<std::string_view> coro_t;
+-
+         fun<void(Sink &)> writer;
+         fun<void()> eof;
+-        std::optional<coro_t::pull_type> coro;
++        std::string buffer;
++        size_t pos = 0;
++        bool produced = false;
+ 
+         SinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
+             : writer(writer)
+@@ -380,49 +355,23 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
+         {
+         }
+ 
+-        std::string_view cur;
+-
+         size_t read(char * data, size_t len) override
+         {
+-            bool hasCoro = coro.has_value();
+-            if (!hasCoro) {
+-                coro =
+-                    coro_t::pull_type(boost::coroutines2::protected_fixedsize_stack(), [&](coro_t::push_type & yield) {
+-                        LambdaSink sink([&](std::string_view data) {
+-                            if (!data.empty()) {
+-                                yield(data);
+-                            }
+-                        });
+-                        writer(sink);
+-                    });
++            if (!produced) {
++                StringSink sink;
++                writer(sink);
++                buffer = std::move(sink.s);
++                produced = true;
+             }
+ 
+-            if (cur.empty()) {
+-                if (hasCoro && *coro) {
+-                    (*coro)();
+-                }
+-                if (*coro) {
+-                    cur = coro->get();
+-                } else {
+-                    coro.reset();
+-                    eof();
+-                    unreachable();
+-                }
+-            }
+-
+-            size_t n = cur.copy(data, len);
+-            cur.remove_prefix(n);
+-
+-            /* This is necessary to ensure that the coroutine gets resumed
+-               after the consumer has finished reading the Source. Otherwise the
+-               coroutine is always abandoned (i.e. it is always destroyed when
+-               suspended). */
+-            if (cur.empty() && coro && *coro) {
+-                (*coro)();
+-                if (*coro)
+-                    cur = coro->get();
++            if (pos >= buffer.size()) {
++                eof();
++                unreachable();
+             }
+ 
++            size_t n = std::min(len, buffer.size() - pos);
++            memcpy(data, buffer.data() + pos, n);
++            pos += n;
+             return n;
+         }
+     };
+diff --git a/src/libutil/unix/file-descriptor.cc b/src/libutil/unix/file-descriptor.cc
+index 05ec38a..21aaf27 100644
+--- a/src/libutil/unix/file-descriptor.cc
++++ b/src/libutil/unix/file-descriptor.cc
+@@ -76,6 +76,9 @@ void Pipe::create()
+ //////////////////////////////////////////////////////////////////////
+ 
+ #if defined(__linux__) || defined(__FreeBSD__)
++#  if !defined(SYS_close_range)
++#    define SYS_close_range 436  /* wasm32 port (#139): musl-wasm lacks the syscall number */
++#  endif
+ static int unix_close_range(unsigned int first, unsigned int last, int flags)
+ {
+ #  if !HAVE_CLOSE_RANGE
+diff --git a/src/libutil/unix/processes.cc b/src/libutil/unix/processes.cc
+index 95ff7e7..8f8688f 100644
+--- a/src/libutil/unix/processes.cc
++++ b/src/libutil/unix/processes.cc
+@@ -242,9 +242,29 @@ pid_t startProcess(fun<void()> processMain, const ProcessOptions & options)
+ 
+     pid_t pid = -1;
+ 
+-    if (options.cloneFlags) {
++    /* pc #139: the wasm/NOMMU kernel cannot do a copy-fork. Every task shares
++       one linear memory but gets its OWN data base (__memory_base) and its OWN
++       function table (__indirect_function_table); a child created without
++       CLONE_VM is instantiated fresh — the parent's heap/stack are NOT copied
++       and stored function pointers (table indices) resolve against a different
++       table → a signature-mismatch trap when the clone child calls its entry
++       fn. The only working spawn is vfork-style: CLONE_VM | CLONE_VFORK shares
++       the parent's address space + table (so fn pointers stay valid) and
++       suspends the parent until the child execs/exits (so the borrowed stack
++       is safe to free afterwards). Route every spawn through clone(childEntry,
++       …) with those flags; childEntry only sets up fds/env and execs, which is
++       vfork-safe. */
++#ifdef __wasm__
++    const int wasmVforkFlags = CLONE_VM | CLONE_VFORK;
++#else
++    const int wasmVforkFlags = 0;
++#endif
++
++    if (options.cloneFlags || wasmVforkFlags) {
+ #ifdef __linux__
+-        // Not supported, since then we don't know when to free the stack.
++        // Not supported, since then we don't know when to free the stack —
++        // except the wasm vfork path, where CLONE_VFORK suspends the parent
++        // until the child execs, making the post-clone munmap safe.
+         assert(!(options.cloneFlags & CLONE_VM));
+ 
+         size_t stackSize = 1 * 1024 * 1024;
+@@ -255,7 +275,7 @@ pid_t startProcess(fun<void()> processMain, const ProcessOptions & options)
+ 
+         Finally freeStack([&] { munmap(stack, stackSize); });
+ 
+-        pid = clone(childEntry, stack + stackSize, options.cloneFlags | SIGCHLD, &wrapper);
++        pid = clone(childEntry, stack + stackSize, options.cloneFlags | wasmVforkFlags | SIGCHLD, &wrapper);
+ #else
+         throw Error("clone flags are only supported on Linux");
+ #endif
