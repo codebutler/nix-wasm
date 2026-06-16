@@ -21,6 +21,10 @@
       # global overlay) so the shared cached toolchain is untouched.
       patchedLld = import ./toolchain/patched-lld.nix { inherit pkgs; };
 
+      # ---- kernel cc/ld toolchain: stock clang-21 + the patched wasm-ld,
+      # carrying pc's fake-llvm argv rewrites. Consumed only by kernel.nix.
+      kernelCC = import ./toolchain/kernel-cc.nix { inherit pkgs patchedLld; };
+
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
         inherit nixpkgs sysroot compilerRt libcxx;
@@ -66,6 +70,9 @@
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;
+
+        # Kernel cc/ld wrapper toolchain (fake-llvm equivalent) for inspection.
+        kernel-cc = kernelCC;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
