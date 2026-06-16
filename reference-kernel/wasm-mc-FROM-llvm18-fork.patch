@@ -1,0 +1,102 @@
+diff --git a/llvm/lib/MC/MCParser/WasmAsmParser.cpp b/llvm/lib/MC/MCParser/WasmAsmParser.cpp
+index 97045495a60..b0027f660a4 100644
+--- a/llvm/lib/MC/MCParser/WasmAsmParser.cpp
++++ b/llvm/lib/MC/MCParser/WasmAsmParser.cpp
+@@ -57,6 +57,9 @@ public:
+     addDirectiveHandler<&WasmAsmParser::parseSectionDirectiveText>(".text");
+     addDirectiveHandler<&WasmAsmParser::parseSectionDirectiveData>(".data");
+     addDirectiveHandler<&WasmAsmParser::parseSectionDirective>(".section");
++    addDirectiveHandler<&WasmAsmParser::parseSectionDirectivePrevious>(".previous");
++    addDirectiveHandler<&WasmAsmParser::parseSectionDirectivePush>(".pushsection");
++    addDirectiveHandler<&WasmAsmParser::parseSectionDirectivePop>(".popsection");
+     addDirectiveHandler<&WasmAsmParser::parseDirectiveSize>(".size");
+     addDirectiveHandler<&WasmAsmParser::parseDirectiveType>(".type");
+     addDirectiveHandler<&WasmAsmParser::ParseDirectiveIdent>(".ident");
+@@ -115,6 +118,20 @@ public:
+       case 'S':
+         flags |= wasm::WASM_SEG_FLAG_STRINGS;
+         break;
++      case 'a': // SHF_ALLOC - not meaningful for Wasm, ignore.
++        break;
++      case 'w': // SHF_WRITE - not meaningful for Wasm, ignore.
++        break;
++      case 'x': // SHF_EXECINSTR - not meaningful for Wasm, ignore.
++        break;
++      case 'M': // SHF_MERGE - not meaningful for Wasm, ignore.
++        break;
++      case 'R': // SHF_GNU_RETAIN - not meaningful for Wasm, ignore.
++        break;
++      case 'e': // SHF_EXCLUDE - not meaningful for Wasm, ignore.
++        break;
++      case 'o': // SHF_LINK_ORDER - not meaningful for Wasm, ignore.
++        break;
+       default:
+         return -1U;
+       }
+@@ -178,8 +195,16 @@ public:
+ 
+     Lex();
+ 
+-    if (expect(AsmToken::Comma, ",") || expect(AsmToken::At, "@"))
+-      return true;
++    if (Lexer->is(AsmToken::Comma)) {
++      Lex();
++      // Swallow @type and %type.
++      if (!isNext(AsmToken::At) && !isNext(AsmToken::Percent))
++        return error("expected '@' or '%' before section type, got: ",
++                     Lexer->getTok());
++      // May fail, which is ok: we want to allow only @ or % without type too.
++      StringRef TypeName;
++      Parser->parseIdentifier(TypeName);
++    }
+ 
+     StringRef GroupName;
+     if (Group && parseGroup(GroupName))
+@@ -207,6 +232,29 @@ public:
+     return false;
+   }
+ 
++  bool parseSectionDirectivePrevious(StringRef, SMLoc) {
++    MCSectionSubPair PreviousSection = getStreamer().getPreviousSection();
++    if (PreviousSection.first == nullptr)
++      return TokError(".previous without a corresponding .section");
++    getStreamer().switchSection(PreviousSection.first, PreviousSection.second);
++    return false;
++  }
++
++  bool parseSectionDirectivePush(StringRef s, SMLoc loc) {
++    getStreamer().pushSection();
++    if (parseSectionDirective(s, loc)) {
++      getStreamer().popSection();
++      return true;
++    }
++    return false;
++  }
++
++  bool parseSectionDirectivePop(StringRef, SMLoc) {
++    if (!getStreamer().popSection())
++      return TokError(".popsection without corresponding .pushsection");
++    return false;
++  }
++
+   // TODO: This function is almost the same as ELFAsmParser::ParseDirectiveSize
+   // so maybe could be shared somehow.
+   bool parseDirectiveSize(StringRef, SMLoc Loc) {
+diff --git a/llvm/lib/MC/WasmObjectWriter.cpp b/llvm/lib/MC/WasmObjectWriter.cpp
+index ead4f9eff4c..6f68896182d 100644
+--- a/llvm/lib/MC/WasmObjectWriter.cpp
++++ b/llvm/lib/MC/WasmObjectWriter.cpp
+@@ -1628,12 +1628,8 @@ uint64_t WasmObjectWriter::writeOneObject(MCAssembler &Asm,
+           continue;
+         }
+ 
+-        if (!WS.getSize())
+-          report_fatal_error("data symbols must have a size set with .size: " +
+-                             WS.getName());
+-
+         int64_t Size = 0;
+-        if (!WS.getSize()->evaluateAsAbsolute(Size, Layout))
++        if (WS.getSize() && !WS.getSize()->evaluateAsAbsolute(Size, Layout))
+           report_fatal_error(".size expression must be evaluatable");
+ 
+         auto &DataSection = static_cast<MCSectionWasm &>(WS.getSection());
