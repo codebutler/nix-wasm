@@ -64,10 +64,21 @@ let
       # Our config: a minimal NOMMU profile. Guest shell is busybox ash; bash is
       # native in this repo (deps-overlay maps it to buildPackages) so it is NOT
       # a guest binary and must not go in the profile.
-      ({ lib, pkgs, ... }: {
+      ({ lib, pkgs, ... }: let
+        # The guest supports exactly ONE terminal (Ghostty/xterm-256color), and
+        # terminfo entries are self-contained (use= refs are resolved into each
+        # entry at compile time), so we ship ONLY that entry instead of ncurses'
+        # full ~1876-entry DB. Not a stub — the complete, real xterm-256color
+        # description; just scoped to what the guest can be. Shrinks the system
+        # closure (and its 9p mount) from ~4200 entries to a handful.
+        terminfoMin = pkgs.runCommand "terminfo-xterm-256color" { } ''
+          mkdir -p $out/share/terminfo/x
+          cp ${pkgs.ncurses}/share/terminfo/x/xterm-256color $out/share/terminfo/x/
+        '';
+      in {
         environment.systemPackages = lib.mkForce [
           pkgs.busybox    # init, ash (the guest shell), coreutils applets
-          pkgs.ncurses    # terminfo (xterm-256color)
+          terminfoMin     # terminfo for the one supported terminal
         ];
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
