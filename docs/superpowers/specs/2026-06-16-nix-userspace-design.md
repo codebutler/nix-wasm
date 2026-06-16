@@ -135,10 +135,13 @@ already gestures at this; we make it the primary path. Fallback to the existing
 busybox initramfs stays for a boot with no `/nix` store mounted.
 
 ### 3.5 Shared overlay fix
-Extend `deps-overlay.nix`'s `compiler-rt` triple override to cover `busybox`
-(evaluate making it general-but-`isWasm`-guarded, so any package linking
-compiler-rt gets the right triple — the STATUS "what didn't work" notes argue for
-shared fixes over per-package).
+**Decision (locked): make the `compiler-rt` triple override general**, not
+per-package. `deps-overlay.nix` applies the corrected `wasm32-unknown-unknown`
+triple to the wasm `llvmPackages_21.compiler-rt` for *all* wasm consumers
+(`isWasm`-guarded so native is untouched), so any package linking compiler-rt —
+busybox included — gets the right triple. This replaces the current per-dep
+application (curl/libarchive/boost) and matches the STATUS rule: shared
+crossSystem fixes over per-package workarounds.
 
 ---
 
@@ -205,7 +208,8 @@ substitute-only model as the package install path, and the caching design goal.
 - **Re-verify terminfo** against a fresh `cross.ncurses` (spike says fine; the
   cached path was stale).
 - **busybox compiler-rt fix** must land first (blocks init+shell). Low risk —
-  the override pattern already exists.
+  generalizing the existing override (§3.5). Watch for any native rebuild cascade
+  (the `isWasm` guard should prevent it; verify a native pkg still substitutes).
 - **One-shot `nix-env -iA` under NOMMU 9P memory pressure** is orthogonal
   (kernel-level) and out of scope here; the two-step `nix copy` + `nix-env`
   remains the reliable path until the kernel fix.
