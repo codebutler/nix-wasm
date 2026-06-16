@@ -16,6 +16,11 @@
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
 
+      # ---- kernel-only patched lld: stock LLVM-21 lld + the joelseverin
+      # wasm-ld GNU linker-script patch, rebased onto 21. Scoped here (not a
+      # global overlay) so the shared cached toolchain is untouched.
+      patchedLld = import ./toolchain/patched-lld.nix { inherit pkgs; };
+
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
         inherit nixpkgs sysroot compilerRt libcxx;
@@ -58,6 +63,9 @@
         llvmCheck = pkgs.writeText "llvm-version" pkgs.llvmPackages_21.clang.version;
 
         inherit compilerRt musl kernelHeaders libcxx sysroot;
+
+        # Kernel-only patched lld with wasm-ld GNU linker-script support.
+        patched-lld = patchedLld;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
