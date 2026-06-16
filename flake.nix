@@ -25,6 +25,14 @@
       # carrying pc's fake-llvm argv rewrites. Consumed only by kernel.nix.
       kernelCC = import ./toolchain/kernel-cc.nix { inherit pkgs patchedLld; };
 
+      # ---- the wasm guest kernel: vmlinux.wasm, built from pinned source with
+      # stock clang-21 + the patched wasm-ld. New exec ABI (039e5f3e); does not
+      # boot yet (runtime forward-port pending).
+      kernel = import ./kernel.nix {
+        inherit pkgs kernelCC;
+        kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
+      };
+
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
         inherit nixpkgs sysroot compilerRt libcxx;
@@ -73,6 +81,9 @@
 
         # Kernel cc/ld wrapper toolchain (fake-llvm equivalent) for inspection.
         kernel-cc = kernelCC;
+
+        # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
+        kernel = kernel;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
