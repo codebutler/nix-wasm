@@ -8,12 +8,8 @@ pkgs.stdenv.mkDerivation {
   pname = "linux-wasm-uapi-headers";
   version = "wasm-7.0";
 
-  src = pkgs.fetchFromGitHub {
-    owner = "joelseverin";
-    repo = "linux";
-    rev = "039e5f3e583f56f329657d1fe9945510dba10f41";
-    hash = "sha256-La+8ZfCyPiFt2BSixlRZn/Y9etA2CKoumN5/RB8Kt1U=";
-  };
+  # Shared pinned source (also used by kernel.nix) — see toolchain/kernel-src.nix.
+  src = import ./kernel-src.nix { inherit pkgs; };
 
   nativeBuildInputs = [ pkgs.gnumake pkgs.rsync pkgs.bison pkgs.flex pkgs.python3 pkgs.bc ];
 

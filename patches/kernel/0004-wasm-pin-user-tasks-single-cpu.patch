@@ -1,0 +1,76 @@
+diff --git a/arch/wasm/kernel/process.c b/arch/wasm/kernel/process.c
+index 2f7a4df6a..68ad6f999 100644
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -90,54 +90,28 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 
+ static int user_task_set_affinity(struct task_struct *p)
+ {
+-	/*
+-	 * TODO: This function needs a review of proper approach and locking!
+-	 * It's probably best to take a step back and think about how this
+-	 * should be implemented properly in the first place, instead of adding
+-	 * band aid on top of about every line that violates this and that. That
+-	 * includes fixing release_thread() and garbage collecting unused CPUs.
+-	 *
+-	 * We may also have to move kthreads to IRQ_CPU (with an option of the
+-	 * boot cpu before IRQ_CPU is up) in case they risk getting blocked.
+-	 */
+-	int retval;
+-	int cpu;
+-
+ 	/* Kthreads can be allowed to run on any online CPU. */
+ 	if (p->flags & PF_KTHREAD)
+ 		return 0;
+ 
+-hack:
+-	cpu = cpumask_first_zero(&user_cpus);
+-	if (cpu >= nr_cpu_ids)
+-		return -EBUSY;
+-
+-	if(cpu == IRQ_CPU) {
+-		/* TODO: We should mark IRQ_CPU as taken at boot instead. */
+-		cpumask_set_cpu(cpu, &user_cpus);
+-		goto hack;
+-	}
+-
+-	if (!cpu_online(cpu)) {
+-		BUG_ON(!cpu_possible(cpu));
+-
+-		/* We should add_cpu(cpu) if we properly supported hotplug... */
+-		retval = cpu_device_up(get_cpu_device(cpu));
+-		if (retval)
+-			return retval;
+-	}
+-
+-	cpumask_set_cpu(cpu, &user_cpus);
+-
+-	retval = set_cpus_allowed_ptr(p, cpumask_of(cpu));
+-	if (retval) {
+-		cpumask_clear_cpu(cpu, &user_cpus);
+-		return retval;
+-	}
+-
++	/*
++	 * pc (ticket #74, #108): pin every user task to the boot CPU and never
++	 * bring up secondary CPUs on demand. The wasm SMP path is racy — when
++	 * several worker "CPUs" run user tasks concurrently, shared kernel state
++	 * is corrupted and a kernel-mode wasm trap surfaces through the oops
++	 * path as make_task_dead() in NMI context, i.e. panic("Aiee, killing
++	 * interrupt handler!"). It reproduces whenever enough user tasks churn
++	 * across CPUs at once (e.g. several busy terminals), regardless of the
++	 * maxcpus= boot value, because the upstream affinity logic this replaces
++	 * cpu_device_up()'d a fresh CPU per concurrent task.
++	 *
++	 * Forcing cooperative single-CPU operation — the pre-SMP scheduling mode
++	 * already exercised all through boot — removes the concurrency that
++	 * triggers the race. pc's Linux is a terminal and needs no SMP
++	 * parallelism. user_cpus is left for release_thread()'s bookkeeping.
++	 */
+ 	p->flags |= PF_NO_SETAFFINITY;
+-
+-	return 0;
++	return set_cpus_allowed_ptr(p, cpumask_of(0));
+ }
+ 
+ asmlinkage unsigned

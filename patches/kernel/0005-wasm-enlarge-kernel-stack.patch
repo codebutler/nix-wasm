@@ -1,0 +1,29 @@
+diff --git a/arch/wasm/include/asm/thread_info.h b/arch/wasm/include/asm/thread_info.h
+index 4cf08ef85..ccee65ab2 100644
+--- a/arch/wasm/include/asm/thread_info.h
++++ b/arch/wasm/include/asm/thread_info.h
+@@ -21,10 +21,21 @@
+  * iX.const, iX.load, local.get, global.get	Wasm internal stack
+  * lobal.set __stack_pointer			__stack_pointer managed stack
+  *
+- * One page should for this reason be enough for the kernel stack, even in the
+- * case where one page is configured to be 4K.
++ * Upstream assumed one page (4K) "should be enough" for that shadow stack.
++ * It is not (pc ticket #118): deep kernel paths - concurrent child reaping
++ * with signal delivery, the wait/release_task/free_pid chain, poll/select
++ * frames (do_sys_poll alone reserves ~900B), printk - exceed 4K under load.
++ * The shadow stack lives in plain linear memory with NO guard page, so an
++ * overflow silently corrupts whatever allocation precedes the stack page
++ * (observed: the tail of a neighbouring slab page - a struct pid's
++ * numbers[].ns pointer overwritten with ASCII digits from a number-
++ * formatting buffer), which later faults at unrelated sites and surfaces
++ * through the wasm NMI path as the "Aiee, killing interrupt handler!"
++ * panic. Give tasks 16K like other modern ports; pair it with
++ * CONFIG_SCHED_STACK_END_CHECK (pc.config) so any future overflow is
++ * caught loudly at the culprit instead of corrupting silently.
+  */
+-#define THREAD_SIZE_ORDER	(0)
++#define THREAD_SIZE_ORDER	(2)
+ #define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
+ #define THREAD_MASK		(~(THREAD_SIZE - 1))
+ 

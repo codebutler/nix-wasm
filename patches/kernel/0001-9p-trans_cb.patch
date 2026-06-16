@@ -1,0 +1,189 @@
+diff --git a/net/9p/Kconfig b/net/9p/Kconfig
+index 22f8c1678..48b553b0a 100644
+--- a/net/9p/Kconfig
++++ b/net/9p/Kconfig
+@@ -32,6 +32,16 @@ config NET_9P_VIRTIO
+ 	  This builds support for a transports between
+ 	  guest partitions and a host partition.
+ 
++config NET_9P_CB
++	bool "9P Wasm host-callback Transport"
++	default NET_9P
++	help
++	  This builds support for a 9P transport that issues requests to the
++	  JavaScript Wasm host via the wasm_driver_9p_request() callback. It is
++	  used by the "pc" desktop to mount its VFS into Linux/Wasm over 9P.
++
++	  Built-in only (Wasm cannot load modules). Say Y if unsure on Wasm.
++
+ config NET_9P_XEN
+ 	depends on XEN
+ 	select XEN_XENBUS_FRONTEND
+diff --git a/net/9p/Makefile b/net/9p/Makefile
+index 22794a451..316ff5f13 100644
+--- a/net/9p/Makefile
++++ b/net/9p/Makefile
+@@ -5,6 +5,7 @@ obj-$(CONFIG_NET_9P_XEN) += 9pnet_xen.o
+ obj-$(CONFIG_NET_9P_VIRTIO) += 9pnet_virtio.o
+ obj-$(CONFIG_NET_9P_RDMA) += 9pnet_rdma.o
+ obj-$(CONFIG_NET_9P_USBG) += 9pnet_usbg.o
++obj-$(CONFIG_NET_9P_CB) += 9pnet_cb.o
+ 
+ 9pnet-objs := \
+ 	mod.o \
+@@ -27,3 +28,6 @@ obj-$(CONFIG_NET_9P_USBG) += 9pnet_usbg.o
+ 
+ 9pnet_usbg-objs := \
+ 	trans_usbg.o \
++
++9pnet_cb-objs := \
++	trans_cb.o \
+diff --git a/net/9p/trans_cb.c b/net/9p/trans_cb.c
+new file mode 100644
+index 000000000..5386c2b1f
+--- /dev/null
++++ b/net/9p/trans_cb.c
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * trans_cb.c - 9P transport over a Wasm host callback (Linux/Wasm, "pc").
++ *
++ * This is the kernel half of the bridge that mounts pc's VFS into Linux over
++ * 9P (docs/linux.md §9). The hot path, p9_cb_request(), hands the request
++ * frame (req->tc) to the JavaScript host via the wasm_driver_9p_request()
++ * import and receives the reply frame back into req->rc. Everything 9P-aware
++ * lives on the host: the JS side performs a SAB-ring round-trip to a dedicated
++ * JS 9P-server worker backed by vfs.* and blocks the calling task-worker until
++ * the reply is ready -- exactly the way the Wasm console driver
++ * (drivers/tty/hvc/hvc_wasm.c -> wasm_driver_hvc_get) blocks for input. One
++ * Web Worker per task means blocking the caller is legal and cheap.
++ *
++ * Because Linux/Wasm is a Harvard-architecture port with no runtime module
++ * loading, this transport is built in (=y); it cannot be a loadable .ko.
++ */
++
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/atomic.h>
++#include <net/9p/9p.h>
++#include <net/9p/client.h>
++#include <net/9p/transport.h>
++
++/*
++ * Imported from the Wasm host (resolved as a wasm import from "env", the same
++ * mechanism hvc_wasm.c uses for its externs). The host:
++ *   - copies the request frame tc[0..tc_size] out of the shared linear memory,
++ *   - runs the 9P round-trip (ring -> JS 9P-server worker -> vfs.*), blocking
++ *     this task-worker on Atomics until the reply lands,
++ *   - writes the reply frame into rc (at most rc_capacity bytes),
++ *   - returns the reply length, or a negative errno on a transport failure.
++ * The reply is itself a framed 9P message (Rxxx or Rlerror) -- protocol-level
++ * errors come back as a valid Rlerror frame, not a negative return.
++ *
++ * cid identifies the calling mount (each mount is its own p9_client). Several
++ * mounts share the one host ring, so the JS server keys per-connection 9P state
++ * (msize + fid namespace) by cid -- otherwise a second mount would renegotiate
++ * the shared msize and collide on fid numbers (Phase E/N1, docs/linux.md §9.3).
++ */
++extern long wasm_driver_9p_request(u32 cid, const u8 *tc, u32 tc_size,
++				   u8 *rc, u32 rc_capacity);
++
++/*
++ * Upper bound on a single message; the effective msize is negotiated normally
++ * via Tversion (which itself travels through .request). Kept comfortably above
++ * the host 9P-server's msize so negotiation, not this cap, decides the size.
++ */
++#define P9_CB_MAXSIZE (512 * 1024)
++
++/*
++ * Per-mount connection id source. Each mount gets its own p9_client; we tag it
++ * with a unique cid (held in the transport-private client->trans as a plain
++ * integer -- no allocation, nothing to free on close) and pass that cid on
++ * every request so the host can isolate mounts that share one ring (N1).
++ */
++static atomic_t p9_cb_conn_seq = ATOMIC_INIT(0);
++
++static int p9_cb_create(struct p9_client *client, struct fs_context *fc)
++{
++	/*
++	 * There is no connection to establish: each request is a synchronous
++	 * host call. Assign this mount a connection id, then mark the transport
++	 * live so the 9P core proceeds to Tversion/Tattach.
++	 */
++	client->trans = (void *)(unsigned long)atomic_inc_return(&p9_cb_conn_seq);
++	client->status = Connected;
++	return 0;
++}
++
++static void p9_cb_close(struct p9_client *client)
++{
++	client->status = Disconnected;
++}
++
++static int p9_cb_request(struct p9_client *client, struct p9_req_t *req)
++{
++	u32 cid = (u32)(unsigned long)client->trans;
++	long n;
++
++	p9_debug(P9_DEBUG_TRANS, "9p/cb request cid %u tag %d type %d size %u\n",
++		 cid, req->tc.tag, req->tc.id, req->tc.size);
++
++	/*
++	 * req->tc.sdata is the complete request frame: size[4] id[1] tag[2]
++	 * body... req->rc.sdata is a core-allocated buffer of req->rc.capacity
++	 * (== negotiated msize) ready to receive the reply.
++	 */
++	n = wasm_driver_9p_request(cid, req->tc.sdata, req->tc.size,
++				   req->rc.sdata, req->rc.capacity);
++	if (n < 0) {
++		req->status = REQ_STATUS_ERROR;
++		return (int)n;
++	}
++
++	req->rc.size = (u32)n;
++
++	/* Reply is already in req->rc; hand it back to the waiting caller. */
++	p9_client_cb(client, req, REQ_STATUS_RCVD);
++	return 0;
++}
++
++static int p9_cb_cancel(struct p9_client *client, struct p9_req_t *req)
++{
++	/*
++	 * Requests complete synchronously inside p9_cb_request(); nothing is
++	 * ever in flight for the core to cancel. Report "already received".
++	 */
++	return 1;
++}
++
++static struct p9_trans_module p9_cb_trans = {
++	.name = "cb",
++	.maxsize = P9_CB_MAXSIZE,
++	.pooled_rbuffers = false,
++	.def = false,
++	.supports_vmalloc = true,
++	.create = p9_cb_create,
++	.close = p9_cb_close,
++	.request = p9_cb_request,
++	.cancel = p9_cb_cancel,
++	.owner = THIS_MODULE,
++};
++
++static int __init p9_cb_init(void)
++{
++	v9fs_register_trans(&p9_cb_trans);
++	return 0;
++}
++
++static void __exit p9_cb_exit(void)
++{
++	v9fs_unregister_trans(&p9_cb_trans);
++}
++
++module_init(p9_cb_init);
++module_exit(p9_cb_exit);
++
++MODULE_AUTHOR("pc");
++MODULE_DESCRIPTION("9P transport over a Wasm host callback (Linux/Wasm)");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS_9P("cb");

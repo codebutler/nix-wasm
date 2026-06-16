@@ -1,0 +1,31 @@
+wasm: add the ARCH_FORCE_MAX_ORDER knob (pc #139 Gate 0.2)
+
+The NOMMU exec path (binfmt_wasm → do_mmap_private) needs ONE contiguous
+buddy allocation for the whole program binary, so MAX_PAGE_ORDER is a hard
+ceiling on executable size: the default order 10 = 4MB, and a real
+compiler binary (clang.wasm, tens of MB) can never load. mmzone.h already
+honors CONFIG_ARCH_FORCE_MAX_ORDER; arch/wasm just never exposed it.
+Default stays at the kernel's own 10 — pc's build sets 15 (128MB blocks)
+via scripts/config in vendor/linux-wasm/build.sh configure_kernel.
+
+--- a/arch/wasm/Kconfig
++++ b/arch/wasm/Kconfig
+@@ -122,4 +122,18 @@ config PGTABLE_LEVELS
+ 	int
+ 	default 2
+
++config ARCH_FORCE_MAX_ORDER
++	int "Maximum zone order"
++	range 10 17
++	default 10
++	help
++	  The kernel's buddy allocator limits all contiguous allocations to
++	  2^order pages. Without an MMU every process image is one contiguous
++	  allocation (do_mmap_private), so this bounds the size of the largest
++	  executable that can load: the default order 10 with 4KiB pages means
++	  4MiB. Raise it to run larger programs (order 15 = 128MiB blocks);
++	  the cost is deeper (mostly empty) buddy free lists.
++
++	  Keep the default if unsure.
++
+ endmenu
