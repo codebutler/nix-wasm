@@ -18,6 +18,17 @@ let
   wasmld = "${bt}/bin/wasm-ld";
   builtins_a = "${compilerRt}/lib/wasm32-unknown-unknown/libclang_rt.builtins.a";
 
+  # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
+  # builtins from its DEFAULT resource dir, which has no wasm builtins → the final
+  # link fails opening .../clang/21/lib/wasm32-unknown-unknown/libclang_rt.builtins.a.
+  # Provide a resource dir with clang's builtin headers + OUR builtins (same shape
+  # as wasm-cross.nix), wired via -resource-dir.
+  resourceDir = pkgs.runCommand "nix-wasm-clang-resource" { } ''
+    mkdir -p $out/include $out/lib/wasm32-unknown-unknown
+    cp -a ${lib.getLib llvm.clang-unwrapped}/lib/clang/*/include/. $out/include/
+    cp ${builtins_a} $out/lib/wasm32-unknown-unknown/libclang_rt.builtins.a
+  '';
+
   # Nix's C dependency closure (nix-built, wasm32).
   deps = with cross; [
     sqlite
@@ -37,11 +48,14 @@ let
   ];
   depDev = lib.concatMapStringsSep " " (d: "-I${lib.getDev d}/include") deps;
   depLib = lib.concatMapStringsSep " " (d: "-L${lib.getLib d}/lib") deps;
-  pkgPath = lib.concatMapStringsSep ":" (d: "${lib.getDev d}/lib/pkgconfig") deps;
+  # Both dirs: most deps put their .pc in lib/pkgconfig, but header-only ones
+  # (nlohmann_json) ship it in share/pkgconfig.
+  pkgPath = lib.concatMapStringsSep ":"
+    (d: "${lib.getDev d}/lib/pkgconfig:${lib.getDev d}/share/pkgconfig") deps;
 
   # Shared C++ guest-ABI flags (wasm EH, atomics/bulk-memory, libc++ from the
   # nix-built libcxx, sysroot + kernel headers). Mirrors build-nix-wasm.sh:70-74.
-  cxxCommon = "--ld-path=${wasmld} --target=wasm32-unknown-unknown -fPIC"
+  cxxCommon = "--ld-path=${wasmld} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir}"
     + " --sysroot=${sysroot} -isystem ${kernelHeaders}/include -D__linux__ -D_GNU_SOURCE"
     + " -matomics -mbulk-memory -fwasm-exceptions -D__USING_WASM_EXCEPTIONS__"
     + " -fvisibility=hidden -fvisibility-inlines-hidden"
@@ -79,7 +93,15 @@ pkgs.stdenv.mkDerivation {
     llvm.clang-unwrapped
     bt
     pkgs.perl
+    pkgs.bison # libexpr parser generator (native build tool)
+    pkgs.flex # libexpr lexer generator (native build tool)
   ];
+
+  # The meson setup-hook's configurePhase would run a NATIVE `meson setup build`
+  # (aarch64/g++) before our cross buildPhase, failing on the wasm-only deps
+  # (libblake3 not in the native pkgconfig path). Our buildPhase does the real
+  # cross `meson setup build-wasm --cross-file …` itself, so disable the hook.
+  dontUseMesonConfigure = true;
 
   buildPhase = ''
     runHook preBuild
@@ -108,7 +130,7 @@ pkgs.stdenv.mkDerivation {
 
     cat > "$WRAP/bin/wcc" <<EOF
     #!${pkgs.runtimeShell}
-    exec ${clang} --target=wasm32-unknown-unknown -fPIC --sysroot=${sysroot} -isystem ${kernelHeaders}/include \
+    exec ${clang} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir} --sysroot=${sysroot} -isystem ${kernelHeaders}/include \
       -D__linux__ -D_GNU_SOURCE -matomics -mbulk-memory ${depDev} "\$@" \
       -Wl,-shared -Wl,-Bsymbolic -Wl,--no-entry -Wl,--export-all \
       -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \
