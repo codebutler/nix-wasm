@@ -16,14 +16,21 @@
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
 
-      # ---- kernel-only patched lld: stock LLVM-21 lld + the joelseverin
-      # wasm-ld GNU linker-script patch, rebased onto 21. Scoped here (not a
-      # global overlay) so the shared cached toolchain is untouched.
-      patchedLld = import ./toolchain/patched-lld.nix { inherit pkgs; };
+      # ---- kernel-only patched LLVM-21 scope: stock LLVM-21 carrying BOTH the
+      # joelseverin wasm-ld GNU linker-script patch (lld) AND the WasmAsmParser
+      # MC-layer patch for the kernel's EXPORT_SYMBOL inline-asm (libllvm),
+      # rebased onto 21. A LOCAL overrideScope (not a global overlay) so the
+      # patched lld links the patched libllvm and the shared cached toolchain is
+      # untouched (no rebuild cascade). Consumed only by the kernel build.
+      kernelLlvm = import ./toolchain/kernel-llvm.nix { inherit pkgs; };
 
-      # ---- kernel cc/ld toolchain: stock clang-21 + the patched wasm-ld,
+      # `.#patched-lld` still exposes the linker-script-capable wasm-ld; it now
+      # comes from the kernel scope (which also carries the MC patch).
+      patchedLld = kernelLlvm.lld;
+
+      # ---- kernel cc/ld toolchain: the patched-scope clang-21 + wasm-ld,
       # carrying pc's fake-llvm argv rewrites. Consumed only by kernel.nix.
-      kernelCC = import ./toolchain/kernel-cc.nix { inherit pkgs patchedLld; };
+      kernelCC = import ./toolchain/kernel-cc.nix { inherit pkgs; llvm = kernelLlvm; };
 
       # ---- the wasm guest kernel: vmlinux.wasm, built from pinned source with
       # stock clang-21 + the patched wasm-ld. New exec ABI (039e5f3e); does not

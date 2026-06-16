@@ -13,18 +13,20 @@
 # from upstream (rewrite_triple / rewrite_clang / rewrite_lld /
 # rewrite_objcopy). The wrapper keys on basename(argv[0]); we invoke it through
 # per-tool symlinks so it sees the tool name, and substitute REAL_LLVM (a dir
-# holding the patched wasm-ld + stock clang/clang++/llvm-objcopy) at build
-# time so the linker reaches the patched lld while the rest stay stock.
-{ pkgs, patchedLld }:
-let
-  llvm = pkgs.llvmPackages_21;
-in
+# holding the kernel-scope wasm-ld + clang/clang++/llvm-objcopy) at build time.
+#
+# `llvm` is the kernel-only patched LLVM-21 scope (toolchain/kernel-llvm.nix):
+# its lld carries the wasm-ld linker-script patch and its clang/libllvm carry
+# the WasmAsmParser MC patch for the kernel's EXPORT_SYMBOL inline-asm. The
+# whole toolchain comes from this scope so clang and wasm-ld agree on the
+# patched libllvm; nothing leaks to the global llvmPackages_21.
+{ pkgs, llvm }:
 pkgs.runCommand "kernel-llvm-wrappers" { } ''
   mkdir -p $out/bin $out/libexec $out/real
 
-  # REAL_LLVM dir the wrapper execs into: patched wasm-ld for the linker,
-  # stock clang/clang++/llvm-objcopy for the rest.
-  ln -s ${patchedLld}/bin/wasm-ld                   $out/real/wasm-ld
+  # REAL_LLVM dir the wrapper execs into: the patched-scope wasm-ld (linker),
+  # clang/clang++ (MC patch), and llvm-objcopy.
+  ln -s ${llvm.lld}/bin/wasm-ld                     $out/real/wasm-ld
   ln -s ${llvm.clang-unwrapped}/bin/clang           $out/real/clang
   ln -s ${llvm.clang-unwrapped}/bin/clang++         $out/real/clang++
   ln -s ${llvm.bintools-unwrapped}/bin/llvm-objcopy $out/real/llvm-objcopy
@@ -42,7 +44,7 @@ pkgs.runCommand "kernel-llvm-wrappers" { } ''
     ln -s $out/libexec/llvm-wrapper.py $out/bin/$t
   done
 
-  # Unwrapped tools straight from stock LLVM-21 binutils.
+  # Unwrapped tools straight from the scope's LLVM-21 binutils.
   for t in llvm-ar llvm-nm llvm-strip llvm-objdump llvm-readobj llvm-ranlib llvm-readelf; do
     ln -s ${llvm.bintools-unwrapped}/bin/$t $out/bin/$t
   done
