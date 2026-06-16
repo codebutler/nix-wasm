@@ -54,35 +54,60 @@ sysroot. Proven by `cross.zlib` cross-compiling to a real wasm `libz.a`.
 
 ---
 
-## 🔧 In progress — the C dependency closure
+## ✅ The C dependency closure — all 13 cross-compile
 
-10/13 top-level deps cross-compile; the heavy ones (`curl`, `libgit2`, `boost`)
-and their transitive tree are where nixpkgs' cross machinery fights wasm. Current
-state of `deps-overlay.nix`:
+`nix build .#dep-{bzip2,xz,sqlite,openssl,curl,libgit2,brotli,libarchive,
+editline,libsodium,boost,nlohmann_json,libblake3}` all build. The fixes (all
+shared crossSystem/overlay, so they serve user packages too):
 
-- ✅ static-only, compiler-rt triple, overlay scoping (above)
-- ✅ curl trimmed (http2/http3/c-ares/idn/zstd/gss/ldap/brotli off → just
-  HTTP/HTTPS); libgit2 without ssh — collapsed the c-ares/nghttp2/ngtcp2/libssh2
-  /wasm-bash transitive explosion
-- 🔧 **`linuxHeaders` override → our wasm headers** (just added, **untested**) —
-  the cross stdenv was pulling stock `linux-6.18.7` and running `make ARCH=wasm32
-  headers_install`, which fails (stock Linux has no wasm arch)
-- ⬜ **runtimeShell leak**: a `bash-wasm32` gets built (a `-config` script's
-  shebang patched to the cross shell). Fix: point the cross `runtimeShell` at the
-  native shell (build scripts run on the build host).
-- ⬜ **inline-asm dep**: `<inline asm>: unknown directive` from some dep with
-  x86/arm asm — disable asm for that dep (e.g. openssl `no-asm`).
+- **musl = OUR musl** (`deps-overlay.nix`): nixpkgs' cross musl is built during
+  the libc bootstrap by the default cc-wrapper, which embeds an `llvmPackages`
+  compiler-rt compiled with the rejected `wasm32-unknown-linux-musl` triple — a
+  stage **neither `overlays` nor `crossOverlays` reach**, so it can't be fixed in
+  place and fails, cascading to everything (pulled transitively via `libiconv`).
+  Overriding `musl` to wrap our own nix-built musl eliminates that bad bootstrap
+  compiler-rt entirely. (This *replaced* the earlier `linuxHeaders`-override idea,
+  which didn't address the bootstrap.)
+- **compiler-rt triple** for the *deps* that link it (curl/libarchive/boost):
+  override `llvmPackages_21.compiler-rt` via `overrideScope` (the top-level
+  `compiler-rt` attr doesn't exist here — the old override was dead code).
+- **bintools ar/ranlib** (`wasm-cross.nix`): the wrapper only symlinked
+  target-prefixed tools, but stock LLVM ships them unprefixed → empty
+  `$AR`/`$RANLIB`. Add the prefixed symlinks (+ a working strip).
+- **libc++ wiring** (`wasm-cross.nix`): thread our libcxx into the cc-wrapper so
+  cross C++ (boost; cmake's CXX probe in C deps) resolves `-lc++`.
+- **wasm-ld flag filter**: also drop `--compress-debug-sections` (was silently
+  failing every sqlite autosetup link probe → bogus "Cannot find libm").
+- **runtimeShell → native** (bash/gnugrep): helper scripts no longer drag in a
+  cross-built bash/grep that fails and the guest doesn't need at build time.
+- **per-dep static / no-`.so`-link trims**: the `__musl_tp` TLS reloc *only*
+  triggers when linking a separate `.so` (cross-module GD-TLS); fully-static
+  links — incl. stdio — are fine (same model as `nix.wasm`). So static-only for
+  zlib/pcre2/libxml2/libidn2; `--static-cli-shell` keeps a working sqlite3 CLI;
+  `static = true` keeps zstd's CLI; libgit2/curl feature trims; boost strips the
+  b2 `architecture=wasm` metadata; openssl `-U_GNU_SOURCE` (musl POSIX
+  `strerror_r`).
+
+## ✅ `nix.wasm` — builds
+
+`nix build .#nix-wasm` → `$out/bin/nix`, a **19 MB wasm dylink module** (38860
+functions, 53 host imports, START + EXPORT sections — complete Nix 2.34.7).
+`nix-wasm.nix` fixes: `dontUseMesonConfigure` (the meson hook ran a native
+configure first), `pkgPath` += `share/pkgconfig` (nlohmann_json), `bison`+`flex`
+in `nativeBuildInputs` (libexpr), and a `-resource-dir` so raw clang finds our
+wasm builtins at the final link.
 
 ---
 
 ## ⬜ What's next
 
-1. Finish the dep-closure crossSystem fixes (above): `linuxHeaders`,
-   `runtimeShell`, the inline-asm dep, any remaining per-dep trims. **All as
-   shared crossSystem/overlay fixes** (they benefit user packages too).
-2. `nix build .#nix-wasm` (the derivation `nix-wasm.nix` is written) → deploy to
-   the guest → verify in-guest: `nix --version` (no SIGILL), then `nix-env -iA sl`
-   installs by name. Reuse the pc harnesses `exec-nix.mjs` / `exec-nixenv.mjs`.
+1. **In-guest verification**: deploy `nix.wasm` and run `nix --version` (no
+   SIGILL), then `nix-env -iA sl`. Needs the pc harnesses `exec-nix.mjs` /
+   `exec-nixenv.mjs` (not in this repo).
+2. **`isStatic` adapter refactor** (planned): collapse the per-dep static/no-shared
+   overrides into one `makeStaticLibraries`-style stdenv adapter + the
+   `hostPlatform.isStatic` flag (kept decoupled from `makeStaticBinaries`' `-static`
+   and from `hasSharedLibraries=false`). Verify it reproduces the same closure.
 3. Phases 2–5 (`docs/plan-environment.md`): userspace, guest-clang, kernel, CI —
    the full "NixOS in wasm" vision.
 

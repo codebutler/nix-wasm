@@ -15,9 +15,10 @@ toolchain it stands on.
 | Layer | State |
 |---|---|
 | **wasm toolchain** (musl, compiler-rt, libc++, kernel headers, sysroot) | ✅ **built & validated** against the known-good linux-wasm artifacts |
-| **crossSystem cc-wrapper** (clang-21 over the nix-built sysroot) | ✅ builds C packages (`cross.zlib` proven) |
-| **C dependency closure** (zlib, sqlite, openssl, curl, libgit2, boost, …) | 🔧 **in progress** — fixing nixpkgs-cross-wasm gaps in the overlay |
-| **`nix.wasm`** (Nix 2.34.7 itself) | ⬜ derivation written (`nix-wasm.nix`), blocked on the dep closure |
+| **crossSystem cc-wrapper** (clang-21 over the nix-built sysroot) | ✅ builds C **and C++** packages |
+| **C dependency closure** (zlib, sqlite, openssl, curl, libgit2, boost, …) | ✅ **all 13 cross-compile** (`nix build .#dep-…`) |
+| **`nix.wasm`** (Nix 2.34.7 itself) | ✅ **builds** — `nix build .#nix-wasm` → a 19 MB wasm dylink module |
+| in-guest verification (`nix --version`, `nix-env -iA sl`) | ⬜ next — needs the pc harness (`exec-nix.mjs`) |
 | userspace / guest-clang / kernel / CI (the rest of "NixOS in wasm") | ⬜ planned (`docs/plan-environment.md`) |
 
 See **[docs/STATUS.md](docs/STATUS.md)** for the detailed log: what works, what's
@@ -38,9 +39,13 @@ sudo -E nix build .#libcxx --no-link --print-out-paths
 # A cross-compiled C dependency (the smoke test):
 sudo -E nix build .#crossZlib --no-link --print-out-paths
 
-# The goal (blocked on the dep closure):
+# The goal — builds today → $out/bin/nix (a wasm dylink module):
 sudo -E nix build .#nix-wasm --print-out-paths
 ```
+
+> **Note:** `sudo -E` is ignored in some setups ("preserving the entire
+> environment is not supported"); if so, pass the flake config inline instead:
+> `sudo nix --extra-experimental-features 'nix-command flakes' build .#nix-wasm`.
 
 LLVM 21 is the toolchain; on `aarch64-linux` the binary cache lacks the exact
 LLVM build, so the **first** build compiles LLVM from source (~1–2 h, cached
