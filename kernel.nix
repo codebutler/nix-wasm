@@ -8,16 +8,17 @@
 # then `cp build/vmlinux $out/vmlinux.wasm` (wasm-ld emits the .wasm directly —
 # no ELF->wasm step). The 6 kernel patches are pc's host-integration set (9p
 # trans_cb, hvc multi-console + winsize, single-CPU pin, 16K stack, force-max-
-# order). The config toggle list mirrors build.sh `configure_kernel()` EXACTLY,
-# minus overlay/shmem/tmpfs (a later phase): the base set is NET + 9P + the
-# host-callback transport, devtmpfs (for /dev/hvcN), POSIX file locking, the
-# stack-end canary (#118), and a 128MB buddy max order (#139 — NOMMU exec needs
-# the whole binary in one contiguous allocation).
+# order). The config toggle list mirrors build.sh `configure_kernel()`: NET + 9P
+# + the host-callback transport, devtmpfs (for /dev/hvcN), POSIX file locking,
+# the stack-end canary (#118), a 128MB buddy max order (#139 — NOMMU exec needs
+# the whole binary in one contiguous allocation), PLUS CONFIG_OVERLAY_FS (Plan 2:
+# read-only served /nix store + ramfs upper; see the toggle comment below).
 #
 # It is the NEW exec ABI (039e5f3e: wasm_create_and_run_task / wasm_load_
-# executable / wasm_release_task / wasm_serialize_tasks; NO wasm_exec_*). It
-# will NOT boot yet — the JS runtime forward-port is a separate plan; acceptance
-# here is a structurally-correct, reproducible kernel.
+# executable / wasm_release_task / wasm_serialize_tasks; NO wasm_exec_*), and it
+# BOOTS + execs userspace with the forward-ported JS runtime (pc commit
+# c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
+# from the kernel memory range the new ABI passes).
 { pkgs, kernelSrc, kernelCC }:
 pkgs.stdenv.mkDerivation {
   pname = "vmlinux-wasm";
@@ -74,14 +75,21 @@ pkgs.stdenv.mkDerivation {
 
     make $makeFlags wasm32_nommu_defconfig
 
-    # build.sh configure_kernel() toggle set (base config only — overlay/shmem/
-    # tmpfs are a later phase and intentionally omitted here).
+    # build.sh configure_kernel() toggle set + overlayfs (Plan 2): the Nix-built
+    # /nix store is served READ-ONLY over 9P (overlay lowerdir); unioning it with
+    # a writable upper lets nix-env install without a writable backing store.
+    # NOMMU caveat: CONFIG_TMPFS depends on CONFIG_SHMEM and mainline gates SHMEM
+    # behind MMU, so olddefconfig SILENTLY DROPS both here — we request them
+    # anyway (harmless; auto-enables if a future MMU/EXPERT change allows tmpfs),
+    # but the working overlay upper is RAMFS (always built in, backs the
+    # initramfs). CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
     bash ./scripts/config --file build/.config \
       --enable CONFIG_NET --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB --enable CONFIG_9P_FS \
       --enable CONFIG_DEVTMPFS --enable CONFIG_DEVTMPFS_MOUNT \
       --enable CONFIG_FILE_LOCKING \
       --enable CONFIG_SCHED_STACK_END_CHECK \
-      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15
+      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
+      --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
 
     make $makeFlags olddefconfig
 
