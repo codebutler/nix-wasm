@@ -11,7 +11,7 @@
 # inject (--undefined-version, --version-script, -soname, --build-id, …) which
 # wasm-ld rejects; wired in via clang -B$out/bin (clang's wasm driver ignores
 # --ld-path). These flags are no-ops on wasm, so dropping them is correct.
-{ nixpkgs, localSystem ? "aarch64-linux", sysroot, compilerRt, overlays ? [ ] }:
+{ nixpkgs, localSystem ? "aarch64-linux", sysroot, compilerRt, libcxx ? null, overlays ? [ ] }:
 let
   native = import nixpkgs { system = localSystem; };
 
@@ -19,6 +19,11 @@ let
     let
       llvm = native.llvmPackages_21;
       libcWasm = sysroot;
+      # Our nix-built libc++/libc++abi/libunwind. Tag isLLVM so cc-wrapper emits
+      # the libc++ C++ flags (-cxx-isystem .../c++/v1, -stdlib=libc++) and wires
+      # the lib search path — without this, cross C++ (boost, and cmake's CXX
+      # compiler check in C deps like llhttp) fails with "unable to find -lc++".
+      libcxxWasm = if libcxx != null then libcxx // { isLLVM = true; } else null;
 
       resourceDir = native.runCommand "wasm-clang-resource" { } ''
         mkdir -p $out/include $out/lib/wasm32-unknown-unknown
@@ -60,16 +65,36 @@ let
         exec ${llvm.bintools-unwrapped}/bin/wasm-ld "''${args[@]}"
       '';
 
-      wasmBintools = pkgs.wrapBintoolsWith {
+      # nixpkgs' bintools-wrapper only symlinks tools it finds under the TARGET
+      # PREFIX (`wasm32-unknown-linux-musl-ar`, …), but stock LLVM binutils ship
+      # them UNPREFIXED (`ar`, `ranlib`, `nm`, …). So the wrapper ends up with no
+      # ar/ranlib/nm (and only a strip wrapper pointing at a nonexistent prefixed
+      # strip). That leaves $AR/$RANLIB empty in every build → "stripDirs: Ranlib
+      # command is empty", tzdata's "ar: command not found", brotli's static-
+      # archive link failure. The LLVM tools are target-agnostic, so add the
+      # target-prefixed symlinks (incl. a working strip) ourselves. One platform
+      # fix, shared across the whole cross set.
+      wasmBintools = (pkgs.wrapBintoolsWith {
         bintools = llvm.bintools-unwrapped;
         libc = libcWasm;
         sharedLibraryLoader = null;
-      };
+      }).overrideAttrs (o: {
+        postFixup = (o.postFixup or "") + ''
+          for t in ar ranlib nm objcopy objdump size strings as readelf \
+                   addr2line c++filt dwp strip; do
+            if [ -e ${llvm.bintools-unwrapped}/bin/$t ]; then
+              ln -sf ${llvm.bintools-unwrapped}/bin/$t \
+                "$out/bin/wasm32-unknown-linux-musl-$t"
+            fi
+          done
+        '';
+      });
     in
     pkgs.wrapCCWith {
       cc = llvm.clang-unwrapped;
       bintools = wasmBintools;
       libc = libcWasm;
+      libcxx = libcxxWasm;
       extraBuildCommands = ''
         ln -sf ${filteredLd}/bin/wasm-ld $out/bin/wasm-ld
         cat >> $out/nix-support/cc-cflags <<EOF

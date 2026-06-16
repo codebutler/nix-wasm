@@ -18,7 +18,7 @@
 
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
-        inherit nixpkgs sysroot compilerRt;
+        inherit nixpkgs sysroot compilerRt libcxx;
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; }) ];
       };
 
