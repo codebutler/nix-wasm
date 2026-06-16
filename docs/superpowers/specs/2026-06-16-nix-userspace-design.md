@@ -126,13 +126,30 @@ respawn line per console (matching `HVC_WASM_NR_CONSOLES`) + the syslogd line, a
 `pc-init` builds today, but generated from Nix. Built separately from the NixOS
 activation/systemd machinery. `wasm-init` is what the bootstrap `exec`s.
 
-### 3.4 `pc-init` → bootstrap (in the `pc` repo)
-Shrinks to ~10 lines: mount proc/sys/dev/devpts, mount 9P (`/mnt/pc`, `/opt/bin`,
-`/nix-cache`, `/nix`), symlink `/etc` → the store closure's etc and
-`/run/current-system/sw` → the system profile, then `exec` the store's
-`wasm-init`. The current Stage-2 (`exec $BB init` from a mounted `/nix` busybox)
-already gestures at this; we make it the primary path. Fallback to the existing
-busybox initramfs stays for a boot with no `/nix` store mounted.
+### 3.4 `pc-init` → bootstrap (in the `pc` repo) — **Plan 2**
+
+Shrinks to a thin bootstrap. The current Stage-2 (`exec $BB init` from a mounted
+`/nix` busybox) already gestures at this; we make it the primary path. Fallback
+to the existing busybox initramfs stays for a boot with no `/nix` store mounted.
+
+**Boot-layout contract (what the bootstrap MUST do).** Plan 1 built the system
+closure (`.#wasm-system`) with these assumptions — the entrypoint is **busybox
+`init` reading `/etc/inittab`**, NOT a `wasm-init` wrapper:
+
+1. mount proc/sys/dev/devpts + 9P (`/mnt/pc`, `/opt/bin`, `/nix-cache`, `/nix`).
+2. symlink `/etc` → `$sys/etc` and `/run/current-system/sw` → `$sys/sw` (with
+   `/nix` mounted, the store-symlinks inside etc — and `sw`/`init` — resolve).
+3. `busybox --install` → creates `/bin/sh`, `/bin/login`, `/sbin/getty`,
+   `/sbin/syslogd`, … (the applets inittab + autologin reference).
+4. install `$sys/etc/autologin` → `/bin/autologin` (+x) **explicitly** — it is a
+   custom script, not a busybox applet, so `--install` won't create it, yet
+   inittab references `/bin/autologin` by absolute path.
+5. create a writable `/var/log` (syslogd writes `/var/log/messages`).
+6. `exec "$sys/init"` — the PATH (basename `init`), so busybox runs the `init`
+   applet. Do NOT exec the resolved busybox target.
+
+`nrConsoles = 8` is baked into the closure's inittab — keep kernel
+`HVC_WASM_NR_CONSOLES` and host `HVC_CONSOLES` in lockstep.
 
 ### 3.5 Shared overlay fix
 **Decision (locked): make the `compiler-rt` triple override general**, not
@@ -152,7 +169,9 @@ pc kernel boots initramfs  →  /init (thin bootstrap, was pc-init)
   mount 9p: /mnt/pc, /opt/bin (tools), /nix-cache, /nix (store)
   ln -s  <store>/etc            /etc
   ln -s  <store>/sw             /run/current-system/sw   (PATH source)
-  exec   <store>/wasm-init  (busybox init + generated inittab)
+  busybox --install ; install <store>/etc/autologin → /bin/autologin
+  exec   <store>/init       (symlink → busybox; basename `init` → init applet;
+                             reads /etc/inittab)
       → getty → autologin root → ash (login shell)
           sources /etc/profile  → PATH=/run/current-system/sw/bin:…
                                  → TERM=xterm-256color
