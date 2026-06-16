@@ -62,6 +62,8 @@
         "boost"
         "nlohmann_json"
         "libblake3"
+        "busybox"
+        "ncurses" # userspace targets (Nix-built guest), exposed for build/testing
       ]);
     };
 }

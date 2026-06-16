@@ -49,7 +49,10 @@ let
       '';
 
       filteredLd = native.writeShellScriptBin "wasm-ld" ''
-        args=(); skip=
+        args=(); skip=; has_r=
+        for a in "$@"; do
+          case "$a" in -r) has_r=1;; esac
+        done
         for a in "$@"; do
           if [ -n "$skip" ]; then skip=; continue; fi
           case "$a" in
@@ -61,6 +64,17 @@ let
             --compress-debug-sections) skip=1; continue;;
             --warn-shared-textrel|-z) skip=1; continue;;
             -z*) continue;;
+            # -r (partial/relocatable link) is incompatible with --shared-memory:
+            # busybox uses -r to produce built-in.o; wasm-ld rejects the combo.
+            # Drop --shared-memory when -r is present (it's harmless for partial
+            # links — the final dylink module still gets --shared-memory via its
+            # own link step).
+            --shared-memory) if [ -n "$has_r" ]; then continue; fi;;
+            # GNU ld archive-group flags: wasm-ld doesn't implement them
+            # (they're no-ops in lld anyway — it doesn't need group ordering).
+            --start-group|--end-group) continue;;
+            # GNU ld-only diagnostic flags that wasm-ld rejects.
+            --warn-common) continue;;
           esac
           args+=("$a")
         done

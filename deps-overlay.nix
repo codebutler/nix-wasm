@@ -22,6 +22,44 @@ let
   isWasm = prev.stdenv.hostPlatform.isWasm or false;
   # Apply f only in the wasm cross set; leave native packages untouched (cached).
   whenWasm = f: p: if isWasm then f p else p;
+
+  # Patch compiler-rt (and compiler-rt-no-libc — busybox's clangNoLibcxx stdenv
+  # uses targetLlvmPackages.compiler-rt-no-libc via overrideScope's `self`, so
+  # both attrs must be fixed) inside any llvmPackages scope: replace the rejected
+  # `wasm32-unknown-linux-musl` triple with the canonical `wasm32-unknown-unknown`
+  # clang accepts, and add the builtins→libgcc.a alias the gcc-compat runtime needs.
+  # `overrideScope` lets internal refs (clangNoLibcxx, clangUseLLVM, …) pick up the
+  # fixed derivations without a second round of overriding.
+  fixCompilerRt = lp: lp.overrideScope (lf: lprev:
+    let
+      fixCR = drv: drv.overrideAttrs (o: {
+        cmakeFlags = builtins.map
+          (f: builtins.replaceStrings [ "wasm32-unknown-linux-musl" ] [ "wasm32-unknown-unknown" ] f)
+          (o.cmakeFlags or [ ])
+          # Disable CRT (crtbegin/crtend): wasm32 doesn't support the
+          # .init_fini-array CRT approach (crtbegin.c: "#error not implemented").
+          # We only need the builtins archive (libclang_rt.builtins-wasm32.a),
+          # not the startup objects — those are irrelevant for dylink wasm modules.
+          ++ [ "-DCOMPILER_RT_BUILD_CRT=OFF" ];
+        # NOTE: we REPLACE (not append) upstream postInstall. Safe because the
+        # only variant built on wasm is compiler-rt-no-libc (haveLibc=false →
+        # withAtomics=false, and CRT=OFF means there are no crt objects to
+        # symlink), so upstream's atomics/crt postInstall blocks are inert here.
+        # If a libc-bearing variant ever builds, switch back to appending.
+        postInstall = ''
+          ln -s $out/lib/*/libclang_rt.builtins-*.a $out/lib/libgcc.a 2>/dev/null || true
+        '';
+      });
+    in {
+      # Redundant on wasm (nixpkgs aliases compiler-rt = compiler-rt-no-libc, which
+      # we fix below), but kept for any direct consumer that references compiler-rt.
+      compiler-rt        = fixCR lprev.compiler-rt;
+      # On wasm nixpkgs aliases compiler-rt = compiler-rt-no-libc; clangNoLibcxx
+      # (= clangWithLibcAndBasicRt) uses targetLlvmPackages.compiler-rt-no-libc,
+      # which resolves to `self` (selfTargetTarget == {}) inside overrideScope, so
+      # fixing this attr propagates into every clang-wrapper that references it.
+      compiler-rt-no-libc = fixCR lprev.compiler-rt-no-libc;
+    });
 in
 {
   # --- runtimeShell leak: use the native shell, not a cross (wasm) bash -------
@@ -197,26 +235,33 @@ in
 
   # --- nixpkgs cross compiler-rt: fix the triple clang rejects ---------------
   # useLLVM=true pulls the cross compiler-rt for the gcc-compat runtime
-  # (libgcc.a); a few deps (curl/libarchive/boost) link it. The compiler-rt that
-  # actually builds is `llvmPackages_21.compiler-rt` (there is NO top-level
-  # `compiler-rt` attr here — a plain `compiler-rt = …` override is dead code).
-  # nixpkgs builds it with -DCMAKE_C_COMPILER_TARGET=wasm32-unknown-linux-musl,
-  # which clang rejects ("unknown target triple"). Override it INSIDE the llvm
-  # scope (overrideScope, so internal refs pick it up) to the canonical wasm
-  # triple, plus the builtins→libgcc.a alias the runtime needs. `llvmPackages`
-  # aliases `_21` here, so point it at the override.
-  llvmPackages_21 =
-    if isWasm then
-      prev.llvmPackages_21.overrideScope (lf: lp: {
-        compiler-rt = lp.compiler-rt.overrideAttrs (o: {
-          cmakeFlags = builtins.map
-            (f: builtins.replaceStrings [ "wasm32-unknown-linux-musl" ] [ "wasm32-unknown-unknown" ] f)
-            (o.cmakeFlags or [ ]);
-          postInstall = (o.postInstall or "") + ''
-            ln -s $out/lib/*/libclang_rt.builtins-*.a $out/lib/libgcc.a 2>/dev/null || true
-          '';
-        });
-      })
-    else prev.llvmPackages_21;
-  llvmPackages = if isWasm then final.llvmPackages_21 else prev.llvmPackages;
+  # (libgcc.a); a few deps (curl/libarchive/boost) link it. nixpkgs builds it
+  # with -DCMAKE_C_COMPILER_TARGET=wasm32-unknown-linux-musl, which clang
+  # rejects ("unknown target triple"). `fixCompilerRt` (defined above in the
+  # `let`) overrides both `compiler-rt` and `compiler-rt-no-libc` inside the
+  # llvm scope via `overrideScope`, so that:
+  #   • direct consumers (curl/libarchive/boost) via `compiler-rt`/`libgcc.a`
+  #   • stdenv-level consumers (busybox's `clangNoLibcxx` stdenv) via
+  #     `compiler-rt-no-libc` (= targetLlvmPackages.compiler-rt-no-libc → self
+  #     inside overrideScope when selfTargetTarget == {})
+  # all pick up the canonical wasm triple. `llvmPackages` aliases `_21` here,
+  # so point it at the override. isWasm-guarded: native packages are untouched.
+  llvmPackages_21 = if isWasm then fixCompilerRt prev.llvmPackages_21 else prev.llvmPackages_21;
+  llvmPackages    = if isWasm then fixCompilerRt prev.llvmPackages_21 else prev.llvmPackages;
+
+  # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
+  # nixpkgs' all-packages.nix overrides busybox's stdenv when
+  # `stdenv.targetPlatform.useLLVM` (= true for wasm):
+  #   stdenv = overrideCC stdenv buildPackages.llvmPackages.clangNoLibcxx
+  # `buildPackages.llvmPackages.clangNoLibcxx` is the native-LLVM cross-compiler
+  # wrapper for wasm32-unknown-linux-musl — it does NOT carry our
+  # `--target=wasm32-unknown-unknown` cc-flag, so clang rejects the triple when
+  # busybox actually compiles. Fix: use `final.stdenv` directly (which IS our
+  # replaceCrossStdenv with the correct wasm triple). The original override's
+  # purpose (avoid dynamic libunwind in a static binary) is moot on wasm32:
+  # our wasm cc-wrapper never pulls libunwind, and wasm links are always fully
+  # static (isStatic = true), so the workaround is a no-op here.
+  busybox = whenWasm
+    (p: p.override { stdenv = final.stdenv; })
+    prev.busybox;
 }
