@@ -115,12 +115,21 @@ import nixpkgs {
     config = "wasm32-unknown-linux-musl";
     libc = "musl";
     useLLVM = true;
-    # NB: we deliberately do NOT set hasSharedLibraries=false — it makes
-    # stdenv.hostPlatform.extensions.sharedLibrary missing, which sqlite (and
-    # others) read unconditionally in configureFlags → eval abort. Shared-lib
-    # handling is instead: musl ships a crt1-reactor.o so `.so` links succeed,
-    # and the few packages whose CLI links against its own `.so` (TLS model
-    # mismatch on wasm) get a per-dep `enableShared = false` in deps-overlay.nix.
+    # isStatic = true makes the whole wasm set build static: packages read
+    # `hostPlatform.isStatic` (zlib `shared=!isStatic`, openssl `static`, sqlite
+    # `--disable-tcl`+static CLI, …) AND nixpkgs applies makeStatic (=
+    # makeStaticLibraries adding --disable-shared/-DBUILD_SHARED_LIBS=OFF/
+    # -Ddefault_library=static everywhere). We want static .a only — packages
+    # that link their own CLI against a wasm .so hit wasm-ld's general-dynamic
+    # TLS path → musl's non-TLS `__musl_tp`. (makeStatic also adds
+    # makeStaticBinaries' `-static`, a harmless no-op on wasm — our final modules
+    # are -shared dylink, set in the cc-wrapper's cc-ldflags, which wins.)
+    #
+    # hasSharedLibraries = true is FORCED back on: isStatic would otherwise drop
+    # `extensions.sharedLibrary`, which sqlite et al. read unconditionally in
+    # configureFlags → eval abort.
+    isStatic = true;
+    hasSharedLibraries = true;
   };
   config = {
     allowUnsupportedSystem = true;
@@ -130,13 +139,6 @@ import nixpkgs {
         ccStdenv = adapters.overrideCC baseStdenv (mkWasmCC buildPackages);
         salt = builtins.replaceStrings [ "-" ] [ "_" ] "wasm32-unknown-linux-musl";
       in
-      # Static-library handling is done per-build-system in deps-overlay.nix
-      # (--disable-shared / -DBUILD_SHARED_LIBS=OFF / link=static), NOT via
-      # stdenvAdapters.makeStaticLibraries — that adapter doesn't compose with
-      # this custom replaceCrossStdenv (its dontAddStaticConfigureFlags resolves
-      # to null → eval error). We disable .so so packages don't link their own
-      # tools against a wasm .so (general-dynamic TLS trips wasm-ld on musl's
-      # __musl_tp); we only need the .a archives.
       adapters.addAttrsToDerivation {
         NIX_NO_SELF_RPATH = "1";
         "NIX_DONT_SET_RPATH_${salt}" = "1";
