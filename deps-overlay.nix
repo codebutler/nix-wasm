@@ -81,6 +81,15 @@ in
   sqlite = whenWasm
     (p: p.overrideAttrs (o: {
       configureFlags = (o.configureFlags or [ ]) ++ [ "--static-cli-shell" ];
+      # WAL journaling needs a shared-memory `-shm` file (mmap) the wasm/NOMMU
+      # guest fs can't provide → Nix's store DB writes fail with SQLITE_IOERR
+      # ("disk I/O error" on the first store op). Disable WAL + threadsafe
+      # mutexing (single-threaded guest) + load-extension — the proven config
+      # for this target's filesystem.
+      env = (o.env or { }) // {
+        NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
+          + " -DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION";
+      };
     }))
     prev.sqlite;
 
