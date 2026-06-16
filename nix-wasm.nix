@@ -45,6 +45,12 @@ let
     curl
     libgit2
     nlohmann_json
+    # transitive: our nixpkgs libgit2 uses llhttp (HTTP) + pcre2 (pathspec),
+    # libarchive uses zstd — link them so those symbols aren't left undefined
+    # (→ env imports the guest can't satisfy → instantiate LinkError).
+    pcre2
+    llhttp
+    zstd
   ];
   depDev = lib.concatMapStringsSep " " (d: "-I${lib.getDev d}/include") deps;
   depLib = lib.concatMapStringsSep " " (d: "-L${lib.getLib d}/lib") deps;
@@ -58,6 +64,13 @@ let
   cxxCommon = "--ld-path=${wasmld} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir}"
     + " --sysroot=${sysroot} -isystem ${kernelHeaders}/include -D__linux__ -D_GNU_SOURCE"
     + " -matomics -mbulk-memory -fwasm-exceptions -D__USING_WASM_EXCEPTIONS__"
+    # Nix's crash-handler uses boost::stacktrace, whose default backend calls
+    # _Unwind_Backtrace — wasm has no stack-walking unwinder, so it can't be
+    # implemented. Select boost::stacktrace's NOOP backend (empty traces, the
+    # honest behavior on wasm) so nothing references _Unwind_Backtrace. (The
+    # legacy build fake-stubbed the symbol instead; disabling the backend is the
+    # correct fix — no fake symbol, the feature is properly off.)
+    + " -DBOOST_STACKTRACE_USE_NOOP"
     + " -fvisibility=hidden -fvisibility-inlines-hidden"
     + " -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS -D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS"
     + " -nostdinc++ -isystem ${libcxx}/include/c++/v1 ${depDev}";
@@ -184,7 +197,7 @@ pkgs.stdenv.mkDerivation {
         -lsqlite3 -lsodium -lbz2 -llzma -lz \
         -lbrotlienc -lbrotlidec -lbrotlicommon -larchive \
         -lcrypto -lssl -lblake3 -leditline -lboost_url \
-        -lcurl -lgit2 ${builtins_a} \
+        -lcurl -lgit2 -lpcre2-8 -lllhttp -lzstd ${builtins_a} \
         -o "$PWD/../nix.unstripped.wasm" )
     runHook postBuild
   '';

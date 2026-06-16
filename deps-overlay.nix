@@ -126,6 +126,22 @@ in
     }))
     prev.libarchive;
 
+  # llhttp: disable its standalone-wasm JS-host glue. llhttp's api.c has a
+  # `#if defined(__wasm__)` block (wasm_settings + extern wasm_on_* callbacks +
+  # llhttp_alloc/free) meant for llhttp's OWN wasm npm package, where a JS host
+  # supplies `wasm_on_*`. When llhttp is embedded as a C library (libgit2 drives
+  # it via llhttp_init + its own settings struct), that block is dead/wrong code
+  # whose `wasm_on_*` externs are left undefined → env imports the guest can't
+  # satisfy → instantiate LinkError. Skip the block (#if 0): real llhttp,
+  # libgit2's normal callback path, no JS-host externs.
+  llhttp = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace src/api.c --replace-fail '#if defined(__wasm__)' '#if 0'
+      '';
+    }))
+    prev.llhttp;
+
   # zlib errno fix: zlib 1.3.2 gates `#include <errno.h>` behind NO_STRERROR;
   # errno.h IS in the sysroot and the gz code uses errno regardless → force-
   # include it. (static comes from isStatic: zlib `shared = !isStatic`.)
