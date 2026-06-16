@@ -46,6 +46,12 @@ LLVM 21 is the toolchain; on `aarch64-linux` the binary cache lacks the exact
 LLVM build, so the **first** build compiles LLVM from source (~1–2 h, cached
 after). On `x86_64-linux` (and CI) it substitutes from cache.
 
+**Caching is a design goal, not an accident.** We want the **host** to build from
+cache (cache-friendly pin + `x86_64` + a wasm-artifact cache) and the **guest** to
+*substitute* pre-built wasm artifacts rather than build in-guest. From-source
+host rebuilds are a failure mode to design out. See
+[docs/STATUS.md § Caching strategy](docs/STATUS.md#caching-strategy-a-goal-not-just-an-observation).
+
 ## Repo layout
 
 ```

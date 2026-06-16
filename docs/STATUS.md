@@ -113,6 +113,37 @@ state of `deps-overlay.nix`:
 
 ---
 
+## Caching strategy (a GOAL, not just an observation)
+
+We **want the host to build from cache, not from source** — on two levels:
+
+1. **Pull nixpkgs deps from a binary cache.** The host build of the toolchain +
+   deps should *substitute* nixpkgs (LLVM, coreutils, cmake, …) from a binary
+   cache, never recompile them. This is a hard requirement for CI and a strong
+   want for local dev. Implications:
+   - **Pin a fully-cached nixpkgs** — `nixos-26.05` (clang 21.1.8, Hydra-complete
+     on x86_64). The current `nixos-unstable` pin is a local-dev convenience only.
+   - **Build/CI on `x86_64-linux`**, where `cache.nixos.org` is complete. The
+     `aarch64-linux` cache lags and lacks heavy builds (LLVM → ~1–2 h from source);
+     that from-source cost should never happen in CI.
+   - If aarch64 host builds are needed, stand up a supplementary cache (cachix /
+     a self-hosted store) that holds the aarch64 LLVM + toolchain.
+
+2. **Publish the wasm builds to a binary cache the guest substitutes from.** The
+   toolchain, the cross-compiled deps, `nix.wasm`, and (eventually) user packages
+   are built **on the host** and pushed to a binary cache. The guest's `nix.wasm`
+   then **substitutes** pre-built wasm artifacts — it should rarely build in-guest.
+   This is the realistic "install any package in the guest" model (host builds,
+   guest downloads) and what makes the crossSystem approach scale.
+   - Not yet built. Needs: a binary-cache store of the wasm `cross.*` outputs +
+     `nix.wasm`, served same-origin to the guest, with `nix.wasm`'s substituter
+     config pointed at it. (CI job to populate it; see `docs/plan-environment.md`
+     Phase 5.)
+
+**TL;DR:** host = cached builds (cache-friendly pin + x86_64 + a wasm artifact
+cache); guest = substitute-only. From-source rebuilds on the host are a failure
+mode to design out, not a normal cost.
+
 ## Environment notes
 
 - **Pin**: `nixos-unstable` @ `9ae611a` (2026-06-10), default LLVM **21.1.8**.

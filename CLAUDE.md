@@ -92,6 +92,16 @@ several already fixed (see STATUS for the full list):
 After the closure builds: `nix build .#nix-wasm` → deploy → verify in-guest
 (no SIGILL, `nix-env -iA sl`). Then phases 2–5 (`docs/plan-environment.md`).
 
+## Caching (design goal)
+
+The **host** must build from cache, not from source: pin a fully-cached nixpkgs
+(`nixos-26.05`), build/CI on `x86_64-linux` (aarch64's cache lags → from-source
+LLVM), and publish the wasm outputs (`cross.*`, `nix.wasm`, user packages) to a
+binary cache. The **guest** then *substitutes* pre-built wasm artifacts rather
+than building in-guest — that's the "install any package" model and what makes
+the crossSystem approach scale. From-source host rebuilds are a failure mode to
+design out. Full detail: `docs/STATUS.md` § Caching strategy.
+
 ## Plans
 
 - `docs/plan-toolchain.md` — the 13-task toolchain+nix.wasm plan.
