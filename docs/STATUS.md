@@ -80,13 +80,26 @@ shared crossSystem/overlay, so they serve user packages too):
   failing every sqlite autosetup link probe → bogus "Cannot find libm").
 - **runtimeShell → native** (bash/gnugrep): helper scripts no longer drag in a
   cross-built bash/grep that fails and the guest doesn't need at build time.
-- **per-dep static / no-`.so`-link trims**: the `__musl_tp` TLS reloc *only*
-  triggers when linking a separate `.so` (cross-module GD-TLS); fully-static
-  links — incl. stdio — are fine (same model as `nix.wasm`). So static-only for
-  zlib/pcre2/libxml2/libidn2; `--static-cli-shell` keeps a working sqlite3 CLI;
-  `static = true` keeps zstd's CLI; libgit2/curl feature trims; boost strips the
-  b2 `architecture=wasm` metadata; openssl `-U_GNU_SOURCE` (musl POSIX
-  `strerror_r`).
+- **static everywhere = a PLATFORM flag** (`wasm-cross.nix`): `crossSystem` sets
+  `isStatic = true` (+ `hasSharedLibraries = true` forced back on, so
+  `extensions.sharedLibrary` stays defined → no sqlite eval-abort). nixpkgs then
+  applies `makeStatic` (--disable-shared / -DBUILD_SHARED_LIBS=OFF /
+  -Ddefault_library=static everywhere) AND packages read `hostPlatform.isStatic`
+  for their own static logic (zlib `shared=!isStatic`, openssl `static`, sqlite
+  `--disable-tcl`, zstd `static`, llhttp `LLHTTP_BUILD_*_LIBS`, …). The
+  `__musl_tp` TLS reloc *only* trips when linking a separate `.so` (cross-module
+  GD-TLS); fully-static links — incl. stdio — are fine (same model as
+  `nix.wasm`), and `makeStatic`'s `-static` is a harmless no-op on wasm (our
+  modules are `-shared` dylink). This REPLACED the whole per-dep static layer in
+  `deps-overlay.nix`; what's left there is genuinely non-static, package-specific
+  cross fixes (openssl `-U_GNU_SOURCE`, boost b2 `architecture=wasm`, curl/libgit2
+  feature trims, libarchive acl, zlib errno) + the platform plumbing.
+- **libc++abi self-contained unwinder** (`toolchain/libcxx.nix`): libc++abi's
+  wasm-EH `cxa_exception` calls `_Unwind_RaiseException`/`_Unwind_DeleteException`
+  (defined in our `Unwind-wasm.c` shim). nix.wasm's hand-link adds `-lunwind`,
+  but cc-wrapper consumers can't reliably inject it after clang's auto `-lc++abi`.
+  Fold `Unwind-wasm.o` INTO `libc++abi.a` so it resolves internally — every
+  C++-exception package is now self-contained.
 
 ## ✅ `nix.wasm` — builds
 
@@ -97,6 +110,22 @@ configure first), `pkgPath` += `share/pkgconfig` (nlohmann_json), `bison`+`flex`
 in `nativeBuildInputs` (libexpr), and a `-resource-dir` so raw clang finds our
 wasm builtins at the final link.
 
+## ✅ Arbitrary nixpkgs packages — many build with ZERO overlay entry
+
+Because every wasm fix is now platform-level (toolchain + `isStatic` + the
+unwinder/runtimeShell/musl/compiler-rt plumbing), nixpkgs packages cross-compile
+just by being in `cross.*` — no `deps-overlay.nix` entry. Proven:
+
+- `cross.hello` → a wasm module, untouched.
+- `cross.sl` (the train) → builds untouched, pulling `cross.ncurses` (whose C++
+  binding drove the libc++abi unwinder fix above).
+
+This is the intended "install any package in the guest" model (PRIME DIRECTIVE
+corollary 1): a snag becomes one *shared* toolchain/overlay fix, not a per-package
+patch. Complex packages can still need fixes (their own `.so`-linked CLIs that we
+keep static, x86/arm inline asm, hard platform assumptions), but the floor is now
+"try it, frequently works."
+
 ---
 
 ## ⬜ What's next
@@ -104,11 +133,7 @@ wasm builtins at the final link.
 1. **In-guest verification**: deploy `nix.wasm` and run `nix --version` (no
    SIGILL), then `nix-env -iA sl`. Needs the pc harnesses `exec-nix.mjs` /
    `exec-nixenv.mjs` (not in this repo).
-2. **`isStatic` adapter refactor** (planned): collapse the per-dep static/no-shared
-   overrides into one `makeStaticLibraries`-style stdenv adapter + the
-   `hostPlatform.isStatic` flag (kept decoupled from `makeStaticBinaries`' `-static`
-   and from `hasSharedLibraries=false`). Verify it reproduces the same closure.
-3. Phases 2–5 (`docs/plan-environment.md`): userspace, guest-clang, kernel, CI —
+2. Phases 2–5 (`docs/plan-environment.md`): userspace, guest-clang, kernel, CI —
    the full "NixOS in wasm" vision.
 
 ---

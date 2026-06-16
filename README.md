@@ -18,6 +18,7 @@ toolchain it stands on.
 | **crossSystem cc-wrapper** (clang-21 over the nix-built sysroot) | ✅ builds C **and C++** packages |
 | **C dependency closure** (zlib, sqlite, openssl, curl, libgit2, boost, …) | ✅ **all 13 cross-compile** (`nix build .#dep-…`) |
 | **`nix.wasm`** (Nix 2.34.7 itself) | ✅ **builds** — `nix build .#nix-wasm` → a 19 MB wasm dylink module |
+| arbitrary nixpkgs packages (`hello`, `sl`, …) | ✅ **many build with no overlay entry** — static is a platform property (`crossSystem.isStatic`) |
 | in-guest verification (`nix --version`, `nix-env -iA sl`) | ⬜ next — needs the pc harness (`exec-nix.mjs`) |
 | userspace / guest-clang / kernel / CI (the rest of "NixOS in wasm") | ⬜ planned (`docs/plan-environment.md`) |
 
@@ -63,7 +64,7 @@ host rebuilds are a failure mode to design out. See
 flake.nix              entry point — exposes the toolchain stages, cross set, nix-wasm
 flake.lock             pinned nixpkgs (nixos-unstable @ 9ae611a, has clang 21.1.8)
 wasm-cross.nix         the crossSystem: clang-21 cc-wrapper over the nix-built sysroot
-deps-overlay.nix       per-dep cross fixes (static-only, compiler-rt triple, kernel headers, trims)
+deps-overlay.nix       per-dep NON-static cross fixes (musl, compiler-rt triple, kernel headers, feature trims); static is platform-level via crossSystem.isStatic in wasm-cross.nix
 nix-wasm.nix           builds Nix 2.34.7 → nix.wasm (meson compile + the wasm hand-link)
 toolchain/             the wasm toolchain, as focused Nix derivations:
   musl.nix             musl 1.2.5 + 8 patches (harness wasm-arch + 7 pc fixes)
