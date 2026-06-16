@@ -22,4 +22,24 @@ pkgs.llvmPackages_21.overrideScope (final: prev: {
   lld = prev.lld.overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [ ../patches/llvm/wasm-ld-linker-script-21.patch ];
   });
+
+  # clang here is NOT our patch surface (the patches are in libllvm + lld above;
+  # this clang just links the patched libllvm via the scope fixpoint). So build
+  # it LEAN to fit the box — the kernel needs only the C compiler + assembler:
+  #   - drop clang-tools-extra (clangd/clang-tidy/…): the dominant build-disk +
+  #     link-RAM cost, never used by the kernel. nixpkgs pulls it in via a
+  #     postPatch `tools/extra` symlink; remove it (+ the postInstall that copies
+  #     a clang-tidy helper, which then won't exist).
+  #   - no debug info (separateDebugInfo): -ggdb bloats objects + link memory.
+  #     We keep debug on the PATCHED libllvm/lld (already built) where a crash
+  #     could happen; clang is stock, so its symbols aren't worth the GBs.
+  clang-unwrapped = prev.clang-unwrapped.overrideAttrs (o: {
+    separateDebugInfo = false;
+    postPatch = (o.postPatch or "") + ''
+      rm -rf tools/extra
+    '';
+    postInstall = builtins.replaceStrings
+      [ "cp bin/clang-tidy-confusable-chars-gen $dev/bin" ] [ "" ]
+      (o.postInstall or "");
+  });
 })
