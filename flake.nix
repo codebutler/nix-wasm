@@ -55,6 +55,9 @@
         # Curated NixOS-module eval -> guest /etc.
         userspace-etc = wasmSystem.config.system.build.etc;
 
+        # Guest system profile (/run/current-system/sw): busybox + ncurses/terminfo.
+        userspace-path = wasmSystem.config.system.path;
+
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
           mkdir -p $out

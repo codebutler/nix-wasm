@@ -71,6 +71,11 @@ let
         ];
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
+        # Link ncurses' terminfo DB into the profile and point ncurses at it, so
+        # curses apps (sl, …) find xterm-256color. system.path's default
+        # pathsToLink does NOT include /share/terminfo, so add it explicitly.
+        environment.pathsToLink = [ "/share/terminfo" ];
+        environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
 
         users.mutableUsers = false;
         users.users.root = {
