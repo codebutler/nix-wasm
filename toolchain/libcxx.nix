@@ -58,6 +58,16 @@ pkgs.stdenv.mkDerivation {
       -D_LIBUNWIND_HIDE_SYMBOLS -I ${src}/libunwind/src \
       -c ${src}/libunwind/src/Unwind-wasm.c -o Unwind-wasm.o
     ${bt}/bin/llvm-ar rcs $out/lib/libunwind.a Unwind-wasm.o
+
+    # libc++abi's cxa_exception (wasm-EH) calls _Unwind_RaiseException /
+    # _Unwind_DeleteException, defined in Unwind-wasm.o. nix.wasm links `-lunwind`
+    # explicitly, but arbitrary nixpkgs C++ packages go through the cc-wrapper,
+    # which has no reliable way to inject `-lunwind` AFTER clang's auto `-lc++abi`
+    # (lld is single-pass per archive). So fold the shim INTO libc++abi.a: lld
+    # re-scans members within one archive, so the _Unwind_* refs resolve
+    # internally and every libc++abi consumer is self-contained — no `-lunwind`
+    # needed. (libunwind.a is kept too, for nix.wasm's explicit link.)
+    ${bt}/bin/llvm-ar rs $out/lib/libc++abi.a Unwind-wasm.o
     runHook postInstall
   '';
 
