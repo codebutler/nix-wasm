@@ -1,33 +1,29 @@
-# The guest system closure in boot layout. Host-built; substituted into the
-# guest /nix store over 9P. The Plan-2 bootstrap (in the `pc` repo) consumes it.
+# The guest system closure in boot layout. Host-built; SERVED read-only into the
+# guest /nix store over 9P (overlay lowerdir) by pc's createNixClosureStore.
 #
-# Boot-layout CONTRACT (what the bootstrap must do — the entrypoint is busybox
-# init, NOT a `wasm-init` wrapper):
-#   1. exec the PATH `$sys/init` (this symlink, basename `init`) — busybox
-#      dispatches on argv[0] basename, so it runs the `init` applet. Do NOT exec
-#      the resolved busybox target (wrong applet). busybox init reads /etc/inittab.
-#   2. busybox --install  -> creates /bin/sh, /bin/login, /sbin/getty, /sbin/syslogd
-#      etc. (applets that inittab + autologin reference).
-#   3. install $sys/etc/autologin -> /bin/autologin (+x). autologin is a CUSTOM
-#      script, not a busybox applet, so --install will NOT create it, yet inittab
-#      references /bin/autologin by absolute path.
-#   4. create a writable /var/log before init runs (syslogd writes /var/log/messages).
-#   5. symlink /etc -> $sys/etc and /run/current-system/sw -> $sys/sw, with /nix
-#      mounted (the store-symlinks inside etc, plus sw and init, resolve in-guest).
-#   6. nrConsoles=8 is baked into inittab — keep kernel HVC_WASM_NR_CONSOLES and
-#      host HVC_CONSOLES in lockstep (see init.nix).
-{ pkgs, etc, systemPath, passwd, group, init }:
+# Boot-layout CONTRACT (what the thin /init does — see nix-wasm initramfs):
+#   1. mount pseudofs + the 9P exports; overlay the served store -> /nix.
+#   2. sys=$(readlink -f /nix/var/nix/profiles/system)   # this closure
+#   3. sh "$sys/activate" "$sys"   # setup-etc tree, /run/current-system, mut dirs
+#   4. exec "$sys/init"            # busybox init (basename `init` -> init applet),
+#                                  # reads /etc/inittab (profile-absolute paths)
+# No `busybox --install`, no /bin/autologin copy, no blanket /etc symlink: the
+# inittab references /run/current-system/sw/bin/{getty,login,syslogd,autologin},
+# all present in `sw` (system.path); /etc is a per-file symlink tree (activate).
+# nrConsoles=8 is baked into inittab — keep kernel HVC_WASM_NR_CONSOLES and host
+# HVC_CONSOLES in lockstep (see init.nix).
+{ pkgs, etc, systemPath, passwd, group, inittab, activate }:
 pkgs.runCommand "wasm-system" { } ''
   mkdir -p $out
-  # Real /etc = module-generated etc + our static passwd/group. Preserve the
-  # store symlinks inside etc (resolved in-guest, where /nix is mounted).
+  # Real /etc = module-generated etc + our static passwd/group + profile inittab.
+  # Preserve the store symlinks inside etc (resolved in-guest, /nix mounted).
   cp -a ${etc}/etc $out/etc
   chmod -R u+w $out/etc
   cp ${passwd} $out/etc/passwd
   cp ${group} $out/etc/group
+  cp ${inittab} $out/etc/inittab
   ln -s ${systemPath} $out/sw
-  cp -a ${init}/etc/inittab $out/etc/inittab
-  cp -a ${init}/bin/autologin $out/etc/autologin   # bootstrap installs to /bin
-  # init entrypoint: busybox init (the bootstrap execs $out/init)
+  ln -s ${activate} $out/activate
+  # init entrypoint: busybox (the thin /init execs $out/init; basename `init`).
   ln -s ${pkgs.busybox}/bin/busybox $out/init
 ''
