@@ -31,6 +31,16 @@
       # ---- PID 1: busybox init + generated inittab --------------------------
       wasmInit = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
 
+      # ---- assembled guest system closure (boot layout) ---------------------
+      wasmToplevel = import ./userspace/toplevel.nix {
+        pkgs = cross;
+        etc = wasmSystem.config.system.build.etc;
+        systemPath = wasmSystem.config.system.path;
+        passwd = wasmPasswd.passwd;
+        group = wasmPasswd.group;
+        init = wasmInit;
+      };
+
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
         owner = "NixOS";
@@ -63,6 +73,9 @@
 
         # PID 1: busybox init binary is Task 7; this emits inittab + autologin.
         wasm-init = wasmInit;
+
+        # Assembled guest system closure: $out/{etc,sw,init} in boot layout.
+        wasm-system = wasmToplevel;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
