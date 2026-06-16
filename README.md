@@ -20,7 +20,7 @@ toolchain it stands on.
 | **`nix.wasm`** (Nix 2.34.7 itself) | ✅ **builds** — `nix build .#nix-wasm` → a 19 MB wasm dylink module |
 | arbitrary nixpkgs packages (`hello`, `sl`, …) | ✅ **many build with no overlay entry** — static is a platform property (`crossSystem.isStatic`) |
 | **in-guest `nix --version`** (runs on the pc guest, no SIGILL) | ✅ **passes** — `nix (Nix) 2.34.7` via the pc headless-kernel harness (`exec-nix.mjs`) |
-| in-guest `nix-env -iA sl` (install by name) | ⬜ next |
+| **in-guest `nix-env -iA sl`** (install a package by name) | ✅ **passes** — substitutes `sl` from a binary cache, installs to the profile, exit 0 |
 | userspace / guest-clang / kernel / CI (the rest of "NixOS in wasm") | ⬜ planned (`docs/plan-environment.md`) |
 
 See **[docs/STATUS.md](docs/STATUS.md)** for the detailed log: what works, what's

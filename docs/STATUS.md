@@ -142,10 +142,20 @@ fake-stubs:
 - patch out llhttp's `#if defined(__wasm__)` JS-host-callback block (`wasm_on_*`),
   which is for llhttp's own wasm npm package and is dead/wrong when embedded.
 
+## ✅ Install-by-name in-guest — `nix-env -iA sl` works
+
+`nix-env -iA sl` on the pc guest: nix.wasm **substitutes `sl` from a binary cache**
+(`nix copy --from file:///nix-cache`) and **installs it by name into the profile**
+(exit 0, `sl` on the profile PATH). The "install any package in the guest" model,
+proven end-to-end. Needed one fix beyond `nix --version`: cross.sqlite with
+`-DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0` (WAL's shared-memory `-shm` file is
+unsupported on the wasm/NOMMU guest fs → SQLITE_IOERR on the store DB).
+
 ## ⬜ What's next
 
-1. **In-guest `nix-env -iA sl`** (install a package by name) — the next rung
-   after `nix --version`. Harness: `exec-nixenv.mjs`.
+1. **Binary cache at scale** (the design goal): publish host-built `cross.*` +
+   user packages to a cache the guest substitutes from (so the guest installs
+   arbitrary packages without building in-guest). + CI on x86_64 to populate it.
 2. Phases 2–5 (`docs/plan-environment.md`): userspace, guest-clang, kernel, CI —
    the full "NixOS in wasm" vision.
 
