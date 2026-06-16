@@ -24,6 +24,9 @@
 
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix { inherit nixpkgs cross; };
+      wasmPasswd = import ./userspace/passwd.nix {
+        lib = cross.lib; pkgs = cross; config = wasmSystem.config;
+      };
 
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
@@ -51,6 +54,13 @@
 
         # Curated NixOS-module eval -> guest /etc.
         userspace-etc = wasmSystem.config.system.build.etc;
+
+        # Static passwd/group files for the wasm guest.
+        userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
+          mkdir -p $out
+          cp ${wasmPasswd.passwd} $out/passwd
+          cp ${wasmPasswd.group} $out/group
+        '';
       }
       # Nix's C dependency closure, each cross-built to wasm. Exposed as
       # `dep-<name>` so `nix build -k .#dep-…` surfaces every failure at once.

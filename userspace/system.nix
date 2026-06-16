@@ -15,6 +15,7 @@ let
     specialArgs = { inherit lib; modulesPath = modulesPath; };
     modules = [
       (modulesPath + "/misc/assertions.nix")
+      (modulesPath + "/misc/ids.nix")
       (modulesPath + "/system/build.nix")
       (modulesPath + "/system/etc/etc.nix")
       (modulesPath + "/config/system-path.nix")
