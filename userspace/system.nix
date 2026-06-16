@@ -84,6 +84,16 @@ let
           shell = "/bin/sh";   # busybox ash, linked by the bootstrap
         };
 
+        # /etc/profile: the bash module (which normally generates it) is excluded,
+        # so generate a minimal one. busybox ash sources it as a login shell. It
+        # sets PATH (system profile + the nix user profile so `nix-env -iA`'d
+        # packages run by name + busybox applet dirs) and sources set-environment
+        # (TERM, TERMINFO_DIRS) which is NOT auto-sourced by ash otherwise.
+        environment.etc."profile".text = ''
+          export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
+          [ -r /etc/set-environment ] && . /etc/set-environment
+        '';
+
         nix.enable = true;
         nix.settings.experimental-features = [ "nix-command" "flakes" ];
         nix.settings.substituters = lib.mkForce [ "file:///nix-cache" ];

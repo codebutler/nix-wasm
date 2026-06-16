@@ -151,6 +151,17 @@ closure (`.#wasm-system`) with these assumptions — the entrypoint is **busybox
 `nrConsoles = 8` is baked into the closure's inittab — keep kernel
 `HVC_WASM_NR_CONSOLES` and host `HVC_CONSOLES` in lockstep.
 
+Notes for Plan 2 (from the Plan-1 final review):
+- **PATH is handled in-closure.** Plan 1 generates `/etc/profile` (the bash module
+  that normally would is excluded) which exports `PATH=/root/.nix-profile/bin:
+  /run/current-system/sw/bin:/bin:/sbin` and sources `/etc/set-environment`
+  (TERM, TERMINFO_DIRS). busybox login sources `/etc/profile` for a login shell,
+  so the bootstrap need not set PATH — it only must ensure the login chain is a
+  *login* shell (the autologin → `login -f root` path already is).
+- **The guest `nix` binary is NOT in `wasm-system`.** It's the separate
+  `nix-wasm.nix` output, delivered to the guest store (today via `/opt/bin` +
+  the cache). `nix-env -iA sl` needs it present independently of this closure.
+
 ### 3.5 Shared overlay fix
 **Decision (locked): make the `compiler-rt` triple override general**, not
 per-package. `deps-overlay.nix` applies the corrected `wasm32-unknown-unknown`
