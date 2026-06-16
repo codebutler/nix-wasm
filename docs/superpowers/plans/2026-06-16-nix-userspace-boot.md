@@ -351,19 +351,24 @@ git commit -m "userspace: generated thin /init (mount + overlay served store + a
 **Files:**
 - Create: `userspace/initramfs.nix`
 
-**Why:** `pc` boots `initramfs.cpio.gz`. It must contain the generated `/init` (Task A4), a busybox to run it, and the baked `/bin/sh` (the one FHS path NixOS keeps; it persists run-in-place for `#!/bin/sh` shebangs). The applet symlinks the initramfs needs (`mount`, `mkdir`, `ln`, `sh`, `readlink`, `cp`, `chmod`, `echo`) are laid down at *build* time via `busybox --install -s` into the staging dir — this is the initrd's own toolset (like NixOS stage-1's extraUtils), NOT the runtime `busybox --install` anti-pattern we removed. The cpio is packed with native `cpio`/`gzip` (host tools archiving guest files).
+**Why:** `pc` boots `initramfs.cpio.gz`. It must contain the generated `/init` (Task A4), a busybox to run it, and all applet symlinks the initramfs `/init` + `activate` use (`sh`, `mount`, `mkdir`, `ln`, `readlink`, `basename`, `cp`, `chmod`, `echo`, …) — the initrd's own toolset (like NixOS stage-1's extraUtils), NOT the runtime `busybox --install` anti-pattern we removed. **We do NOT run `busybox --install`**: a wasm32 busybox can't execute on the x86 build host. Instead we `cp -a` `cross.busybox/bin/.` — nixpkgs busybox already ships the complete set of applet symlinks (relative → `busybox`) in its `$out/bin`, so a recursive copy gives the binary + every applet, deterministically and with no guest execution. `/bin/sh` comes along in that copy (it persists run-in-place for `#!/bin/sh` shebangs — the one FHS path NixOS keeps). The cpio is packed with native `cpio`/`gzip` (host tools archiving guest files).
 
 - [ ] **Step 1: Create `userspace/initramfs.nix`.**
 
 ```nix
 # .#wasm-initramfs — the guest initramfs.cpio.gz, built by Nix (replaces pc's
-# build.sh initramfs path). Contents: the generated /init (bootstrap.nix), the
-# cross-built busybox + its applet symlinks (the initrd's own toolset, baked at
-# build — NOT the runtime busybox --install we deleted), and /bin/sh. newc cpio
-# + gzip, the format the kernel's initramfs loader expects.
+# build.sh initramfs path). Contents: the generated /init (bootstrap.nix) + the
+# cross-built busybox and its full applet symlink set (the initrd's own toolset,
+# baked at build — NOT the runtime busybox --install we deleted). newc cpio +
+# gzip, the format the kernel's initramfs loader expects.
 #
 # `cross` is the wasm guest pkg set (busybox is a guest binary); native cpio/gzip
 # come from `pkgs` (host tools that just archive the guest files).
+#
+# We DON'T run `busybox --install`: a wasm32 busybox can't exec on the x86 host.
+# nixpkgs busybox already ships every applet as a RELATIVE symlink (-> busybox)
+# in $out/bin, so `cp -a` of that dir gives the real binary + all applets +
+# /bin/sh, deterministically and without executing any guest code.
 { pkgs, cross, init }:
 pkgs.runCommand "wasm-initramfs"
   {
@@ -374,12 +379,10 @@ pkgs.runCommand "wasm-initramfs"
     mkdir -p "$root/bin" "$root/sbin" "$root/proc" "$root/sys" "$root/dev" \
              "$root/mnt" "$root/nix" "$root/run" "$root/etc" "$root/root" "$root/tmp"
 
-    # busybox + applet symlinks (the initrd's own utils). --install -s makes
-    # RELATIVE symlinks next to the busybox binary; do it in $root/bin.
-    cp ${cross.busybox}/bin/busybox "$root/bin/busybox"
-    chmod +w "$root/bin/busybox"
-    ( cd "$root/bin" && ./busybox --install -s . )
-    ln -sf busybox "$root/bin/sh"
+    # busybox binary + its complete applet symlink set (relative -> busybox).
+    cp -a ${cross.busybox}/bin/. "$root/bin/"
+    # /bin/sh is among them; ensure it exists even if a future busybox drops it.
+    [ -e "$root/bin/sh" ] || ln -sf busybox "$root/bin/sh"
 
     # the generated /init (entrypoint; kernel cmdline init=/init).
     cp ${init} "$root/init"
@@ -393,7 +396,7 @@ pkgs.runCommand "wasm-initramfs"
   ''
 ```
 
-> NOTE: `cross.busybox --install -s .` runs the *guest* busybox on the *host* to lay symlinks — but `--install -s` only creates symlinks (no execution of guest code beyond busybox's own applet table walk, which busybox can do as it is just writing names). If the host cannot exec the wasm busybox at all, replace the `--install -s` line with an explicit symlink loop over the applet list (`for a in sh mount mkdir ln readlink cp chmod echo mountpoint; do ln -sf busybox "$root/bin/$a"; done`). Prefer the explicit loop if the build errors on exec — it is deterministic and needs no guest execution. Implementer: try `--install -s` first; fall back to the loop and note which was used.
+> NOTE: `cp -a` preserves the relative applet symlinks (`ls`→`busybox`, etc.) and copies `busybox` itself as a real file (the store ships it as a real binary, not a symlink), so the initramfs `/bin` is fully self-contained before `/nix` is mounted. If `cross.busybox/bin` unexpectedly does NOT contain the applet symlinks (verify with `ls -la $(nix path-info .#... )` during the A7 build), fall back to an explicit relative-symlink loop over the applets the bootstrap/activate need: `for a in sh mount mkdir ln readlink basename cp chmod echo cat; do ln -sf busybox "$root/bin/$a"; done` (still no guest exec). Report which path was used.
 
 - [ ] **Step 2:** (build deferred to Task A7.)
 
