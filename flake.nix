@@ -22,6 +22,9 @@
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; muslWasm = musl; }) ];
       };
 
+      # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
+      wasmSystem = import ./userspace/system.nix { inherit nixpkgs cross; };
+
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
         owner = "NixOS";
@@ -45,6 +48,9 @@
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
+
+        # Curated NixOS-module eval -> guest /etc.
+        userspace-etc = wasmSystem.config.system.build.etc;
       }
       # Nix's C dependency closure, each cross-built to wasm. Exposed as
       # `dep-<name>` so `nix build -k .#dep-…` surfaces every failure at once.
