@@ -75,10 +75,24 @@ let
           mkdir -p $out/share/terminfo/x
           cp ${pkgs.ncurses}/share/terminfo/x/xterm-256color $out/share/terminfo/x/
         '';
+        # autologin: getty's `-l` execs this instead of /bin/login (single-user
+        # guest, passwordless root). Shipped as a PROFILE package so it resolves
+        # at /run/current-system/sw/bin/autologin (no FHS copy). Shebang /bin/sh
+        # = the busybox sh baked in the initramfs (persists run-in-place).
+        autologin = pkgs.writeTextFile {
+          name = "autologin";
+          executable = true;
+          destination = "/bin/autologin";
+          text = ''
+            #!/bin/sh
+            exec /run/current-system/sw/bin/login -f root
+          '';
+        };
       in {
         environment.systemPackages = lib.mkForce [
-          pkgs.busybox    # init, ash (the guest shell), coreutils applets
+          pkgs.busybox    # init, ash (the guest shell), coreutils + getty/login/syslogd applets
           terminfoMin     # terminfo for the one supported terminal
+          autologin       # /run/current-system/sw/bin/autologin (inittab references it)
         ];
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -95,13 +109,14 @@ let
           shell = "/bin/sh";   # busybox ash, linked by the bootstrap
         };
 
-        # /etc/profile: the bash module (which normally generates it) is excluded,
-        # so generate a minimal one. busybox ash sources it as a login shell. It
-        # sets PATH (system profile + the nix user profile so `nix-env -iA`'d
-        # packages run by name + busybox applet dirs) and sources set-environment
-        # (TERM, TERMINFO_DIRS) which is NOT auto-sourced by ash otherwise.
+        # /etc/profile: busybox ash sources it as a login shell. PATH order:
+        # the nix user profile (nix-env -iA'd pkgs run by name), the system
+        # profile, the guest-tool seam (/usr/bin + /opt/bin — the host-provided
+        # `nix`/`clang` shims the bootstrap links; NOT part of the Nix system),
+        # then the baked initramfs /bin,/sbin. Then source set-environment
+        # (TERM, TERMINFO_DIRS) which ash does not auto-source.
         environment.etc."profile".text = ''
-          export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
+          export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/opt/bin:/bin:/sbin
           [ -r /etc/set-environment ] && . /etc/set-environment
         '';
 
