@@ -57,6 +57,8 @@ let
             --version-script=*|--dynamic-list=*|-soname=*|--soname=*) continue;;
             --version-script|--dynamic-list|-soname|--soname) skip=1; continue;;
             --build-id|--build-id=*|--eh-frame-hdr|--hash-style=*) continue;;
+            --compress-debug-sections=*) continue;;
+            --compress-debug-sections) skip=1; continue;;
             --warn-shared-textrel|-z) skip=1; continue;;
             -z*) continue;;
           esac
@@ -98,7 +100,7 @@ let
       extraBuildCommands = ''
         ln -sf ${filteredLd}/bin/wasm-ld $out/bin/wasm-ld
         cat >> $out/nix-support/cc-cflags <<EOF
-         --target=wasm32-unknown-unknown -D__linux__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -fPIC -matomics -mbulk-memory -resource-dir=${resourceDir} -B$out/bin -Wno-error=implicit-function-declaration -Wno-error=implicit-int
+         --target=wasm32-unknown-unknown -D__linux__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -fPIC -matomics -mbulk-memory -resource-dir=${resourceDir} -B$out/bin -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=unused-command-line-argument
         EOF
         cat >> $out/nix-support/cc-ldflags <<EOF
          -shared -Bsymbolic --no-entry --export-all --import-memory --shared-memory --max-memory=4294967296 --import-table --no-merge-data-segments --export-if-defined=__set_tls_base --export-if-defined=__libc_handle_signal --allow-undefined-file=${allowUndefined}
