@@ -128,11 +128,24 @@ keep static, x86/arm inline asm, hard platform assumptions), but the floor is no
 
 ---
 
+## ✅ Runs in-guest — `nix --version` works
+
+Deployed to the pc guest (headless-kernel harness `exec-nix.mjs`): `nix --version`
+→ `nix (Nix) 2.34.7`, exit 0, **no SIGILL**. Getting there needed three env-import
+fixes (our build left symbols undefined → `env` imports the guest can't satisfy →
+instantiate LinkError, surfaced as SIGILL) — all CORRECT fixes, not the legacy
+fake-stubs:
+- `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash-handler boost::stacktrace pulled
+  `_Unwind_Backtrace`, unimplementable on wasm — NOOP backend instead of a stub);
+- link the real `pcre2`/`llhttp`/`zstd` (transitive deps of libgit2/libarchive
+  the link line had omitted);
+- patch out llhttp's `#if defined(__wasm__)` JS-host-callback block (`wasm_on_*`),
+  which is for llhttp's own wasm npm package and is dead/wrong when embedded.
+
 ## ⬜ What's next
 
-1. **In-guest verification**: deploy `nix.wasm` and run `nix --version` (no
-   SIGILL), then `nix-env -iA sl`. Needs the pc harnesses `exec-nix.mjs` /
-   `exec-nixenv.mjs` (not in this repo).
+1. **In-guest `nix-env -iA sl`** (install a package by name) — the next rung
+   after `nix --version`. Harness: `exec-nixenv.mjs`.
 2. Phases 2–5 (`docs/plan-environment.md`): userspace, guest-clang, kernel, CI —
    the full "NixOS in wasm" vision.
 
