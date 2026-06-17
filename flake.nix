@@ -94,49 +94,6 @@
         inherit pkgs; toplevel = wasmToplevel;
       };
 
-      # ---- DIAGNOSTIC (new-ABI spawn fix): a minimal in-guest posix_spawn test,
-      # exec'd directly as /init (no busybox, no shell). posix_spawn is musl's
-      # clone-WITH-a-fn path (__clone -> _Clone stores the child fn) — the path
-      # the wasm port is supposed to support. If the child runs, clone-with-fn
-      # works on the new ABI and the spawn fix is runtime-side routing; if it
-      # traps, the clone mechanism itself is broken (kernel/runtime). Remove later.
-      spawnTest = cross.runCommandCC "spawn-test" { } ''
-        mkdir -p $out
-        cat > child.c <<'EOF'
-        #include <unistd.h>
-        int main(void){ write(1,"CHILD_RAN\n",10); _exit(0); }
-        EOF
-        cat > init.c <<'EOF'
-        #include <spawn.h>
-        #include <unistd.h>
-        #include <sys/wait.h>
-        extern char **environ;
-        int main(void){
-          write(1,"INIT_PARENT\n",12);
-          pid_t pid; char *av[]={"/child",0};
-          int r = posix_spawn(&pid,"/child",0,0,av,environ);
-          if(r){ write(1,"SPAWN_FAIL\n",11); while(1) sleep(60); }
-          write(1,"SPAWN_OK\n",9);
-          int st; waitpid(pid,&st,0);
-          write(1,"WAITED\n",7);
-          while(1) sleep(60);
-        }
-        EOF
-        $CC child.c -o $out/child
-        $CC init.c -o $out/init
-      '';
-      spawnTestInitramfs = pkgs.runCommand "spawn-test-initramfs"
-        { nativeBuildInputs = [ pkgs.cpio pkgs.gzip ]; } ''
-        root=$(mktemp -d)
-        mkdir -p "$root/proc" "$root/sys" "$root/dev"
-        cp ${spawnTest}/init "$root/init"; chmod +x "$root/init"
-        cp ${spawnTest}/child "$root/child"; chmod +x "$root/child"
-        chmod 0755 "$root"
-        mkdir -p $out
-        ( cd "$root" && find . -print0 | cpio --null -o --format=newc --owner=0:0 --quiet ) \
-          | gzip -9 > $out/initramfs.cpio.gz
-      '';
-
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
         owner = "NixOS";
@@ -189,9 +146,6 @@
 
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
-
-        # DIAGNOSTIC: minimal posix_spawn test as /init (new-ABI spawn check).
-        spawn-test-initramfs = spawnTestInitramfs;
 
         # The wasm-system closure exported as store.json for pc to serve over 9P.
         wasm-store-manifest = wasmStoreManifest;

@@ -1,6 +1,3 @@
 result
 result-*
 .direnv/
-
-# Throwaway eval-modules / cross-pkgs exploration spikes (Approach A/B).
-spike/
