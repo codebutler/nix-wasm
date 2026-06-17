@@ -113,8 +113,12 @@ the sysroot unpack fragments the NOMMU heap. C startup needed two link/loader fi
 
 Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
 design goal below: build on x86_64, publish the wasm outputs, guest substitutes).
-Robustness long-tail: the remaining busybox vfork applets (`tar`/`wget`/…) need
-the same clone-with-fn treatment as the spawn patch.
+The biggest functional gap for autotools packages is the **guest shell**: hush
+isn't POSIX-enough for autoconf `./configure` — see `docs/plan-guest-shell.md`
+(plain-Makefile + `nix-build` C/C++ builds work today; autotools `configure` does
+not). Archive ops work: `tar` (czf/xzf, patched) is validated; `wget` is N/A on the
+guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
+internet fetch), so the disabled network/service vfork applets aren't needed.
 
 ## Caching (design goal)
 

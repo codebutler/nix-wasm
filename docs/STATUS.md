@@ -259,6 +259,17 @@ disables, and the `-lc++ -lc++abi -lunwind` link. Two non-obvious requirements:
 Validated in-guest: `c++ -O2` building std::string + std::vector + std::sort +
 exceptions + `std::cout` compiles and runs.
 
+### ✅ Archive ops in-guest; `wget` is N/A (2026-06-17)
+B4: the realistic package archive flow works — `tar czf` → `tar xzf` into a fresh
+dir → `make` the extracted tree → run, validated in-guest (`tar` was already
+clone-with-fn-patched, `patches/busybox/0005`). **`wget` is not applicable on this
+guest:** there is no network device/socket transport (the guest is a NOMMU wasm
+worker), and package sources arrive via the **9P-mounted Nix binary cache**
+(`file:///nix-cache`, `aname=nixcache`) that `nix` substitutes from — not internet
+fetch. wget's only vfork is its SSL-helper spawn, which there's no network to use.
+So the disabled network/service/mail vfork applets (`WGET`/`HTTPD`/`NC`/… in
+`userspace/busybox.nix`) are correctly disabled and none block compiling packages.
+
 ### ✅ cc/c++ driver flag completeness (2026-06-17)
 A3: the `cc`/`c++` arg parsers handled common flags but **silently dropped the value
 of two-arg flags** — `-isystem DIR`, `-include FILE`, `-iquote/-idirafter/-imacros/
