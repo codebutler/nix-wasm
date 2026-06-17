@@ -45,6 +45,9 @@ cross.stdenv.mkDerivation {
     # The 0001 patch converted run_pipe's command fork but left $(...) command
     # substitution on vfork(); convert it to clone-with-fn too (NOMMU can't vfork).
     ../patches/busybox/0003-hush-cmdsub-clone.patch
+    # The remaining NOMMU vfork+exec spawn paths: libbb spawn()/fork_or_rexec()
+    # (the shared helpers behind spawn_and_wait/bb_daemonize_or_rexec) + timeout.
+    ../patches/busybox/0004-libbb-spawn-clone.patch
   ];
 
   # busybox's Makefile resolves the O= dir via a hardcoded `/bin/pwd`, which

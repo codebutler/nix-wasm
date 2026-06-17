@@ -1,0 +1,187 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] busybox: clone-with-fn for libbb spawn()/fork_or_rexec() + timeout
+
+Convert the remaining NOMMU vfork()+exec spawn paths to clone-with-a-fn
+(CLONE_VM|CLONE_VFORK|SIGCHLD), like 0001/0003. libbb spawn()/fork_or_rexec()
+are the shared helpers many applets funnel through (spawn_and_wait, xspawn,
+bb_daemonize_or_rexec); timeout has its own watcher vfork on top. vfork can't
+work on wasm (a fresh instance can't resume the parent mid-function).
+
+--- a/libbb/vfork_daemon_rexec.c
++++ b/libbb/vfork_daemon_rexec.c
+@@ -16,6 +16,7 @@
+  */
+ #include "busybox.h" /* uses applet tables */
+ #include "NUM_APPLETS.h"
++#include <sched.h> /* clone() — wasm NOMMU spawns children clone-with-a-fn */
+ 
+ #define NOFORK_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK))
+ #define NOEXEC_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE))
+@@ -173,6 +174,20 @@
+ 
+ /* This does a fork/exec in one call, using vfork().  Returns PID of new child,
+  * -1 for failure.  Runs argv[0], searching path if that has no / in it. */
++#if !BB_MMU
++/* wasm NOMMU child fn for spawn(): exec argv, or record errno + _exit so the
++ * (CLONE_VM) parent sees the failure. vfork() can't be used — a fresh wasm
++ * instance can't resume the parent mid-function; clone-with-a-fn can. */
++struct spawn_child_args { char **argv; volatile int *failed; };
++static int spawn_child(void *arg)
++{
++	struct spawn_child_args *a = arg;
++	BB_EXECVP(a->argv[0], a->argv);
++	*a->failed = errno;
++	_exit(111);
++}
++#endif
++
+ pid_t FAST_FUNC spawn(char **argv)
+ {
+ 	/* Compiler should not optimize stores here */
+@@ -183,6 +198,7 @@
+ 
+ 	/* Be nice to nommu machines. */
+ 	failed = 0;
++#if BB_MMU
+ 	pid = vfork();
+ 	if (pid < 0) /* error */
+ 		return pid;
+@@ -199,6 +215,15 @@
+ 		/*bb_perror_msg("can't execute '%s'", argv[0]);*/
+ 		_exit(111);
+ 	}
++#else
++	{
++		struct spawn_child_args a = { argv, &failed };
++		pid = clone(spawn_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, &a);
++		if (pid < 0) /* error */
++			return pid;
++	}
++#endif
+ 	/* parent */
+ 	/* Unfortunately, this is not reliable: according to standards
+ 	 * vfork() can be equivalent to fork() and we won't see value
+@@ -258,6 +283,14 @@
+ 	bb_perror_msg_and_die("can't execute '%s'", bb_busybox_exec_path);
+ }
+ 
++/* wasm NOMMU child fn for fork_or_rexec(): re-exec busybox (re_exec execv's and
++ * does not return). clone-with-a-fn instead of vfork (see spawn_child). */
++static int fork_or_rexec_child(void *arg)
++{
++	re_exec((char **)arg);
++	return 0; /* not reached (re_exec execs or dies) */
++}
++
+ pid_t FAST_FUNC fork_or_rexec(char **argv)
+ {
+ 	pid_t pid;
+@@ -267,11 +300,12 @@
+ 
+ 	/* fflush_all(); ? - so far all callers had no buffered output to flush */
+ 
+-	pid = xvfork();
+-	if (pid) /* parent */
+-		return pid;
+-	/* child - re-exec ourself */
+-	re_exec(argv);
++	pid = clone(fork_or_rexec_child, NULL,
++			CLONE_VM | CLONE_VFORK | SIGCHLD, argv);
++	if (pid < 0)
++		bb_simple_perror_msg_and_die("clone");
++	/* parent (the child re-execs itself via re_exec) */
++	return pid;
+ }
+ #endif
+ 
+--- a/coreutils/timeout.c
++++ b/coreutils/timeout.c
+@@ -46,6 +46,23 @@
+ //usage:       "If it still exists in KILL_SECS seconds, send KILL.\n"
+ 
+ #include "libbb.h"
++#include <sched.h> /* clone() — wasm NOMMU spawns the watcher clone-with-a-fn */
++
++#if !BB_MMU
++/* wasm NOMMU: the watcher child can't be vfork()ed (a fresh wasm instance can't
++ * resume the parent mid-function). It only sets argv[-pPID] and re-execs itself
++ * via bb_daemonize_or_rexec (which _exits this child after cloning the re-execed
++ * grandchild watcher), so spawn it clone-with-a-fn. */
++struct timeout_child_args { char **argv; int optind; };
++static int timeout_child(void *arg)
++{
++	struct timeout_child_args *a = arg;
++	a->argv[a->optind] = xasprintf("-p%u", (unsigned)getppid());
++	a->argv[a->optind + 1] = NULL;
++	bb_daemonize_or_rexec(0, a->argv);
++	return 0; /* not reached (bb_daemonize_or_rexec _exits this child) */
++}
++#endif
+ 
+ static NOINLINE int timeout_wait(int timeout, pid_t pid)
+ {
+@@ -112,31 +129,27 @@
+ #if !BB_MMU
+ 	sv1 = argv[optind];
+ 	sv2 = argv[optind + 1];
+-#endif
++	/* Spawn the watcher child clone-with-a-fn (NOMMU can't vfork). The child
++	 * re-execs itself as the grandchild watcher and _exits; the grandchild
++	 * reaches the `grandchild:` code below via the top `goto` after re-exec. */
++	{
++		struct timeout_child_args a = { argv, optind };
++		pid = clone(timeout_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, &a);
++		if (pid < 0)
++			bb_simple_perror_msg_and_die("clone");
++	}
++#else
+ 	pid = xvfork();
+ 	if (pid == 0) {
+ 		/* Child: spawn grandchild and exit */
+ 		parent = getppid();
+-#if !BB_MMU
+-		argv[optind] = xasprintf("-p%u", parent);
+-		argv[optind + 1] = NULL;
+-#endif
+ 		/* NB: exits with nonzero on error: */
+ 		bb_daemonize_or_rexec(0, argv);
+-		/* Here we are grandchild. Sleep, then kill grandparent */
+- grandchild:
+-		if (timeout_wait(timeout, parent) == EXIT_SUCCESS)
+-			return EXIT_SUCCESS;
+-		kill(parent, signo);
+-
+-		if (kill_timeout > 0) {
+-			if (timeout_wait(kill_timeout, parent) == EXIT_SUCCESS)
+-				return EXIT_SUCCESS;
+-			kill(parent, SIGKILL);
+-		}
+-
+-		return EXIT_SUCCESS;
++		/* Here we are grandchild (MMU). Sleep, then kill grandparent */
++		goto grandchild;
+ 	}
++#endif
+ 
+ 	/* Parent */
+ 	wait(&status); /* wait for child to die */
+@@ -150,4 +163,17 @@
+ 	argv[1] = sv2;
+ #endif
+ 	BB_EXECVP_or_die(argv);
++
++ grandchild:
++	if (timeout_wait(timeout, parent) == EXIT_SUCCESS)
++		return EXIT_SUCCESS;
++	kill(parent, signo);
++
++	if (kill_timeout > 0) {
++		if (timeout_wait(kill_timeout, parent) == EXIT_SUCCESS)
++			return EXIT_SUCCESS;
++		kill(parent, SIGKILL);
++	}
++
++	return EXIT_SUCCESS;
+ }
