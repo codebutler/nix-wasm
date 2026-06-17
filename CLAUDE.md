@@ -174,6 +174,10 @@ arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
   guest-clang → kernel → CI) for the full "NixOS in wasm" vision. Phases 1, 2, 4
   are done; 3 and 5 remain.
 - `docs/plan-rationale.md` — why this replaced the shell-script approach.
+- `docs/plan-clang-native-driver.md` — future work: retire the `cc`/`c++` shell
+  wrappers by making `clang`/`clang++` act as their own driver for the wasm target
+  (config file / custom ToolChain), gated on whether LLVM's linker spawn uses
+  posix_spawn on the NOMMU port.
 
 (The per-task implementation plans — Phase-1 toolchain, the userspace Plans 1/2,
 the kernel-nixify plan — were executed and removed; the code + `STATUS.md` are the
