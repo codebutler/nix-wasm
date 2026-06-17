@@ -46,6 +46,18 @@ cross.stdenv.mkDerivation {
     # attributes so the __cb_* calls bind to the linked guest adapter instead.
     sed -i '/__attribute__((import_module("cb")/d' shell/ash.c
 
+    # FIX: each forkshell parent helper leaves g_parsefile pointing at basepf
+    # instead of the caller's parsefile (the -c string / a sourced file). ash's
+    # outer evalcommand then does unwindfiles(file_stop), whose
+    # `while (g_parsefile != stop) popfile()` spins forever (popfile() stops at
+    # basepf, so the unreachable stop is never hit) — hanging the command after a
+    # $()/subshell/pipeline. g_parsefile is only RESET here, not freed, so save it
+    # across each forkshell helper and restore it. (Root-caused via pid-tagged
+    # traces; see docs/plan-guest-shell.md.)
+    sed -i 's|fslen = forkshell_capture(&fs, &fsbuf, &fsstatus);|struct parsefile *_spf = g_parsefile; fslen = forkshell_capture(\&fs, \&fsbuf, \&fsstatus); g_parsefile = _spf;|' shell/ash.c
+    sed -i 's|status = forkshell_run(&fs, backgnd);|{ struct parsefile *_spf = g_parsefile; status = forkshell_run(\&fs, backgnd); g_parsefile = _spf; }|' shell/ash.c
+    sed -i 's|status = forkshell_pipeline(n, flags);|{ struct parsefile *_spf = g_parsefile; status = forkshell_pipeline(n, flags); g_parsefile = _spf; }|' shell/ash.c
+
     # Compile the guest cb adapter + the wasm SjLj runtime as part of the shell
     # dir (gated on CONFIG_ASH). The SjLj runtime provides __wasm_setjmp/_test/
     # __wasm_longjmp + the __c_longjmp tag that `-mllvm -wasm-enable-sjlj` needs
