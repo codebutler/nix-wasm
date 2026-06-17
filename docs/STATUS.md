@@ -222,6 +222,26 @@ disabled (`-DSQLITE_OMIT_WAL`) — a legit documented build flag.
    and boots the full acceptance test. (Patched LLVM stays — EXPORT_SYMBOL asm +
    `vmlinux.lds` linker-script are real toolchain features, not flag massaging.)
 
+### ✅ In-guest compile startup SIGILL — two root causes fixed 2026-06-17
+Programs compiled in-guest with `cc` used to SIGILL at startup in two independent
+cases — the blocker for autoconf `configure` run-tests / "typical package compiles":
+1. **No-data-reloc programs (any main sig).** The user-process loader
+   (pc `vendor/linux-wasm/runtime/kernel-worker.js`) called
+   `__wasm_apply_data_relocs()` *unconditionally*, but wasm-ld emits that export
+   only when the module has data relocations. A program referencing no relocatable
+   data lacks it → the call threw → process killed. **Fix:** guard the call,
+   mirroring the `__wasm_call_ctors` guard right below it (skipping it when absent
+   is correct — no relocations to apply). Candidate upstream fix.
+2. **`int main(void)`.** clang emits `__main_argc_argv` only for
+   `int main(int,char**)`; for `void` it emits `__main_void`/`main`, leaving
+   crt1.o's overridden-weak `main` forwarder (kept by `-no-gc-sections`, though
+   dead) referencing `__main_argc_argv` → `--import-undefined` made it an
+   unsatisfied `env.__main_argc_argv` import → instantiate failed. **Fix:**
+   `toolchain/guest-cc.nix` links with `--gc-sections` — with `--export-all`
+   rooting named symbols, only the dead forwarder is dropped (ctors/address-taken
+   funcs/exports preserved). Validated in-guest: void+argc mains, printf, ctor+fnptr,
+   malloc, multi-TU, and a from-source `nix-build` (external sh builder → cc → run).
+
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
 systemd/perl/python — rejected). Prior art that validated the shape: **NixNG**
