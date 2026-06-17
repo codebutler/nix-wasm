@@ -184,9 +184,9 @@ exit 0, `command -v sl` → `/root/.nix-profile/bin/sl`. (Closure pre-copied wit
 
 The userspace redesign (the spine) is **DONE** and the acceptance test is green.
 **Phase 3 (nixify guest-clang + the cc pipeline) is now DONE too** — the guest
-compiles C in-browser entirely from Nix-built artifacts (validated 2026-06-17).
-Remaining, roughly by leverage: **Phase 5 (CI + binary cache)** — the design goal;
-then the robustness long-tail.
+compiles C **and C++** in-browser entirely from Nix-built artifacts (validated
+2026-06-17). Remaining, roughly by leverage: **Phase 5 (CI + binary cache)** — the
+design goal; then the robustness long-tail.
 
 ### ✅ Provisioning is now declarative (the `pc-init` hacks are retired)
 Everything below USED to live in the hand-written `pc-init` shell script; the
@@ -241,6 +241,23 @@ cases — the blocker for autoconf `configure` run-tests / "typical package comp
    rooting named symbols, only the dead forwarder is dropped (ctors/address-taken
    funcs/exports preserved). Validated in-guest: void+argc mains, printf, ctor+fnptr,
    malloc, multi-TU, and a from-source `nix-build` (external sh builder → cc → run).
+
+### ✅ In-guest C++ — the `c++` driver (2026-06-17)
+`.#guest-cxx` (`toolchain/guest-cxx.nix`) is the C++ companion to `cc`: same guest
+clang + wasm-ld over the cc-sysroot, now carrying the nix-built libc++ (`cc-sysroot`
+`sys/cxx` = libc++ headers + libc++.a/libc++abi.a/libunwind.a, the same libcxx
+nix.wasm links). Over `cc` it adds: the libc++ header path (`-nostdinc++ -isystem
+…/c++/v1`), wasm-EH (`-fwasm-exceptions`), the libc++ visibility-annotation
+disables, and the `-lc++ -lc++abi -lunwind` link. Two non-obvious requirements:
+- **`-D__linux__`** — the triple is `wasm32-unknown-*unknown*`, so libc++'s `__config`
+  can't auto-select the pthread thread API and errors "No thread API". `-D__linux__`
+  (+ `-D_GNU_SOURCE`), matching nix.wasm's own C++ link, makes it pick pthread.
+- **`--allow-undefined`** (vs cc's `--import-undefined` alone) — C++ wasm-EH references
+  the host-provided `__cpp_exception` tag, which `--import-undefined` won't import (it's
+  an exception tag, not a function). The remaining env imports are the standard runtime
+  ABI (memory/table/bases, `__wasm_abort`, `__wasm_syscall_*`, `logAPIs`).
+Validated in-guest: `c++ -O2` building std::string + std::vector + std::sort +
+exceptions + `std::cout` compiles and runs.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled

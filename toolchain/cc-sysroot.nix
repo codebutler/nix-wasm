@@ -11,7 +11,9 @@
 #   sys/musl/{include,lib}                              — musl headers + crt*.o + libc.a …
 #   sys/clang/include                                   — clang builtin headers (stddef.h …)
 #   sys/clang/lib/wasm32-unknown-unknown/libclang_rt.builtins.a
-{ pkgs, musl, compilerRt }:
+#   sys/cxx/include/c++/v1                              — libc++ headers (for the `c++` driver)
+#   sys/cxx/lib/{libc++.a,libc++abi.a,libunwind.a}      — libc++ + libc++abi (unwind shim folded in)
+{ pkgs, musl, compilerRt, libcxx }:
 let
   lib = pkgs.lib;
   cu = pkgs.llvmPackages_21.clang-unwrapped; # same clang whose headers guest-clang.nix ships
@@ -43,4 +45,14 @@ pkgs.runCommand "cc-sysroot" { }
 
     # OUR wasm compiler-rt builtins (resource-dir/lib/<triple>).
     cp ${builtins_a} "$out/sys/clang/lib/wasm32-unknown-unknown/libclang_rt.builtins.a"
+
+    # libc++ for the in-guest `c++` driver (toolchain/guest-cxx.nix): the same
+    # nix-built libcxx that nix.wasm itself links. Headers go under
+    # sys/cxx/include/c++/v1 (driven via -nostdinc++ -isystem …); the static libs
+    # (libc++.a + libc++abi.a with the Unwind-wasm shim already folded in, plus
+    # libunwind.a) go under sys/cxx/lib.
+    mkdir -p "$out/sys/cxx/include" "$out/sys/cxx/lib"
+    cp -a ${libcxx}/include/c++ "$out/sys/cxx/include/c++"
+    cp ${libcxx}/lib/libc++.a ${libcxx}/lib/libc++abi.a ${libcxx}/lib/libunwind.a \
+       "$out/sys/cxx/lib/"
   ''

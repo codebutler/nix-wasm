@@ -85,8 +85,11 @@
       # of musl + LLVM-21 builtin headers + compiler-rt builtins) and the `cc`
       # driver (references clang/wasm-ld + the sysroot by store path; no /opt/bin,
       # no cpio extraction — all served read-only over 9P in the /nix closure).
-      ccSysroot = import ./toolchain/cc-sysroot.nix { inherit pkgs musl compilerRt; };
+      ccSysroot = import ./toolchain/cc-sysroot.nix { inherit pkgs musl compilerRt libcxx; };
       guestCc = import ./toolchain/guest-cc.nix { inherit pkgs guestClang ccSysroot; };
+      # ---- the in-guest `c++` driver (C++ companion to `cc`): same clang+wasm-ld
+      # over the cc-sysroot's libc++ (sys/cxx), with wasm-EH + the libc++ link.
+      guestCxx = import ./toolchain/guest-cxx.nix { inherit pkgs guestClang ccSysroot; };
 
       # ---- in-guest `make` (pdpmake → wasm32). Works unpatched: it spawns recipes
       # via system()→posix_spawn→clone(CLONE_VFORK), the only NOMMU spawn mode.
@@ -100,8 +103,8 @@
         inherit nixpkgs cross; busybox = wasmBusybox;
         # The in-guest toolchain, folded into the system profile/closure (one
         # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
-        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc.
-        toolchain = [ nixWasmClean guestClang guestCc makeWasm ];
+        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
+        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -199,6 +202,7 @@
         # The in-guest cc pipeline: $out/sys/{musl,clang} sysroot dir + $out/bin/cc.
         cc-sysroot = ccSysroot;
         guest-cc = guestCc;
+        guest-cxx = guestCxx;
 
         # In-guest make (pdpmake → $out/bin/make).
         make-wasm = makeWasm;

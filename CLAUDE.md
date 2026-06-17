@@ -99,12 +99,17 @@ crossSystem/overlay or kernel-source fix, never a package-private workaround (PR
 DIRECTIVE corollary 1).
 
 **Phase 3 is also done** (2026-06-17): the in-guest compiler is nixified —
-`.#guest-clang` (LLVM-21 clang+lld cross-built to wasm32), `.#cc-sysroot`, and
-`.#guest-cc` (the `cc` driver). The guest now COMPILES C in-browser entirely from
-Nix-built artifacts (`cc -O2 hello.c && ./hello` validated in-guest). Enabling it
-needed a shared kernel fix: `CONFIG_BOOT_MEM_PAGES` 0x2000→0x4000 (512MiB→1GiB) so
-the 57MB clang.wasm can be mmap'd contiguously after the sysroot unpack fragments
-the NOMMU heap.
+`.#guest-clang` (LLVM-21 clang+lld cross-built to wasm32), `.#cc-sysroot`,
+`.#guest-cc` (the `cc` driver), and `.#guest-cxx` (the `c++` driver). The guest now
+COMPILES C **and C++** in-browser entirely from Nix-built artifacts (`cc -O2 hello.c
+&& ./hello` and `c++` building std::string/vector/exceptions/iostream both validated
+in-guest). Enabling clang needed a shared kernel fix: `CONFIG_BOOT_MEM_PAGES`
+0x2000→0x4000 (512MiB→1GiB) so the 57MB clang.wasm can be mmap'd contiguously after
+the sysroot unpack fragments the NOMMU heap. C startup needed two link/loader fixes
+(see `docs/STATUS.md` § in-guest compile startup SIGILL); `c++` adds `-D__linux__`
+(libc++ pthread thread-API selection on the `-unknown` triple) + `--allow-undefined`
+(the host-provided `__cpp_exception` wasm-EH tag), with libc++ shipped in
+`cc-sysroot` (`sys/cxx`).
 
 Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
 design goal below: build on x86_64, publish the wasm outputs, guest substitutes).
