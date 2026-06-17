@@ -283,6 +283,20 @@ generation, and `@file` response-file passthrough. Validated in-guest: a `make`
 build using `-isystem`, `-include`, `-MMD -MF` (depfile `c.o: c.c prefix.h`
 produced) and `-Wl,--gc-sections` compiles, links, and runs.
 
+### ⚙️ Autoconf-capable guest shell — forkshell ash built; blocked on a kernel wait4 bug (2026-06-17)
+Brought pc's WASI **forkshell ash** (busybox-w32 lineage) to the guest as
+`.#guest-ash` (`userspace/ash.nix` + `ash-cb-guest.c` adapter over native
+posix_spawn/pipe/waitpid + `ash-wasm-sjlj.c`). ash's dash-derived parser is
+autoconf-grade, and the NOMMU "fork-without-exec" is handled by serialize →
+re-exec `ash --fs`. Working in-guest: builds, runs, **clean exit** (needed the
+wasm SjLj fix — musl-wasm `longjmp` is `call abort`), and **subshells `( )`**
+(`fork_run`) end-to-end. `$(…)` capture spawns/runs/reaps the child cleanly but
+then hangs — root-caused (in-guest C probe) to a **guest-kernel bug: `waitpid(-1,
+WNOHANG)` with no children BLOCKS instead of returning `ECHILD`** (non-blocking
+poll flags aren't honored; also breaks the `timeout` applet). The fix is in the
+joelseverin/linux wasm port's `wait4` path + a `vmlinux` rebuild (LLVM cached).
+Full detail + plan: `docs/plan-guest-shell.md` § Implementation status.
+
 ### ⚠️ Real autoconf `./configure` — blocked on the guest shell (2026-06-17)
 A2 (run a genuine autoconf-generated `configure` + `make` in-guest) was run with a
 host-generated minimal autoconf project (real 4669-line `configure`: `AC_PROG_CC`,
