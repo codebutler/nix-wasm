@@ -33,6 +33,9 @@ pkgs.stdenv.mkDerivation {
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
     ./patches/kernel/0005-wasm-enlarge-kernel-stack.patch
     ./patches/kernel/0006-wasm-force-max-order.patch
+    # User stack 8KiB->8MiB: the 8KiB stack overflowed on a single musl realpath()
+    # (8KiB of buffers) and crashed nix at startup; NOMMU stacks can't grow.
+    ./patches/kernel/0007-wasm-enlarge-user-stack.patch
   ];
 
   nativeBuildInputs = [

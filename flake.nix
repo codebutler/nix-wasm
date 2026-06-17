@@ -125,6 +125,66 @@
         $CC child.c -o $out/child
         $CC init.c -o $out/init
       '';
+      # ---- DIAGNOSTIC (realpath/readlink corruption): readlink a long symlink
+      # target into a HEAP buffer vs a STACK buffer (both pre-filled with 'X'),
+      # printing the returned length and the raw bytes. Reveals whether the wasm
+      # readlink syscall writes fewer bytes than it returns (stale 'X' tail) and
+      # whether heap vs stack differ — the bug musl realpath() trips over (and the
+      # suspected nix.wasm startup crash). Remove once fixed.
+      realpathTest = cross.runCommandCC "realpath-test" { } ''
+        mkdir -p $out
+        cat > init.c <<'EOF'
+        #include <unistd.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <sys/stat.h>
+        static void wr(const char*s){ write(1,s,strlen(s)); }
+        static void wrn(long n){ char b[24]; int i=22; b[23]='\n';
+          if(n==0)b[--i+1]='0'; while(n>0){b[i--]='0'+n%10;n/=10;}
+          write(1,b+i+1,23-i); }
+        /* realpath an EXISTING target dir of the given name; print result+len. */
+        static void test(const char *dir){
+          mkdir(dir,0755);
+          unlink("/lnk"); symlink(dir,"/lnk");
+          wr("--- tgt="); wr(dir); wr(" len="); wrn((long)strlen(dir));
+          /* (A) resolved=NULL -> strdup path */
+          char *rp=realpath("/lnk",0);
+          wr("  A_rp=["); if(rp){ wr(rp); } else wr("(null)"); wr("]\n");
+          free(rp);
+          /* (B) resolved=stack buffer -> memcpy path (what busybox uses) */
+          char rbuf[4097]; memset(rbuf,'X',sizeof rbuf);
+          char *rb=realpath("/lnk",rbuf);
+          wr("  B_rp=["); if(rb){ write(1,rbuf,strlen(dir)+8); } else wr("(null)"); wr("]\n");
+        }
+        int main(void){
+          /* single-component (control) */
+          test("/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+          /* MULTI-component: parent dirs must exist; vary leaf length */
+          mkdir("/p",0755);
+          test("/p/x");
+          test("/p/bbbbbbbbbbbbbbbb");
+          test("/p/cccccccccccccccccccccccccccccccc");
+          test("/p/dddddddddddddddddddddddddddddddddddddddddddddddd");
+          /* deep, mirroring /nix/store/HASH-wasm-system */
+          mkdir("/nix",0755); mkdir("/nix/store",0755);
+          test("/nix/store/6jsb4mjifp3kn8fpg3id90rng63zlnqq-wasm-system");
+          wr("DONE\n");
+          while(1) sleep(60);
+        }
+        EOF
+        $CC init.c -o $out/init
+      '';
+      realpathTestInitramfs = pkgs.runCommand "realpath-test-initramfs"
+        { nativeBuildInputs = [ pkgs.cpio pkgs.gzip ]; } ''
+        root=$(mktemp -d)
+        mkdir -p "$root/proc" "$root/sys" "$root/dev"
+        cp ${realpathTest}/init "$root/init"; chmod +x "$root/init"
+        chmod 0755 "$root"
+        mkdir -p $out
+        ( cd "$root" && find . -print0 | cpio --null -o --format=newc --owner=0:0 --quiet ) \
+          | gzip -9 > $out/initramfs.cpio.gz
+      '';
+
       spawnTestInitramfs = pkgs.runCommand "spawn-test-initramfs"
         { nativeBuildInputs = [ pkgs.cpio pkgs.gzip ]; } ''
         root=$(mktemp -d)
@@ -192,6 +252,9 @@
 
         # DIAGNOSTIC: minimal posix_spawn test as /init (new-ABI spawn check).
         spawn-test-initramfs = spawnTestInitramfs;
+
+        # DIAGNOSTIC: readlink heap-vs-stack + realpath corruption probe as /init.
+        realpath-test-initramfs = realpathTestInitramfs;
 
         # The wasm-system closure exported as store.json for pc to serve over 9P.
         wasm-store-manifest = wasmStoreManifest;

@@ -1,0 +1,29 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: enlarge user stack 8KiB->4MiB (binfmt_wasm)
+
+The 8 KiB user stack overflowed on a single musl realpath() call and crashed
+nix at startup. NOMMU stacks cannot grow; size it to 4 MiB (the alloc rounds
+to an available 8 MiB/order-11 block; a full 8 MiB stack would need a
+nonexistent 16 MiB/order-12 block and fail with ENOMEM).
+
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -20,7 +20,17 @@
+ #include <linux/uaccess.h>
+ #include <linux/vmalloc.h>
+ 
+-#define WASM_STACK_SIZE		(2UL * PAGE_SIZE)
++/*
++ * User stack (shares this region with brk; musl mallocng uses mmap not brk, so
++ * it is effectively the stack). NOMMU stacks can't grow on fault -> HARD ceiling.
++ * The original 2 pages (8 KiB) overflowed on a single musl realpath() call
++ * (char stack[PATH_MAX+1] + char output[PATH_MAX] = 8 KiB) and crashed nix
++ * (deep C++/std::filesystem stacks). Use 4 MiB: big enough for realpath/nix, and (with the arg extra) the
++ * NOMMU power-of-2 mmap rounds to an 8 MiB/order-11 block, which the buddy
++ * allocator has free (a full 8 MiB stack rounds to order-12/16 MiB, of which
++ * there are none → ENOMEM at exec).
++ */
++#define WASM_STACK_SIZE		(1024UL * PAGE_SIZE)
+ 
+ /*
+  * Userland expects the stack to be page aligned as of now, which allows it to
