@@ -35,8 +35,12 @@ for sp in paths:
                     "d": base64.b64encode(data).decode("ascii"),
                 }
 
-# the system profile symlink the bootstrap reads.
-entries["var/nix/profiles/system"] = {"t": "l", "to": rel(os.path.realpath(toplevel))}
+# The system profile symlink the bootstrap reads. The target is ABSOLUTE
+# (/nix/store/...) — a relative target would resolve against the symlink's own
+# dir (/nix/var/nix/profiles/) and point at the wrong place. /nix is the guest
+# mount, so the absolute target resolves correctly in-guest (this is also how
+# real Nix profile symlinks are written).
+entries["var/nix/profiles/system"] = {"t": "l", "to": os.path.realpath(toplevel)}
 
 with open(out_file, "w") as f:
     json.dump(entries, f)
