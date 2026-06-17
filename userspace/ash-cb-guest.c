@@ -24,6 +24,34 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <signal.h>
+#include <time.h>
+
+/* The forkshell/spawn children are REAL processes here (posix_spawn), unlike
+ * pc's WASI build where the host runs them invisibly. Each delivers SIGCHLD to
+ * ash; we reap it ourselves (waitpid on the specific pid). The problem: ash's
+ * SIGCHLD handler then sets got_sigchld, and its next dowait() calls
+ * waitpid(-1, WNOHANG) — which on this NOMMU wasm kernel BLOCKS instead of
+ * returning ECHILD when there are no children (a guest-kernel bug; see
+ * docs/STATUS.md), hanging the command after a $()/subshell.
+ *
+ * Fix without touching the kernel: temporarily set SIGCHLD to SIG_DFL around
+ * spawn+reap. SIGCHLD's default action is "ignore" (child still reapable), so
+ * ash's handler never runs, got_sigchld stays clear, and ash's dowait(NONBLOCK)
+ * early-returns without calling the buggy waitpid. Our own waitpid(specific_pid)
+ * is unaffected (the bug is only -1 + WNOHANG + no children). This also matches
+ * WASI semantics, where ash never saw the (host-run) child's SIGCHLD. */
+static void chld_block(struct sigaction *old)
+{
+	struct sigaction da;
+	memset(&da, 0, sizeof(da));
+	da.sa_handler = SIG_DFL;
+	sigaction(SIGCHLD, &da, old);
+}
+static void chld_unblock(const struct sigaction *old)
+{
+	sigaction(SIGCHLD, old, NULL);
+}
 
 extern char **environ;
 
@@ -90,23 +118,28 @@ static int read_full(int fd, void *buf, int n)
 
 int cb_spawn(char **argv)
 {
+	struct sigaction old;
 	pid_t pid;
-	if (posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ) != 0)
-		return 127;
-	return wait_status(pid);
+	int rc;
+	chld_block(&old);
+	rc = (posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ) != 0) ? 127 : wait_status(pid);
+	chld_unblock(&old);
+	return rc;
 }
 
 int cb_spawn_pipeline(char ***stages, int nstages)
 {
+	struct sigaction old;
 	pid_t pids[64];
 	int prev_read = -1, i, status = 1;
 	if (nstages > 64) return 126;
+	chld_block(&old);
 	for (i = 0; i < nstages; i++) {
 		int last = (i == nstages - 1);
 		int pp[2] = { -1, -1 };
 		posix_spawn_file_actions_t fa;
 
-		if (!last && pipe(pp) < 0) return 126;
+		if (!last && pipe(pp) < 0) { chld_unblock(&old); return 126; }
 		posix_spawn_file_actions_init(&fa);
 		if (prev_read >= 0) {
 			posix_spawn_file_actions_adddup2(&fa, prev_read, 0);
@@ -125,15 +158,18 @@ int cb_spawn_pipeline(char ***stages, int nstages)
 	}
 	for (i = 0; i < nstages; i++)
 		if (pids[i] > 0) { int s = wait_status(pids[i]); if (i == nstages - 1) status = s; }
+	chld_unblock(&old);
 	return status;
 }
 
 int cb_spawn_redirect(char **argv, const cb_redir_spec *redirs, int nredirs)
 {
+	struct sigaction old;
 	posix_spawn_file_actions_t fa;
 	pid_t pid;
 	int i, rc;
 
+	chld_block(&old);
 	posix_spawn_file_actions_init(&fa);
 	for (i = 0; i < nredirs; i++) {
 		int flags = redirs[i].op == 0 ? (O_WRONLY | O_CREAT | O_TRUNC)
@@ -143,17 +179,20 @@ int cb_spawn_redirect(char **argv, const cb_redir_spec *redirs, int nredirs)
 	}
 	rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&fa);
-	if (rc != 0) return 127;
-	return wait_status(pid);
+	rc = (rc != 0) ? 127 : wait_status(pid);
+	chld_unblock(&old);
+	return rc;
 }
 
 int cb_spawn_capture(char **argv, char *outbuf, int outbuf_size)
 {
+	struct sigaction old;
 	posix_spawn_file_actions_t fa;
 	pid_t pid;
 	int pp[2], total, n, rc;
 
-	if (pipe(pp) < 0) return -1;
+	chld_block(&old);
+	if (pipe(pp) < 0) { chld_unblock(&old); return -1; }
 	posix_spawn_file_actions_init(&fa);
 	posix_spawn_file_actions_adddup2(&fa, pp[1], 1);
 	posix_spawn_file_actions_addclose(&fa, pp[1]);
@@ -161,20 +200,23 @@ int cb_spawn_capture(char **argv, char *outbuf, int outbuf_size)
 	rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
 	posix_spawn_file_actions_destroy(&fa);
 	close(pp[1]);
-	if (rc != 0) { close(pp[0]); return -1; }
+	if (rc != 0) { close(pp[0]); chld_unblock(&old); return -1; }
 	total = 0;
 	while (total < outbuf_size && (n = read(pp[0], outbuf + total, outbuf_size - total)) > 0)
 		total += n;
 	close(pp[0]);
 	wait_status(pid);
+	chld_unblock(&old);
 	return total;
 }
 
 /* ===== forkshell family — "fork without exec" via re-exec `ash --fs` ======= */
 
 /* Spawn `ash --fs` with the serialized block on FS_BLOCK_FD. stdin_from /
- * stdout_to (>=0) dup2 onto 0/1 for pipelines and $() capture. Returns pid. */
-static pid_t spawn_fs(int blockfd, int stdin_from, int stdout_to)
+ * stdout_to (>=0) dup2 onto 0/1 for pipelines and $() capture; close0/close1
+ * (>=0) are extra parent-side pipe fds to close in the child so the child holds
+ * no stray pipe ends (else the parent never sees EOF). Returns pid. */
+static pid_t spawn_fs2(int blockfd, int stdin_from, int stdout_to, int close0, int close1)
 {
 	const char *exe = self_exe();
 	char *argv[] = { (char *)"ash", (char *)"--fs", NULL };
@@ -187,10 +229,18 @@ static pid_t spawn_fs(int blockfd, int stdin_from, int stdout_to)
 		posix_spawn_file_actions_addclose(&fa, blockfd);
 	if (stdin_from >= 0) posix_spawn_file_actions_adddup2(&fa, stdin_from, 0);
 	if (stdout_to  >= 0) posix_spawn_file_actions_adddup2(&fa, stdout_to, 1);
+	/* close the raw pipe fds in the child (after the dup2s captured them). */
+	if (close0 >= 0 && close0 != FS_BLOCK_FD) posix_spawn_file_actions_addclose(&fa, close0);
+	if (close1 >= 0 && close1 != FS_BLOCK_FD && close1 != 1) posix_spawn_file_actions_addclose(&fa, close1);
 	if (posix_spawn(&pid, exe, &fa, NULL, argv, environ) != 0)
 		pid = -1;
 	posix_spawn_file_actions_destroy(&fa);
 	return pid;
+}
+
+static pid_t spawn_fs(int blockfd, int stdin_from, int stdout_to)
+{
+	return spawn_fs2(blockfd, stdin_from, stdout_to, -1, -1);
 }
 
 /* Frame a block as [i32 len][block] in a seekable fd. */
@@ -210,36 +260,46 @@ static int block_fd(const char *block, int len)
 
 int __cb_fork_run(const char *block, int len, int bg)
 {
-	int bf = block_fd(block, len);
+	struct sigaction old;
+	int bf, rc;
 	pid_t pid;
-	if (bf < 0) return -1;
+
+	chld_block(&old);
+	bf = block_fd(block, len);
+	if (bf < 0) { chld_unblock(&old); return -1; }
 	pid = spawn_fs(bf, -1, -1);
 	close(bf);
-	if (pid < 0) return -1;
-	return bg ? 0 : wait_status(pid);
+	rc = (pid < 0) ? -1 : (bg ? 0 : wait_status(pid));
+	chld_unblock(&old);
+	return rc;
 }
 
 int __cb_fork_capture(const char *block, int len, char *outbuf, int outbufsize, int *statusp)
 {
-	int bf = block_fd(block, len);
-	int pp[2], total, n;
+	struct sigaction old;
+	int bf, pp[2], total, n;
 	pid_t pid;
 
-	if (bf < 0) return -1;
-	if (pipe(pp) < 0) { close(bf); return -1; }
-	pid = spawn_fs(bf, -1, pp[1]);
+	chld_block(&old);
+	bf = block_fd(block, len);
+	if (bf < 0) { chld_unblock(&old); return -1; }
+	if (pipe(pp) < 0) { close(bf); chld_unblock(&old); return -1; }
+	/* close both raw pipe fds in the child (it keeps only fd1=dup(pp[1])). */
+	pid = spawn_fs2(bf, -1, pp[1], pp[0], pp[1]);
 	close(bf); close(pp[1]);
-	if (pid < 0) { close(pp[0]); return -1; }
+	if (pid < 0) { close(pp[0]); chld_unblock(&old); return -1; }
 	total = 0;
 	while (total < outbufsize && (n = read(pp[0], outbuf + total, outbufsize - total)) > 0)
 		total += n;
 	close(pp[0]);
 	{ int st = wait_status(pid); if (statusp) *statusp = st; }
+	chld_unblock(&old);
 	return total;
 }
 
 int __cb_fork_pipeline(const char *buf, int len, int bg)
 {
+	struct sigaction old;
 	pid_t pids[64];
 	int nstages, off, prev_read = -1, i, status = 1;
 	(void)bg;
@@ -248,21 +308,22 @@ int __cb_fork_pipeline(const char *buf, int len, int bg)
 	nstages = (unsigned char)buf[0] | ((unsigned char)buf[1] << 8)
 		| ((unsigned char)buf[2] << 16) | ((unsigned char)buf[3] << 24);
 	if (nstages <= 0 || nstages > 64) return -1;
+	chld_block(&old);
 	off = 4;
 	for (i = 0; i < nstages; i++) {
 		int blen, bf, last = (i == nstages - 1), pp[2] = { -1, -1 };
 		pid_t pid;
 
-		if (off + 4 > len) return -1;
+		if (off + 4 > len) { pids[i] = -1; break; }
 		blen = (unsigned char)buf[off] | ((unsigned char)buf[off + 1] << 8)
 		     | ((unsigned char)buf[off + 2] << 16) | ((unsigned char)buf[off + 3] << 24);
 		off += 4;
-		if (off + blen > len) return -1;
+		if (off + blen > len) { pids[i] = -1; break; }
 		bf = block_fd(buf + off, blen);
 		off += blen;
 		if (bf < 0) { pids[i] = -1; continue; }
 		if (!last && pipe(pp) < 0) { close(bf); pids[i] = -1; continue; }
-		pid = spawn_fs(bf, prev_read, last ? -1 : pp[1]);
+		pid = spawn_fs2(bf, prev_read, last ? -1 : pp[1], (!last ? pp[0] : -1), (!last ? pp[1] : -1));
 		pids[i] = pid;
 		close(bf);
 		if (prev_read >= 0) close(prev_read);
@@ -270,6 +331,7 @@ int __cb_fork_pipeline(const char *buf, int len, int bg)
 	}
 	for (i = 0; i < nstages; i++)
 		if (pids[i] > 0) { int s = wait_status(pids[i]); if (i == nstages - 1) status = s; }
+	chld_unblock(&old);
 	return status;
 }
 

@@ -109,3 +109,44 @@ then a subshell and a pipeline, then the full configure.
 Map confirmed against the patch; next is the build: create `userspace/ash.nix` +
 `forkshell_guest.c`, get `ash --fs` round-tripping a single `fork_capture`
 (`$(echo hi)`) in-guest, then climb to the full configure via the A2 harness.
+
+## Implementation status (2026-06-17) — built, runs, ONE kernel blocker left
+
+Implemented and committed: `userspace/ash.nix` (busybox ash + the 3 vendored
+forkshell patches), `userspace/ash-cb-guest.c` (the `cb` surface over
+posix_spawn/pipe/waitpid — replacing pc's WASI futex bridge), and
+`userspace/ash-wasm-sjlj.c` (the wasm SjLj runtime). What works in-guest:
+
+- **ash builds** (293 KB wasm, zero `cb.*` imports, all helpers defined).
+- **Basic commands + clean exit** — needed the **wasm SjLj fix**: ash's exit/error
+  flow uses setjmp/longjmp, but musl-wasm's `longjmp` is `call abort`. Compiling
+  ash with `-mllvm -wasm-enable-sjlj` + the vendored SjLj runtime
+  (`__wasm_setjmp/_test/__wasm_longjmp` + the `__c_longjmp` tag) fixed it.
+- **Subshells `( … )`** (`fork_run`) work end-to-end (serialize → re-exec
+  `ash --fs` → run → reap).
+- **`$(…)` capture** (`fork_capture`): the child spawns, runs, produces output,
+  and is reaped cleanly (verified) — but ash **hangs on the *next* command**.
+
+### The remaining blocker is a GUEST-KERNEL bug
+Root-caused with an in-guest C probe: **`waitpid(-1, WNOHANG)` with no children
+BLOCKS instead of returning `ECHILD`** on this wasm NOMMU kernel. After a `$()`,
+the forkshell child's SIGCHLD sets ash's `got_sigchld`, so ash's next
+`dowait()` calls `waitpid(-1, WNOHANG)` → blocks forever. (`sigtimedwait` with a
+zero timeout *also* blocks — the kernel doesn't honor non-blocking poll flags.)
+This same bug breaks the `timeout` applet (`timeout: can't execute '-pNN'`).
+
+Adapter mitigations tried (committed, correct but insufficient alone): close the
+child's stray pipe fds; set `SIGCHLD` to `SIG_DFL` around spawn+reap so ash's
+handler doesn't set `got_sigchld`. These don't fully clear it because ash also
+hits a blocking `dowait`/`waitpid` via other paths (and likely a `makejob`
+orphan job in the forkshell `evalbackcmd` that ash block-waits on at exit).
+
+### Next step: fix the kernel `wait4` (the true root cause)
+`waitpid(-1, WNOHANG)`/`wait4` with no eligible children must return `-ECHILD`
+(and honor `WNOHANG`), not block, in the joelseverin/linux wasm port's wait path
+(`kernel/exit.c do_wait` is generic — the bug is in the wasm port's task/wait or
+scheduler glue that fails to wake/return for the no-children case). Rebuild
+`vmlinux.wasm` (the patched LLVM is cached, so this is a kernel-only recompile)
+and re-validate `$()`/pipelines, then the full configure. This also fixes
+`timeout` and any other `WNOHANG` user. Secondary: drop/`freejob` the forkshell
+`evalbackcmd` `makejob` orphan so ash doesn't block-wait a child it never owns.
