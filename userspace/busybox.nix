@@ -48,6 +48,15 @@ cross.stdenv.mkDerivation {
     # The remaining NOMMU vfork+exec spawn paths: libbb spawn()/fork_or_rexec()
     # (the shared helpers behind spawn_and_wait/bb_daemonize_or_rexec) + timeout.
     ../patches/busybox/0004-libbb-spawn-clone.patch
+    # tar's vfork_compressor (tar.c): the compress-on-create child still used
+    # xvfork → musl abort. clone-with-fn so `tar czf` (and bzip2/xz) work. (The
+    # decompress side, fork_transformer, was already converted in 0001.)
+    ../patches/busybox/0005-tar-compressor-clone.patch
+    # hush's heredoc writer (setup_heredoc, >pipe-buf heredocs): nested xvfork →
+    # clone-with-fn. The last reachable vfork in a kept/core applet — the rest of
+    # busybox's ~24 vfork applets (daemons/servers/edge tools) are DISABLED in the
+    # config below rather than patched, so they can never be invoked and crash.
+    ../patches/busybox/0006-hush-heredoc-clone.patch
   ];
 
   # busybox's Makefile resolves the O= dir via a hardcoded `/bin/pwd`, which
@@ -89,6 +98,29 @@ cross.stdenv.mkDerivation {
       "CONFIG_EXTRA_LDFLAGS="
     )
     make "''${mk[@]}" wasm_defconfig
+
+    # Curated NOMMU surface: DISABLE every applet that still spawns via vfork() and
+    # that the guest doesn't need (network servers/clients, service supervisors,
+    # cron, mail, misc) — so an unpatched vfork can never be reached and abort
+    # ("vfork() is not implemented yet"). The core/kept spawn paths (hush run_pipe/
+    # cmdsub/heredoc, libbb spawn/fork_or_rexec, tar, fork_transformer, timeout) are
+    # converted to clone-with-a-fn by the patches above; everything else with a live
+    # vfork is removed here. `time` is dropped too (marginal; its applet vfork isn't
+    # worth keeping). Disabling rather than patching is the deliberate choice (no
+    # landmines). olddefconfig then re-resolves deps.
+    for c in CROND CRONTAB CONSPY SCRIPT RUNSV SVLOGD RUNSVDIR OPENVT \
+             FTPD HTTPD INETD NC TCPSVD UDPSVD WGET REFORMIME SENDMAIL MAKEMIME \
+             POPMAILDIR START_STOP_DAEMON BOOTCHARTD NSENTER TIME \
+             FEATURE_TAR_TO_COMMAND; do
+      sed -i "s/^CONFIG_$c=y\$/# CONFIG_$c is not set/" build/.config
+    done
+    # No `make olddefconfig` (busybox 1.36 kconfig has no such target); the build
+    # regenerates include/autoconf.h from .config via silentoldconfig, which keeps
+    # these existing values disabled. Sanity-check a few stuck.
+    for c in CROND HTTPD WGET NC TIME; do
+      grep -q "^# CONFIG_$c is not set" build/.config \
+        || { echo "ERROR: CONFIG_$c not disabled in .config" >&2; exit 1; }
+    done
     runHook postConfigure
   '';
 

@@ -7,7 +7,7 @@
 # pinned nixpkgs rev (which modules declare/read which options moves between
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
-{ nixpkgs, cross, busybox }:
+{ nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix }:
 let
   lib = cross.lib;
   modulesPath = nixpkgs + "/nixos/modules";
@@ -52,7 +52,7 @@ let
 
       ({ config, lib, ... }: {
         options.nix.enable = lib.mkOption { type = lib.types.bool; default = true; };
-        options.nix.package = lib.mkOption { type = lib.types.package; default = cross.nix; };
+        options.nix.package = lib.mkOption { type = lib.types.package; default = nixPackage; };
         config = {
           _module.args.pkgs = cross;
           _module.args.utils = import (modulesPath + "/../lib/utils.nix") {
@@ -89,11 +89,11 @@ let
           '';
         };
       in {
-        environment.systemPackages = lib.mkForce [
+        environment.systemPackages = lib.mkForce ([
           busybox         # patched wasm busybox: init, hush (guest shell), coreutils + getty/login/syslogd applets
           terminfoMin     # terminfo for the one supported terminal
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
-        ];
+        ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
         # Link ncurses' terminfo DB into the profile and point ncurses at it, so
@@ -111,12 +111,12 @@ let
 
         # /etc/profile: busybox ash sources it as a login shell. PATH order:
         # the nix user profile (nix-env -iA'd pkgs run by name), the system
-        # profile, the guest-tool seam (/usr/bin + /opt/bin — the host-provided
-        # `nix`/`clang` shims the bootstrap links; NOT part of the Nix system),
+        # profile (busybox + the folded toolchain: nix/clang/wasm-ld/cc/make —
+        # NO MORE /opt/bin side-mount; the toolchain is just Nix packages here),
         # then the baked initramfs /bin,/sbin. Then source set-environment
         # (TERM, TERMINFO_DIRS) which ash does not auto-source.
         environment.etc."profile".text = ''
-          export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/opt/bin:/bin:/sbin
+          export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
           [ -r /etc/set-environment ] && . /etc/set-environment
         '';
 

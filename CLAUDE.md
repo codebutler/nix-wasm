@@ -98,11 +98,18 @@ cache and renders it** (Phase A + B both PASS). Every wasm fix is a SHARED
 crossSystem/overlay or kernel-source fix, never a package-private workaround (PRIME
 DIRECTIVE corollary 1).
 
+**Phase 3 is also done** (2026-06-17): the in-guest compiler is nixified —
+`.#guest-clang` (LLVM-21 clang+lld cross-built to wasm32), `.#cc-sysroot`, and
+`.#guest-cc` (the `cc` driver). The guest now COMPILES C in-browser entirely from
+Nix-built artifacts (`cc -O2 hello.c && ./hello` validated in-guest). Enabling it
+needed a shared kernel fix: `CONFIG_BOOT_MEM_PAGES` 0x2000→0x4000 (512MiB→1GiB) so
+the 57MB clang.wasm can be mmap'd contiguously after the sysroot unpack fragments
+the NOMMU heap.
+
 Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
-design goal below: build on x86_64, publish the wasm outputs, guest substitutes)
-and **Phase 3** (nixify the guest `clang.wasm`/`wasm-ld.wasm` so the guest can
-*compile*, not just install). Robustness long-tail: the remaining busybox vfork
-applets (`tar`/`wget`/…) need the same clone-with-fn treatment as the spawn patch.
+design goal below: build on x86_64, publish the wasm outputs, guest substitutes).
+Robustness long-tail: the remaining busybox vfork applets (`tar`/`wget`/…) need
+the same clone-with-fn treatment as the spawn patch.
 
 ## Caching (design goal)
 
@@ -113,6 +120,48 @@ binary cache. The **guest** then *substitutes* pre-built wasm artifacts rather
 than building in-guest — that's the "install any package" model and what makes
 the crossSystem approach scale. From-source host rebuilds are a failure mode to
 design out. Full detail: `docs/STATUS.md` § Caching strategy.
+
+## ccache (opt-in compile cache — dev iteration only)
+
+ccache is **not** the caching design goal above (that's the Nix binary cache,
+which works at derivation granularity). ccache is orthogonal: it speeds up the
+*dev loop* on the two from-source LLVM builds — `guest-clang` and the kernel's
+patched LLVM (`kernel-llvm`) — where tweaking a flag or patch changes the
+derivation hash and forces a full ~1–2 h rebuild even though almost every C++ TU
+is identical. ccache reuses those object files, turning the rebuild into minutes.
+
+It is **off by default** (PRIME DIRECTIVE: the standard build is fully hermetic;
+the default `.#guest-clang` / `.#kernel` derivation hashes are unchanged). The
+cache dir is an impure `extra-sandbox-path`, so it's gated behind separate flake
+attrs and explicit host setup. ccache (daemonless) is used, not sccache (its
+background server doesn't fit the per-derivation Nix sandbox; its distributed
+backend would only duplicate the Nix binary cache).
+
+**One-time host setup** (the cache dir + exposing it into the build sandbox):
+
+```sh
+echo password | sudo -S install -d -m 0770 -o root -g nixbld /nix/var/cache/ccache
+# Expose the dir into the sandbox (the daemon reads /etc/nix/nix.conf):
+echo password | sudo -S sh -c \
+  "echo 'extra-sandbox-paths = /nix/var/cache/ccache' >> /etc/nix/nix.conf"
+echo password | sudo -S systemctl restart nix-daemon   # reload the daemon
+```
+
+**Build with ccache** (cold first build still compiles from source — it *populates*
+the cache; the speedup is on the *next* rebuild after a source change):
+
+```sh
+echo password | sudo -S nix --extra-experimental-features 'nix-command flakes' \
+  build .#guest-clang-ccache --print-out-paths      # in-guest clang+lld
+echo password | sudo -S nix --extra-experimental-features 'nix-command flakes' \
+  build .#kernel-ccache --print-out-paths           # vmlinux.wasm (patched LLVM cached)
+```
+
+Inspect hit rate with `ccache -s -d /nix/var/cache/ccache`. The ccache outputs
+are deterministic (bit-identical to the hermetic builds) but carry a different
+input-addressed store path — they're for iteration, not for publishing as the
+canonical `.#guest-clang` / `.#kernel` artifacts. The wiring is a `useCcache`
+arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
 
 ## Plans
 

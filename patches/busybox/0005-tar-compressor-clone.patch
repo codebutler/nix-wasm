@@ -1,0 +1,87 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] busybox: clone-with-fn for tar's vfork_compressor (tar czf/xz)
+
+tar's CREATE-with-compression path (archival/tar.c vfork_compressor) spawned the
+external gzip/bzip2/xz with xvfork() — which musl aborts on wasm ("vfork() is not
+implemented yet, use clone() instead!"), so `tar czf` failed. (The DECOMPRESS
+side, open_transformer's fork_transformer, was already converted in 0001; this is
+the separate compress-on-create child.) Convert it to clone-with-a-fn
+(CLONE_VM|CLONE_VFORK|SIGCHLD) like 0001/0003/0004: the child body becomes a
+function the parent clones. CLONE_VM keeps the shared `vfork_exec_errno` working
+(child writes it on exec failure; the CLONE_VFORK-suspended parent reads it),
+exactly as the vfork version relied on.
+
+--- a/archival/tar.c
++++ b/archival/tar.c
+@@ -119,6 +119,7 @@
+ #include "libbb.h"
+ #include "common_bufsiz.h"
+ #include "bb_archive.h"
++#include <sched.h> /* clone() — wasm NOMMU spawns children clone-with-a-fn */
+ /* FIXME: Stop using this non-standard feature */
+ #ifndef FNM_LEADING_DIR
+ # define FNM_LEADING_DIR 0
+@@ -569,6 +570,38 @@
+ }
+ 
+ # if SEAMLESS_COMPRESSION
++/* wasm NOMMU child fn for vfork_compressor(): wire stdin (data pipe) + stdout
++ * (the tar fd), then exec the external gzip/bzip2/xz. clone-with-a-fn instead of
++ * vfork (like 0001/0004) — a fresh wasm instance can't resume the parent
++ * mid-function. CLONE_VM keeps *exec_errno shared (child writes it on exec
++ * failure, the CLONE_VFORK-suspended parent reads it), exactly as vfork did. */
++#  if !BB_MMU
++struct compressor_child_args {
++	int data_wr, data_rd, tar_fd;
++	const char *gzip;
++	volatile int *exec_errno;
++};
++static int compressor_child(void *arg)
++{
++	struct compressor_child_args *a = arg;
++	int tfd;
++	/* NB: close _first_, then move fds! */
++	close(a->data_wr);
++	/* copy it: parent's tar_fd variable must not change */
++	tfd = a->tar_fd;
++	if (tfd == 0) {
++		/* Output tar fd may be zero (see the MMU branch below). */
++		tfd = dup(tfd);
++	}
++	xmove_fd(a->data_rd, 0);
++	xmove_fd(tfd, 1);
++	/* exec external gzip/bzip2/... (NOT the applet — see comment below) */
++	execlp(a->gzip, a->gzip, "-f", (char *)0);
++	*a->exec_errno = errno;
++	_exit(EXIT_FAILURE);
++}
++#  endif
++
+ /* Don't inline: vfork scares gcc and pessimizes code */
+ static void NOINLINE vfork_compressor(int tar_fd, const char *gzip)
+ {
+@@ -585,6 +618,7 @@
+ 
+ 	signal(SIGPIPE, SIG_IGN); /* we only want EPIPE on errors */
+ 
++#  if BB_MMU
+ 	if (xvfork() == 0) {
+ 		/* child */
+ 		int tfd;
+@@ -623,6 +657,16 @@
+ 		vfork_exec_errno = errno;
+ 		_exit(EXIT_FAILURE);
+ 	}
++#  else
++	{
++		struct compressor_child_args a = {
++			data.wr, data.rd, tar_fd, gzip, &vfork_exec_errno
++		};
++		if (clone(compressor_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, &a) < 0)
++			bb_perror_msg_and_die("clone");
++	}
++#  endif
+ 
+ 	/* parent */
+ 	xmove_fd(data.wr, tar_fd);

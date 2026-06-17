@@ -206,6 +206,13 @@ pkgs.stdenv.mkDerivation {
     runHook preInstall
     mkdir -p $out/bin
     ${bt}/bin/llvm-strip nix.unstripped.wasm -o $out/bin/nix
+    # nix is a MULTI-CALL binary (it dispatches on argv[0]); the bootstrap used to
+    # create these symlinks on /usr/bin → /opt/bin/nix. With the toolchain folded
+    # into the system profile they ship in the package, so the profile bin/ carries
+    # nix-env (the `nix-env -iA` acceptance path), nix-build, nix-store, etc.
+    for t in nix-env nix-build nix-store nix-shell nix-instantiate nix-channel nix-collect-garbage; do
+      ln -s nix "$out/bin/$t"
+    done
     runHook postInstall
   '';
 

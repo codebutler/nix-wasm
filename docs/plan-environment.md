@@ -1,12 +1,15 @@
 # Fully Reproducible wasm32 Environment, Built With Nix — Master Plan
 
-> **STATUS (2026-06-17):** Phases **1 (toolchain + nix.wasm), 2 (userspace), and 4
-> (kernel) are DONE** — the guest boots and `nix-env -iA sl` runs in-guest (see
-> `docs/STATUS.md`). Phase 4 went further than this doc anticipated: the `fake-llvm`
-> Python wrapper was ELIMINATED (flags live in the kernel source + a `symlinkJoin`
-> of the patched LLVM — see Phase 4 below). **Phase 3 (guest clang.wasm) and Phase
-> 5 (CI + binary cache) remain.** The per-phase implementation plans were executed
-> and removed; the code + STATUS are the record (git history has the plans).
+> **STATUS (2026-06-17):** Phases **1 (toolchain + nix.wasm), 2 (userspace), 3
+> (guest clang + cc pipeline), and 4 (kernel) are DONE** — the guest boots,
+> `nix-env -iA sl` runs in-guest, AND `cc -O2 hello.c && ./hello` compiles + runs
+> in-guest (see `docs/STATUS.md`). Phase 4 went further than this doc anticipated:
+> the `fake-llvm` Python wrapper was ELIMINATED (flags live in the kernel source +
+> a `symlinkJoin` of the patched LLVM — see Phase 4 below). Phase 3 shipped
+> `.#guest-clang`/`.#cc-sysroot`/`.#guest-cc` and needed a shared kernel fix
+> (`CONFIG_BOOT_MEM_PAGES` 0x2000→0x4000 for contiguous large-binary exec). **Only
+> Phase 5 (CI + binary cache) remains.** The per-phase implementation plans were
+> executed and removed; the code + STATUS are the record (git history has the plans).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement each phase task-by-task. This master plan maps ALL phases at design depth (exact recipes, derivation sketches, validation, risks).
 
@@ -126,10 +129,23 @@ read/write over 9P all pass. The busybox `setup_heredoc` double-vfork gap
 
 ---
 
-## Phase 3 — Guest compiler `clang.wasm` / `wasm-ld.wasm` via Nix
+## Phase 3 — Guest compiler `clang.wasm` / `wasm-ld.wasm` via Nix ✅ DONE (2026-06-17)
 
 **Goal:** the in-guest clang+lld (cross-compiled to wasm32) built by Nix from
 stock LLVM-21 source, producing `vendor/linux-wasm/clang.wasm` + `wasm-ld.wasm`.
+
+**Shipped as** `toolchain/guest-clang.nix` (`.#guest-clang`), `toolchain/cc-sysroot.nix`
+(`.#cc-sysroot`), `toolchain/guest-cc.nix` (`.#guest-cc`). Stock LLVM-21 monorepo,
+NO linker-script patch needed for guest-clang's own link (open verify item resolved:
+the kernel is the only linker-script consumer). Three real LLVM-21 deltas vs the
+old recipe: `-DCLANG_BUILD_STATIC` (template-ABI export annotations have no wasm
+`#else`), a resource-dir with our wasm compiler-rt builtins, blanket
+`--allow-undefined`. cc-sysroot ships only the 29 generic freestanding clang
+headers (full 15MB resource dir fragments guest RAM). Required a shared kernel fix:
+`CONFIG_BOOT_MEM_PAGES` 0x2000→0x4000 (512MiB→1GiB) so the 57MB clang.wasm mmaps
+contiguously after the sysroot unpack. Validated in-guest: `clang`/`wasm-ld
+--version` (21.1.8) and `cc -O2 hello.c && ./hello`. (The original sketch below is
+kept for the design record.)
 
 **Files (new):**
 - `nixbuild/guest-clang.nix` — `stdenv.mkDerivation` building LLVM `clang`+`lld`

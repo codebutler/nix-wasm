@@ -1,0 +1,87 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] busybox: clone-with-fn for hush's heredoc writer (>pipe-buf)
+
+setup_heredoc (shell/hush.c) forks a grandchild to write a heredoc that doesn't
+fit the pipe buffer (>~64KB); the NOMMU path used nested xvfork() → musl abort.
+This is the last reachable vfork in a kept/core applet (the daemons/edge applets
+that still vfork are disabled in the busybox config instead). Convert the nested
+vfork to nested clone-with-a-fn (CLONE_VM|CLONE_VFORK|SIGCHLD): the child clones a
+grandchild then _exits (reparenting it, as the original did), and the grandchild
+re-execs the shell to do the blocking write. CLONE_VM keeps the shell's `to_free`
+shared so re_execute_shell hands the serialized argv back to setup_heredoc to free.
+
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -7741,6 +7741,32 @@
+ #endif /* ENABLE_HUSH_TICK */
+ 
+ 
++#if !BB_MMU
++/* wasm NOMMU heredoc writer (clone-with-a-fn; vfork can't work — a fresh wasm
++ * instance can't resume the parent mid-function). Mirrors the original nested
++ * vfork: the child spawns a grandchild and _exits so the grandchild is reparented
++ * (no stray child for the parent, which is about to exec the heredoc consumer);
++ * the grandchild re-execs the shell to do the blocking write. CLONE_VM keeps the
++ * shell's *to_free shared so re_execute_shell can hand the serialized argv back
++ * to setup_heredoc to free (exactly as the vfork version relied on). */
++struct heredoc_writer_args { int rd_fd; int wr; char *heredoc; char ***to_free_p; };
++static int heredoc_grandchild(void *arg)
++{
++	struct heredoc_writer_args *a = arg;
++	close(a->rd_fd); /* read side of the pipe */
++	xmove_fd(a->wr, STDOUT_FILENO);
++	re_execute_shell(a->to_free_p, a->heredoc, NULL, NULL, NULL);
++	return 0; /* notreached (re_execute_shell execs) */
++}
++static int heredoc_child(void *arg)
++{
++	disable_restore_tty_pgrp_on_exit();
++	clone(heredoc_grandchild, NULL, CLONE_VM | CLONE_VFORK | SIGCHLD, arg);
++	_exit(0); /* reparent the grandchild; notreached past here */
++	return 0;
++}
++#endif
++
+ static void setup_heredoc(struct redir_struct *redir)
+ {
+ 	struct fd_pair pair;
+@@ -7787,27 +7813,30 @@
+ 	 * for the unsuspecting parent process. Child creates a grandchild
+ 	 * and exits before parent execs the process which consumes heredoc
+ 	 * (that exec happens after we return from this function) */
+-#if !BB_MMU
+-	to_free = NULL;
+-#endif
++#if BB_MMU
+ 	pid = xvfork();
+ 	if (pid == 0) {
+ 		/* child */
+ 		disable_restore_tty_pgrp_on_exit();
+-		pid = BB_MMU ? xfork() : xvfork();
++		pid = xfork();
+ 		if (pid != 0)
+ 			_exit(0);
+ 		/* grandchild */
+ 		close(redir->rd_fd); /* read side of the pipe */
+-#if BB_MMU
+ 		full_write(pair.wr, heredoc, len); /* may loop or block */
+ 		_exit(0);
++	}
+ #else
+-		/* Delegate blocking writes to another process */
+-		xmove_fd(pair.wr, STDOUT_FILENO);
+-		re_execute_shell(&to_free, heredoc, NULL, NULL, NULL);
+-#endif
++	to_free = NULL;
++	{
++		/* clone-with-a-fn (NOMMU can't vfork); see heredoc_child above */
++		struct heredoc_writer_args a = {
++			redir->rd_fd, pair.wr, (char*)heredoc, &to_free
++		};
++		pid = clone(heredoc_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, &a);
+ 	}
++#endif
+ 	/* parent */
+ #if ENABLE_HUSH_FAST
+ 	G.count_SIGCHLD++;

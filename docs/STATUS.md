@@ -183,9 +183,10 @@ exit 0, `command -v sl` → `/root/.nix-profile/bin/sl`. (Closure pre-copied wit
 ## ⬜ What's next — full checklist
 
 The userspace redesign (the spine) is **DONE** and the acceptance test is green.
+**Phase 3 (nixify guest-clang + the cc pipeline) is now DONE too** — the guest
+compiles C in-browser entirely from Nix-built artifacts (validated 2026-06-17).
 Remaining, roughly by leverage: **Phase 5 (CI + binary cache)** — the design goal;
-**Phase 3 (nixify guest-clang)** — lets the guest compile, not just install; then
-robustness long-tail.
+then the robustness long-tail.
 
 ### ✅ Provisioning is now declarative (the `pc-init` hacks are retired)
 Everything below USED to live in the hand-written `pc-init` shell script; the
@@ -259,9 +260,38 @@ renders. The `pc-init` shell script is retired.
   `cache=loose,ignoreqv` (`userspace/bootstrap.nix`) → buffered page-cache reads +
   `copy_to_user`. One-shot `nix-env -iA sl` now substitutes reliably.
 - ✅ Kernel is nixified (`kernel.nix`, `.#kernel` → `vmlinux.wasm`); 2026-06-17
-  added patch 0007 (user stack 8KiB→4MiB — see below).
-- ⬜ **Guest-clang** (`clang.wasm`/`wasm-ld.wasm`) still vendored prebuilt in pc;
-  nixify it (Phase 3) so the guest can *compile*, not just install.
+  added patch 0007 (user stack 8KiB→4MiB — see below) and bumped
+  `CONFIG_BOOT_MEM_PAGES` 0x2000→0x4000 (512MiB→1GiB guest RAM) so the 57MB
+  clang.wasm can be mmap'd contiguously for exec after the cc sysroot unpack
+  fragments the NOMMU buddy allocator (a shared fix — helps any large-binary exec).
+- ✅ **Phase 3 — Guest-clang + cc pipeline nixified** (`.#guest-clang` →
+  `clang.wasm`/`wasm-ld.wasm`; `.#cc-sysroot` → `cc-sysroot.cpio`; `.#guest-cc` →
+  the `cc` driver). LLVM-21 clang+lld cross-built to wasm32 against the nix musl
+  sysroot + libc++ (`toolchain/guest-clang.nix`); three real toolchain fixes vs
+  the LLVM-18 era: `-DCLANG_BUILD_STATIC` (LLVM-21 template-ABI export annotations
+  with no wasm `#else`), a resource-dir carrying OUR wasm compiler-rt builtins,
+  and blanket `--allow-undefined` (matches `nix-wasm.nix`'s wcxx — libc imports
+  resolved by the guest runtime). cc-sysroot ships ONLY the 29 generic freestanding
+  clang headers (the full 15MB resource dir fragments guest RAM). Validated
+  in-guest: `clang --version` + `wasm-ld --version` (LLVM 21.1.8), and
+  `cc -O2 hello.c && ./hello` compiles, links, and runs. NB: the wasm musl crt
+  needs `int main(int,char**)` — `int main(void)` SIGILLs (pre-existing ABI quirk,
+  identical on the LLVM-18 reference toolchain).
+- ✅ **Toolchain folded into the Nix closure** (no more pc `/opt/bin` side-mount of
+  loose binaries). `nix`/`clang`/`wasm-ld`/`cc`/`make` are now in
+  `environment.systemPackages` (`userspace/system.nix`) → on PATH via the system
+  profile, exactly like `sl`. `guest-cc.nix` references clang/wasm-ld + the
+  `cc-sysroot` (now a store DIR, not a cpio) by store path; `nix-wasm.nix` ships
+  its multi-call symlinks (nix-env, …); `bootstrap.nix` dropped the tools mount.
+  Two fixes the fold required: (1) `nix-wasm` embeds dead build-path refs
+  (openssl/boost-dev/json → transitively native glibc + its locale files); a
+  `nuke-refs` post-process (`nixWasmClean` in flake.nix) strips them — without it
+  the closure ballooned to 18k files / 258MB. (2) `store-manifest.py` now splits
+  large files into lazy `store-content/<sha256>` blobs (inline small ones), so the
+  closure store (`nix-closure-store.js`, pc side) fetches the toolchain on first
+  exec, not at boot — store.json is 9.3MB, the ~113MB of tool blobs are lazy.
+  Validated in-guest end-to-end (all tools resolve from the profile, `/opt/bin`
+  gone, `nix --version` + `cc` build both lazy-fetch and work).
 
 ### ⬜ Caching / CI (the design goal — see § Caching strategy below)
 - Binary cache at scale: publish host-built `cross.*` + user packages; guest

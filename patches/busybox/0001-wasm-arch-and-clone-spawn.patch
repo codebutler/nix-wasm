@@ -229,7 +229,7 @@ index 44715ef..d311750 100644
  		/* notreached */
  	}
 +#else
-+	void *arg[2] = {&fd, transform_prog, &fd_pipe};
++	void *arg[3] = {&fd, transform_prog, &fd_pipe};
 +	clone(fork_transformer_child, NULL, CLONE_VM | CLONE_VFORK | SIGCHLD, arg);
 +#endif
  

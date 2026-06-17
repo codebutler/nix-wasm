@@ -2,13 +2,14 @@
 # .#wasm-initramfs. It is the only hand-shaped guest code, and it is irreducible:
 # it must mount the served /nix store before anything in the store is reachable.
 # Roles: mount pseudofs + pc's 9P exports, overlay the read-only served store
-# with a ramfs upper -> /nix, run the closure's activation, link the host-
-# provided guest `nix` onto PATH (the guest-tool seam — NOT the Nix system),
-# then exec the closure's init. Run-in-place: no switch_root (NOMMU; the
-# initramfs ramfs stays the root, so the baked /bin/sh persists).
+# with a ramfs upper -> /nix, run the closure's activation, then exec the
+# closure's init. The toolchain (nix/clang/wasm-ld/cc/make) is part of the served
+# closure now — on PATH via the system profile, no host-provided /opt/bin seam.
+# Run-in-place: no switch_root (NOMMU; the initramfs ramfs stays the root, so the
+# baked /bin/sh persists).
 #
 # 9P: trans=cb -> net/9p/trans_cb.c -> the JS 9P server. msize 512K = the kernel
-# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, tools, nixcache,
+# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache,
 # nix=the served wasm-system closure (createNixClosureStore).
 { pkgs }:
 pkgs.writeText "init" ''
@@ -35,10 +36,6 @@ pkgs.writeText "init" ''
   mkdir -p /mnt/pc
   mount -t 9p -o "$M,aname=/" cb /mnt/pc 2>/dev/null || echo "pc: /mnt/pc 9p mount failed"
 
-  # Host-provided large guest tools (nix.wasm, clang, …), lazy + read-only.
-  mkdir -p /opt/bin
-  mount -t 9p -o "$RO,aname=tools" cb /opt/bin 2>/dev/null || true
-
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
   mount -t 9p -o "$RO,aname=nixcache" cb /nix-cache 2>/dev/null || true
@@ -56,7 +53,10 @@ pkgs.writeText "init" ''
     mkdir -p /nix/store
   fi
 
-  # Resolve + activate the system, then guest-tool seam, then hand off to init.
+  # Resolve + activate the system, then hand off to init. The whole toolchain
+  # (nix + multi-call entry points, clang, wasm-ld, cc, make) is now part of the
+  # activated system profile (/run/current-system/sw/bin, on PATH via /etc/profile)
+  # — there is NO host-provided /opt/bin seam anymore.
   # The profile symlink is a DIRECT absolute pointer to the store path (one level;
   # see store-manifest.py), so a plain readlink resolves it — no `-f`/realpath
   # canonicalization (musl realpath corrupts long targets read over 9p/overlay).
@@ -64,19 +64,6 @@ pkgs.writeText "init" ''
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
 
-    # Guest-tool seam (host-provided binaries, NOT the Nix system): expose the
-    # nix multi-call entry points (dispatch on argv[0]) on /usr/bin, on PATH via
-    # /etc/profile. /opt/bin is a read-only 9p mount, so link into writable /usr/bin.
-    mkdir -p /usr/bin
-    if [ -e /opt/bin/nix ]; then
-      for t in nix nix-env nix-build nix-store nix-shell nix-instantiate nix-channel nix-collect-garbage; do
-        ln -sf /opt/bin/nix "/usr/bin/$t"
-      done
-      [ -e /opt/bin/make ] && ln -sf /opt/bin/make /usr/bin/make
-      [ -e /opt/bin/clang ] && ln -sf /opt/bin/clang /usr/bin/clang
-      [ -e /opt/bin/wasm-ld ] && ln -sf /opt/bin/wasm-ld /usr/bin/wasm-ld
-      [ -e /opt/bin/cc ] && { cp /opt/bin/cc /usr/bin/cc 2>/dev/null && chmod +x /usr/bin/cc; }
-    fi
     # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
     [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr 2>/dev/null || true
 

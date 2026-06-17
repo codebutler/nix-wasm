@@ -35,10 +35,17 @@
       # ---- the wasm guest kernel: vmlinux.wasm, built from pinned source with
       # stock clang-21 + the patched wasm-ld. New exec ABI (039e5f3e); does not
       # boot yet (runtime forward-port pending).
-      kernel = import ./kernel.nix {
-        inherit pkgs kernelCC;
-        kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
-      };
+      kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
+      kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
+
+      # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
+      # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
+      # libllvm/lld/clang rebuild routes clang through ccache, turning a from-
+      # scratch ~1–2 h LLVM rebuild into a near-cache-hit when iterating on the
+      # two LLVM patches. Default builds stay hermetic; build via `.#kernel-ccache`.
+      kernelLlvmCcache = import ./toolchain/kernel-llvm.nix { inherit pkgs; useCcache = true; };
+      kernelCCcache = import ./toolchain/kernel-cc.nix { inherit pkgs; llvm = kernelLlvmCcache; };
+      kernelCcache = import ./kernel.nix { inherit pkgs kernelSrc; kernelCC = kernelCCcache; };
 
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
@@ -59,9 +66,43 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
+      # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
+      guestClang = import ./toolchain/guest-clang.nix {
+        inherit pkgs musl libcxx compilerRt;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # Opt-in ccache variant (CLAUDE.md § ccache): same derivation, clang routed
+      # through ccache so a rebuild after a flag/patch tweak reuses object files.
+      # Build via `.#guest-clang-ccache`; the default `.#guest-clang` stays hermetic.
+      guestClangCcache = import ./toolchain/guest-clang.nix {
+        inherit pkgs musl libcxx compilerRt;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+        useCcache = true;
+      };
+
+      # ---- Phase 3 Stage B: the in-guest `cc` pipeline — cc-sysroot (a store DIR
+      # of musl + LLVM-21 builtin headers + compiler-rt builtins) and the `cc`
+      # driver (references clang/wasm-ld + the sysroot by store path; no /opt/bin,
+      # no cpio extraction — all served read-only over 9P in the /nix closure).
+      ccSysroot = import ./toolchain/cc-sysroot.nix { inherit pkgs musl compilerRt; };
+      guestCc = import ./toolchain/guest-cc.nix { inherit pkgs guestClang ccSysroot; };
+
+      # ---- in-guest `make` (pdpmake → wasm32). Works unpatched: it spawns recipes
+      # via system()→posix_spawn→clone(CLONE_VFORK), the only NOMMU spawn mode.
+      makeWasm = import ./toolchain/make.nix {
+        inherit pkgs musl compilerRt;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
+        # The in-guest toolchain, folded into the system profile/closure (one
+        # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
+        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc.
+        toolchain = [ nixWasmClean guestClang guestCc makeWasm ];
+        nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -104,6 +145,26 @@
       nixWasm = import ./nix-wasm.nix {
         inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc;
       };
+
+      # nix.wasm is statically linked, but the wasm binary embeds dead build-time
+      # store-path strings (openssl-static/boost-static-dev/nlohmann_json), which
+      # Nix scans as references — transitively dragging native glibc + its
+      # thousands of locale files into the wasm-system closure (it ballooned
+      # store.json to 258MB). The guest never touches those host paths, so strip
+      # them (the standard removeReferencesTo technique) via a cheap post-process —
+      # no nix rebuild. Result: nix-wasm's closure is just its own binary.
+      nixWasmClean = pkgs.runCommand "nix-wasm-2.34.7"
+        {
+          nativeBuildInputs = [ pkgs.nukeReferences ];
+          # config/nix.nix reads `nix.package.version` (for nix.conf generation).
+          version = nixWasm.version;
+        }
+        ''
+          mkdir -p $out/bin
+          cp -a ${nixWasm}/bin/. $out/bin/
+          chmod -R u+w $out/bin
+          nuke-refs $out/bin/nix
+        '';
     in
     {
       packages.${system} = {
@@ -126,6 +187,22 @@
 
         # The patched guest busybox (clone-spawn fix) + its musl-patched UAPI
         # headers — exposed for build/inspection before wiring into the system.
+        # The in-guest compiler: $out/bin/{clang,wasm-ld} (+ lib/clang resource dir).
+        guest-clang = guestClang;
+
+        # Opt-in ccache build variants of the two from-source LLVM derivations —
+        # for the dev iteration loop only (need `extra-sandbox-paths`; CLAUDE.md
+        # § ccache). Byte-identical outputs to guest-clang/kernel, built faster.
+        guest-clang-ccache = guestClangCcache;
+        kernel-ccache = kernelCcache;
+
+        # The in-guest cc pipeline: $out/sys/{musl,clang} sysroot dir + $out/bin/cc.
+        cc-sysroot = ccSysroot;
+        guest-cc = guestCc;
+
+        # In-guest make (pdpmake → $out/bin/make).
+        make-wasm = makeWasm;
+
         userspace-busybox = wasmBusybox;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
 

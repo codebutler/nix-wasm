@@ -14,14 +14,40 @@
 # scope's `libllvm`, not the global one). Nothing here touches the global
 # `llvmPackages_21` used by cross.*/wasm-cross.nix/deps-overlay.nix — no rebuild
 # cascade on the shared cached toolchain; only the kernel consumes this scope.
-{ pkgs }:
+# `useCcache` (default false): wire ccache into the from-source rebuild of the
+# patched libllvm/lld (and the lean clang) via cmake's COMPILER_LAUNCHER seam.
+# Iterating on the two LLVM patches above rebuilds full LLVM components from
+# source — ccache reuses object files for every unchanged TU. OFF by default so
+# the standard kernel build stays hermetic (PRIME DIRECTIVE); enable for the dev
+# loop via `.#kernel-ccache`. Requires the host nix.conf to expose
+# `/nix/var/cache/ccache` (see CLAUDE.md § ccache).
+{ pkgs, useCcache ? false }:
+let
+  lib = pkgs.lib;
+  # Folded into each LLVM component's overrideAttrs. Empty unless opted in, so the
+  # default derivations are unchanged (same hashes → still cache-substitutable).
+  ccacheNB = o: (o.nativeBuildInputs or [ ]) ++ lib.optional useCcache pkgs.ccache;
+  ccacheCmake = o: (o.cmakeFlags or [ ]) ++ lib.optionals useCcache [
+    "-DCMAKE_C_COMPILER_LAUNCHER=ccache"
+    "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+  ];
+  ccacheEnv = lib.optionalAttrs useCcache {
+    CCACHE_DIR = "/nix/var/cache/ccache";
+    CCACHE_UMASK = "007";
+    CCACHE_SLOPPINESS = "time_macros,locale";
+  };
+in
 pkgs.llvmPackages_21.overrideScope (final: prev: {
   libllvm = prev.libllvm.overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [ ../patches/llvm/wasm-mc-21.patch ];
-  });
+    nativeBuildInputs = ccacheNB o;
+    cmakeFlags = ccacheCmake o;
+  } // ccacheEnv);
   lld = prev.lld.overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [ ../patches/llvm/wasm-ld-linker-script-21.patch ];
-  });
+    nativeBuildInputs = ccacheNB o;
+    cmakeFlags = ccacheCmake o;
+  } // ccacheEnv);
 
   # clang here is NOT our patch surface (the patches are in libllvm + lld above;
   # this clang just links the patched libllvm via the scope fixpoint). So build
@@ -41,5 +67,7 @@ pkgs.llvmPackages_21.overrideScope (final: prev: {
     postInstall = builtins.replaceStrings
       [ "cp bin/clang-tidy-confusable-chars-gen $dev/bin" ] [ "" ]
       (o.postInstall or "");
-  });
+    nativeBuildInputs = ccacheNB o;
+    cmakeFlags = ccacheCmake o;
+  } // ccacheEnv);
 })

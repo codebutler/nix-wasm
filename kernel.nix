@@ -111,6 +111,15 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_FILE_LOCKING \
       --enable CONFIG_SCHED_STACK_END_CHECK \
       --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
+      `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \
+      `# (64KiB pages) and that becomes the kernel's physical RAM. The default` \
+      `# 0x2000 = 512MiB is too tight for in-guest compilation: exec'ing the 57MB` \
+      `# clang.wasm needs a single contiguous mmap, and the cc wrapper's sysroot` \
+      `# unpack fragments the NOMMU buddy allocator below 57MB first (only 4 order-15` \
+      `# blocks at 512MiB, all spoiled). 0x4000 = 1GiB doubles the order-15 block` \
+      `# count so a contiguous 57MB survives; stays under setup.c's 0x80000000` \
+      `# (2GiB) positive-address limit. Shared fix — helps any large-binary exec.` \
+      --set-val CONFIG_BOOT_MEM_PAGES 0x4000 \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
 
     make $makeFlags olddefconfig
