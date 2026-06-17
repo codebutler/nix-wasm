@@ -13,8 +13,8 @@ Detailed progress log. Last updated **2026-06-17**.
 
 Goal: build `nix.wasm` (Nix for the wasm32-linux-musl NOMMU guest) and its
 toolchain entirely through Nix, as the keystone for "the pc-linux userspace is
-created by Nix." The known-good reference is the old shell-script build
-(`legacy/`), which produces a working `nix.wasm` via hand-built minimal libs.
+created by Nix." (The original known-good reference — a hand-written shell-script
+build of `nix.wasm` — has been deleted; it lives in git history.)
 
 ---
 
@@ -142,7 +142,7 @@ keep static, x86/arm inline asm, hard platform assumptions), but the floor is no
 Deployed to the pc guest (headless-kernel harness `exec-nix.mjs`): `nix --version`
 → `nix (Nix) 2.34.7`, exit 0, **no SIGILL**. Getting there needed three env-import
 fixes (our build left symbols undefined → `env` imports the guest can't satisfy →
-instantiate LinkError, surfaced as SIGILL) — all CORRECT fixes, not the legacy
+instantiate LinkError, surfaced as SIGILL) — all CORRECT fixes, not the old build's
 fake-stubs:
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash-handler boost::stacktrace pulled
   `_Unwind_Backtrace`, unimplementable on wasm — NOOP backend instead of a stub);
@@ -280,8 +280,8 @@ renders. The `pc-init` shell script is retired.
 ### ⬜ Housekeeping
 - Branch `nix-userspace-boot` (nix-wasm) holds this session's work — decide merge
   to `master`. pc work is on its linux-wasm branch.
-- `legacy/` (the OLD shell-script build) is still in the tree as reference — can be
-  removed once Phase 3 (guest-clang) lands and nothing needs it for flag lookups.
+- (done 2026-06-17) `legacy/` removed — the old shell-script build is superseded by
+  the Nix derivations; it remains in git history if ever needed.
 
 ---
 
@@ -350,5 +350,5 @@ mode to design out, not a normal cost.
   cached locally). x86_64/CI substitutes everything.
 - **Known-good oracle**: `~/lwbuild/ws/install/*-wasm32_nommu` (the linux-wasm
   toolchain build). Read-only; validate against it, don't rebuild it here.
-- The legacy shell-script build (`legacy/`) still produces a working `nix.wasm`
-  via hand-built minimal libs — the proven fallback / reference for flags.
+- The old shell-script build (deleted; in git history) was the original reference
+  for the flags now encoded in the Nix derivations.

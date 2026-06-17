@@ -1,13 +1,13 @@
 # Nix 2.34.7 cross-compiled to the wasm32-linux-musl guest → $out/bin/nix.
 #
-# Faithful port of the proven build-nix-wasm.sh recipe, but built entirely with
+# Faithful port of the proven hand-written nix.wasm build recipe, but built with
 # Nix: clang-21 against the nix-built libc++ (libcxx) + sysroot, deps from the
 # nix-built cross.* store paths. NO stub libs — real cross.libgit2 + cross.xz.
 #
 # Nix's C++ is compiled by meson; the final binary is hand-linked from the
 # per-TU .o files because meson's `-r` relocatable prelink can't emit wasm TLS
 # relocations (a real wasm limitation, not a shortcut). The meson config probes
-# are fixed in postPatch (the versioned replacement for build-nix-wasm.sh's sed).
+# are fixed in postPatch (the versioned replacement for the old shell build's sed).
 { pkgs, cross, sysroot, kernelHeaders, libcxx, compilerRt, nixSrc }:
 let
   lib = pkgs.lib;
@@ -60,7 +60,7 @@ let
     (d: "${lib.getDev d}/lib/pkgconfig:${lib.getDev d}/share/pkgconfig") deps;
 
   # Shared C++ guest-ABI flags (wasm EH, atomics/bulk-memory, libc++ from the
-  # nix-built libcxx, sysroot + kernel headers). Mirrors build-nix-wasm.sh:70-74.
+  # nix-built libcxx, sysroot + kernel headers).
   cxxCommon = "--ld-path=${wasmld} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir}"
     + " --sysroot=${sysroot} -isystem ${kernelHeaders}/include -D__linux__ -D_GNU_SOURCE"
     + " -matomics -mbulk-memory -fwasm-exceptions -D__USING_WASM_EXCEPTIONS__"
@@ -68,7 +68,7 @@ let
     # _Unwind_Backtrace — wasm has no stack-walking unwinder, so it can't be
     # implemented. Select boost::stacktrace's NOOP backend (empty traces, the
     # honest behavior on wasm) so nothing references _Unwind_Backtrace. (The
-    # legacy build fake-stubbed the symbol instead; disabling the backend is the
+    # the old shell build fake-stubbed the symbol instead; disabling the backend is the
     # correct fix — no fake symbol, the feature is properly off.)
     + " -DBOOST_STACKTRACE_USE_NOOP"
     + " -fvisibility=hidden -fvisibility-inlines-hidden"
@@ -85,7 +85,7 @@ pkgs.stdenv.mkDerivation {
 
   patches = [ ./patches/nix-2.34.7-wasm32-port.patch ];
 
-  # Versioned replacement for build-nix-wasm.sh's sed/perl meson hacks (#141):
+  # Versioned replacement for the old shell build's sed/perl meson hacks (#141):
   #  - AT_SYMLINK_NOFOLLOW probes false in the cross (has_header_symbol fails), so
   #    nix's working utimensat(AT_SYMLINK_NOFOLLOW) symlink-mtime path is #if'd
   #    out and nix THROWS on every symlink (nix-env profiles). Force it on.

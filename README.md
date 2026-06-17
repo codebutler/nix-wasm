@@ -75,7 +75,6 @@ toolchain/             the wasm toolchain, as focused Nix derivations:
   sysroot.nix          assembles musl + kernel headers into the cc sysroot
 patches/               the kernel/musl/nix source patches
 docs/                  the plans + the detailed STATUS log
-legacy/                the known-good SHELL-SCRIPT approach (reference / fallback only)
 ```
 
 ## Two layers — important distinction
@@ -92,5 +91,5 @@ per-package recipes — the latter wouldn't generalize to user installs.
 
 ## License
 
-Patches under `patches/` and `legacy/` derive from musl, the Linux kernel, LLVM,
+Patches under `patches/` derive from musl, the Linux kernel, LLVM,
 and Nix — see their respective upstream licenses.

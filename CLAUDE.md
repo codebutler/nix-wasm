@@ -7,8 +7,9 @@ for the current state before doing anything.
 ## PRIME DIRECTIVE (non-negotiable)
 
 **DO THINGS CORRECTLY. No shortcuts. No hacks. No stubs.** Every artifact is a
-reproducible Nix derivation. The hand-written shell scripts and fake-lib stubs in
-`legacy/` are the OLD approach being replaced — they exist only as reference.
+reproducible Nix derivation. The OLD approach (hand-written shell scripts +
+fake-lib stubs) has been deleted — it lives in git history; the Nix derivations
+are the only build path.
 
 Hard-won corollaries (each was a real mistake; don't repeat them):
 
