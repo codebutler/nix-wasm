@@ -127,26 +127,28 @@ posix_spawn/pipe/waitpid — replacing pc's WASI futex bridge), and
 - **`$(…)` capture** (`fork_capture`): the child spawns, runs, produces output,
   and is reaped cleanly (verified) — but ash **hangs on the *next* command**.
 
-### The remaining blocker is a GUEST-KERNEL bug
-Root-caused with an in-guest C probe: **`waitpid(-1, WNOHANG)` with no children
-BLOCKS instead of returning `ECHILD`** on this wasm NOMMU kernel. After a `$()`,
-the forkshell child's SIGCHLD sets ash's `got_sigchld`, so ash's next
-`dowait()` calls `waitpid(-1, WNOHANG)` → blocks forever. (`sigtimedwait` with a
-zero timeout *also* blocks — the kernel doesn't honor non-blocking poll flags.)
-This same bug breaks the `timeout` applet (`timeout: can't execute '-pNN'`).
+### The remaining blocker — ash hangs at EXIT after `$()` (root cause NOT yet isolated)
+Clean, reliable in-guest findings (raw-tail reads, separated compile/run):
+- `ash -c 'echo CAP=$(true; echo e2)'` prints **`CAP=e2`** (the `$()` body runs and
+  the output is captured correctly) — then **ash hangs at its own exit** (the
+  trailing `echo $?` never runs).
+- `waitpid(-1, WNOHANG)` with no children **returns `ECHILD`** (does NOT block).
+  An earlier note here claimed a kernel `WNOHANG` bug — that was **WRONG**
+  (the probe that "showed" it was a flaky harness with no real output). Blocking
+  `waitpid(-1, 0)`/no-children is not yet cleanly characterized (combined
+  `cc && prog` harnesses gave unreliable output; use the separated-step pattern).
+- Subshells `( )` (`fork_run`) and clean exit (SjLj) work end-to-end.
 
-Adapter mitigations tried (committed, correct but insufficient alone): close the
-child's stray pipe fds; set `SIGCHLD` to `SIG_DFL` around spawn+reap so ash's
-handler doesn't set `got_sigchld`. These don't fully clear it because ash also
-hits a blocking `dowait`/`waitpid` via other paths (and likely a `makejob`
-orphan job in the forkshell `evalbackcmd` that ash block-waits on at exit).
+So the capture itself works; the hang is in **ash's post-`$()` exit path**
+(`exitshell` → `setjobctl(0)` → possibly a blocking `dowait`/`waitpid`, or
+`tcsetpgrp`/flush). The forkshell child is reaped by the adapter (`SIG_DFL`
+around spawn+reap keeps `got_sigchld` clear); something at exit still blocks.
 
-### Next step: fix the kernel `wait4` (the true root cause)
-`waitpid(-1, WNOHANG)`/`wait4` with no eligible children must return `-ECHILD`
-(and honor `WNOHANG`), not block, in the joelseverin/linux wasm port's wait path
-(`kernel/exit.c do_wait` is generic — the bug is in the wasm port's task/wait or
-scheduler glue that fails to wake/return for the no-children case). Rebuild
-`vmlinux.wasm` (the patched LLVM is cached, so this is a kernel-only recompile)
-and re-validate `$()`/pipelines, then the full configure. This also fixes
-`timeout` and any other `WNOHANG` user. Secondary: drop/`freejob` the forkshell
-`evalbackcmd` `makejob` orphan so ash doesn't block-wait a child it never owns.
+### Next step: instrument ash's exit path on the current build
+Re-add targeted traces (raw `write(2,…)`) at `exitshell` entry, `setjobctl`,
+`flush_stdout_stderr`, and the actual `waitpid` call site in `waitproc`, run the
+clean `ash -c 'echo CAP=$(true; echo e2)'` case, and read the raw tail to see the
+exact last call before the hang. Only then decide the fix (ash-side vs kernel).
+Use the **separated-step, tail-reading** harness pattern — the marker-matching /
+combined-command harnesses produced false positives (matching echoed source) and
+false "hangs", which sent the earlier kernel-`WNOHANG` diagnosis down a wrong path.

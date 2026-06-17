@@ -290,12 +290,15 @@ posix_spawn/pipe/waitpid + `ash-wasm-sjlj.c`). ash's dash-derived parser is
 autoconf-grade, and the NOMMU "fork-without-exec" is handled by serialize →
 re-exec `ash --fs`. Working in-guest: builds, runs, **clean exit** (needed the
 wasm SjLj fix — musl-wasm `longjmp` is `call abort`), and **subshells `( )`**
-(`fork_run`) end-to-end. `$(…)` capture spawns/runs/reaps the child cleanly but
-then hangs — root-caused (in-guest C probe) to a **guest-kernel bug: `waitpid(-1,
-WNOHANG)` with no children BLOCKS instead of returning `ECHILD`** (non-blocking
-poll flags aren't honored; also breaks the `timeout` applet). The fix is in the
-joelseverin/linux wasm port's `wait4` path + a `vmlinux` rebuild (LLVM cached).
-Full detail + plan: `docs/plan-guest-shell.md` § Implementation status.
+(`fork_run`) end-to-end. `$(…)` capture runs the body and captures the output **correctly** (`echo
+CAP=$(true; echo e2)` prints `CAP=e2`) but ash then **hangs at its own exit**.
+Root cause not yet isolated; an earlier "kernel `waitpid(WNOHANG)` bug" note was
+**WRONG** (disproven — `waitpid(-1,WNOHANG)`/no-children returns `ECHILD`; the
+"evidence" was a flaky harness). The hang is in ash's post-`$()` exit path
+(`exitshell`/`setjobctl`/a blocking wait). Next: instrument the exit path with raw
+traces on the current build (separated-step, tail-reading harness — the
+marker/combined-command harnesses gave false results). Full detail:
+`docs/plan-guest-shell.md` § Implementation status.
 
 ### ⚠️ Real autoconf `./configure` — blocked on the guest shell (2026-06-17)
 A2 (run a genuine autoconf-generated `configure` + `make` in-guest) was run with a
