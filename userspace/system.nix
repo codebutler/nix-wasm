@@ -7,7 +7,7 @@
 # pinned nixpkgs rev (which modules declare/read which options moves between
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
-{ nixpkgs, cross }:
+{ nixpkgs, cross, busybox }:
 let
   lib = cross.lib;
   modulesPath = nixpkgs + "/nixos/modules";
@@ -90,7 +90,7 @@ let
         };
       in {
         environment.systemPackages = lib.mkForce [
-          pkgs.busybox    # init, ash (the guest shell), coreutils + getty/login/syslogd applets
+          busybox         # patched wasm busybox: init, hush (guest shell), coreutils + getty/login/syslogd applets
           terminfoMin     # terminfo for the one supported terminal
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
         ];

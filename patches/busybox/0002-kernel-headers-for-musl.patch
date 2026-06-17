@@ -1,0 +1,159 @@
+diff -ruN a/linux/if_ether.h b/linux/if_ether.h
+--- a/linux/if_ether.h	2024-02-25 19:26:11.628023992 +0100
++++ b/linux/if_ether.h	2024-02-25 21:24:10.153141474 +0100
+@@ -23,6 +23,7 @@
+ #define _LINUX_IF_ETHER_H
+ 
+ #include <linux/types.h>
++#include <linux/libc-compat.h>
+ 
+ /*
+  *	IEEE 802.3 Ethernet magic constants.  The frame sizes omit the preamble
+diff -ruN a/linux/libc-compat.h b/linux/libc-compat.h
+--- a/linux/libc-compat.h	2024-02-25 19:26:16.004079143 +0100
++++ b/linux/libc-compat.h	2024-02-25 21:26:04.178635811 +0100
+@@ -49,8 +49,7 @@
+ #ifndef _LIBC_COMPAT_H
+ #define _LIBC_COMPAT_H
+ 
+-/* We have included glibc headers... */
+-#if defined(__GLIBC__)
++#ifndef __KERNEL__ /* we're used from userspace */
+ 
+ /* Coordinate with glibc net/if.h header. */
+ #if defined(_NET_IF_H) && defined(__USE_MISC)
+@@ -86,6 +85,52 @@
+ 
+ #endif /* _NET_IF_H */
+ 
++#ifdef _NETINET_IF_ETHER_H /* musl */
++#define __UAPI_DEF_ETHHDR 0
++#else /* glibc uses __NETINET_IF_ETHER_H, and includes the kernel header. */
++#define __UAPI_DEF_ETHHDR 1
++#endif
++
++#ifdef _NETINET_TCP_H /* musl */
++#define __UAPI_DEF_TCPHDR 0
++#else
++#define __UAPI_DEF_TCPHDR 1
++#endif
++
++#ifdef _TIME_H /* musl */
++#define __UAPI_DEF_TIMESPEC 0
++#define __UAPI_DEF_ITIMERSPEC 0
++#else
++#define __UAPI_DEF_TIMESPEC 1
++#define __UAPI_DEF_ITIMERSPEC 1
++#endif
++
++#ifdef _SYS_TIME_H /* musl */
++#define __UAPI_DEF_TIMEVAL 0
++#define __UAPI_DEF_ITIMERVAL 0
++#define __UAPI_DEF_TIMEZONE 0
++#else
++#define __UAPI_DEF_TIMEVAL 1
++#define __UAPI_DEF_ITIMERVAL 1
++#define __UAPI_DEF_TIMEZONE 1
++#endif
++
++#ifdef _NET_IF_H /* musl */
++#define __UAPI_DEF_IF_IFNAMSIZ 0
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 0
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS 0
++#define __UAPI_DEF_IF_IFMAP 0
++#define __UAPI_DEF_IF_IFREQ 0
++#define __UAPI_DEF_IF_IFCONF 0
++#else
++#define __UAPI_DEF_IF_IFNAMSIZ 1
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 1
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS 1
++#define __UAPI_DEF_IF_IFMAP 1
++#define __UAPI_DEF_IF_IFREQ 1
++#define __UAPI_DEF_IF_IFCONF 1
++#endif
++
+ /* Coordinate with glibc netinet/in.h header. */
+ #if defined(_NETINET_IN_H)
+ 
+@@ -103,11 +148,7 @@
+  * if the glibc code didn't define them. This guard matches
+  * the guard in glibc/inet/netinet/in.h which defines the
+  * additional in6_addr macros e.g. s6_addr16, and s6_addr32. */
+-#if defined(__USE_MISC) || defined (__USE_GNU)
+ #define __UAPI_DEF_IN6_ADDR_ALT		0
+-#else
+-#define __UAPI_DEF_IN6_ADDR_ALT		1
+-#endif
+ #define __UAPI_DEF_SOCKADDR_IN6		0
+ #define __UAPI_DEF_IPV6_MREQ		0
+ #define __UAPI_DEF_IPPROTO_V6		0
+@@ -262,6 +303,22 @@
+ #define __UAPI_DEF_XATTR		1
+ #endif
+ 
++#define __UAPI_DEF_TCPHDR 1
++#define __UAPI_DEF_ETHHDR 1
++
++#define __UAPI_DEF_TIMESPEC 1
++#define __UAPI_DEF_ITIMERSPEC 1
++#define __UAPI_DEF_TIMEVAL 1
++#define __UAPI_DEF_ITIMERVAL 1
++#define __UAPI_DEF_TIMEZONE 1
++
++#define __UAPI_DEF_IF_IFNAMSIZ 1
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 1
++#define __UAPI_DEF_IF_NET_DEVICE_FLAGS 1
++#define __UAPI_DEF_IF_IFMAP 1
++#define __UAPI_DEF_IF_IFREQ 1
++#define __UAPI_DEF_IF_IFCONF 1
++
+ #endif /* __GLIBC__ */
+ 
+ #endif /* _LIBC_COMPAT_H */
+diff -ruN a/linux/stat.h b/linux/stat.h
+--- a/linux/stat.h	2024-02-25 19:26:20.004129543 +0100
++++ b/linux/stat.h	2024-02-25 21:23:41.940770885 +0100
+@@ -4,7 +4,7 @@
+ 
+ #include <linux/types.h>
+ 
+-#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
++#if defined(__KERNEL__) || !defined(S_ISLNK)
+ 
+ #define S_IFMT  00170000
+ #define S_IFSOCK 0140000
+diff -ruN a/linux/tcp.h b/linux/tcp.h
+--- a/linux/tcp.h	2024-02-25 19:26:16.364083679 +0100
++++ b/linux/tcp.h	2024-02-25 21:24:29.185391271 +0100
+@@ -19,9 +19,11 @@
+ #define _LINUX_TCP_H
+ 
+ #include <linux/types.h>
++#include <linux/libc-compat.h>
+ #include <asm/byteorder.h>
+ #include <linux/socket.h>
+ 
++#if __UAPI_DEF_TCPHDR
+ struct tcphdr {
+ 	__be16	source;
+ 	__be16	dest;
+@@ -56,6 +58,7 @@
+ 	__sum16	check;
+ 	__be16	urg_ptr;
+ };
++#endif
+ 
+ /*
+  *	The union cast uses a gcc extension to avoid aliasing problems
+diff -ruN a/linux/time.h b/linux/time.h
+--- a/linux/time.h	2024-02-25 19:26:17.788101623 +0100
++++ b/linux/time.h	2024-02-25 21:25:42.730355117 +0100
+@@ -68,6 +68,8 @@
+ /*
+  * The various flags for setting POSIX.1b interval timers:
+  */
++#ifndef TIMER_ABSTIME
+ #define TIMER_ABSTIME			0x01
++#endif
+ 
+ #endif /* _LINUX_TIME_H */

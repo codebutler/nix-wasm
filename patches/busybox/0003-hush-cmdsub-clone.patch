@@ -1,0 +1,178 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] hush: clone-with-fn for $(...) command substitution (wasm NOMMU)
+
+The 0001 spawn patch converted run_pipe's external-command fork but left
+generate_stream_from_string (command substitution) on vfork(), which the
+wasm NOMMU kernel cannot implement. Convert it the same way: hoist the
+child body into generate_stream_child() and clone() it with a start fn.
+
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -7603,96 +7603,90 @@
+ }
+ 
+ #if ENABLE_HUSH_TICK
+-static int generate_stream_from_string(const char *s, pid_t *pid_p)
++/* wasm NOMMU: the $(...) command-substitution child cannot be spawned with
++ * vfork() — a fresh wasm instance can't resume the parent mid-function, so the
++ * kernel's wasm vfork is unimplemented. Like run_pipe_child, the child body is
++ * hoisted into a function and spawned via clone-WITH-a-fn (CLONE_VM|CLONE_VFORK),
++ * which IS supported (musl's __clone stores the start fn; the child re-enters the
++ * clone callback and call_indirect's it). Args travel through a void* array. */
++static int generate_stream_child(void *arg)
+ {
+-	pid_t pid;
+-	int channel[2];
++	const char *s = ((void **)arg)[0];
++	int *channel = ((void **)arg)[1];
+ # if !BB_MMU
+-	char **to_free = NULL;
++	char ***to_free_p = ((void **)arg)[2];
+ # endif
+-
+-	xpipe(channel);
+-	pid = BB_MMU ? xfork() : xvfork();
+-	if (pid == 0) { /* child */
+-		disable_restore_tty_pgrp_on_exit();
+-		/* Process substitution is not considered to be usual
+-		 * 'command execution'.
+-		 * SUSv3 says ctrl-Z should be ignored, ctrl-C should not.
+-		 */
+-		bb_signals(0
+-			+ (1 << SIGTSTP)
+-			+ (1 << SIGTTIN)
+-			+ (1 << SIGTTOU)
+-			, SIG_IGN);
+-		close(channel[0]); /* NB: close _first_, then move fd! */
+-		xmove_fd(channel[1], 1);
++	disable_restore_tty_pgrp_on_exit();
++	/* Process substitution is not considered to be usual
++	 * 'command execution'.
++	 * SUSv3 says ctrl-Z should be ignored, ctrl-C should not.
++	 */
++	bb_signals(0
++		+ (1 << SIGTSTP)
++		+ (1 << SIGTTIN)
++		+ (1 << SIGTTOU)
++		, SIG_IGN);
++	close(channel[0]); /* NB: close _first_, then move fd! */
++	xmove_fd(channel[1], 1);
+ # if ENABLE_HUSH_TRAP
+-		/* Awful hack for `trap` or $(trap).
+-		 *
+-		 * http://www.opengroup.org/onlinepubs/009695399/utilities/trap.html
+-		 * contains an example where "trap" is executed in a subshell:
+-		 *
+-		 * save_traps=$(trap)
+-		 * ...
+-		 * eval "$save_traps"
+-		 *
+-		 * Standard does not say that "trap" in subshell shall print
+-		 * parent shell's traps. It only says that its output
+-		 * must have suitable form, but then, in the above example
+-		 * (which is not supposed to be normative), it implies that.
+-		 *
+-		 * bash (and probably other shell) does implement it
+-		 * (traps are reset to defaults, but "trap" still shows them),
+-		 * but as a result, "trap" logic is hopelessly messed up:
+-		 *
+-		 * # trap
+-		 * trap -- 'echo Ho' SIGWINCH  <--- we have a handler
+-		 * # (trap)        <--- trap is in subshell - no output (correct, traps are reset)
+-		 * # true | trap   <--- trap is in subshell - no output (ditto)
+-		 * # echo `true | trap`    <--- in subshell - output (but traps are reset!)
+-		 * trap -- 'echo Ho' SIGWINCH
+-		 * # echo `(trap)`         <--- in subshell in subshell - output
+-		 * trap -- 'echo Ho' SIGWINCH
+-		 * # echo `true | (trap)`  <--- in subshell in subshell in subshell - output!
+-		 * trap -- 'echo Ho' SIGWINCH
+-		 *
+-		 * The rules when to forget and when to not forget traps
+-		 * get really complex and nonsensical.
+-		 *
+-		 * Our solution: ONLY bare $(trap) or `trap` is special.
+-		 */
+-		s = skip_whitespace(s);
+-		if (is_prefixed_with(s, "trap")
+-		 && skip_whitespace(s + 4)[0] == '\0'
+-		) {
+-			static const char *const argv[] ALIGN_PTR = { NULL, NULL };
+-			builtin_trap((char**)argv);
+-			fflush_all(); /* important */
+-			_exit(0);
+-		}
++	/* Awful hack for `trap` or $(trap): ONLY bare $(trap) or `trap` is
++	 * special (reset traps, but still print them). See upstream for why. */
++	s = skip_whitespace(s);
++	if (is_prefixed_with(s, "trap")
++	 && skip_whitespace(s + 4)[0] == '\0'
++	) {
++		static const char *const argv[] ALIGN_PTR = { NULL, NULL };
++		builtin_trap((char**)argv);
++		fflush_all(); /* important */
++		_exit(0);
++	}
+ # endif
+ # if BB_MMU
+-		/* Prevent it from trying to handle ctrl-z etc */
+-		IF_HUSH_JOB(G.run_list_level = 1;)
+-		CLEAR_RANDOM_T(&G.random_gen); /* or else $RANDOM repeats in child */
+-		reset_traps_to_defaults();
+-		IF_HUSH_MODE_X(G.x_mode_depth++;)
+-		//bb_error_msg("%s: ++x_mode_depth=%d", __func__, G.x_mode_depth);
+-		parse_and_run_string(s);
+-		_exit(G.last_exitcode);
++	/* Prevent it from trying to handle ctrl-z etc */
++	IF_HUSH_JOB(G.run_list_level = 1;)
++	CLEAR_RANDOM_T(&G.random_gen); /* or else $RANDOM repeats in child */
++	reset_traps_to_defaults();
++	IF_HUSH_MODE_X(G.x_mode_depth++;)
++	parse_and_run_string(s);
++	_exit(G.last_exitcode);
+ # else
+-	/* We re-execute after vfork on NOMMU. This makes this script safe:
++	/* We re-execute after clone on NOMMU. This makes this script safe:
+ 	 * yes "0123456789012345678901234567890" | dd bs=32 count=64k >BIG
+ 	 * huge=`cat BIG` # was blocking here forever
+ 	 * echo OK
+ 	 */
+-		re_execute_shell(&to_free,
+-				s,
+-				G.global_argv[0],
+-				G.global_argv + 1,
+-				NULL);
++	re_execute_shell(to_free_p,
++			s,
++			G.global_argv[0],
++			G.global_argv + 1,
++			NULL);
+ # endif
++	return 0; /* not reached (child execs or _exits) */
++}
++
++static int generate_stream_from_string(const char *s, pid_t *pid_p)
++{
++	pid_t pid;
++	int channel[2];
++# if !BB_MMU
++	char **to_free = NULL;
++# endif
++
++	xpipe(channel);
++# if BB_MMU
++	{
++		void *arg[] = { (void*)s, channel };
++		pid = xfork();
++		if (pid == 0) /* child */
++			generate_stream_child(arg);
+ 	}
++# else
++	{
++		void *arg[] = { (void*)s, channel, &to_free };
++		pid = clone(generate_stream_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, arg);
++	}
++# endif
+ 
+ 	/* parent */
+ 	*pid_p = pid;

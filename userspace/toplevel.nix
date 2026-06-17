@@ -12,7 +12,7 @@
 # all present in `sw` (system.path); /etc is a per-file symlink tree (activate).
 # nrConsoles=8 is baked into inittab — keep kernel HVC_WASM_NR_CONSOLES and host
 # HVC_CONSOLES in lockstep (see init.nix).
-{ pkgs, etc, systemPath, passwd, group, inittab, activate }:
+{ pkgs, busybox, etc, systemPath, passwd, group, inittab, activate }:
 pkgs.runCommand "wasm-system" { } ''
   mkdir -p $out
   # Real /etc = module-generated etc + our static passwd/group + profile inittab.
@@ -24,6 +24,8 @@ pkgs.runCommand "wasm-system" { } ''
   cp ${inittab} $out/etc/inittab
   ln -s ${systemPath} $out/sw
   ln -s ${activate} $out/activate
-  # init entrypoint: busybox (the thin /init execs $out/init; basename `init`).
-  ln -s ${pkgs.busybox}/bin/busybox $out/init
+  # init entrypoint: the PATCHED busybox (the thin /init execs $out/init;
+  # basename `init` -> busybox init applet). MUST be the clone-spawn busybox —
+  # stock busybox's fork/vfork PID1 SIGILLs on the wasm NOMMU model.
+  ln -s ${busybox}/bin/busybox $out/init
 ''

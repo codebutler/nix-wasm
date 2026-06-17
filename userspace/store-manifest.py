@@ -13,6 +13,21 @@ with open(store_paths_file) as f:
     paths = [l.strip() for l in f if l.strip()]
 
 for sp in paths:
+    # A store path is not always a directory: `writeText`/`writeScript` outputs
+    # (e.g. the activate script) are a single FILE, and some are symlinks. Emit
+    # the correct node type for the top-level path, then walk only real dirs.
+    if os.path.islink(sp):
+        entries[rel(sp)] = {"t": "l", "to": os.readlink(sp)}
+        continue
+    if os.path.isfile(sp):
+        with open(sp, "rb") as fh:
+            data = fh.read()
+        entries[rel(sp)] = {
+            "t": "f",
+            "x": bool(os.stat(sp).st_mode & 0o111),
+            "d": base64.b64encode(data).decode("ascii"),
+        }
+        continue
     # the store dir itself
     entries[rel(sp)] = {"t": "d"}
     for root, dirs, files in os.walk(sp):

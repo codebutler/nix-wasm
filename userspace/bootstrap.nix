@@ -49,7 +49,10 @@ pkgs.writeText "init" ''
   fi
 
   # Resolve + activate the system, then guest-tool seam, then hand off to init.
-  sys=$(readlink -f /nix/var/nix/profiles/system 2>/dev/null)
+  # The profile symlink is a DIRECT absolute pointer to the store path (one level;
+  # see store-manifest.py), so a plain readlink resolves it — no `-f`/realpath
+  # canonicalization (musl realpath corrupts long targets read over 9p/overlay).
+  sys=$(readlink /nix/var/nix/profiles/system 2>/dev/null)
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
 

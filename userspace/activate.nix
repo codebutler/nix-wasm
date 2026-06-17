@@ -13,11 +13,13 @@
 # shebang, and in THIS repo `cross.bash` is the NATIVE host bash (deps-overlay
 # maps bash/runtimeShell -> buildPackages), which would drag native bash+glibc
 # (~50MB) into the guest closure. The thin /init runs this as `sh "$sys/activate"
-# "$sys"`, so the shebang is cosmetic; busybox ash honours `set -eu`.
+# "$sys"`, so the shebang is cosmetic; busybox hush honours `set -e`.
 { pkgs }:
 pkgs.writeText "activate" ''
   #!/bin/sh
-  set -eu
+  # busybox hush (the guest /bin/sh) implements `set -e` but NOT `set -u`
+  # (no nounset option) — `set -eu` aborts with "invalid option". -e suffices.
+  set -e
   sys="$1"
 
   # Profile indirection: inittab + /etc/profile reference /run/current-system/sw.
