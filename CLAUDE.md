@@ -178,6 +178,9 @@ arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
   wrappers by making `clang`/`clang++` act as their own driver for the wasm target
   (config file / custom ToolChain), gated on whether LLVM's linker spawn uses
   posix_spawn on the NOMMU port.
+- `docs/plan-guest-shell.md` — the critical path for autotools `./configure`: hush
+  (the current `/bin/sh`) isn't POSIX-enough for autoconf; plan to port busybox
+  `ash` to the clone-with-fn NOMMU spawn model.
 
 (The per-task implementation plans — Phase-1 toolchain, the userspace Plans 1/2,
 the kernel-nixify plan — were executed and removed; the code + `STATUS.md` are the

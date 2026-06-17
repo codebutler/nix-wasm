@@ -259,6 +259,26 @@ disables, and the `-lc++ -lc++abi -lunwind` link. Two non-obvious requirements:
 Validated in-guest: `c++ -O2` building std::string + std::vector + std::sort +
 exceptions + `std::cout` compiles and runs.
 
+### ⚠️ Real autoconf `./configure` — blocked on the guest shell (2026-06-17)
+A2 (run a genuine autoconf-generated `configure` + `make` in-guest) was run with a
+host-generated minimal autoconf project (real 4669-line `configure`: `AC_PROG_CC`,
+`AC_CHECK_HEADERS`, `AC_CHECK_FUNCS`, `config.h`, run-tests). **The toolchain side
+works** — the conftest compile/link/RUN loop, `cc` detection, and `make` all
+function (the startup-SIGILL + `c++` fixes hold up under configure's load). **The
+blocker is the shell:** the guest `/bin/sh` is busybox **hush**, which is not
+POSIX-complete enough for autoconf — configure dies with `sh: ambiguous redirect` /
+`sh: syntax error at 'fi'` and emits no Makefile.
+
+This is the NOMMU-fork wall resurfacing (see fork/vfork notes): autoconf needs a
+real POSIX shell, but a real shell's subshell/pipeline/`$(…)` model duplicates the
+shell process via `fork()` — impossible on one shared NOMMU memory. hush was chosen
+and spawn-patched (clone-with-fn) precisely to sidestep that, but hush can't parse
+autoconf. `ash` is **not** compiled in (`# CONFIG_ASH is not set`) and would need
+its own fork sites ported to the clone-with-fn model. So: **plain-Makefile and
+`nix-build`-driven C/C++ builds compile cleanly in-guest; autotools `./configure`
+specifically is blocked** until the guest gets an autoconf-capable, NOMMU-safe
+shell. Plan: `docs/plan-guest-shell.md`.
+
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
 systemd/perl/python — rejected). Prior art that validated the shape: **NixNG**
