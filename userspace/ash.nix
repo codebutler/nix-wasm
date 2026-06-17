@@ -46,9 +46,13 @@ cross.stdenv.mkDerivation {
     # attributes so the __cb_* calls bind to the linked guest adapter instead.
     sed -i '/__attribute__((import_module("cb")/d' shell/ash.c
 
-    # Compile the guest cb adapter as part of the shell dir (gated on CONFIG_ASH).
+    # Compile the guest cb adapter + the wasm SjLj runtime as part of the shell
+    # dir (gated on CONFIG_ASH). The SjLj runtime provides __wasm_setjmp/_test/
+    # __wasm_longjmp + the __c_longjmp tag that `-mllvm -wasm-enable-sjlj` needs
+    # (LLVM-21 ships no standalone impl).
     cp ${./ash-cb-guest.c} shell/ash_cb_guest.c
-    echo 'lib-$(CONFIG_ASH) += ash_cb_guest.o' >> shell/Kbuild.src
+    cp ${./ash-wasm-sjlj.c} shell/ash_wasm_sjlj.c
+    echo 'lib-$(CONFIG_ASH) += ash_cb_guest.o ash_wasm_sjlj.o' >> shell/Kbuild.src
   '';
 
   depsBuildBuild = [ pkgs.gcc ];
@@ -68,7 +72,14 @@ cross.stdenv.mkDerivation {
       "STRIP=${cc}/bin/${p}strip"
       "OBJCOPY=${cc}/bin/${p}objcopy"
       "CONFIG_SYSROOT="
-      "CONFIG_EXTRA_CFLAGS=-isystem ${busyboxKernelHeaders}"
+      # -mllvm -wasm-enable-sjlj: ash's exit/error control flow uses
+      # setjmp/longjmp (exraise/EXEXIT). musl-wasm's longjmp is literally
+      # `call abort` ("forbidden"; setjmp is a no-op) — so every ash exit
+      # SIGABRTs. clang's wasm SjLj lowers setjmp/longjmp via wasm EH itself
+      # (never calling musl's longjmp), exactly as pc's sh.wasm build does.
+      # The cross stdenv adds no -fwasm-exceptions here, so there's no EH/SjLj
+      # conflict.
+      "CONFIG_EXTRA_CFLAGS=-isystem ${busyboxKernelHeaders} -mllvm -wasm-enable-sjlj"
       "CONFIG_EXTRA_LDFLAGS="
     )
     # Minimal ash binary (pc's sh.wasm recipe, sans WASI): allnoconfig → enable
@@ -102,21 +113,12 @@ cross.stdenv.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    make "''${mk[@]}" CONFIG_PREFIX=$out install
-    for d in sbin usr/bin usr/sbin; do
-      [ -d "$out/$d" ] || continue
-      for f in "$out/$d"/*; do
-        n=$(basename "$f")
-        [ "$n" = busybox ] && continue
-        ln -sf busybox "$out/bin/$n"
-      done
-      rm -rf "$out/$d"
-    done
-    rmdir "$out/usr" 2>/dev/null || true
-    rm -f "$out/linuxrc"
-    # Expose the shell as `ash` (and `sh`) → the single busybox binary.
+    # Install ONLY the ash binary as `ash`, to avoid colliding with the main
+    # busybox (which provides `sh` + coreutils) in the shared system profile.
+    # External commands ash runs resolve to that busybox on PATH.
+    mkdir -p "$out/bin"
+    cp build/busybox "$out/bin/busybox"
     ln -sf busybox "$out/bin/ash"
-    ln -sf busybox "$out/bin/sh"
     runHook postInstall
   '';
 

@@ -110,7 +110,7 @@
         # The in-guest toolchain, folded into the system profile/closure (one
         # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
         # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
-        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm ];
+        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
