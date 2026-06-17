@@ -1,0 +1,1397 @@
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -308,6 +308,96 @@
+ # error "Do not even bother, ash will not run on NOMMU machine"
+ #endif
+ 
++/* ============ cb forkshell (M6, #106 items 1/2) — fork-without-exec.
++ *
++ * Port of busybox-w32's forkshell machinery (Windows also has no fork()) to
++ * the WASI build. ash forks WITHOUT exec'ing to run its own code in a child:
++ * subshells ( ... ), command substitution $(shell-code), backgrounded
++ * compound commands. wasm can't clone a live instance, so instead the parent
++ * SERIALIZES the state a child shell needs -- variables, functions, aliases,
++ * cmdtable, the parse-tree node to run -- into a flat block with a relocation
++ * bitmap (reusing ash's own copynode/calcsize machinery), and the cb host
++ * bridge boots a FRESH sh.wasm instance ("sh --fs") that fetches the block,
++ * relocates its pointers, installs the state, and evaluates the node. The
++ * child's stdio is wired by the host (terminal for subshells, a capture
++ * buffer for $(...)).
++ */
++
++union node;
++struct strlist;
++struct job;
++
++struct forkshell {
++	/* filled by forkshell_copy() */
++	struct globals_misc *gmp;
++	struct globals_var *gvp;
++	struct tblentry **cmdtable;
++#if ENABLE_ASH_ALIAS
++	struct alias **atab;
++#endif
++	char *old_base;     /* block address in the parent (relocation base) */
++	int size;           /* header + funcblock + funcstring, excl. bitmap */
++	int relocatesize;   /* pointer slots covered by the relocation bitmap */
++
++	/* type of forkshell */
++	int fpid;
++
++	/* generic data, used by forkshell_child */
++	int mode;
++
++	/* optional data, used by forkshell_child */
++	int flags;
++	union node *n;
++	char **argv;
++	const char *path;
++};
++
++enum {
++	FS_OPENHERE,
++	FS_EVALBACKCMD,
++	FS_EVALSUBSHELL,
++	FS_EVALPIPE,
++	FS_SHELLEXEC
++};
++
++/* cb host-bridge imports (M6). fork_run runs a serialized block in a fresh
++ * sh.wasm child (bg=1 returns immediately); fork_capture additionally
++ * captures the child's stdout into outbuf and stores its exit status at
++ * *statusp; fork_block is the child-side fetch (len=0 probes the size). */
++__attribute__((import_module("cb"), import_name("fork_run")))
++extern int __cb_fork_run(const char *block, int len, int bg);
++__attribute__((import_module("cb"), import_name("fork_capture")))
++extern int __cb_fork_capture(const char *block, int len, char *outbuf,
++			     int outbufsize, int *statusp);
++__attribute__((import_module("cb"), import_name("fork_block")))
++extern int __cb_fork_block(char *buf, int len);
++/* fork_pipeline (M6b): N serialized blocks, one per pipeline stage, joined by
++ * host pipe queues. buf = [i32 nstages][per stage: i32 len, block bytes]. */
++__attribute__((import_module("cb"), import_name("fork_pipeline")))
++extern int __cb_fork_pipeline(const char *buf, int len, int bg);
++
++/* here_fd (#182 item 1): hand a heredoc body to the worker, which inserts a
++ * byte-buffer Fd straight into the live WASI fd table and returns its index —
++ * no pipe, no temp file. openhere() dup2s it onto the target fd as usual. */
++__attribute__((import_module("cb"), import_name("here_fd")))
++extern int __cb_here_fd(const char *text, int len);
++
++/* poll_signal (#180 trap delivery): NON-blocking probe of the host's
++ * pending-signal cell in the futex SAB header (the host Atomics.store's a
++ * signo there at any time; this is a plain shared-memory read, no futex
++ * round). consume=1 clears the cell, consume=0 peeks. */
++__attribute__((import_module("cb"), import_name("poll_signal")))
++extern int __cb_poll_signal(int consume);
++
++static int forkshell_run(struct forkshell *fs, int bg);
++static int forkshell_pipeline(union node *n, int flags);
++static int forkshell_capture(struct forkshell *fs, char **bufp, int *statusp);
++static void forkshell_init(void);
++static void *sticky_mem_start, *sticky_mem_end;
++static void sticky_free(void *p);
++#define free(p) sticky_free(p)
++
++
+ /* ============ Hash table sizes. Configurable. */
+ 
+ #define VTABSIZE 39
+@@ -4648,6 +4738,17 @@
+ 	struct job *job;
+ 	int retval;
+ 	struct job *jp;
++
++	/* cb forkshell (#180): fork children are host-side workers tracked in a
++	 * HOST job table — ash's own jobtab is always empty here, so the stock
++	 * dowait/waitpid path can only fail. Delegate to the host's `wait`
++	 * session command through the spawn bridge (blocks until the job(s)
++	 * exit, returns the exit status). */
++	{
++		extern int cb_spawn(char **xargv);
++		return cb_spawn(argv);
++	}
++
+ #if BASH_WAIT_N
+ 	int status;
+ 	char one = nextopt("n");
+@@ -5484,38 +5585,22 @@
+ openhere(union node *redir)
+ {
+ 	char *p;
+-	int pip[2];
+-	size_t len = 0;
+-
+-	if (pipe(pip) < 0)
+-		ash_msg_and_raise_perror("can't create pipe");
++	int fd;
+ 
++	/* cb heredoc (#182 item 1): no pipe(), no fork — hand the (expanded)
++	 * body to the host worker, which wires it as an in-memory read fd in
++	 * the WASI fd table. The stock pipe() path wedged the shell (sh.wasm
++	 * has no pipes); any size works now, not just <= PIPE_BUF. */
+ 	p = redir->nhere.doc->narg.text;
+ 	if (redir->type == NXHERE) {
+ 		expandhere(redir->nhere.doc);
+ 		p = stackblock();
+ 	}
+ 
+-	len = strlen(p);
+-	if (len <= PIPE_BUF) {
+-		xwrite(pip[1], p, len);
+-		goto out;
+-	}
+-
+-	if (forkshell((struct job *)NULL, (union node *)NULL, FORK_NOJOB) == 0) {
+-		/* child */
+-		close(pip[0]);
+-		ignoresig(SIGINT);  //signal(SIGINT, SIG_IGN);
+-		ignoresig(SIGQUIT); //signal(SIGQUIT, SIG_IGN);
+-		ignoresig(SIGHUP);  //signal(SIGHUP, SIG_IGN);
+-		ignoresig(SIGTSTP); //signal(SIGTSTP, SIG_IGN);
+-		signal(SIGPIPE, SIG_DFL);
+-		xwrite(pip[1], p, len);
+-		_exit_SUCCESS();
+-	}
+- out:
+-	close(pip[1]);
+-	return pip[0];
++	fd = __cb_here_fd(p, (int)strlen(p));
++	if (fd < 0)
++		ash_msg_and_raise_error("can't create heredoc");
++	return fd;
+ }
+ 
+ static int
+@@ -6610,132 +6695,27 @@
+ 		goto out;
+ 	}
+ 
+-	/* M3b: $(external_cmd) fast path.
+-	 * For a simple NCMD with no redirects/assigns, try to capture stdout via
+-	 * cb_spawn_capture.  argv[0] is passed un-resolved; if the host's applet
+-	 * runner doesn't know the command it returns -1 and we fall through to
+-	 * the pipe/forkshell path (which also fails for builtins, giving the same
+-	 * behaviour as before). We intentionally skip find_command here to avoid
+-	 * forward-declaration ordering issues in this single huge .c file. */
+-	if (ctl == CTLBACKQ && n->type == NCMD
+-	    && n->ncmd.redirect == NULL && n->ncmd.assign == NULL
+-	    && n->ncmd.args != NULL
+-	    && n->ncmd.args->narg.text != NULL) {
+-		/* Grab the raw command name — we only proceed if it looks like
+-		 * an external name (no slashes, not empty).  Builtins are short-
+-		 * circuited on the host side (cb_spawn_capture returns -1). */
+-		const char *bq_cmd0 = n->ncmd.args->narg.text;
+-		/* Skip if the first arg has embedded expansions (backquote, $) —
+-		 * those need the full arg-expansion machinery that runs later. */
+-		if (bq_cmd0[0] && bq_cmd0[0] != CTLVAR && bq_cmd0[0] != CTLBACKQ
+-		    && bq_cmd0[0] != CTLENDVAR && !strchr(bq_cmd0, '/')) {
+-#define CB_BQ_MAX_ARGC  64
+-#define CB_BQ_ARG_BUFSZ 4096
+-#define CB_BQ_OUT_BUFSZ 65536
+-			static char *bq_argv[CB_BQ_MAX_ARGC + 1];
+-			static char  bq_arg_storage[CB_BQ_ARG_BUFSZ];
+-			static char  bq_outbuf[CB_BQ_OUT_BUFSZ];
+-			struct arglist bq_arglist;
+-			struct strlist *bq_sp;
+-			struct stackmark bq_smark;
+-			union node *bq_argp;
+-			int bq_ai = 0, bq_bufoff = 0, bq_tlen, bq_captured;
+-			int bq_overflow = 0;
+-			/* evalbackcmd runs *during* the outer command line's word
+-			 * expansion, so the global expdest points into the buffer
+-			 * expbackq is building.  expandarg() below appends the inner
+-			 * command's args to that same expdest, corrupting the outer
+-			 * line (the args leak into the result).  The normal fork path
+-			 * avoids this because the child expands in its own memory.
+-			 * Save expdest and restore it after, so only the captured
+-			 * stdout (appended by expbackq via memtodest) lands. */
+-			char *bq_saved_expdest = expdest;
+-
+-			setstackmark(&bq_smark);
+-			bq_arglist.lastp = &bq_arglist.list;
+-			*bq_arglist.lastp = NULL;
+-			for (bq_argp = n->ncmd.args; bq_argp; bq_argp = bq_argp->narg.next)
+-				expandarg(bq_argp, &bq_arglist, EXP_FULL | EXP_TILDE);
+-			*bq_arglist.lastp = NULL;
+-
+-			for (bq_sp = bq_arglist.list;
+-			     bq_sp && bq_ai < CB_BQ_MAX_ARGC;
+-			     bq_sp = bq_sp->next) {
+-				bq_tlen = (int)strlen(bq_sp->text) + 1;
+-				if (bq_bufoff + bq_tlen > CB_BQ_ARG_BUFSZ) {
+-					bq_overflow = 1;
+-					break;
+-				}
+-				memcpy(bq_arg_storage + bq_bufoff, bq_sp->text, bq_tlen);
+-				bq_argv[bq_ai++] = bq_arg_storage + bq_bufoff;
+-				bq_bufoff += bq_tlen;
+-			}
+-			if (bq_sp) bq_overflow = 1;
+-			bq_argv[bq_ai] = NULL;
+-			popstackmark(&bq_smark);
+-			expdest = bq_saved_expdest; /* undo expandarg's writes to the outer expansion */
+-
+-			if (bq_ai > 0 && !bq_overflow) {
+-				bq_captured = cb_spawn_capture(bq_argv, bq_outbuf,
+-				                               CB_BQ_OUT_BUFSZ);
+-				if (bq_captured >= 0) {
+-					if (bq_captured > 0) {
+-						result->buf = xmalloc(bq_captured + 1);
+-						memcpy(result->buf, bq_outbuf, bq_captured);
+-						result->buf[bq_captured] = '\0';
+-						result->nleft = bq_captured;
+-					}
+-					result->fd = -1;
+-					result->jp = NULL;
+-					goto out;
+-				}
+-				/* bq_captured < 0: not an external command — fall
+-				 * through to pipe/fork (will also fail, as before) */
+-			}
+-		}
+-	}
+ 
+-	if (pipe(pip) < 0)
+-		ash_msg_and_raise_perror("can't create pipe");
+-	/* process substitution uses NULL job/node, like openhere() */
+-	jp = (ctl == CTLBACKQ) ? makejob(/*n,*/ 1) : NULL;
+-	if (forkshell(jp, (ctl == CTLBACKQ) ? n : NULL, FORK_NOJOB) == 0) {
+-		/* child */
+-		FORCE_INT_ON;
+-		close(pip[ip]);
+-		/* ic is index of child end of pipe *and* fd to connect it to */
+-		if (pip[ic] != ic) {
+-			/*close(ic);*/
+-			dup2_or_raise(pip[ic], ic);
+-			close(pip[ic]);
+-		}
+-/* TODO: eflag clearing makes the following not abort:
+- *  ash -c 'set -e; z=$(false;echo foo); echo $z'
+- * which is what bash does (unless it is in POSIX mode).
+- * dash deleted "eflag = 0" line in the commit
+- *  Date: Mon, 28 Jun 2010 17:11:58 +1000
+- *  [EVAL] Don't clear eflag in evalbackcmd
+- * For now, preserve bash-like behavior, it seems to be somewhat more useful:
+- */
+-		eflag = 0;
+-		ifsfree();
+-		evaltreenr(n, EV_EXIT);
+-		/* NOTREACHED */
+-	}
+-	/* parent */
+-#if BASH_PROCESS_SUBST
+-	if (ctl != CTLBACKQ) {
+-		int fd = fcntl(pip[ip], F_DUPFD, 64);
+-		if (fd > 0) {
+-			close(pip[ip]);
+-			pip[ip] = fd;
+-		}
+-		pushfd(pip[ip]);
++	/* cb forkshell (M6, #106 item 1): run the $(...) body in a fresh
++	 * sh.wasm child seeded with this shell's serialized state; the host
++	 * captures the child's stdout and hands it back as a buffer (no pipe,
++	 * no fork). expbackq() consumes result->buf/nleft and frees the buf. */
++	{
++		struct forkshell fs;
++		char *fsbuf;
++		int fslen, fsstatus = 0;
++
++		memset(&fs, 0, sizeof(fs));
++		fs.fpid = FS_EVALBACKCMD;
++		fs.n = n;
++		fslen = forkshell_capture(&fs, &fsbuf, &fsstatus);
++		if (fslen < 0)
++			ash_msg_and_raise_error("can't fork");
++		result->buf = fsbuf;
++		result->nleft = fslen;
++		back_exitstatus = fsstatus;
+ 	}
+-#endif
+-	close(pip[ic]);
+-	result->fd = pip[ip];
+-	result->jp = jp;
++	(void)pip; (void)jp; (void)ip; (void)ic;
+ 
+  out:
+ 	TRACE(("evalbackcmd done: fd=%d buf=0x%x nleft=%d jp=0x%x\n",
+@@ -9013,6 +8993,9 @@
+ /*static int funcstringsize;    // size of strings in node */
+ static void *funcblock;         /* block to allocate function from */
+ static char *funcstring_end;    /* end of block to allocate strings from */
++/* cb forkshell (M6): non-NULL while forkshell_prepare() is serializing. */
++static int fs_size;
++static void *fs_start;
+ 
+ static const uint8_t nodesize[N_NUMBER] ALIGN1 = {
+ 	[NCMD     ] = SHELL_ALIGN(sizeof(struct ncmd)),
+@@ -9145,14 +9128,33 @@
+ }
+ 
+ static char *
+-nodeckstrdup(char *s)
++nodeckstrdup(const char *s)
+ {
++	if (!s)
++		return NULL;   /* cb forkshell: state fields may be NULL */
+ 	funcstring_end -= SHELL_ALIGN(strlen(s) + 1);
+ 	return strcpy(funcstring_end, s);
+ }
+ 
+ static union node *copynode(union node *);
+ 
++/* cb forkshell (M6): while serializing (fs_size != 0), record the location of
++ * every pointer written into the block in a bitmap appended after it, so
++ * forkshell_init() can relocate them in the child (the malloc'd block lands
++ * at a different address in the fresh instance). One bit per pointer slot. */
++static void
++forkshell_mark_ptr(void *dst)
++{
++	char *lrelocate = (char *)fs_start + fs_size;
++	int index = (int)(((char *)dst - (char *)fs_start)/sizeof(char *));
++
++	lrelocate[index/8] |= 1 << (index % 8);
++}
++
++#define SAVE_PTR(dst) { if (fs_size) forkshell_mark_ptr((void *)&(dst)); }
++#define SAVE_PTR2(dst1,dst2) { SAVE_PTR(dst1) SAVE_PTR(dst2) }
++#define SAVE_PTR3(dst1,dst2,dst3) { SAVE_PTR(dst1) SAVE_PTR(dst2) SAVE_PTR(dst3) }
++
+ static struct nodelist *
+ copynodelist(struct nodelist *lp)
+ {
+@@ -9164,6 +9166,7 @@
+ 		*lpp = funcblock;
+ 		funcblock = (char *) funcblock + SHELL_ALIGN(sizeof(struct nodelist));
+ 		(*lpp)->n = copynode(lp->n);
++		SAVE_PTR2((*lpp)->n, (*lpp)->next);
+ 		lp = lp->next;
+ 		lpp = &(*lpp)->next;
+ 	}
+@@ -9187,10 +9190,12 @@
+ 		new->ncmd.args = copynode(n->ncmd.args);
+ 		new->ncmd.assign = copynode(n->ncmd.assign);
+ 		new->ncmd.linno = n->ncmd.linno;
++		SAVE_PTR3(new->ncmd.redirect, new->ncmd.args, new->ncmd.assign);
+ 		break;
+ 	case NPIPE:
+ 		new->npipe.cmdlist = copynodelist(n->npipe.cmdlist);
+ 		new->npipe.pipe_backgnd = n->npipe.pipe_backgnd;
++		SAVE_PTR(new->npipe.cmdlist);
+ 		break;
+ 	case NREDIR:
+ 	case NBACKGND:
+@@ -9198,6 +9203,7 @@
+ 		new->nredir.redirect = copynode(n->nredir.redirect);
+ 		new->nredir.n = copynode(n->nredir.n);
+ 		new->nredir.linno = n->nredir.linno;
++		SAVE_PTR2(new->nredir.redirect, new->nredir.n);
+ 		break;
+ 	case NAND:
+ 	case NOR:
+@@ -9206,37 +9212,44 @@
+ 	case NUNTIL:
+ 		new->nbinary.ch2 = copynode(n->nbinary.ch2);
+ 		new->nbinary.ch1 = copynode(n->nbinary.ch1);
++		SAVE_PTR2(new->nbinary.ch1, new->nbinary.ch2);
+ 		break;
+ 	case NIF:
+ 		new->nif.elsepart = copynode(n->nif.elsepart);
+ 		new->nif.ifpart = copynode(n->nif.ifpart);
+ 		new->nif.test = copynode(n->nif.test);
++		SAVE_PTR3(new->nif.elsepart, new->nif.ifpart, new->nif.test);
+ 		break;
+ 	case NFOR:
+ 		new->nfor.var = nodeckstrdup(n->nfor.var);
+ 		new->nfor.body = copynode(n->nfor.body);
+ 		new->nfor.args = copynode(n->nfor.args);
+ 		new->nfor.linno = n->nfor.linno;
++		SAVE_PTR3(new->nfor.var, new->nfor.body, new->nfor.args);
+ 		break;
+ 	case NCASE:
+ 		new->ncase.cases = copynode(n->ncase.cases);
+ 		new->ncase.expr = copynode(n->ncase.expr);
+ 		new->ncase.linno = n->ncase.linno;
++		SAVE_PTR2(new->ncase.cases, new->ncase.expr);
+ 		break;
+ 	case NCLIST:
+ 		new->nclist.body = copynode(n->nclist.body);
+ 		new->nclist.pattern = copynode(n->nclist.pattern);
+ 		new->nclist.next = copynode(n->nclist.next);
++		SAVE_PTR3(new->nclist.body, new->nclist.pattern, new->nclist.next);
+ 		break;
+ 	case NDEFUN:
+ 		new->ndefun.body = copynode(n->ndefun.body);
+ 		new->ndefun.text = nodeckstrdup(n->ndefun.text);
+ 		new->ndefun.linno = n->ndefun.linno;
++		SAVE_PTR2(new->ndefun.body, new->ndefun.text);
+ 		break;
+ 	case NARG:
+ 		new->narg.backquote = copynodelist(n->narg.backquote);
+ 		new->narg.text = nodeckstrdup(n->narg.text);
+ 		new->narg.next = copynode(n->narg.next);
++		SAVE_PTR3(new->narg.backquote, new->narg.text, new->narg.next);
+ 		break;
+ 	case NTO:
+ #if BASH_REDIR_OUTPUT
+@@ -9249,6 +9262,7 @@
+ 		new->nfile.fname = copynode(n->nfile.fname);
+ 		new->nfile.fd = n->nfile.fd;
+ 		new->nfile.next = copynode(n->nfile.next);
++		SAVE_PTR2(new->nfile.fname, new->nfile.next);
+ 		break;
+ 	case NTOFD:
+ 	case NFROMFD:
+@@ -9256,15 +9270,18 @@
+ 		new->ndup.dupfd = n->ndup.dupfd;
+ 		new->ndup.fd = n->ndup.fd;
+ 		new->ndup.next = copynode(n->ndup.next);
++		SAVE_PTR2(new->ndup.vname, new->ndup.next);
+ 		break;
+ 	case NHERE:
+ 	case NXHERE:
+ 		new->nhere.doc = copynode(n->nhere.doc);
+ 		new->nhere.fd = n->nhere.fd;
+ 		new->nhere.next = copynode(n->nhere.next);
++		SAVE_PTR2(new->nhere.doc, new->nhere.next);
+ 		break;
+ 	case NNOT:
+ 		new->nnot.com = copynode(n->nnot.com);
++		SAVE_PTR(new->nnot.com);
+ 		break;
+ 	};
+ 	new->type = n->type;
+@@ -9418,6 +9435,18 @@
+ 	}
+ 	TRACE(("evaltree(%p: %d, %d) called\n", n, n->type, flags));
+ 
++	/* cb signal delivery (#180): the host raises a signal by storing its
++	 * number in a shared SAB cell; poll it here (a cheap import call, once
++	 * per node) and feed ash's OWN handler — the dotrap() below then runs
++	 * trap handlers exactly as on a real OS, and an untrapped SIGINT
++	 * aborts the in-flight command via raise_interrupt (so ^C breaks a
++	 * busy loop running inside the shell itself). */
++	{
++		int cb_sig = __cb_poll_signal(1);
++		if (cb_sig > 0 && cb_sig < NSIG)
++			signal_handler(cb_sig);
++	}
++
+ 	dotrap();
+ 
+ 	switch (n->type) {
+@@ -9668,34 +9697,36 @@
+ static int
+ evalsubshell(union node *n, int flags)
+ {
+-	struct job *jp;
+ 	int backgnd = (n->type == NBACKGND); /* FORK_BG(1) if yes, else FORK_FG(0) */
+ 	int status;
++	struct forkshell fs;
+ 
+ 	errlinno = lineno = n->nredir.linno;
+ 
+ 	expredir(n->nredir.redirect);
+-	if (!backgnd && (flags & EV_EXIT) && !may_have_traps)
+-		goto nofork;
+-	INT_OFF;
+-	if (backgnd == FORK_FG)
+-		get_tty_state();
+-	jp = makejob(/*n,*/ 1);
+-	if (forkshell(jp, n, backgnd) == 0) {
+-		/* child */
+-		INT_ON;
+-		flags |= EV_EXIT;
+-		if (backgnd)
+-			flags &= ~EV_TESTED;
+- nofork:
++	if (!backgnd && (flags & EV_EXIT) && !may_have_traps) {
++		/* nofork fast path (same as stock) */
+ 		redirect(n->nredir.redirect, 0);
+ 		evaltreenr(n->nredir.n, flags);
+ 		/* never returns */
+ 	}
+-	/* parent */
+-	status = 0;
+-	if (backgnd == FORK_FG)
+-		status = waitforjob(jp);
++	/* cb forkshell (M6, #106 item 1): serialize state + the subshell node;
++	 * the host runs it in a fresh sh.wasm child. Foreground blocks for the
++	 * child's exit status; background ( ... & , cmd & ) returns immediately
++	 * while the child streams to the terminal. */
++	INT_OFF;
++	memset(&fs, 0, sizeof(fs));
++	fs.fpid = FS_EVALSUBSHELL;
++	fs.n = n;
++	fs.flags = flags;
++	fs.mode = backgnd;
++	status = forkshell_run(&fs, backgnd);
++	if (backgnd) {
++		/* host returns the child's pid for `$!` / jobs (#180) */
++		if (status > 0)
++			backgndpid = status;
++		status = 0;
++	}
+ 	INT_ON;
+ 	return status;
+ }
+@@ -9877,51 +9908,23 @@
+ 		}
+ 	}
+ 
++	/* cb forkshell (M6b, #106 item 1): pipelines with shell-code stages
++	 * (builtins, compounds, functions). Each stage runs in its own fresh
++	 * sh.wasm child seeded with this shell's serialized state; the host
++	 * joins the stages with pipe queues (the M5 plumbing). All-external
++	 * pipelines never get here (the M2b fast path above dispatches them as
++	 * plain applets). */
+ 	flags |= EV_EXIT;
+ 	INT_OFF;
+-	if (n->npipe.pipe_backgnd == 0)
+-		get_tty_state();
+-	jp = makejob(/*n,*/ pipelen);
+-	prevfd = -1;
+-	for (lp = n->npipe.cmdlist; lp; lp = lp->next) {
+-		prehash(lp->n);
+-		pip[1] = -1;
+-		if (lp->next) {
+-			if (pipe(pip) < 0) {
+-				close(prevfd);
+-				ash_msg_and_raise_perror("can't create pipe");
+-			}
+-		}
+-		if (forkshell(jp, lp->n, n->npipe.pipe_backgnd) == 0) {
+-			/* child */
+-			INT_ON;
+-			if (pip[1] >= 0) {
+-				close(pip[0]);
+-			}
+-			if (prevfd > 0) {
+-				dup2(prevfd, 0);
+-				close(prevfd);
+-			}
+-			if (pip[1] > 1) {
+-				dup2(pip[1], 1);
+-				close(pip[1]);
+-			}
+-			evaltreenr(lp->n, flags);
+-			/* never returns */
+-		}
+-		/* parent */
+-		if (prevfd >= 0)
+-			close(prevfd);
+-		prevfd = pip[0];
+-		/* Don't want to trigger debugging */
+-		if (pip[1] != -1)
+-			close(pip[1]);
+-	}
+-	if (n->npipe.pipe_backgnd == 0) {
+-		status = waitforjob(jp);
+-		TRACE(("evalpipe:  job done exit status %d\n", status));
++	status = forkshell_pipeline(n, flags);
++	if (n->npipe.pipe_backgnd) {
++		/* host returns the job's pid for `$!` / jobs (#180) */
++		if (status > 0)
++			backgndpid = status;
++		status = 0;
+ 	}
+ 	INT_ON;
++	(void)jp; (void)prevfd; (void)pip;
+ 
+ 	return status;
+ }
+@@ -10743,6 +10746,27 @@
+ 				int rtype = rp->nfile.type;
+ 				const char *rpath = rp->nfile.expfname;
+ 				int rop;
++				if (rtype == NHERE || rtype == NXHERE) {
++					/* heredoc on an external command
++					 * (#182 item 1): ship the (expanded)
++					 * BODY as the spec's path field with
++					 * op 3 — the host feeds it to the
++					 * applet's stdin directly. xstrdup:
++					 * stackblock() is reused by the next
++					 * expandhere in this loop. */
++					if (rtype == NXHERE) {
++						expandhere(rp->nhere.doc);
++						rpath = xstrdup(stackblock());
++					} else {
++						rpath = rp->nhere.doc->narg.text;
++					}
++					rop = 3; /* stdin from content */
++					rdspecs[nrdspecs].fd   = rp->nfile.fd;
++					rdspecs[nrdspecs].op   = rop;
++					rdspecs[nrdspecs].path = rpath ? rpath : "";
++					nrdspecs++;
++					continue;
++				}
+ 				if (!rpath || !rpath[0])
+ 					continue; /* not expanded — skip */
+ 				/* numeric node types — NTO2 is gated behind
+@@ -10757,7 +10781,7 @@
+ 				else if (rtype == 19 /*NFROM*/)
+ 					rop = 2; /* read (<) */
+ 				else {
+-					redir_ok = 0; /* fd-dup / here-doc: unsupported */
++					redir_ok = 0; /* fd-dup: unsupported */
+ 					break;
+ 				}
+ 				rdspecs[nrdspecs].fd   = rp->nfile.fd;
+@@ -13834,6 +13858,16 @@
+ 			inter++;
+ 			chkmail();
+ 		}
++		/* cb signal delivery (#180): a signal raised while the shell was
++		 * blocked reading the prompt (e.g. ^C with a trap set) is picked
++		 * up here, so the trap fires before the next command instead of
++		 * being deferred until one runs. */
++		{
++			int cb_sig = __cb_poll_signal(1);
++			if (cb_sig > 0 && cb_sig < NSIG)
++				signal_handler(cb_sig);
++			dotrap();
++		}
+ 		n = parsecmd(inter);
+ #if DEBUG
+ 		if (DEBUG > 2 && debug && (n != NODE_EOF))
+@@ -14920,6 +14954,14 @@
+ #endif
+ 	INIT_G_cmdtable();
+ 
++	/* cb forkshell child (M6): "sh --fs" — fetch the serialized parent
++	 * state from the host, install it, run the node. Never returns. */
++	if (argv[1] && strcmp(argv[1], "--fs") == 0 && !argv[2]) {
++		forkshell_init();
++		/* only reached on error */
++		bb_error_msg_and_die("forkshell failed");
++	}
++
+ #if PROFILE
+ 	monitor(4, etext, profile_buf, sizeof(profile_buf), 50);
+ #endif
+@@ -15086,3 +15128,725 @@
+  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+  * SUCH DAMAGE.
+  */
++
++
++/* ============ cb forkshell (M6) — serializer + child-side init.
++ *
++ * Ported from busybox-w32's shell/ash.c (GPL-2.0), with the Windows shared-
++ * memory mapping replaced by a malloc'd block handed to the host via
++ * cb.fork_run / cb.fork_capture and re-fetched in the child via
++ * cb.fork_block. The funcblock/funcstring/relocation-bitmap layout and the
++ * copy helpers are kept as close to upstream as the 1.36.1 base allows
++ * (no JOBS, no MAX_HISTORY; basepf/g_parsefile/commandname are file statics
++ * here, not globals_misc members, so they are not serialized).
++ *
++ * forkshell_prepare() lays out one block:
++ *   [struct forkshell][funcblock: structs][funcstring: strings][bitmap]
++ * funcblock grows up from the header; nodeckstrdup() allocates strings from
++ * funcstring_end growing down; every pointer slot written is marked in the
++ * bitmap (SAVE_PTR) so the child can rebase them by old_base delta. */
++
++static int align_len(const char *s)
++{
++	return s ? SHELL_ALIGN(strlen(s)+1) : 0;
++}
++
++struct datasize {
++	int funcblocksize;
++	int funcstringsize;
++};
++
++#define SLIST_SIZE_BEGIN(name,type) \
++static struct datasize \
++name(struct datasize ds, type *p) \
++{ \
++	while (p) { \
++		ds.funcblocksize += sizeof(type);
++		/* do something here with p */
++#define SLIST_SIZE_END() \
++		p = p->next; \
++	} \
++	return ds; \
++}
++
++#define SLIST_COPY_BEGIN(name,type) \
++static type * \
++name(type *vp) \
++{ \
++	type *start; \
++	type **vpp; \
++	vpp = &start; \
++	while (vp) { \
++		*vpp = funcblock; \
++		funcblock = (char *) funcblock + sizeof(type);
++		/* do something here with vpp and vp */
++#define SLIST_COPY_END() \
++		SAVE_PTR((*vpp)->next); \
++		vp = vp->next; \
++		vpp = &(*vpp)->next; \
++	} \
++	*vpp = NULL; \
++	return start; \
++}
++
++/*
++ * struct var
++ */
++SLIST_SIZE_BEGIN(var_size,struct var)
++ds.funcstringsize += align_len(p->var_text);
++SLIST_SIZE_END()
++
++SLIST_COPY_BEGIN(var_copy,struct var)
++(*vpp)->var_text = nodeckstrdup(vp->var_text);
++(*vpp)->flags = vp->flags;
++(*vpp)->var_func = NULL;
++SAVE_PTR((*vpp)->var_text);
++SLIST_COPY_END()
++
++/*
++ * struct tblentry
++ */
++static struct datasize
++tblentry_size(struct datasize ds, struct tblentry *tep)
++{
++	while (tep) {
++		ds.funcblocksize += sizeof(struct tblentry) + align_len(tep->cmdname);
++		/* CMDBUILTIN, e->param.cmd needs no pointer relocation */
++		if (tep->cmdtype == CMDFUNCTION) {
++			ds.funcblocksize += offsetof(struct funcnode, n);
++			ds.funcblocksize = calcsize(ds.funcblocksize, &tep->param.func->n);
++		}
++		tep = tep->next;
++	}
++	return ds;
++}
++
++static struct tblentry *
++tblentry_copy(struct tblentry *tep)
++{
++	struct tblentry *start;
++	struct tblentry **newp;
++	int size;
++
++	newp = &start;
++	while (tep) {
++		*newp = funcblock;
++		size = sizeof(struct tblentry) + align_len(tep->cmdname);
++
++		funcblock = (char *) funcblock + size;
++		memcpy(*newp, tep, sizeof(struct tblentry)+strlen(tep->cmdname));
++		switch (tep->cmdtype) {
++		case CMDBUILTIN:
++			/* Save index of builtin, not pointer; fixed by forkshell_init() */
++			(*newp)->param.index = tep->param.cmd - builtintab;
++			break;
++		case CMDFUNCTION:
++			(*newp)->param.func = funcblock;
++			funcblock = (char *) funcblock + offsetof(struct funcnode, n);
++			copynode(&tep->param.func->n);
++			SAVE_PTR((*newp)->param.func);
++			break;
++		default:
++			break;
++		}
++		SAVE_PTR((*newp)->next);
++		tep = tep->next;
++		newp = &(*newp)->next;
++	}
++	*newp = NULL;
++	return start;
++}
++
++static struct datasize
++cmdtable_size(struct datasize ds)
++{
++	int i;
++	ds.funcblocksize += sizeof(struct tblentry *)*CMDTABLESIZE;
++	for (i = 0; i < CMDTABLESIZE; i++)
++		ds = tblentry_size(ds, cmdtable[i]);
++	return ds;
++}
++
++static struct tblentry **
++cmdtable_copy(void)
++{
++	struct tblentry **new = funcblock;
++	int i;
++
++	funcblock = (char *) funcblock + sizeof(struct tblentry *)*CMDTABLESIZE;
++	for (i = 0; i < CMDTABLESIZE; i++) {
++		new[i] = tblentry_copy(cmdtable[i]);
++		SAVE_PTR(new[i]);
++	}
++	return new;
++}
++
++#if ENABLE_ASH_ALIAS
++/*
++ * struct alias
++ */
++SLIST_SIZE_BEGIN(alias_size,struct alias)
++ds.funcstringsize += align_len(p->name);
++ds.funcstringsize += align_len(p->val);
++SLIST_SIZE_END()
++
++SLIST_COPY_BEGIN(alias_copy,struct alias)
++(*vpp)->name = nodeckstrdup(vp->name);
++(*vpp)->val = nodeckstrdup(vp->val);
++(*vpp)->flag = vp->flag;
++SAVE_PTR((*vpp)->name);
++SAVE_PTR((*vpp)->val);
++SLIST_COPY_END()
++
++static struct datasize
++atab_size(struct datasize ds)
++{
++	int i;
++	ds.funcblocksize += sizeof(struct alias *)*ATABSIZE;
++	for (i = 0; i < ATABSIZE; i++)
++		ds = alias_size(ds, atab[i]);
++	return ds;
++}
++
++static struct alias **
++atab_copy(void)
++{
++	struct alias **new = funcblock;
++	int i;
++
++	funcblock = (char *) funcblock + sizeof(struct alias *)*ATABSIZE;
++	for (i = 0; i < ATABSIZE; i++) {
++		new[i] = alias_copy(atab[i]);
++		SAVE_PTR(new[i]);
++	}
++	return new;
++}
++#endif
++
++/*
++ * char **
++ */
++static struct datasize
++argv_size(struct datasize ds, char **p)
++{
++	if (p) {
++		while (*p) {
++			ds.funcblocksize += sizeof(char *);
++			ds.funcstringsize += align_len(*p);
++			p++;
++		}
++		// Allow two extra elements for tryexec().
++		ds.funcblocksize += 3 * sizeof(char *);
++	}
++	return ds;
++}
++
++static char **
++argv_copy(char **p)
++{
++	char **new, **start = funcblock;
++
++	if (p) {
++		// Allow two extra elements for tryexec().
++		funcblock = (char *) funcblock + 2 * sizeof(char *);
++		while (*p) {
++			new = funcblock;
++			funcblock = (char *) funcblock + sizeof(char *);
++			*new = nodeckstrdup(*p);
++			SAVE_PTR(*new);
++			p++;
++		}
++		new = funcblock;
++		funcblock = (char *) funcblock + sizeof(char *);
++		*new = NULL;
++		return start + 2;
++	}
++	return NULL;
++}
++
++/*
++ * struct redirtab
++ */
++static int
++redirtab_size(int funcblocksize, struct redirtab *rdtp)
++{
++	while (rdtp) {
++		funcblocksize += sizeof(*rdtp)+sizeof(rdtp->two_fd[0])*rdtp->pair_count;
++		rdtp = rdtp->next;
++	}
++	return funcblocksize;
++}
++
++static struct redirtab *
++redirtab_copy(struct redirtab *rdtp)
++{
++	struct redirtab *start;
++	struct redirtab **vpp;
++
++	vpp = &start;
++	while (rdtp) {
++		int size = sizeof(*rdtp)+sizeof(rdtp->two_fd[0])*rdtp->pair_count;
++		*vpp = funcblock;
++		funcblock = (char *) funcblock + size;
++		memcpy(*vpp, rdtp, size);
++		SAVE_PTR((*vpp)->next);
++		rdtp = rdtp->next;
++		vpp = &(*vpp)->next;
++	}
++	*vpp = NULL;
++	return start;
++}
++
++static struct datasize
++globals_var_size(struct datasize ds)
++{
++	int i;
++
++	ds.funcblocksize += sizeof(struct globals_var);
++	ds.funcstringsize += align_len(funcname);
++	ds = argv_size(ds, shellparam.p);
++	ds.funcblocksize = redirtab_size(ds.funcblocksize, redirlist);
++	for (i = 0; i < VTABSIZE; i++)
++		ds = var_size(ds, vartab[i]);
++	return ds;
++}
++
++#undef funcname
++#undef shellparam
++#undef redirlist
++#undef vartab
++static struct globals_var *
++globals_var_copy(void)
++{
++	int i;
++	struct globals_var *gvp, *new;
++
++	gvp = ash_ptr_to_globals_var;
++	new = funcblock;
++	funcblock = (char *) funcblock + sizeof(struct globals_var);
++	memcpy(new, gvp, sizeof(struct globals_var));
++
++	new->funcname = nodeckstrdup(gvp->funcname);
++	SAVE_PTR(new->funcname);
++
++	/* shparam */
++	new->shellparam.malloced = 0;
++	new->shellparam.p = argv_copy(gvp->shellparam.p);
++	SAVE_PTR(new->shellparam.p);
++
++	new->redirlist = redirtab_copy(gvp->redirlist);
++	SAVE_PTR(new->redirlist);
++
++	for (i = 0; i < VTABSIZE; i++) {
++		new->vartab[i] = var_copy(gvp->vartab[i]);
++		SAVE_PTR(new->vartab[i]);
++	}
++
++	return new;
++}
++
++static struct datasize
++globals_misc_size(struct datasize ds)
++{
++	int i;
++
++	ds.funcblocksize += sizeof(struct globals_misc);
++	ds.funcstringsize += align_len(minusc);
++	if (curdir != nullstr)
++		ds.funcstringsize += align_len(curdir);
++	if (physdir != nullstr)
++		ds.funcstringsize += align_len(physdir);
++	ds.funcstringsize += align_len(arg0);
++	for (i = 0; i < (int)ARRAY_SIZE(trap); i++)
++		ds.funcstringsize += align_len(trap[i]);
++	return ds;
++}
++
++#undef minusc
++#undef curdir
++#undef physdir
++#undef arg0
++#undef nullstr
++#undef trap
++static struct globals_misc *
++globals_misc_copy(void)
++{
++	struct globals_misc *p = ash_ptr_to_globals_misc;
++	struct globals_misc *new = funcblock;
++	int i;
++
++	funcblock = (char *) funcblock + sizeof(struct globals_misc);
++	memcpy(new, p, sizeof(struct globals_misc));
++
++	new->minusc = nodeckstrdup(p->minusc);
++	new->curdir = p->curdir != p->nullstr ? nodeckstrdup(p->curdir) : new->nullstr;
++	new->physdir = p->physdir != p->nullstr ? nodeckstrdup(p->physdir) : new->nullstr;
++	new->arg0 = nodeckstrdup(p->arg0);
++	SAVE_PTR(new->minusc);
++	SAVE_PTR(new->curdir);
++	SAVE_PTR(new->physdir);
++	SAVE_PTR(new->arg0);
++	for (i = 0; i < (int)ARRAY_SIZE(p->trap); i++) {
++		new->trap[i] = nodeckstrdup(p->trap[i]);
++		SAVE_PTR(new->trap[i]);
++	}
++	/* (exception_handler / trap_ptr stale parent pointers ride along in the
++	 * memcpy; forkshell_init() overwrites both before they are used) */
++	return new;
++}
++
++static struct datasize
++forkshell_size(struct forkshell *fs)
++{
++	struct datasize ds = {0, 0};
++
++	ds.funcstringsize += align_len(fs->path);
++	ds = globals_misc_size(ds);
++	ds = globals_var_size(ds);
++	ds = cmdtable_size(ds);
++
++	ds.funcblocksize = calcsize(ds.funcblocksize, fs->n);
++	ds = argv_size(ds, fs->argv);
++
++#if ENABLE_ASH_ALIAS
++	ds = atab_size(ds);
++#endif
++	return ds;
++}
++
++static void
++forkshell_copy(struct forkshell *fs, struct forkshell *new)
++{
++	memcpy(new, fs, sizeof(struct forkshell)); /* non-pointer stuff */
++
++	new->path = nodeckstrdup(fs->path);
++	SAVE_PTR(new->path);
++
++	new->gmp = globals_misc_copy();
++	new->gvp = globals_var_copy();
++	new->cmdtable = cmdtable_copy();
++	SAVE_PTR(new->gmp);
++	SAVE_PTR(new->gvp);
++	SAVE_PTR(new->cmdtable);
++
++	new->n = copynode(fs->n);
++	new->argv = argv_copy(fs->argv);
++	SAVE_PTR(new->n);
++	SAVE_PTR(new->argv);
++
++#if ENABLE_ASH_ALIAS
++	new->atab = atab_copy();
++	SAVE_PTR(new->atab);
++#endif
++}
++
++static struct forkshell *
++forkshell_prepare(struct forkshell *fs)
++{
++	struct forkshell *new;
++	struct datasize ds;
++	int size, relocatesize, bitmapsize;
++
++	/* calculate size of structure, funcblock and funcstring */
++	ds = forkshell_size(fs);
++	size = sizeof(struct forkshell) + ds.funcblocksize + ds.funcstringsize;
++	relocatesize = (sizeof(struct forkshell) + ds.funcblocksize)/sizeof(char *);
++	bitmapsize = (relocatesize + 7)/8;
++
++	new = ckzalloc(size + bitmapsize);
++
++	/* Initialise pointers */
++	fs_size = size;
++	fs_start = new;
++	funcblock = (char *)(new + 1);
++	funcstring_end = (char *)new + size;
++
++	/* Now pack them all */
++	forkshell_copy(fs, new);
++
++	/* Finish it up */
++	new->size = size;
++	new->relocatesize = relocatesize;
++	new->old_base = (char *)new;
++	fs_size = 0;
++	fs_start = NULL;
++	return new;
++}
++
++static int
++forkshell_blocklen(struct forkshell *blk)
++{
++	return blk->size + (blk->relocatesize + 7)/8;
++}
++
++static int
++forkshell_run(struct forkshell *fs, int bg)
++{
++	struct forkshell *blk = forkshell_prepare(fs);
++	int status;
++
++	status = __cb_fork_run((char *)blk, forkshell_blocklen(blk), bg);
++	free(blk);
++	if (status < 0)
++		ash_msg_and_raise_error("can't fork");
++	return status;
++}
++
++/* Max captured $(...) output. The host clamps to the SAB data region anyway
++ * (1 MiB); 256 KiB of command substitution is generous for a shell. */
++#define CB_FORK_CAPTURE_MAX (256*1024)
++
++static int
++forkshell_capture(struct forkshell *fs, char **bufp, int *statusp)
++{
++	struct forkshell *blk = forkshell_prepare(fs);
++	char *out;
++	int n;
++
++	*bufp = NULL;
++	out = ckmalloc(CB_FORK_CAPTURE_MAX);
++	n = __cb_fork_capture((char *)blk, forkshell_blocklen(blk),
++			      out, CB_FORK_CAPTURE_MAX, statusp);
++	free(blk);
++	if (n < 0) {
++		free(out);
++		return -1;
++	}
++	*bufp = out;
++	return n;
++}
++
++/* forkshell_pipeline (M6b): serialize each pipeline stage into its own
++ * forkshell block and hand the lot to the host, which runs every stage in a
++ * fresh child shell wired stage-to-stage with pipe queues. Returns the last
++ * stage's exit status (host), or raises on serialization/host failure. */
++static int
++forkshell_pipeline(union node *n, int flags)
++{
++	struct nodelist *lp;
++	int nstages = 0;
++	char *buf;
++	int cap, off, status;
++
++	for (lp = n->npipe.cmdlist; lp; lp = lp->next)
++		nstages++;
++
++	cap = 8192;
++	buf = ckmalloc(cap);
++	off = 4;
++	for (lp = n->npipe.cmdlist; lp; lp = lp->next) {
++		struct forkshell fs;
++		struct forkshell *blk;
++		int len;
++
++		memset(&fs, 0, sizeof(fs));
++		fs.fpid = FS_EVALPIPE;
++		fs.n = lp->n;
++		fs.flags = flags;
++		blk = forkshell_prepare(&fs);
++		len = forkshell_blocklen(blk);
++		while (off + 4 + len > cap) {
++			cap *= 2;
++			buf = ckrealloc(buf, cap);
++		}
++		buf[off+0] = (char)(len & 0xff);
++		buf[off+1] = (char)((len >> 8) & 0xff);
++		buf[off+2] = (char)((len >> 16) & 0xff);
++		buf[off+3] = (char)((len >> 24) & 0xff);
++		memcpy(buf + off + 4, blk, len);
++		off += 4 + len;
++		free(blk);
++	}
++	buf[0] = (char)(nstages & 0xff);
++	buf[1] = (char)((nstages >> 8) & 0xff);
++	buf[2] = (char)((nstages >> 16) & 0xff);
++	buf[3] = (char)((nstages >> 24) & 0xff);
++
++	status = __cb_fork_pipeline(buf, off, n->npipe.pipe_backgnd);
++	free(buf);
++	if (status < 0)
++		ash_msg_and_raise_error("can't fork");
++	return status;
++}
++
++/* ── child side ──────────────────────────────────────────────────────────── */
++
++static void
++forkshell_evalbackcmd(struct forkshell *fs)
++{
++	union node *n = fs->n;
++
++	FORCE_INT_ON;
++/* TODO: eflag clearing makes the following not abort:
++ *  ash -c 'set -e; z=$(false;echo foo); echo $z'
++ * which is what bash does (unless it is in POSIX mode).
++ * (same bash-like behavior as the stock evalbackcmd child) */
++	eflag = 0;
++	ifsfree();
++	evaltreenr(n, EV_EXIT);
++	/* NOTREACHED */
++}
++
++static void
++forkshell_evalsubshell(struct forkshell *fs)
++{
++	union node *n = fs->n;
++	int flags = fs->flags;
++
++	INT_ON;
++	flags |= EV_EXIT;
++	if (fs->mode)
++		flags &= ~EV_TESTED;
++	expredir(n->nredir.redirect);
++	redirect(n->nredir.redirect, 0);
++	evaltreenr(n->nredir.n, flags);
++	/* never returns */
++}
++
++static void
++forkshell_child(struct forkshell *fs)
++{
++	switch (fs->fpid) {
++	case FS_EVALBACKCMD:
++		forkshell_evalbackcmd(fs);
++		break;
++	case FS_EVALSUBSHELL:
++		forkshell_evalsubshell(fs);
++		break;
++	case FS_EVALPIPE:
++		/* stdio is wired by the host (pipe queues); just run the stage */
++		FORCE_INT_ON;
++		evaltreenr(fs->n, fs->flags);
++		break;
++	}
++}
++
++/*
++ * Reinitialise the builtin environment variables in varinit. Their current
++ * settings have been copied from the parent in vartab. Look these up using
++ * the names from varinit_data, copy the details from vartab to varinit and
++ * replace the old copy in vartab with the new one in varinit.
++ *
++ * Also reinitialise the function pointers (serialization NULLed them) and
++ * the LINENO/FUNCNAME var_text buffers (they point at fixed G_var arrays).
++ */
++static void
++reinitvar(void)
++{
++	int i;
++	int nnull = 0;
++	const char *name;
++	struct var **old;
++
++	for (i = 0; i < (int)ARRAY_SIZE(varinit); ++i) {
++		name = varinit_data[i].var_text;
++		if (name == NULL)
++			/* the two entries inited to linenovar/funcnamevar */
++			name = (++nnull == 1) ? "LINENO=" : "FUNCNAME=";
++		old = findvar(hashvar(name), name);
++		if (*old != NULL) {
++			varinit[i] = **old;
++			*old = varinit + i;
++		}
++		varinit[i].var_func = varinit_data[i].var_func;
++	}
++	vlineno.var_text = linenovar;
++	vfuncname.var_text = funcnamevar;
++}
++
++#undef trap_ptr
++static void
++forkshell_init(void)
++{
++	struct forkshell *fs;
++	int total, i;
++	char **ptr;
++	char *lrelocate;
++	static struct jmploc fs_handler;
++
++	/* fetch the serialized block from the host */
++	total = __cb_fork_block((char *)NULL, 0);
++	if (total <= (int)sizeof(struct forkshell))
++		return;
++	fs = ckmalloc(total);
++	if (__cb_fork_block((char *)fs, total) != total)
++		return;
++
++	/* this memory can't be freed */
++	sticky_mem_start = fs;
++	sticky_mem_end = (char *) fs + fs->size;
++
++	/* pointer fixup */
++	lrelocate = (char *)fs + fs->size;
++	for (i = 0; i < fs->relocatesize; i++) {
++		if (lrelocate[i/8] & (1 << i % 8)) {
++			ptr = (char **)((char *)fs + i * sizeof(char *));
++			if (*ptr)
++				*ptr = (char *)fs + (*ptr - fs->old_base);
++		}
++	}
++
++	/* Now fix up stuff that can't be transferred */
++	for (i = 0; i < CMDTABLESIZE; i++) {
++		struct tblentry *e = fs->cmdtable[i];
++		while (e) {
++			if (e->cmdtype == CMDBUILTIN)
++				e->param.cmd = builtintab + e->param.index;
++			e = e->next;
++		}
++	}
++	fs->gmp->trap_ptr = fs->gmp->trap;
++
++	/* Set global variables */
++	ASSIGN_CONST_PTR(&ash_ptr_to_globals_misc, fs->gmp);
++	ASSIGN_CONST_PTR(&ash_ptr_to_globals_var, fs->gvp);
++	cmdtable = fs->cmdtable;
++#if ENABLE_ASH_ALIAS
++	atab = fs->atab;
++#endif
++
++#if ENABLE_ASH_RANDOM_SUPPORT
++	/* or else $RANDOM repeats in child */
++	memset((void *)&random_gen, 0, sizeof(random_gen));
++#endif
++
++	reinitvar();
++
++	/* Thread the parent's cwd into wasi-libc's emulated cwd so relative
++	 * paths in the child — and cb_pack_cwd()'s getcwd() for any externals
++	 * the child spawns — resolve against it (M4 parity). */
++	if (fs->gmp->curdir[0] == '/')
++		chdir(fs->gmp->curdir);
++
++	if (setjmp(fs_handler.loc)) {
++		exitreset();
++		exitshell();
++	}
++	exception_handler = &fs_handler;
++
++	shlvl++;
++
++	if (fs->n && fs->n->type == NCMD        /* is it single cmd? */
++	 && fs->n->ncmd.args && strcmp(fs->n->ncmd.args->narg.text, "trap") == 0
++	 && fs->n->ncmd.args->narg.next == NULL /* "trap" with no arguments */
++	) {
++		/* Trap hack: save trap handler strings for `trap` to print */
++		fs->gmp->trap_ptr = xmemdup(fs->gmp->trap, sizeof(fs->gmp->trap));
++		/* fall through into clearing traps */
++	}
++	clear_traps();
++
++	forkshell_child(fs);
++	/* forkshell_child() should not return; if it does, exit with the
++	 * last status rather than falling into the REPL with parent state. */
++	exitshell();
++}
++
++#undef free
++static void
++sticky_free(void *base)
++{
++	if (base >= sticky_mem_start && base < sticky_mem_end)
++		return;
++	free(base);
++}

@@ -65,6 +65,12 @@
         inherit pkgs cross;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
+      # busybox ASH — the autoconf-capable guest shell (forkshell, NOMMU
+      # fork-without-exec via the guest cb adapter). See docs/plan-guest-shell.md.
+      wasmAsh = import ./userspace/ash.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
 
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
@@ -203,6 +209,7 @@
         cc-sysroot = ccSysroot;
         guest-cc = guestCc;
         guest-cxx = guestCxx;
+        guest-ash = wasmAsh;
 
         # In-guest make (pdpmake → $out/bin/make).
         make-wasm = makeWasm;

@@ -1,0 +1,132 @@
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -9297,6 +9297,9 @@
+ static int evalcommand(union node *, int);
+ static int evalbltin(const struct builtincmd *, int, char **, int);
+ static void prehash(union node *);
++/* cb host-bridge imports (defined in cb_spawn.c, M2 #91 option B) */
++extern int cb_spawn(char **argv);
++extern int cb_spawn_pipeline(char ***stages, int nstages);
+ 
+ /*
+  * Evaluate a parse tree.  The value is left in the global variable
+@@ -9686,6 +9689,100 @@
+ 	pipelen = 0;
+ 	for (lp = n->npipe.cmdlist; lp; lp = lp->next)
+ 		pipelen++;
++
++	/* M2b: all-external pipeline fast path.
++	 * If every stage is a simple command (NCMD) with no redirections that
++	 * resolves to CMDUNKNOWN (an external applet), collect each stage's
++	 * expanded argv and dispatch the whole pipeline to the host via
++	 * cb_spawn_pipeline, skipping the broken fork/pipe path.
++	 *
++	 * Args are expanded via expandarg (EXP_FULL|EXP_TILDE) so that quoted
++	 * strings, $VARIABLES, globs (*.js), and ~ all work, exactly as they
++	 * would in evalcommand. Expanded strings live on ash's stack; we copy
++	 * them into static storage before popstackmark to avoid use-after-pop. */
++	if (!n->npipe.pipe_backgnd && pipelen >= 2) {
++#define CB_PIPE_MAX_STAGES 16
++#define CB_PIPE_MAX_ARGC   64
++#define CB_PIPE_ARG_BUFSZ  4096
++		static char *stage_argv[CB_PIPE_MAX_STAGES][CB_PIPE_MAX_ARGC + 1];
++		static char  arg_storage[CB_PIPE_MAX_STAGES][CB_PIPE_ARG_BUFSZ];
++		/* stage_ptrs[i] = stage_argv[i] — array of pointers for cb_spawn_pipeline */
++		static char **stage_ptrs[CB_PIPE_MAX_STAGES];
++		struct cmdentry entry;
++		struct stackmark smark;
++		int si = 0;
++		int all_external = 1;
++
++		setstackmark(&smark);
++
++		for (lp = n->npipe.cmdlist; lp && si < CB_PIPE_MAX_STAGES; lp = lp->next, si++) {
++			union node *cmd = lp->n;
++			union node *argp;
++			struct arglist arglist;
++			struct strlist *sp;
++			int ai;
++			int buf_off;
++			int tlen;
++
++			/* must be a plain command with no redirections */
++			if (cmd->type != NCMD || cmd->ncmd.redirect != NULL
++			    || cmd->ncmd.args == NULL) {
++				all_external = 0;
++				break;
++			}
++
++			/* Expand all arguments (quotes, $VAR, globs, ~) */
++			arglist.lastp = &arglist.list;
++			*arglist.lastp = NULL;
++			for (argp = cmd->ncmd.args; argp; argp = argp->narg.next)
++				expandarg(argp, &arglist, EXP_FULL | EXP_TILDE);
++			*arglist.lastp = NULL;
++
++			/* Build argv from expanded strlist — resolve command with expanded argv[0] */
++			if (!arglist.list) {
++				all_external = 0;
++				break;
++			}
++			find_command(arglist.list->text, &entry, 0, pathval());
++			if (entry.cmdtype != CMDUNKNOWN) {
++				all_external = 0;
++				break;
++			}
++
++			/* Copy expanded strings into static storage before popstackmark.
++			 * The expanded text pointers (sp->text) live on ash's stack and
++			 * become invalid after popstackmark — we must copy them now. */
++			buf_off = 0;
++			ai = 0;
++			for (sp = arglist.list; sp && ai < CB_PIPE_MAX_ARGC; sp = sp->next) {
++				tlen = (int)strlen(sp->text) + 1;
++				if (buf_off + tlen > CB_PIPE_ARG_BUFSZ) {
++					all_external = 0;
++					break;
++				}
++				memcpy(arg_storage[si] + buf_off, sp->text, tlen);
++				stage_argv[si][ai] = arg_storage[si] + buf_off;
++				buf_off += tlen;
++				ai++;
++			}
++			if (sp) all_external = 0;  /* >MAX_ARGC args -> fall back, don't truncate */
++			if (!all_external) break;
++			stage_argv[si][ai] = NULL;
++
++			if (ai == 0) { all_external = 0; break; }
++		}
++
++		popstackmark(&smark);
++
++		if (all_external && si == pipelen) {
++			int i;
++			for (i = 0; i < si; i++)
++				stage_ptrs[i] = stage_argv[i];
++			exitstatus = status = cb_spawn_pipeline(stage_ptrs, si);
++			return status;
++		}
++	}
++
+ 	flags |= EV_EXIT;
+ 	INT_OFF;
+ 	if (n->npipe.pipe_backgnd == 0)
+@@ -10510,7 +10607,7 @@
+ 	 || !(IS_BUILTIN_REGULAR(cmdentry.u.cmd))
+ 	) {
+ 		path = path ? path : pathval();
+-		find_command(argv[0], &cmdentry, cmd_flag | DO_ERR, path);
++		find_command(argv[0], &cmdentry, cmd_flag, path);
+ 	}
+ 
+ 	jp = NULL;
+@@ -10518,8 +10615,8 @@
+ 	/* Execute the command. */
+ 	switch (cmdentry.cmdtype) {
+ 	case CMDUNKNOWN:
+-		status = 127;
+ 		flush_stdout_stderr();
++		exitstatus = status = cb_spawn(argv);
+ 		goto bail;
+ 
+ 	default: {

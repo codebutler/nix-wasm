@@ -1,0 +1,244 @@
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -6581,6 +6581,11 @@
+ 	/* NOTREACHED */
+ }
+ 
++/* Forward declarations for M3/M3b — these are defined later in the file
++ * or in cb_spawn.c, but evalbackcmd's fast path needs them here. */
++static void expandarg(union node *, struct arglist *, int);
++extern int cb_spawn_capture(char **argv, char *outbuf, int outbuf_size);
++
+ static void FAST_FUNC
+ evalbackcmd(union node *n, struct backcmd *result
+ 				IF_BASH_PROCESS_SUBST(, int ctl))
+@@ -6605,6 +6610,91 @@
+ 		goto out;
+ 	}
+ 
++	/* M3b: $(external_cmd) fast path.
++	 * For a simple NCMD with no redirects/assigns, try to capture stdout via
++	 * cb_spawn_capture.  argv[0] is passed un-resolved; if the host's applet
++	 * runner doesn't know the command it returns -1 and we fall through to
++	 * the pipe/forkshell path (which also fails for builtins, giving the same
++	 * behaviour as before). We intentionally skip find_command here to avoid
++	 * forward-declaration ordering issues in this single huge .c file. */
++	if (ctl == CTLBACKQ && n->type == NCMD
++	    && n->ncmd.redirect == NULL && n->ncmd.assign == NULL
++	    && n->ncmd.args != NULL
++	    && n->ncmd.args->narg.text != NULL) {
++		/* Grab the raw command name — we only proceed if it looks like
++		 * an external name (no slashes, not empty).  Builtins are short-
++		 * circuited on the host side (cb_spawn_capture returns -1). */
++		const char *bq_cmd0 = n->ncmd.args->narg.text;
++		/* Skip if the first arg has embedded expansions (backquote, $) —
++		 * those need the full arg-expansion machinery that runs later. */
++		if (bq_cmd0[0] && bq_cmd0[0] != CTLVAR && bq_cmd0[0] != CTLBACKQ
++		    && bq_cmd0[0] != CTLENDVAR && !strchr(bq_cmd0, '/')) {
++#define CB_BQ_MAX_ARGC  64
++#define CB_BQ_ARG_BUFSZ 4096
++#define CB_BQ_OUT_BUFSZ 65536
++			static char *bq_argv[CB_BQ_MAX_ARGC + 1];
++			static char  bq_arg_storage[CB_BQ_ARG_BUFSZ];
++			static char  bq_outbuf[CB_BQ_OUT_BUFSZ];
++			struct arglist bq_arglist;
++			struct strlist *bq_sp;
++			struct stackmark bq_smark;
++			union node *bq_argp;
++			int bq_ai = 0, bq_bufoff = 0, bq_tlen, bq_captured;
++			int bq_overflow = 0;
++			/* evalbackcmd runs *during* the outer command line's word
++			 * expansion, so the global expdest points into the buffer
++			 * expbackq is building.  expandarg() below appends the inner
++			 * command's args to that same expdest, corrupting the outer
++			 * line (the args leak into the result).  The normal fork path
++			 * avoids this because the child expands in its own memory.
++			 * Save expdest and restore it after, so only the captured
++			 * stdout (appended by expbackq via memtodest) lands. */
++			char *bq_saved_expdest = expdest;
++
++			setstackmark(&bq_smark);
++			bq_arglist.lastp = &bq_arglist.list;
++			*bq_arglist.lastp = NULL;
++			for (bq_argp = n->ncmd.args; bq_argp; bq_argp = bq_argp->narg.next)
++				expandarg(bq_argp, &bq_arglist, EXP_FULL | EXP_TILDE);
++			*bq_arglist.lastp = NULL;
++
++			for (bq_sp = bq_arglist.list;
++			     bq_sp && bq_ai < CB_BQ_MAX_ARGC;
++			     bq_sp = bq_sp->next) {
++				bq_tlen = (int)strlen(bq_sp->text) + 1;
++				if (bq_bufoff + bq_tlen > CB_BQ_ARG_BUFSZ) {
++					bq_overflow = 1;
++					break;
++				}
++				memcpy(bq_arg_storage + bq_bufoff, bq_sp->text, bq_tlen);
++				bq_argv[bq_ai++] = bq_arg_storage + bq_bufoff;
++				bq_bufoff += bq_tlen;
++			}
++			if (bq_sp) bq_overflow = 1;
++			bq_argv[bq_ai] = NULL;
++			popstackmark(&bq_smark);
++			expdest = bq_saved_expdest; /* undo expandarg's writes to the outer expansion */
++
++			if (bq_ai > 0 && !bq_overflow) {
++				bq_captured = cb_spawn_capture(bq_argv, bq_outbuf,
++				                               CB_BQ_OUT_BUFSZ);
++				if (bq_captured >= 0) {
++					if (bq_captured > 0) {
++						result->buf = xmalloc(bq_captured + 1);
++						memcpy(result->buf, bq_outbuf, bq_captured);
++						result->buf[bq_captured] = '\0';
++						result->nleft = bq_captured;
++					}
++					result->fd = -1;
++					result->jp = NULL;
++					goto out;
++				}
++				/* bq_captured < 0: not an external command — fall
++				 * through to pipe/fork (will also fail, as before) */
++			}
++		}
++	}
++
+ 	if (pipe(pip) < 0)
+ 		ash_msg_and_raise_perror("can't create pipe");
+ 	/* process substitution uses NULL job/node, like openhere() */
+@@ -9297,9 +9387,13 @@
+ static int evalcommand(union node *, int);
+ static int evalbltin(const struct builtincmd *, int, char **, int);
+ static void prehash(union node *);
+-/* cb host-bridge imports (defined in cb_spawn.c, M2 #91 option B) */
++/* cb host-bridge imports (defined in cb_spawn.c, M2/M2b/M3) */
+ extern int cb_spawn(char **argv);
+ extern int cb_spawn_pipeline(char ***stages, int nstages);
++typedef struct { int fd; int op; const char *path; } cb_redir_spec;
++extern int cb_spawn_redirect(char **argv, const cb_redir_spec *redirs,
++                             int nredirs);
++extern int cb_spawn_capture(char **argv, char *outbuf, int outbuf_size);
+ 
+ /*
+  * Evaluate a parse tree.  The value is left in the global variable
+@@ -10438,6 +10532,7 @@
+ 	smallint cmd_is_exec;
+ 	int vflags;
+ 	int vlocal;
++	union node *cb_redir = NULL; /* M3a: redirect detached from an external cmd */
+ 
+ 	errlinno = lineno = cmd->ncmd.linno;
+ 
+@@ -10524,6 +10619,18 @@
+ 		lastarg = nargv[-1];
+ 
+ 	expredir(cmd->ncmd.redirect);
++	/* M3a: an external command (CMDUNKNOWN) with file redirections — detach
++	 * the redirect list so ash's own redirect machinery (redirectsafe → dup2,
++	 * stubbed to fail under WASI, which raises and leaves an empty file) is
++	 * skipped entirely.  cb_redir carries the now-expanded targets to the
++	 * CMDUNKNOWN case, where the host wires them to VFS files via
++	 * cb_spawn_redirect.  cmdtype was resolved by the early find_command above
++	 * (DO_REGBLTIN): CMDUNKNOWN means not-a-builtin and not-a-function — a real
++	 * external command (functions are CMDFUNCTION and keep their redirect). */
++	if (cmdentry.cmdtype == CMDUNKNOWN && cmd->ncmd.redirect) {
++		cb_redir = cmd->ncmd.redirect;
++		cmd->ncmd.redirect = NULL;
++	}
+ #if !BASH_PROCESS_SUBST
+ 	redir_stop = pushredir(cmd->ncmd.redirect);
+ #else
+@@ -10616,7 +10723,56 @@
+ 	switch (cmdentry.cmdtype) {
+ 	case CMDUNKNOWN:
+ 		flush_stdout_stderr();
+-		exitstatus = status = cb_spawn(argv);
++		/* M3a: external command with simple file redirections.  The
++		 * redirect node was detached from cmd *before* redirectsafe (so
++		 * ash's own dup2-based redirect — stubbed under WASI — never
++		 * fires and never crashes/creates an empty file); cb_redir holds
++		 * it.  Collect the already-expanded targets and dispatch via
++		 * cb_spawn_redirect so the host wires them as VFS streams.  Only
++		 * NTO/NTO2/NCLOBBER (>), NAPPEND (>>) and NFROM (<) are handled;
++		 * fd-dup (>&N) and here-docs fall back to plain spawn. */
++		if (cb_redir) {
++#define CB_REDIR_MAX 8
++			cb_redir_spec rdspecs[CB_REDIR_MAX];
++			union node *rp;
++			int nrdspecs = 0;
++			int redir_ok = 1;
++			for (rp = cb_redir;
++			     rp && nrdspecs < CB_REDIR_MAX;
++			     rp = rp->nfile.next) {
++				int rtype = rp->nfile.type;
++				const char *rpath = rp->nfile.expfname;
++				int rop;
++				if (!rpath || !rpath[0])
++					continue; /* not expanded — skip */
++				/* numeric node types — NTO2 is gated behind
++				 * BASH_REDIR_OUTPUT (off here), so the named
++				 * constants aren't all defined; the values are
++				 * stable (verified against shell/nodes.h). */
++				if (rtype == 16 /*NTO*/ || rtype == 17 /*NTO2*/
++				    || rtype == 18 /*NCLOBBER*/)
++					rop = 0; /* truncate write (>) */
++				else if (rtype == 21 /*NAPPEND*/)
++					rop = 1; /* append (>>) */
++				else if (rtype == 19 /*NFROM*/)
++					rop = 2; /* read (<) */
++				else {
++					redir_ok = 0; /* fd-dup / here-doc: unsupported */
++					break;
++				}
++				rdspecs[nrdspecs].fd   = rp->nfile.fd;
++				rdspecs[nrdspecs].op   = rop;
++				rdspecs[nrdspecs].path = rpath;
++				nrdspecs++;
++			}
++			if (redir_ok && nrdspecs > 0)
++				exitstatus = status = cb_spawn_redirect(argv,
++				                        rdspecs, nrdspecs);
++			else
++				exitstatus = status = cb_spawn(argv);
++		} else {
++			exitstatus = status = cb_spawn(argv);
++		}
+ 		goto bail;
+ 
+ 	default: {
+@@ -10714,6 +10870,14 @@
+ 		setvar0("_", lastarg);
+ 	}
+ 
++	/* M3a: restore the redirect detached before redirectsafe (cb_redir), so
++	 * re-executing this command node — e.g. a redirected external command in a
++	 * for/while loop body — re-detaches it each iteration instead of silently
++	 * losing the redirect after the first.  Placed after popredir (a no-op here
++	 * since the node was detached), so there is no push/pop imbalance. */
++	if (cb_redir)
++		cmd->ncmd.redirect = cb_redir;
++
+ 	return status;
+ }
+ 
+@@ -14603,14 +14767,14 @@
+ 		}
+ #endif
+ 		p = lookupvar("PWD");
+-		if (p) {
+-			struct stat st1, st2;
+-			if (p[0] != '/' || stat(p, &st1) || stat(".", &st2)
+-			 || st1.st_dev != st2.st_dev || st1.st_ino != st2.st_ino
+-			) {
+-				p = NULL;
+-			}
+-		}
++		/* Under WASI the stat-based sanity check always fails (the preopened
++		 * fd doesn't correspond to PWD).  Trust it if it looks absolute. */
++		if (p && p[0] != '/')
++			p = NULL;
++		/* Also chdir() so wasi-libc's __wasilibc_cwd matches p; otherwise
++		 * getcwd() returns "/" and setpwd(NULL,...) would reset curdir. */
++		if (p)
++			chdir(p);
+ 		setpwd(p, 0);
+ 	}
+ }
