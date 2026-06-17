@@ -41,13 +41,24 @@ definitions then cross-compile.
   libcxx,kernel-headers,sysroot}.nix`. This layer is **done and validated**.
 - **cc-wrapper** = `clang-unwrapped` (LLVM 21) + a **flag-filtering `wasm-ld`**
   (drops ELF-only flags like `--undefined-version`, wired via `clang -B$out/bin`)
-  over the nix-built sysroot. No joelseverin/llvm fork — the wasm-EH patch is
-  upstream in LLVM ≥19; the toolchain is stock-21 throughout.
+  over the nix-built sysroot. Stock LLVM-21 for all of userspace — no joelseverin/
+  llvm fork (the wasm-EH patch is upstream in LLVM ≥19).
 - **Deps** = nixpkgs packages via `cross.*`, with cross-wasm fixes in
   `deps-overlay.nix` (all wasm-guarded so native packages stay stock/cached).
 - **`nix.wasm`** = `nix-wasm.nix`: meson compiles Nix's C++ with clang-21 against
   the nix-built libc++ + the `cross.*` deps, then a custom `.o` link (meson's
   `-r` prelink can't emit wasm TLS relocs — a real wasm limit, not a shortcut).
+- **Guest kernel** = `kernel.nix`: `vmlinux.wasm` from the pinned joelseverin/linux
+  wasm port. The ONLY patched-LLVM consumer (`kernel-llvm.nix`: a libllvm patch for
+  `EXPORT_SYMBOL` inline-asm + an lld patch for the `vmlinux.lds` linker script —
+  real toolchain features, not flag massaging), exposed as a plain `symlinkJoin`
+  (`kernel-cc.nix`). The wasm cc/ld/objcopy flags live in the kernel SOURCE
+  (`patches/kernel/0008-0012`) — there is **no fake-llvm wrapper** (deleted).
+- **Guest userspace** = `userspace/*.nix`: a curated `lib.evalModules` NixOS
+  closure (no systemd/perl/python) + a patched busybox (`userspace/busybox.nix`:
+  clone-with-fn spawn — NOMMU wasm can't fork/vfork) built via the `cross`
+  cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
+  overlays the served `/nix` closure and hands off to busybox-init.
 
 LLVM target triple is `wasm32-unknown-unknown` (clang rejects
 `wasm32-unknown-linux-musl`); `-D__linux__ -matomics -mbulk-memory
@@ -75,22 +86,22 @@ sudo -E nix build .#nix-wasm --print-out-paths               # the goal
 - The eval cache is a single SQLite db — concurrent `nix` invocations race
   ("database is busy"); don't run a status check against a live build.
 
-## Current blocker + strategy
+## Current state
 
-The dep closure (`cross.curl`/`libgit2`/`boost` and their transitive tree) is
-where nixpkgs' cross machinery fights the wasm target. **The fix is always a
-shared crossSystem/overlay fix, never a package-private workaround.** Known gaps,
-several already fixed (see STATUS for the full list):
+**It works end-to-end** (2026-06-17). `nix build .#nix-wasm` builds the wasm Nix;
+the dep closure (`cross.*`), the kernel, and the curated guest userspace all build
+reproducibly. In the pc harness (`scripts/linux-demo/exec-nixsystem.mjs`) the
+Nix-built userspace boots — served-closure `/nix` overlay → busybox-init → getty →
+autologin → root shell — and **`nix-env -iA sl` substitutes `sl` from the binary
+cache and renders it** (Phase A + B both PASS). Every wasm fix is a SHARED
+crossSystem/overlay or kernel-source fix, never a package-private workaround (PRIME
+DIRECTIVE corollary 1).
 
-- ✅ shared-lib general-dynamic TLS (`__musl_tp`) → build deps static-only
-- ✅ overlay leaking to `buildPackages` (native rebuild cascade) → guard with `isWasm`
-- ✅ nixpkgs cross compiler-rt built with the rejected triple → override to `wasm32-unknown-unknown`
-- 🔧 cross stdenv pulls **stock** Linux kernel headers (no wasm arch) → override `linuxHeaders` to ours (in `deps-overlay.nix`, just added, untested)
-- ⬜ `runtimeShell` leak (a wasm `bash` gets built) → point at native shell
-- ⬜ per-dep feature trims / inline-asm (curl http3 done; openssl asm, etc.)
-
-After the closure builds: `nix build .#nix-wasm` → deploy → verify in-guest
-(no SIGILL, `nix-env -iA sl`). Then phases 2–5 (`docs/plan-environment.md`).
+Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
+design goal below: build on x86_64, publish the wasm outputs, guest substitutes)
+and **Phase 3** (nixify the guest `clang.wasm`/`wasm-ld.wasm` so the guest can
+*compile*, not just install). Robustness long-tail: the remaining busybox vfork
+applets (`tar`/`wget`/…) need the same clone-with-fn treatment as the spawn patch.
 
 ## Caching (design goal)
 
@@ -104,7 +115,11 @@ design out. Full detail: `docs/STATUS.md` § Caching strategy.
 
 ## Plans
 
-- `docs/plan-toolchain.md` — the 13-task toolchain+nix.wasm plan.
 - `docs/plan-environment.md` — the 5-phase master plan (toolchain → userspace →
-  guest-clang → kernel → CI) for the full "NixOS in wasm" vision.
+  guest-clang → kernel → CI) for the full "NixOS in wasm" vision. Phases 1, 2, 4
+  are done; 3 and 5 remain.
 - `docs/plan-rationale.md` — why this replaced the shell-script approach.
+
+(The per-task implementation plans — Phase-1 toolchain, the userspace Plans 1/2,
+the kernel-nixify plan — were executed and removed; the code + `STATUS.md` are the
+record. They live in git history if needed.)

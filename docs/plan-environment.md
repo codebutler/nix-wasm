@@ -1,6 +1,14 @@
 # Fully Reproducible wasm32 Environment, Built With Nix — Master Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement each phase task-by-task. This master plan maps ALL phases; Phase 1 is fully task-decomposed in its own plan (linked), Phases 2–5 are specified at design depth with exact recipes, derivation sketches, validation, and risks — each gets its own task-decomposed plan when started.
+> **STATUS (2026-06-17):** Phases **1 (toolchain + nix.wasm), 2 (userspace), and 4
+> (kernel) are DONE** — the guest boots and `nix-env -iA sl` runs in-guest (see
+> `docs/STATUS.md`). Phase 4 went further than this doc anticipated: the `fake-llvm`
+> Python wrapper was ELIMINATED (flags live in the kernel source + a `symlinkJoin`
+> of the patched LLVM — see Phase 4 below). **Phase 3 (guest clang.wasm) and Phase
+> 5 (CI + binary cache) remain.** The per-phase implementation plans were executed
+> and removed; the code + STATUS are the record (git history has the plans).
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement each phase task-by-task. This master plan maps ALL phases at design depth (exact recipes, derivation sketches, validation, risks).
 
 **Goal:** The ENTIRE pc-linux guest environment — the kernel (`vmlinux.wasm`), the base userspace (`initramfs.cpio.gz`), the in-guest compiler (`clang.wasm`/`wasm-ld.wasm`), and Nix itself (`nix.wasm`) — built reproducibly **from source by Nix**, with a CI job that builds the whole thing from scratch. End state: `nix build` produces every vendored `vendor/linux-wasm/*` artifact; no hand-rolled shell-script build path, no opaque pinned LLVM fork, no cached-toolchain dependency.
 
@@ -65,7 +73,7 @@ commits** over `llvmorg-18.1.2`, and almost all are already upstream in LLVM 21:
 
 ## Phase 1 — `nix.wasm` + wasm toolchain + C dep closure
 
-**Status:** fully task-decomposed in `docs/superpowers/plans/2026-06-15-nix-wasm-toolchain.md` (13 tasks).
+**Status:** DONE — built + validated (see `docs/STATUS.md` and `toolchain/*.nix`, `nix-wasm.nix`).
 
 **Delivers (all via Nix, plain `llvmPackages_21`):** musl 1.2.5 (+7 patches),
 kernel UAPI headers, compiler-rt builtins, libc++/libc++abi/libunwind, the
@@ -158,11 +166,8 @@ in-guest-compile probe — `exec-clang.mjs`/`exec-cc.mjs`), and `nix.wasm`'s own
 in-guest `nix build` of a C package works end-to-end.
 
 **Risk:** this is a large LLVM cross-build (long, but reproducible + nix-cached).
-The Nix store cache (Phase 5) keeps CI from paying it every run. The `fake-llvm`
-Python wrapper (`vendor/linux-wasm/tools/fake-llvm/`) is version-agnostic (it
-rewrites wasm flags + delegates to stock LLVM) — Phase 3 doesn't need it (the
-derivation passes flags directly); Phase 4 may reuse its flag-rewriting as a
-small Nix-wrapped script or inline the flags into the kernel Makefile vars.
+The Nix store cache (Phase 5) keeps CI from paying it every run. (The `fake-llvm` Python wrapper is GONE — Phase 3 never needed it, and Phase 4
+removed it by moving the wasm flags into the kernel source. See Phase 4.)
 
 ---
 
@@ -187,11 +192,10 @@ patch is REQUIRED here — `vmlinux.lds`).
   `CONFIG_NET CONFIG_NET_9P CONFIG_NET_9P_CB CONFIG_9P_FS CONFIG_DEVTMPFS
   CONFIG_DEVTMPFS_MOUNT CONFIG_FILE_LOCKING CONFIG_SCHED_STACK_END_CHECK` and
   `--set-val CONFIG_ARCH_FORCE_MAX_ORDER 15` → `olddefconfig` → `make … vmlinux`.
-- The kernel's `LLVM=` wrapper: replace the `tools/fake-llvm` Python rig with a
-  small Nix `runCommand` that exposes `clang`/`ld.lld`/`llvm-*` symlinks onto
-  `llvm21-wasm` + the cc-wrapper flags (the kbuild `LLVM=<dir>/` convention), OR
-  pass `REAL_LLVM=` + the flag set directly. The wrapper only rewrites wasm flags;
-  it is version-agnostic.
+- The kernel toolchain (DONE, shim-free): `kernel-cc.nix` is a `symlinkJoin` of
+  the patched-LLVM-21 scope (`kernel-llvm.nix`); the wasm cc/ld/objcopy flags live
+  in the kernel source (`patches/kernel/0008-0012`), with the triple fixed via the
+  `CLANG_TARGET_FLAGS_wasm` make var. NO fake-llvm Python rig.
 - Output: `cp $KBUILD/vmlinux vmlinux.wasm`.
 
 **Validation:** the nix-built `vmlinux.wasm` boots in the Linux app
