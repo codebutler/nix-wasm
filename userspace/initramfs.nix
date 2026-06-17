@@ -30,9 +30,14 @@ pkgs.runCommand "wasm-initramfs"
     cp ${init} "$root/init"
     chmod +x "$root/init"
 
-    # pack newc cpio + gzip.
+    # mktemp -d creates the root 0700; an initramfs / must be traversable.
+    chmod 0755 "$root"
+
+    # pack newc cpio + gzip. --owner=0:0 records root:root in the archive (the
+    # build runs as an unprivileged nixbld user, so without this every entry
+    # would carry the builder's uid; the kernel unpacks the initramfs verbatim).
     mkdir -p $out
     ( cd "$root" && find . -print0 \
-        | cpio --null -o --format=newc --quiet ) \
+        | cpio --null -o --format=newc --owner=0:0 --quiet ) \
         | gzip -9 > $out/initramfs.cpio.gz
   ''
