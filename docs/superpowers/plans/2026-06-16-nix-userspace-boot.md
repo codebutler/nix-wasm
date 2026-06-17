@@ -159,8 +159,16 @@ git commit -m "userspace: inittab profile-absolute paths + autologin as a profil
 #     tmpfiles role; login(1) records sessions into utmp, wtmp is never auto-made)
 # Takes the system path as $1 (the thin /init passes it). /bin/sh is NOT made
 # here — it is baked into the initramfs and persists (run-in-place, no switch_root).
+#
+# writeText, NOT writeShellScript: writeShellScript embeds a bash store-path
+# shebang, and `cross.bash` is the NATIVE host bash (deps-overlay maps
+# bash/runtimeShell -> buildPackages), which drags native bash+glibc (~50MB,
+# verified) into the guest closure. The thin /init runs this as
+# `sh "$sys/activate" "$sys"`, so the shebang is cosmetic; busybox ash honours
+# `set -eu`. (BUILD-CONFIRMED: writeShellScript -> 70MB closure; writeText -> 2.4MB.)
 { pkgs }:
-pkgs.writeShellScript "activate" ''
+pkgs.writeText "activate" ''
+  #!/bin/sh
   set -eu
   sys="$1"
 
@@ -388,10 +396,15 @@ pkgs.runCommand "wasm-initramfs"
     cp ${init} "$root/init"
     chmod +x "$root/init"
 
-    # pack newc cpio + gzip.
+    # mktemp -d creates the root 0700; an initramfs / must be traversable.
+    chmod 0755 "$root"
+
+    # pack newc cpio + gzip. --owner=0:0 records root:root (the build runs as an
+    # unprivileged nixbld user; without it every entry carries the builder uid
+    # and the kernel unpacks the initramfs verbatim).
     mkdir -p $out
     ( cd "$root" && find . -print0 \
-        | cpio --null -o --format=newc --quiet ) \
+        | cpio --null -o --format=newc --owner=0:0 --quiet ) \
         | gzip -9 > $out/initramfs.cpio.gz
   ''
 ```
