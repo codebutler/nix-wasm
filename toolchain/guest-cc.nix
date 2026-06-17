@@ -37,7 +37,14 @@ pkgs.writeTextFile {
     LD=${ld}
     TARGET="--target=wasm32-unknown-unknown -fPIC --sysroot=$SR/musl -resource-dir=$SR/clang"
     FEAT="-Xclang -target-feature -Xclang +atomics -Xclang -target-feature -Xclang +bulk-memory"
-    LDADD="-shared -no-gc-sections --no-merge-data-segments --no-entry --export-all \
+    # --gc-sections (paired with --export-all, which roots every named symbol) drops
+    # only truly-dead leftovers — notably crt1.o's overridden-weak `main` forwarder,
+    # which references `__main_argc_argv`. clang emits `__main_argc_argv` only for
+    # `int main(int,char**)`; for `int main(void)` it emits `__main_void`/`main`, so
+    # that forwarder's reference dangles into an unsatisfied `env.__main_argc_argv`
+    # import and the module fails to instantiate (SIGILL at startup). GC'ing the dead
+    # forwarder removes the dangling import while keeping all exported entry points.
+    LDADD="-shared --gc-sections --no-merge-data-segments --no-entry --export-all \
       --import-memory --shared-memory --max-memory=4294967296 --import-undefined --import-table"
 
     compile_only=0
