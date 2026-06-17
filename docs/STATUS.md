@@ -1,6 +1,15 @@
 # STATUS — nix-wasm
 
-Detailed progress log. Last updated **2026-06-16**.
+Detailed progress log. Last updated **2026-06-17**.
+
+> **🎉 MILESTONE (2026-06-17): the full loop works end-to-end.**
+> `pc/scripts/linux-demo/exec-nixsystem.mjs` **Phase A AND Phase B both PASS** on a
+> fresh boot: the Nix-built wasm userspace boots (served-closure store overlaid at
+> `/nix`, activate, busybox-init → getty → autologin → root shell, correct
+> TERM/PATH/`/etc`), then `nix-env -iA sl` **substitutes `sl` from the binary
+> cache** and **`sl` renders the steam locomotive**. This is the "install any
+> package in the guest" model (substitute-from-cache) proven end-to-end. See
+> "Userspace redesign — Plan 2 DONE" and "Root causes fixed 2026-06-17" below.
 
 Goal: build `nix.wasm` (Nix for the wasm32-linux-musl NOMMU guest) and its
 toolchain entirely through Nix, as the keystone for "the pc-linux userspace is
@@ -173,21 +182,37 @@ exit 0, `command -v sl` → `/root/.nix-profile/bin/sl`. (Closure pre-copied wit
 
 ## ⬜ What's next — full checklist
 
-These are sequenced after the **userspace redesign** (below), which is the spine.
+The userspace redesign (the spine) is **DONE** and the acceptance test is green.
+Remaining, roughly by leverage: **Phase 5 (CI + binary cache)** — the design goal;
+**Phase 3 (nixify guest-clang)** — lets the guest compile, not just install; then
+robustness long-tail.
 
-### 🔧 Works today, but via `pc-init` hacks (the redesign replaces these)
-The guest functions, but provisioning lives in the hand-written `pc-init` shell
-script + build flags. Each is a leak that the Nix-built userspace makes
-declarative — they are the reason for the redesign, not standalone bugs:
-- `/etc/nix/nix.conf`, `passwd`/`group`, `inittab`, `PATH`, the nix-env symlinks —
-  all `printf`/`ln` lines in `pc-init` → become NixOS-module-generated config.
-- **`TERM=vt102`** (busybox getty default) — should be `xterm-256color` (the pc
-  terminal is Ghostty/xterm). → `environment.variables.TERM`.
-- **terminfo missing** — cross `ncurses` ships a dangling `lib/terminfo` symlink
-  (its `tic` is a wasm binary that can't run on the host to compile the DB).
-  terminfo is platform-independent data → populate `$out/share/terminfo` from the
-  native `buildPackages.ncurses` (shared overlay fix), delivered via `system.path`.
-- sqlite WAL disabled (`-DSQLITE_OMIT_WAL`) — a legit build flag, documented here.
+### ✅ Provisioning is now declarative (the `pc-init` hacks are retired)
+Everything below USED to live in the hand-written `pc-init` shell script; the
+Nix-built userspace (Plan 2) now generates it: `/etc/nix/nix.conf`, `passwd`/
+`group`, `inittab`, `PATH`, the nix-env multi-call symlinks, `TERM=xterm-256color`,
+and the trimmed terminfo (xterm-256color only) via `system.path`. sqlite WAL stays
+disabled (`-DSQLITE_OMIT_WAL`) — a legit documented build flag.
+
+### ✅ Root causes fixed 2026-06-17 (what made Plan 2 + Phase B actually work)
+1. **busybox spawn** — stock busybox forks/vforks, impossible on the wasm NOMMU
+   clone-with-fn model (a fresh wasm instance can't resume the parent mid-fn →
+   SIGILL). Built a patched busybox 1.36.1 (`userspace/busybox.nix`) with
+   clone-with-fn patches (`patches/busybox/0001` arch+run_pipe/init/hush, `0003`
+   `$(...)` cmdsub, `0004` libbb `spawn()`/`fork_or_rexec()` + `timeout`) — **built
+   via the `cross` cc-wrapper, NOT the kernel's `fake-llvm` shim**. fake-llvm left
+   `-shared` as a clang driver flag → reactor crt + `--gc-sections` collected ALL
+   applet code into a 700-byte empty module; the cross wrapper picks the command
+   crt so `main` seeds the applets.
+2. **8 KiB user stack → 4 MiB** (`patches/kernel/0007`, `binfmt_wasm.c`). musl
+   `realpath()` alone uses 8 KiB of stack buffers and overflowed it (NOMMU can't
+   grow the stack) — this was BOTH the "readlink -f corrupts long paths" bug AND
+   the nix.wasm "memory access out of bounds" startup crash. 4 MiB (not 8) so the
+   alloc+arg-extra fits an available order-11 buddy block.
+3. **9P buffered reads** — `cache=loose,ignoreqv` (see Platform/kernel above).
+4. **single-user nix** (`userspace/system.nix`): `build-users-group=""` (no nixbld
+   members) + `filter-syscalls=false` (wasm has no seccomp) — both otherwise abort
+   `nix-env`.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
@@ -209,29 +234,46 @@ code — `docs/superpowers/{specs,plans}/2026-06-16-nix-userspace-*`:
   redesign was triggered by): getty termtype arg + ncurses terminfo linked into
   the profile + `TERMINFO_DIRS`.
 
-### ⬜ Userspace redesign — Plan 2 (bootstrap + in-guest) NEXT
-- Rewrite `pc/vendor/linux-wasm/pc-init` to a thin bootstrap consuming
-  `wasm-system` (the contract is in spec §3.4: `busybox --install`, install
-  `etc/autologin`→`/bin/autologin`, create `/var/log`, `exec $sys/init`).
-- Publish the closure to the guest cache/store; repack the initramfs.
-- **Verify in-guest: boot to a getty, `nix-env -iA sl`, and `sl` actually
-  renders** (closes the terminfo/TERM loop end-to-end).
+### ✅ Userspace redesign — Plan 2 (bootstrap + in-guest) DONE
+The thin initramfs `/init` (`userspace/bootstrap.nix`, generated by Nix — replaces
+the hand-written `pc-init`) mounts the pseudofs + the 9P exports, overlays the
+served `wasm-system` closure at `/nix`, runs `$sys/activate`, links the guest-tool
+seam, then `exec $sys/init`. The served closure is delivered by pc's
+`createNixClosureStore` over 9P (real store paths preserved) + the `store.json`
+manifest from `userspace/store-manifest.nix`. **Verified end-to-end** (the
+acceptance test above): boot → getty → autologin → shell → `nix-env -iA sl` → `sl`
+renders. The `pc-init` shell script is retired.
 
 ### ⬜ Platform / kernel
-- **NOMMU 9P substitution-under-pressure**: a one-shot `nix-env -iA` (no pre-copy)
-  fails — `netfs: Couldn't get user pages (rc=-14)` → I/O error — when nix-env
-  holds the evaluator and substitutes at once. `nix copy` first (low pressure)
-  then `nix-env` is reliable. A real kernel-level fix is needed for one-shot.
-- Nixify the kernel + guest-clang (from the uncommitted `reference-pc/` recipes).
+- **NOMMU 9P substitution — FIXED (2026-06-17).** The `netfs: Couldn't get user
+  pages (rc=-14)` I/O error was 9P `cache=none` (default) + the JS server's
+  `qid.version==0` forcing `P9L_DIRECT` → netfs UNBUFFERED reads → `get_user_pages`
+  on the user buffer (unsupported on NOMMU/wasm). Fix: mount the read-only exports
+  `cache=loose,ignoreqv` (`userspace/bootstrap.nix`) → buffered page-cache reads +
+  `copy_to_user`. One-shot `nix-env -iA sl` now substitutes reliably.
+- ✅ Kernel is nixified (`kernel.nix`, `.#kernel` → `vmlinux.wasm`); 2026-06-17
+  added patch 0007 (user stack 8KiB→4MiB — see below).
+- ⬜ **Guest-clang** (`clang.wasm`/`wasm-ld.wasm`) still vendored prebuilt in pc;
+  nixify it (Phase 3) so the guest can *compile*, not just install.
 
 ### ⬜ Caching / CI (the design goal — see § Caching strategy below)
 - Binary cache at scale: publish host-built `cross.*` + user packages; guest
   substitutes arbitrary packages without building in-guest.
 - CI on `x86_64-linux` to populate the cache (avoid from-source LLVM on aarch64).
 
+### ⬜ Robustness long-tail (not blocking the acceptance test)
+- **Remaining busybox vfork applets** — `tar`, `wget`, `crond`, `runit`, `script`
+  still `vfork` (SIGILL if used). Same clone-with-fn pattern as 0001/0003/0004.
+- **`timeout` watcher quirk** — `timeout PROG` execs PROG (sl renders), but its
+  re-exec'd *watcher* mis-parses the injected `-pPID` (getopt `+` stops at the
+  duration first) so the timeout isn't enforced. Benign for self-exiting progs.
+- **Bigger user stack** — 4 MiB is capped by the 512 MiB guest's largest free
+  buddy order; more guest RAM would allow 8 MiB (Linux default) for heavy progs.
+
 ### ⬜ Housekeeping
-- Push pc `linux-wasm-cleanup`; decide its relationship to `main`.
-- Write the redesign spec → implementation plan.
+- Branch `nix-userspace-boot` (nix-wasm) holds this session's work — decide merge
+  to `master`. pc work is on its linux-wasm branch.
+- `flake.nix` still carries the `spawn-test-initramfs` diagnostic — drop when tidy.
 
 ---
 
