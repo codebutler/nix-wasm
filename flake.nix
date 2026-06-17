@@ -52,8 +52,9 @@
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
       };
 
-      # ---- PID 1: busybox init + generated inittab --------------------------
-      wasmInit = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
+      # ---- generated inittab (profile-absolute paths) + activation script ----
+      wasmInittab = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
+      wasmActivate = import ./userspace/activate.nix { pkgs = cross; };
 
       # ---- assembled guest system closure (boot layout) ---------------------
       wasmToplevel = import ./userspace/toplevel.nix {
@@ -62,7 +63,19 @@
         systemPath = wasmSystem.config.system.path;
         passwd = wasmPasswd.passwd;
         group = wasmPasswd.group;
-        init = wasmInit;
+        inittab = wasmInittab;
+        activate = wasmActivate;
+      };
+
+      # ---- thin initramfs /init (generated) + the initramfs cpio ------------
+      wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
+      wasmInitramfs = import ./userspace/initramfs.nix {
+        inherit pkgs cross; init = wasmBootstrap;
+      };
+
+      # ---- the served-closure manifest (store.json) for pc -----------------
+      wasmStoreManifest = import ./userspace/store-manifest.nix {
+        inherit pkgs; toplevel = wasmToplevel;
       };
 
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
@@ -104,11 +117,17 @@
         # Guest system profile (/run/current-system/sw): busybox + ncurses/terminfo.
         userspace-path = wasmSystem.config.system.path;
 
-        # PID 1: busybox init binary is Task 7; this emits inittab + autologin.
-        wasm-init = wasmInit;
+        # Generated guest inittab (profile-absolute paths) — debug/inspection.
+        wasm-inittab = wasmInittab;
 
-        # Assembled guest system closure: $out/{etc,sw,init} in boot layout.
+        # Assembled guest system closure: $out/{etc,sw,init,activate} in boot layout.
         wasm-system = wasmToplevel;
+
+        # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
+        wasm-initramfs = wasmInitramfs;
+
+        # The wasm-system closure exported as store.json for pc to serve over 9P.
+        wasm-store-manifest = wasmStoreManifest;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
