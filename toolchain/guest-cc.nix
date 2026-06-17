@@ -58,9 +58,22 @@ pkgs.writeTextFile {
     	case "$1" in
     		-c) compile_only=1 ;;
     		-o) out=$2; shift ;;
+    		# Two-arg compile flags: the VALUE is the next argument. These MUST consume
+    		# both — otherwise the value (a path/name, not matching -*/*.c) fell through
+    		# to the *) catch-all and was silently dropped, corrupting the compile
+    		# (e.g. `-isystem /inc` lost `/inc`; `-MF dep.d` lost the depfile name).
+    		-isystem | -iquote | -idirafter | -imacros | -isysroot | -include | -I | -D | -U \
+    			| -MF | -MT | -MQ | -x | -Xclang | -Xpreprocessor)
+    			cflags="$cflags $1 $2"; shift ;;
+    		-Xlinker) ldflags="$ldflags $2"; shift ;;          # raw linker arg → link
+    		-Wl,*) # clang-style -Wl,a,b,c → pass a b c to the linker (we drive wasm-ld)
+    			for a in $(printf '%s' "''${1#-Wl,}" | tr , ' '); do ldflags="$ldflags $a"; done ;;
     		-l*) libs="$libs $1" ;;
     		-L*) ldflags="$ldflags $1" ;;
-    		-I* | -D* | -U* | -O* | -std=* | -W* | -g | -g* | -f* | -m* | -pipe | -pedantic | -ansi) cflags="$cflags $1" ;;
+    		# Depfile single-arg flags (-MMD/-MD/-MP/-MM/-M/-MG) and the rest are compile
+    		# flags. -M* must come AFTER the two-arg -MF/-MT/-MQ cases above.
+    		-I* | -D* | -U* | -O* | -std=* | -M* | -W* | -g | -g* | -f* | -m* | -pipe | -pedantic | -ansi) cflags="$cflags $1" ;;
+    		@*) cflags="$cflags $1" ;; # response file — clang expands it at compile
     		*.c) srcs="$srcs $1" ;;
     		*.o | *.a) objs="$objs $1" ;;
     		-*) cflags="$cflags $1" ;; # unknown flag → treat as a compile flag

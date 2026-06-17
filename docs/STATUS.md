@@ -259,6 +259,19 @@ disables, and the `-lc++ -lc++abi -lunwind` link. Two non-obvious requirements:
 Validated in-guest: `c++ -O2` building std::string + std::vector + std::sort +
 exceptions + `std::cout` compiles and runs.
 
+### ✅ cc/c++ driver flag completeness (2026-06-17)
+A3: the `cc`/`c++` arg parsers handled common flags but **silently dropped the value
+of two-arg flags** — `-isystem DIR`, `-include FILE`, `-iquote/-idirafter/-imacros/
+-isysroot DIR`, `-MF FILE`, `-MT/-MQ NAME`, `-x LANG`, `-Xclang/-Xpreprocessor ARG`,
+`-I DIR`/`-D NAME`/`-U NAME` (spaced forms) — because the value (a path/name, not
+matching `-*`/`*.c`) fell through to the catch-all. That corrupted real Makefile/
+configure compiles (wrong include dirs, lost depfile names). Fixed: each two-arg
+flag now consumes both tokens. Also added `-Wl,a,b,c` / `-Xlinker ARG` → routed to
+the `wasm-ld` link (we drive the linker directly), `-MMD/-MD/-MP/-M…` depfile
+generation, and `@file` response-file passthrough. Validated in-guest: a `make`
+build using `-isystem`, `-include`, `-MMD -MF` (depfile `c.o: c.c prefix.h`
+produced) and `-Wl,--gc-sections` compiles, links, and runs.
+
 ### ⚠️ Real autoconf `./configure` — blocked on the guest shell (2026-06-17)
 A2 (run a genuine autoconf-generated `configure` + `make` in-guest) was run with a
 host-generated minimal autoconf project (real 4669-line `configure`: `AC_PROG_CC`,

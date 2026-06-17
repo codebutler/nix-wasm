@@ -67,9 +67,17 @@ pkgs.writeTextFile {
     	case "$1" in
     		-c) compile_only=1 ;;
     		-o) out=$2; shift ;;
+    		# Two-arg flags whose VALUE is the next argument (see guest-cc.nix — these
+    		# MUST consume both, else the value was silently dropped).
+    		-isystem | -iquote | -idirafter | -imacros | -isysroot | -include | -I | -D | -U \
+    			| -MF | -MT | -MQ | -x | -Xclang | -Xpreprocessor)
+    			cflags="$cflags $1 $2"; shift ;;
+    		-Xlinker) ldflags="$ldflags $2"; shift ;;
+    		-Wl,*) for a in $(printf '%s' "''${1#-Wl,}" | tr , ' '); do ldflags="$ldflags $a"; done ;;
     		-l*) libs="$libs $1" ;;
     		-L*) ldflags="$ldflags $1" ;;
-    		-I* | -D* | -U* | -O* | -std=* | -W* | -g | -g* | -f* | -m* | -pipe | -pedantic | -ansi) cflags="$cflags $1" ;;
+    		-I* | -D* | -U* | -O* | -std=* | -M* | -W* | -g | -g* | -f* | -m* | -pipe | -pedantic | -ansi) cflags="$cflags $1" ;;
+    		@*) cflags="$cflags $1" ;;
     		*.cc | *.cpp | *.cxx | *.c++ | *.C | *.c) srcs="$srcs $1" ;;
     		*.o | *.a) objs="$objs $1" ;;
     		-*) cflags="$cflags $1" ;; # unknown flag → treat as a compile flag
