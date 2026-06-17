@@ -1,79 +1,111 @@
-# Plan — an autoconf-capable, NOMMU-safe guest shell
+# Plan — autoconf-capable guest shell via the existing forkshell ash
 
-**Status:** not started; this is the critical path for autotools `./configure`
-support (and thus for a large class of "typical packages"). Discovered by A2 (see
-`docs/STATUS.md` § Real autoconf `./configure`).
+**Status:** designed, not yet implemented. This is the critical path for in-guest
+autotools `./configure` (discovered by A2). Supersedes the earlier "port ash from
+scratch / improve hush" framing.
 
-## The problem
+## The realization
 
-The guest `/bin/sh` is busybox **hush**, chosen because its small, well-defined set
-of process-spawn sites could be converted to the **clone-with-fn** model the NOMMU
-wasm guest requires (one shared `WebAssembly.Memory`; no `fork`/`vfork` — a child
-can't resume the parent mid-call; see the fork/vfork notes in `STATUS.md`). hush
-works for interactive use, init, and simple scripts.
+The hard parts are already solved and proven — just not yet wired to *our* guest:
 
-But hush is **not POSIX-complete enough for autoconf**. A real
-autoconf-generated `configure` fails under hush with `ambiguous redirect` and
-`syntax error at 'fi'`, producing no Makefile. autoconf scripts assume a full POSIX
-`sh` (parameter expansions like `${1+"$@"}`, `LINENO`, here-doc edge cases, complex
-`case`/redirection). autoconf even tries to *re-exec under a better shell* if the
-initial `/bin/sh` is deficient — but there is no better shell on the guest.
+1. **An autoconf-grade parser that needs no `fork()`.** pc's **WASI terminal**
+   already ships a no-fork ash: `pc/vendor/busybox/wasi-compat/ash-forkshell.patch`
+   (1397 lines), a port of **busybox-w32's** forkshell machinery (Windows has no
+   `fork()` either). ash's parser is dash-derived and runs every autoconf script.
+2. **The NOMMU "fork-without-exec" mechanism.** forkshell serializes the state a
+   child shell needs — `globals_misc`, `globals_var`, `cmdtable`, aliases, and the
+   parse-tree `node` — into one flat block **with a relocation bitmap** (reusing
+   ash's own `copynode`/`calcsize`). A fresh shell instance fetches the block,
+   **rebases every pointer** by `(new_base - old_base)`, reinstalls the globals, and
+   evaluates the node. It covers exactly what autoconf needs: `FS_EVALSUBSHELL`
+   (`( … )`), `FS_EVALBACKCMD` (`$(shell-code)`), `FS_EVALPIPE` (pipelines),
+   `FS_OPENHERE` (heredocs), `FS_SHELLEXEC` (fork+exec).
 
-The deeper issue: a full POSIX shell implements subshells, pipelines, and command
-substitution by **`fork()`-ing the shell itself** (the child is a divergent copy of
-the parent shell's state, continuing from the fork point). That is precisely the
-operation NOMMU-wasm cannot do — the same wall that ruled out `fork`/`vfork`
-project-wide. So "ship a real shell" isn't free: any shell needs its
-fork-for-subshell reworked for the clone-with-fn model.
+We rejected asyncify-fork (collides with our pervasive `-fwasm-exceptions`; wasmer
+itself punts on fork+Wasm-EH) and MMU emulation (research-grade, "eventually" even
+upstream). forkshell needs **neither** — it's pure state serialization + a fresh
+process, both of which the guest already supports.
 
-## Options
+## What stays vs. what changes
 
-### 1. Port busybox `ash` to the clone-with-fn model (most promising)
-`ash` (dash-class) *is* POSIX enough for autoconf, and it's already in the busybox
-tree — just disabled (`# CONFIG_ASH is not set`; `CONFIG_SH_IS_HUSH=y`). Work:
-- Enable `CONFIG_ASH` + `CONFIG_SH_IS_ASH` (and the `ASH_*` features autoconf needs:
-  `ASH_BASH_COMPAT`, arithmetic, `test`, `printf`, `getopts`, etc.) in
-  `configs/wasm_defconfig` (patch `0001`).
-- Port ash's fork sites — `forkchild`/`forkparent`/`forkshell`, `evalsubshell`,
-  `evalpipe`, `openhere` (here-doc), `expbackq`/command-substitution, and job control
-  — to clone-with-fn, exactly as patches `0001`/`0003`/`0006` did for hush. The hard
-  cases are the ones that need the *child to keep running shell code* (subshell,
-  left side of `|`, `$(...)`): on NOMMU these must run the child as a fresh shell
-  instance executing the captured AST/state, not a memory copy. Evaluate whether the
-  child can be driven via the existing clone-with-fn callback running an ash entry
-  point that re-enters evaluation with serialized state.
-- Disable/avoid any remaining ash vfork the guest doesn't need (mirror the curated
-  disable list in `userspace/busybox.nix`).
-- Validate with the A2 harness (a real `configure` → `make` → run).
+The WASI build talks to a **`cb` host-bridge** (wasm imports from module `cb`,
+serviced by pc's worker over a futex SAB, booting fresh `sh.wasm` instances). The
+guest is a real Linux process environment with working `posix_spawn`/clone-with-fn,
+pipes, `waitpid`, `dup2`. So:
 
-**Open question to resolve first:** how busybox ash behaves on NOMMU today. busybox
-has historical NOMMU handling for ash (re-exec/`vfork`); a quick experiment —
-enable `CONFIG_ASH`, build, and test `ash -c 'echo hi'`, a pipeline, and `$(...)`
-in-guest — tells us how much is already viable vs. needs the clone-with-fn port.
+- **Reuse verbatim:** the serializer (`forkshell_prepare`/`copynode`/relocation
+  bitmap), the child bootstrap (`forkshell_init`/`forkshell_child`, triggered by
+  `ash --fs`), and all the `FS_*` eval hooks. This is the asset.
+- **Replace:** the ~6 `cb.*` bridge functions with a small guest adapter
+  (`forkshell_guest.c`) implemented over ordinary Linux syscalls. Drop the
+  `import_module("cb")` attributes so the calls bind to the adapter instead of wasm
+  imports.
+- **Drop:** `cb_spawn.c` entirely — in the guest, ash runs external commands through
+  its **native `shellexec`→`execve`** (the guest has exec via clone-with-fn; busybox
+  already execs today). cb_spawn only existed because WASI has no exec.
 
-### 2. Cross-build `dash` as `/bin/sh`
-dash is a small, strict POSIX shell. Same fundamental problem: its subshell/pipeline
-forks need the clone-with-fn rework, and dash isn't structured around busybox's
-NOMMU spawn helpers, so this is likely *more* work than (1) with less shared
-infrastructure. Not recommended unless ash proves intractable.
+## The adapter map (`cb.*` → guest syscalls)
 
-### 3. Improve hush's POSIX coverage
-Chasing autoconf compatibility inside hush (fixing each `ambiguous redirect` /
-parser gap) is a losing battle — hush is intentionally a smaller language, and
-autoconf targets a full `sh`. Not recommended.
+The block travels parent→child over an inherited fd (a pipe or `memfd`), length-
+prefixed. The child is a re-exec of the same ash binary as `ash --fs`, which calls
+`forkshell_init()` → reads the block from that fd via `fork_block`.
 
-## Recommendation
+| forkshell call | semantics | guest implementation |
+|---|---|---|
+| `fork_run(blk,len,bg)` | run block in a fresh child shell; wait unless `bg` | write `[len][blk]` to a pipe; `posix_spawn` `ash --fs` with the read end as a known fd (file-action `adddup2`); child inherits stdio (subshell shares the tty); `bg`→return 0, else `waitpid`→`WEXITSTATUS` |
+| `fork_capture(blk,len,out,max,*st)` | run block, capture stdout | as `fork_run` + a second pipe for the child's stdout (`posix_spawn_file_actions_adddup2` fd1→pipe); parent reads ≤`max` into `out`, `waitpid`→`*st`; for `$(…)` |
+| `fork_pipeline(buf,len,bg)` | `[nstages][len|blk]*`; run all stages wired stage→stage | create `n-1` pipes; `posix_spawn` each `ash --fs` with stdin/stdout dup2'd to the adjacent pipes + its block fd; `waitpid` all; return last stage's status |
+| `here_fd(text,len)` | fd that reads a heredoc body | `pipe()` (or `memfd_create`), write `text`, return the read fd (large bodies: a writer or memfd to avoid pipe-buffer deadlock) |
+| `poll_signal(consume)` | pending-interrupt check (Ctrl-C) | a `volatile sig_atomic_t` set by ash's `SIGINT` handler (or `sigpending`); return/optionally clear it |
+| `fork_block(buf,len)` *(child)* | fetch the serialized block | first call `(NULL,0)`→read the 4-byte length prefix from the block fd and return it; second `(buf,total)`→read `total` bytes |
 
-Pursue **Option 1 (ash)**. Start with the experiment (enable `CONFIG_ASH`, measure
-what works on NOMMU), then port the fork sites to clone-with-fn following the hush
-patches as the template. This is the single highest-leverage item for "any autotools
-package compiles in-guest." Until then, the guest compiles plain-Makefile and
-`nix-build`-driven C/C++ projects fine; autotools `./configure` is the gap.
+Everything here is a syscall the guest kernel already services (busybox uses
+`posix_spawn`/`pipe`/`waitpid`/`dup2` today; `make` already drives
+`system()`→`posix_spawn`→`clone(CLONE_VFORK)` in-guest). No host bridge, no SAB, no
+asyncify.
 
-## Relationship to other work
+**FS_SHELLEXEC note:** fork+exec of an external command can go through the same
+forkshell path (the deserialized child just `execve`s) or be short-circuited to a
+direct `posix_spawn` (the child only execs, so no state needs serializing). Start
+uniform-through-forkshell for correctness; optimize later if it matters.
 
-- The clone-with-fn spawn model and the existing hush/libbb patches
-  (`patches/busybox/0001,0003,0004,0005,0006`) are the template and the shared
-  infrastructure.
-- Overlaps the remaining busybox vfork applet long-tail (`tar` done; `wget` et al.):
-  same clone-with-fn technique, same NOMMU constraint.
+## Build wiring
+
+- **`userspace/ash.nix`** (mirror `userspace/busybox.nix`): the same busybox source +
+  cross cc-wrapper, with a `wasm_defconfig`-style config enabling `CONFIG_ASH` (+ the
+  `ASH_*` features autoconf needs: `ASH_BASH_COMPAT`, math, `test`, `printf`,
+  `getopts`, alias) and `SH_IS_ASH` (or keep hush as `/bin/sh` and ship `ash`
+  separately first). Apply a guest-adapted forkshell patch set:
+  - the upstream `ash-forkshell.patch` serializer/bootstrap/`FS_*` hooks, **minus**
+    the `import_module("cb")` attributes;
+  - **`forkshell_guest.c`** implementing the 6 entry points above;
+  - **not** `cb_spawn.c` (use native execve).
+- Add to the system closure (`flake.nix` toolchain list / `system.path`) so `ash` is
+  on `PATH`; once validated, consider making it `/bin/sh`.
+- The forkshell child re-execs the ash binary by absolute store path as `ash --fs`
+  (the guest re-exec/clone-with-fn pattern, like libbb `fork_or_rexec`).
+
+## Validation
+
+Reuse the A2 harness: a real autoconf-generated `configure` + `make` + run, driven
+by `ash` in the guest. Stage it: first `ash -c 'echo $(echo hi)'` (one `fork_capture`),
+then a subshell and a pipeline, then the full configure.
+
+## Risks / unknowns
+
+- **Block transfer**: WASI passes the block in shared host memory; the guest passes
+  it over an fd — `fork_block` must read-and-relocate from the fd. The relocation math
+  is unchanged (delta from `old_base`), only the source of the bytes differs.
+- **Re-exec cost**: every subshell/`$()` spawns a fresh ash instance loading the
+  serialized state. configure spawns *many* — watch throughput; the clone-with-fn
+  instance-load is the per-spawn cost (same as every other guest spawn).
+- **Heredoc/pipe deadlock**: large heredocs or capture > pipe buffer need a
+  writer-side drain or `memfd`, not a single blocking `write`.
+- **Signals/job control**: configure rarely needs job control; `poll_signal` + basic
+  `waitpid` should suffice. Keep `ASH_JOB_CONTROL` off initially.
+
+## First step
+
+Map confirmed against the patch; next is the build: create `userspace/ash.nix` +
+`forkshell_guest.c`, get `ash --fs` round-tripping a single `fork_capture`
+(`$(echo hi)`) in-guest, then climb to the full configure via the A2 harness.
