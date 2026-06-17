@@ -36,6 +36,15 @@ pkgs.stdenv.mkDerivation {
     # User stack 8KiB->8MiB: the 8KiB stack overflowed on a single musl realpath()
     # (8KiB of buffers) and crashed nix at startup; NOMMU stacks can't grow.
     ./patches/kernel/0007-wasm-enlarge-user-stack.patch
+    # Toolchain flags moved INTO the kernel source (replacing the fake-llvm argv
+    # shim): arch/wasm/Makefile carries the wasm cc + LDFLAGS_vmlinux flags, and
+    # three small generic-kbuild guards drop what wasm-ld/llvm-objcopy reject
+    # (--build-id/-z noexecstack, --start-group, --set-section-flags/symbol-strip).
+    ./patches/kernel/0008-wasm-arch-toolchain-flags.patch
+    ./patches/kernel/0009-wasm-skip-buildid-noexecstack.patch
+    ./patches/kernel/0010-wasm-link-vmlinux-no-group.patch
+    ./patches/kernel/0011-wasm-strip-relocs-section-only.patch
+    ./patches/kernel/0012-wasm-vmlinux-o-no-group.patch
   ];
 
   nativeBuildInputs = [
@@ -50,15 +59,25 @@ pkgs.stdenv.mkDerivation {
     kernelCC
   ];
 
-  # kbuild resolves CC=clang, LD=ld.lld, AR=llvm-ar, … from LLVM=<dir>/; HOSTCC
-  # stays the native gcc (host tools: fixdep, kallsyms, …). The CROSS_COMPILE
-  # prefix only names the (rewritten-away) target triple.
+  # kbuild resolves CC=clang, AR=llvm-ar, OBJCOPY=llvm-objcopy, … from LLVM=<dir>/
+  # (the symlink farm). CROSS_COMPILE=wasm32-unknown-unknown- makes kbuild pass
+  # --target=wasm32-unknown-unknown (a triple clang accepts). HOSTCC=gcc keeps the
+  # native host tools (fixdep, kallsyms) on the build platform; HOSTLD defaults to
+  # the farm's ld.lld (ELF — fine for host ELF). LD is overridden to wasm-ld: lld
+  # dispatches on argv[0], and the default LLVM= LD=ld.lld is the ELF driver, which
+  # can't link the wasm target objects — wasm-ld is the wasm driver.
   makeFlags = [
     "ARCH=wasm"
     "O=build"
     "LLVM=${kernelCC}/bin/"
+    "LD=${kernelCC}/bin/wasm-ld"
     "HOSTCC=gcc"
     "CROSS_COMPILE=wasm32-unknown-unknown-"
+    # scripts/Makefile.clang hardcodes CLANG_TARGET_FLAGS_wasm := wasm-linux-musl,
+    # which clang REJECTS (wasm needs wasm32). Override it (command-line wins over
+    # the Makefile :=) to the triple clang accepts; arch/wasm/Makefile re-adds the
+    # -D__linux__/__unix__ the bare triple drops. (No patch to the generic file.)
+    "CLANG_TARGET_FLAGS_wasm=wasm32-unknown-unknown"
   ];
 
   # Fixed identity so the build is deterministic (kbuild otherwise embeds the

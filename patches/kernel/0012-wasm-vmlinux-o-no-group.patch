@@ -1,0 +1,28 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: vmlinux.o link without --start-group (wasm-ld has no groups)
+
+--- a/scripts/Makefile.vmlinux_o	2026-06-17 06:47:45.081163925 -0400
++++ b/scripts/Makefile.vmlinux_o	2026-06-17 06:47:45.098802767 -0400
+@@ -54,13 +54,21 @@
+ 
+ vmlinux-o-ld-args-$(CONFIG_BUILTIN_MODULE_RANGES)	+= -Map=$@.map
+ 
++# wasm-ld has no --start-group/--end-group (and resolves order-independently).
++vmlinux-o-sg-y := --start-group
++vmlinux-o-eg-y := --end-group
++ifeq ($(SRCARCH),wasm)
++vmlinux-o-sg-y :=
++vmlinux-o-eg-y :=
++endif
++
+ quiet_cmd_ld_vmlinux.o = LD      $@
+       cmd_ld_vmlinux.o = \
+ 	$(LD) ${KBUILD_LDFLAGS} -r -o $@ \
+ 	$(vmlinux-o-ld-args-y) \
+ 	$(addprefix -T , $(initcalls-lds)) \
+ 	--whole-archive vmlinux.a --no-whole-archive \
+-	--start-group $(KBUILD_VMLINUX_LIBS) --end-group \
++	$(vmlinux-o-sg-y) $(KBUILD_VMLINUX_LIBS) $(vmlinux-o-eg-y) \
+ 	$(cmd_objtool)
+ 
+ cmd_check_function_names = $(srctree)/scripts/check-function-names.sh $@

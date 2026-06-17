@@ -1,0 +1,19 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: link vmlinux without --start-group (wasm-ld has no groups)
+
+--- a/scripts/link-vmlinux.sh	2026-06-17 06:37:04.172900211 -0400
++++ b/scripts/link-vmlinux.sh	2026-06-17 06:40:12.582632741 -0400
+@@ -100,9 +100,12 @@
+ 		ldflags="${ldflags} ${wl}-Map=vmlinux.map"
+ 	fi
+ 
++	# wasm-ld has no --start-group/--end-group (and resolves order-independently).
++	local sg="${wl}--start-group" eg="${wl}--end-group"
++	if [ "${SRCARCH}" = "wasm" ]; then sg=""; eg=""; fi
+ 	${ld} ${ldflags} -o ${output}					\
+ 		${wl}--whole-archive ${objs} ${wl}--no-whole-archive	\
+-		${wl}--start-group ${libs} ${wl}--end-group		\
++		${sg} ${libs} ${eg}					\
+ 		${kallsymso} ${btf_vmlinux_bin_o} ${arch_vmlinux_o} ${ldlibs}
+ }
+ 

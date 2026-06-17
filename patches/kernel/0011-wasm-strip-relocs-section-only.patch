@@ -1,0 +1,21 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: strip_relocs is section-removal only (llvm-objcopy wasm limit)
+
+--- a/scripts/Makefile.vmlinux	2026-06-17 06:37:04.182117750 -0400
++++ b/scripts/Makefile.vmlinux	2026-06-17 06:40:12.582723325 -0400
+@@ -92,8 +92,15 @@
+ # To avoid warnings: "empty loadable segment detected at ..." from GNU objcopy,
+ # it is necessary to remove the PT_LOAD flag from the segment.
+ quiet_cmd_strip_relocs = OBJCOPY $@
++ifeq ($(SRCARCH),wasm)
++# wasm: vmlinux is a wasm module (no ELF PT_LOAD segments); llvm-objcopy on wasm
++# supports only section dump/removal/addition — not --set-section-flags or symbol
++# stripping. Just drop the removable sections.
++      cmd_strip_relocs = $(OBJCOPY) $(addprefix --remove-section=,$(remove-section-y)) $< $@
++else
+       cmd_strip_relocs = $(OBJCOPY) $(patsubst %,--set-section-flags %=noload,$(remove-section-y)) $< $@; \
+                          $(OBJCOPY) $(addprefix --remove-section=,$(remove-section-y)) $(remove-symbols) $@
++endif
+ 
+ targets += vmlinux
+ vmlinux: vmlinux.unstripped FORCE

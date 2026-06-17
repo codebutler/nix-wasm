@@ -1,0 +1,38 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: arch Makefile carries wasm cc/ld flags (drop fake-llvm clang rewrites)
+
+--- a/arch/wasm/Makefile	2026-06-17 06:37:04.192143375 -0400
++++ b/arch/wasm/Makefile	2026-06-17 06:52:24.970787604 -0400
+@@ -3,17 +3,28 @@
+ KBUILD_DEFCONFIG := wasm32_nommu_defconfig
+ 
+ KCFLAGS += -nostdlib -fno-builtin
++# wasm clang: --target=wasm{32,64} already selects the arch — `-march=wasm32` is
++# REJECTED by clang. atomics+bulk-memory are required (shared-memory linking).
++# __builtin_return_address is unimplemented on non-Emscripten wasm; alias it to a
++# null pointer (only ever called with arg 0, for stack traces we don't support).
++KCFLAGS += -matomics -mbulk-memory -D__linux__ -D__unix__ -D__unix '-D__builtin_return_address(x)=(void*)0'
++KAFLAGS += -matomics -mbulk-memory -D__linux__ -D__unix__ -D__unix
+ 
+ ifeq ($(CONFIG_64BIT),y)
+-	KCFLAGS += -march=wasm64
+-	KAFLAGS += -march=wasm64
+ 	KBUILD_LDFLAGS += -mwasm64
++	LDFLAGS_vmlinux += --max-memory=17179869184
+ else
+-	KCFLAGS += -march=wasm32
+-	KAFLAGS += -march=wasm32
+ 	KBUILD_LDFLAGS += -mwasm32
++	LDFLAGS_vmlinux += --max-memory=4294967296
+ endif
+ 
++# The final vmlinux is a wasm dylink module. These belong on LDFLAGS_vmlinux
++# (the FINAL link only) — NOT KBUILD_LDFLAGS: wasm-ld rejects `--shared-memory`
++# together with `-r`, which the intermediate built-in.o prelinks use.
++LDFLAGS_vmlinux += --no-entry --export-all --import-memory --shared-memory \
++	--import-undefined --no-merge-data-segments \
++	-no-gc-sections --error-limit=0
++
+ core-y += arch/wasm/kernel/
+ core-y += arch/wasm/mm/
+ libs-y += arch/wasm/lib/

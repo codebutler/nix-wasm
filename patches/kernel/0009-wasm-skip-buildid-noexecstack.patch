@@ -1,0 +1,19 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: skip --build-id / -z noexecstack (wasm-ld rejects them)
+
+--- a/Makefile	2026-06-17 06:37:04.162014874 -0400
++++ b/Makefile	2026-06-17 06:40:12.582475408 -0400
+@@ -1147,10 +1147,13 @@
+ KBUILD_CFLAGS   += $(KCFLAGS)
+ KBUILD_RUSTFLAGS += $(KRUSTFLAGS)
+ 
++# wasm-ld implements neither --build-id nor `-z noexecstack`.
++ifneq ($(SRCARCH),wasm)
+ KBUILD_LDFLAGS_MODULE += --build-id=sha1
+ LDFLAGS_vmlinux += --build-id=sha1
+ 
+ KBUILD_LDFLAGS	+= -z noexecstack
++endif
+ ifeq ($(CONFIG_LD_IS_BFD),y)
+ KBUILD_LDFLAGS	+= $(call ld-option,--no-warn-rwx-segments)
+ endif
