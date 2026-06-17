@@ -125,6 +125,14 @@ let
         nix.settings.substituters = lib.mkForce [ "file:///nix-cache" ];
         nix.settings.require-sigs = false;
         nix.settings.sandbox = false;
+        # Single-user guest: build/realize as the calling user (root). Empty
+        # build-users-group disables build-user isolation — otherwise nix aborts
+        # with "build users group 'nixbld' has no members" (there are none, and
+        # NOMMU can't sandbox anyway).
+        nix.settings.build-users-group = "";
+        # wasm has no seccomp; nix's default syscall filter aborts the build
+        # without this ("seccomp is not supported on this platform").
+        nix.settings.filter-syscalls = false;
       })
     ];
   };

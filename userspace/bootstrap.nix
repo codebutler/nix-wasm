@@ -22,6 +22,14 @@ pkgs.writeText "init" ''
   mkdir -p /dev/pts && mount -t devpts none /dev/pts 2>/dev/null
 
   M="trans=cb,version=9p2000.L,msize=524288"
+  # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
+  # of netfs UNBUFFERED/direct reads. Direct reads call iov_iter_extract_pages /
+  # get_user_pages on the user buffer, which fails EFAULT on this NOMMU/wasm guest
+  # ("netfs: Couldn't get user pages (rc=-14)") — that broke `nix-env -iA`. Buffered
+  # reads fill kernel page-cache pages then copy_to_user (works). cache=none (the
+  # default) forces P9L_DIRECT; so does qid.version==0 (which the JS 9p servers
+  # report) unless ignoreqv is set — hence BOTH. Read-only exports, so loose is safe.
+  RO="$M,cache=loose,ignoreqv"
 
   # pc's VFS (user files) at /mnt/pc.
   mkdir -p /mnt/pc
@@ -29,17 +37,17 @@ pkgs.writeText "init" ''
 
   # Host-provided large guest tools (nix.wasm, clang, …), lazy + read-only.
   mkdir -p /opt/bin
-  mount -t 9p -o "$M,aname=tools" cb /opt/bin 2>/dev/null || true
+  mount -t 9p -o "$RO,aname=tools" cb /opt/bin 2>/dev/null || true
 
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
-  mount -t 9p -o "$M,aname=nixcache" cb /nix-cache 2>/dev/null || true
+  mount -t 9p -o "$RO,aname=nixcache" cb /nix-cache 2>/dev/null || true
 
   # The served wasm-system closure: real /nix store paths, read-only (9p) ->
   # overlay lower; ramfs upper makes /nix writable for nix-env. NOMMU has no
   # tmpfs, so the upper is ramfs (always available, backs the initramfs root).
   mkdir -p /mnt/nix-ro /run/nix-upper /run/nix-work /nix
-  if mount -t 9p -o "$M,aname=nix" cb /mnt/nix-ro 2>/dev/null; then
+  if mount -t 9p -o "$RO,aname=nix" cb /mnt/nix-ro 2>/dev/null; then
     mount -t overlay overlay \
       -o lowerdir=/mnt/nix-ro,upperdir=/run/nix-upper,workdir=/run/nix-work /nix \
       || { echo "pc: /nix overlay failed; falling back to ramfs /nix"; mkdir -p /nix/store; }
