@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# sync-to-pc.sh — copy the linux-wasm-runtime ENGINE subset into pc's vendor
+# tree. Excludes node/, web/, tests, package config (pc consumes the engine,
+# not the dev harnesses). Stamps the source commit into pc's SOURCE.md.
+#
+# Usage: runtime/sync-to-pc.sh /path/to/pc
+set -euo pipefail
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # nix-wasm/runtime
+PC="${1:?usage: sync-to-pc.sh <pc-repo-path>}"
+DEST="$PC/vendor/linux-wasm/runtime"
+SHA="$(git -C "$SRC" rev-parse --short HEAD)"
+DATE="$(date -u +%Y-%m-%d)"
+
+rm -rf "$DEST"
+mkdir -p "$DEST/ninep"
+# Engine files only (including make-worker.js):
+cp "$SRC"/{index.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-closure-store.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js} "$DEST/"
+cp "$SRC"/ninep/{protocol.js,server.js,ring.js,transport.js,host-call.js,mem-vfs.js} "$DEST/ninep/"
+
+# Provenance stamp into pc's SOURCE.md (idempotent: replace the marker line).
+MARK="<!-- runtime-sync -->"
+LINE="$MARK Engine synced from nix-wasm@$SHA on $DATE."
+SRCMD="$PC/vendor/linux-wasm/SOURCE.md"
+if grep -q "$MARK" "$SRCMD" 2>/dev/null; then
+  # portable in-place replace
+  tmp="$(mktemp)"; sed "s|^$MARK.*|$LINE|" "$SRCMD" > "$tmp" && mv "$tmp" "$SRCMD"
+else
+  printf '\n%s\n' "$LINE" >> "$SRCMD"
+fi
+echo "synced engine → $DEST (nix-wasm@$SHA)"
