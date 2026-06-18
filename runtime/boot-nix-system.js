@@ -14,6 +14,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   vfs: any,
  *   baseUrl: string|URL,              // dir holding the 4 artifacts (trailing slash optional)
  *   onDownload?: (ev: any) => void,   // lazy-blob fetch progress from the closure store
+ *   onModuleCached?: () => void,      // a streamed user binary finished compiling+caching host-side (close a "loading <tool>…" indicator)
  *   consoleCount?: number,
  *   cmdline?: string,
  *   onLog?: (text: string) => void,
@@ -36,6 +37,7 @@ export async function bootNixSystem(opts) {
     consoleCount: opts.consoleCount,
     cmdline: opts.cmdline,
     onLog: opts.onLog,
+    onModuleCached: opts.onModuleCached,
     nixStore: useNix
       ? await createNixClosureStore(u("store.json"), { onProgress: opts.onDownload })
       : undefined,
