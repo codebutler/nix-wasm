@@ -283,7 +283,7 @@ generation, and `@file` response-file passthrough. Validated in-guest: a `make`
 build using `-isystem`, `-include`, `-MMD -MF` (depfile `c.o: c.c prefix.h`
 produced) and `-Wl,--gc-sections` compiles, links, and runs.
 
-### ⚙️ Autoconf-capable guest shell — forkshell ash; 4 spawn defects fixed, configure runs its whole preamble (2026-06-17)
+### ✅ Autoconf-capable guest shell — DONE: real in-guest `./configure` generates config.h + Makefile (2026-06-17)
 Brought pc's WASI **forkshell ash** (busybox-w32 lineage) to the guest as
 `.#guest-ash` (`userspace/ash.nix` + `ash-cb-guest.c` adapter over native
 posix_spawn/pipe/waitpid + `ash-wasm-sjlj.c`). ash's dash-derived parser is
@@ -309,32 +309,47 @@ preamble; root-caused and fixed **four distinct NOMMU spawn defects** (commit
    found command's redirect (`cat >conftest.c <<EOF` never created the file).
    Neutralized so ash's own `redirect()` handles all redirects in-process.
 
-With these, in-guest `./configure` now runs through its **entire preamble** (shell
-detection, function defs, LINENO, command-not-found probes, all `cc --version/-v/-V`
-checks) and reaches the core tests. **One issue remains:** `forkshell_capture` (a
-`` `backtick` ``) hangs when the captured subshell contains anything beyond a
-single existing command (a `||`, a `|`, or a not-found command — i.e. an extra
-*nested* forkshell or a `cb_spawn`-127) **while stdout is already redirected**
-(autoconf's cosmetic `## Platform. ##` block: `{ cat <<EOF …backticks… } >&5`).
-Isolated precisely: plain `` `(uname -m)` `` in that context works; `` `(cmd) || …` ``,
-`` `(cmd) | sed` ``, and `` `(/nonexistent) 2>/dev/null` `` each hang on the *first*
-capture (not an fd leak — `open()` returns fd 3). The capture pipe's write-end is
-left open across the nested forkshell, so the parent's pipe read never EOFs. This
-is a deep nested-forkshell pipe/wait interaction in the forkshell port, distinct
-from the 4 fixes above, and gates only in-guest autotools (the design's real
-package path is host-cross-compile → guest-substitute, unaffected).
-Full detail: `docs/plan-guest-shell.md` § Implementation status.
+A **fifth** defect surfaced in autoconf's `## Platform. ##` block (`{ cat <<EOF
+…backticks… } >&5`): a `forkshell_capture` (backtick) whose body does a *nested*
+forkshell (a `||`/`|`/not-found subshell) **while stdout is redirected** hung on
+the first capture. Root cause (commit `4325159`): the forkshell serializer copies
+the parent's `redirlist` into the re-exec'd child (fine for a real COW fork, but
+here the child inherited only the *already-applied* fds via posix_spawn, so the
+squirreled-away backup fds the redirtab references don't exist). On exit,
+`exitreset()→unwindredir(NULL)` tried to restore from those invalid backups and
+spun, never closing the capture pipe. Fix: forkshell children clear the inherited
+`redirlist` (they just `_exit()`, which closes fds; they must not unwind the
+parent's redirect stack) + pin `SIGCHLD=SIG_DFL` (they do their own specific-pid
+waits, never need ash's `dowait`→`waitpid(-1,WNOHANG)` which blocks on this kernel).
 
-### ⚠️ Real autoconf `./configure` — preamble runs; one forkshell-capture edge remains (2026-06-17)
+A **sixth** step finished it: **promote the forkshell ash to `/bin/sh`**
+(`userspace/bootstrap.nix` relinks `/bin/sh → $sys/sw/bin/ash` after activation).
+autoconf's generated `config.status` carries a `#!/bin/sh` shebang, so it ran under
+busybox hush ("ambiguous redirect" / "syntax error at 'fi'") and produced no
+output files. Under ash it works.
+
+**Result (validated end-to-end):** a real autoconf `./configure` run **in-guest**
+(`ash ./configure` in ramfs) returns **RC=0** and generates **`config.status` (989
+lines), `config.h` (64 lines), and `Makefile`** — full pipeline: preamble → shell
+detection → C-compiler-works → `AC_CHECK_HEADERS` → `AC_CHECK_FUNCS` →
+`config.status: creating config.h / Makefile`. The interactive guest shell is now
+ash too (boot banner: "built-in shell (ash)").
+
+Caveat: large-file writes to the **9P `/mnt/pc` test mount** fail (config.status to
+that mount errored "write failure"); this is a MemVfs/9P-transport test-harness
+limitation, NOT a guest/ash bug — real in-guest builds use ramfs / the `/nix`
+overlay (ramfs upper), where it works. Full detail: `docs/plan-guest-shell.md`.
+
+### ✅ Real autoconf `./configure` — WORKS in-guest (generates config.h + Makefile, RC=0) (2026-06-17)
 A2 (run a genuine autoconf-generated `configure` in-guest) used a host-generated
 minimal project (real `configure`: `AC_PROG_CC`, `AC_CHECK_HEADERS/FUNCS`,
-`config.h`). The **toolchain side works** (conftest compile/link, `cc` detection),
-and the **shell side is now the forkshell ash** (no longer hush): the 4 spawn
-fixes above carry configure through its entire preamble into the core tests.
-Superseded the old "hush can't parse autoconf / ash not compiled in" framing — ash
-IS built (`.#guest-ash`) and is the autoconf-grade parser. The remaining blocker is
-the single `forkshell_capture`-in-brace-redirect hang documented in the section
-above. Plan: `docs/plan-guest-shell.md`.
+`config.h`). **Now fully working**: with the six forkshell/spawn/shell fixes in the
+section above, `ash ./configure` (in ramfs) returns RC=0 and emits config.status,
+config.h, and Makefile. Superseded the old "hush can't parse autoconf / ash not
+compiled in" framing — ash IS built (`.#guest-ash`), is `/bin/sh`, and is the
+autoconf-grade parser. Next for in-guest autotools: drive `make` (the generated
+Makefile) end-to-end; broader-package `configure` coverage. Plan:
+`docs/plan-guest-shell.md`.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled

@@ -64,6 +64,18 @@ pkgs.writeText "init" ''
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
 
+    # Promote the autoconf-capable forkshell ash to /bin/sh (the initramfs bakes
+    # busybox hush there). hush isn't POSIX-enough for autoconf: a package's
+    # ./configure and the config.status it generates carry a `#!/bin/sh` shebang,
+    # so they run under whatever /bin/sh is. The forkshell ash (NOMMU-safe
+    # subshell/$()/pipeline/heredoc via serialize+re-exec) parses autoconf; hush
+    # dies with "ambiguous redirect" / "syntax error at 'fi'". Relink after
+    # activation, once the served closure (and its ash) is mounted. System
+    # services invoke the profile-absolute busybox sh directly, so only
+    # `#!/bin/sh` scripts and the interactive login shell pick up ash.
+    # See docs/plan-guest-shell.md.
+    [ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh
+
     # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
     [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr 2>/dev/null || true
 
