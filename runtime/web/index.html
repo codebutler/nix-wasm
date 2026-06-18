@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>linux-wasm — browser demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+      }
+      #term {
+        width: 100vw;
+        height: 100vh;
+      }
+      #status {
+        position: fixed;
+        top: 4px;
+        left: 8px;
+        color: #6f6;
+        font: 12px monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">booting…</div>
+    <div id="term"></div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,3 @@
+# oxfmt reads this file as its ignore list (--ignore-path defaults to .gitignore and .prettierignore).
+# Vendored third-party bundles — never format-checked.
+web/vendor/
