@@ -1,0 +1,26 @@
+{
+  "name": "linux-wasm-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JS runtime that boots the linux-wasm guest (kernel host + 9P server + Nix store wiring) in Node and the browser.",
+  "license": "GPL-2.0",
+  "bin": {
+    "linux-wasm-attach": "./node/attach.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p jsconfig.json",
+    "lint": "oxlint --max-warnings 0 .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt --write --threads=1 . && oxfmt --write --threads=1 .",
+    "format:check": "oxfmt --check --threads=1 .",
+    "test": "bun test ./ninep/*.test.js ./nix-closure-store.test.js ./nix-store.test.js",
+    "test:node": "node --test node/"
+  },
+  "devDependencies": {
+    "oxfmt": "0.52.0",
+    "oxlint": "1.67.0",
+    "playwright": "^1.61.0",
+    "typescript": "6.0.2"
+  }
+}
