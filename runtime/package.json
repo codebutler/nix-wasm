@@ -14,7 +14,7 @@
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt --write --threads=1 . && oxfmt --write --threads=1 .",
     "format:check": "oxfmt --check --threads=1 .",
-    "test": "bun test",
+    "test": "bun test ./ninep/*.test.js ./nix-closure-store.test.js ./nix-store.test.js",
     "test:node": "node --test node/"
   },
   "devDependencies": {
