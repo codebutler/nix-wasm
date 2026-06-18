@@ -340,16 +340,18 @@ that mount errored "write failure"); this is a MemVfs/9P-transport test-harness
 limitation, NOT a guest/ash bug — real in-guest builds use ramfs / the `/nix`
 overlay (ramfs upper), where it works. Full detail: `docs/plan-guest-shell.md`.
 
-### ✅ Real autoconf `./configure` — WORKS in-guest (generates config.h + Makefile, RC=0) (2026-06-17)
-A2 (run a genuine autoconf-generated `configure` in-guest) used a host-generated
-minimal project (real `configure`: `AC_PROG_CC`, `AC_CHECK_HEADERS/FUNCS`,
-`config.h`). **Now fully working**: with the six forkshell/spawn/shell fixes in the
-section above, `ash ./configure` (in ramfs) returns RC=0 and emits config.status,
-config.h, and Makefile. Superseded the old "hush can't parse autoconf / ash not
-compiled in" framing — ash IS built (`.#guest-ash`), is `/bin/sh`, and is the
-autoconf-grade parser. Next for in-guest autotools: drive `make` (the generated
-Makefile) end-to-end; broader-package `configure` coverage. Plan:
-`docs/plan-guest-shell.md`.
+### ✅ Real autoconf `./configure && make` — WORKS end-to-end in-guest (2026-06-17)
+A2 (run a genuine autoconf-generated `configure` + `make` in-guest) used a
+host-generated minimal project (real `configure`: `AC_PROG_CC`,
+`AC_CHECK_HEADERS/FUNCS`, `config.h`). **Now fully working end-to-end**: with the
+six forkshell/spawn/shell fixes in the section above, in ramfs:
+`ash ./configure` → RC=0 (emits config.status, config.h, Makefile) →
+`make` → RC=0 (`cc -g -O2 -DHAVE_CONFIG_H -I. -o hello hello.c`, a 33KB wasm
+binary) → `./hello` → RC=0, prints `AC-acdemo-ok-9`. The full configure→make→run
+autotools loop runs entirely inside the wasm guest. Superseded the old "hush can't
+parse autoconf / ash not compiled in" framing — ash IS built (`.#guest-ash`), is
+`/bin/sh`, and is the autoconf-grade parser; `make` (pdpmake) drives the cc/wasm-ld
+build. Next: broader real-package coverage. Plan: `docs/plan-guest-shell.md`.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
