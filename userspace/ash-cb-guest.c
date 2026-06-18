@@ -116,13 +116,58 @@ static int read_full(int fd, void *buf, int n)
  * On the guest, ash's CMDUNKNOWN external commands are real execve's via
  * posix_spawnp (PATH search) — the working NOMMU clone-with-fn spawn. */
 
+/* Resolve argv[0] to an executable, exactly as posix_spawnp's PATH search would.
+ * Returns 1 if found+executable, 0 if not. This is the command-not-found gate:
+ * on this NOMMU guest, posix_spawn{,p} of a NONEXISTENT binary does NOT report
+ * the child's execve failure back to the parent — instead our wait_status()
+ * blocks forever (the same -1/no-child kernel wait quirk; see chld_block above).
+ * autoconf probes missing commands constantly (and treats e.g. `as_var+=2` as
+ * one), so a not-found command must return 127 WITHOUT ever calling posix_spawn.
+ * This is just standard shell semantics — resolve before exec, 127 if absent. */
+static int cmd_found(const char *name)
+{
+	char buf[4096];
+	const char *path, *p;
+	size_t nl;
+	if (!name || !name[0]) return 0;
+	if (strchr(name, '/'))           /* explicit path: no PATH search */
+		return access(name, X_OK) == 0;
+	path = getenv("PATH");
+	if (!path) path = "/bin:/usr/bin";
+	nl = strlen(name);
+	for (p = path; ; ) {
+		const char *colon = strchr(p, ':');
+		size_t dl = colon ? (size_t)(colon - p) : strlen(p);
+		if (dl == 0) {               /* empty entry == current directory */
+			if (access(name, X_OK) == 0) return 1;
+		} else if (dl + 1 + nl + 1 <= sizeof buf) {
+			memcpy(buf, p, dl);
+			buf[dl] = '/';
+			memcpy(buf + dl + 1, name, nl + 1);
+			if (access(buf, X_OK) == 0) return 1;
+		}
+		if (!colon) break;
+		p = colon + 1;
+	}
+	return 0;
+}
+
 int cb_spawn(char **argv)
 {
 	struct sigaction old;
+	posix_spawn_file_actions_t fa;
 	pid_t pid;
 	int rc;
+	if (!cmd_found(argv[0])) return 127;   /* command not found — never spawn */
 	chld_block(&old);
-	rc = (posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ) != 0) ? 127 : wait_status(pid);
+	/* Pass an (empty) initialized file_actions, NOT NULL: on this NOMMU wasm
+	 * port posix_spawn{,p} with a NULL file-actions argument hangs, whereas a
+	 * non-NULL (even empty) one works — every other cb_spawn_* here already
+	 * passes &fa, and only this NULL path was broken. */
+	posix_spawn_file_actions_init(&fa);
+	rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+	posix_spawn_file_actions_destroy(&fa);
+	rc = (rc != 0) ? 127 : wait_status(pid);
 	chld_unblock(&old);
 	return rc;
 }
@@ -150,8 +195,12 @@ int cb_spawn_pipeline(char ***stages, int nstages)
 			posix_spawn_file_actions_addclose(&fa, pp[1]);
 			posix_spawn_file_actions_addclose(&fa, pp[0]);
 		}
-		if (posix_spawnp(&pids[i], stages[i][0], &fa, NULL, stages[i], environ) != 0)
+		/* not-found stage: never posix_spawn (it would hang); mark failed. */
+		if (!cmd_found(stages[i][0]) ||
+		    posix_spawnp(&pids[i], stages[i][0], &fa, NULL, stages[i], environ) != 0) {
 			pids[i] = -1;
+			if (last) status = 127;
+		}
 		posix_spawn_file_actions_destroy(&fa);
 		if (prev_read >= 0) close(prev_read);
 		if (!last) { close(pp[1]); prev_read = pp[0]; }
@@ -169,6 +218,7 @@ int cb_spawn_redirect(char **argv, const cb_redir_spec *redirs, int nredirs)
 	pid_t pid;
 	int i, rc;
 
+	if (!cmd_found(argv[0])) return 127;   /* command not found — never spawn */
 	chld_block(&old);
 	posix_spawn_file_actions_init(&fa);
 	for (i = 0; i < nredirs; i++) {
@@ -191,6 +241,7 @@ int cb_spawn_capture(char **argv, char *outbuf, int outbuf_size)
 	pid_t pid;
 	int pp[2], total, n, rc;
 
+	if (!cmd_found(argv[0])) return 0;     /* command not found — empty capture */
 	chld_block(&old);
 	if (pipe(pp) < 0) { chld_unblock(&old); return -1; }
 	posix_spawn_file_actions_init(&fa);

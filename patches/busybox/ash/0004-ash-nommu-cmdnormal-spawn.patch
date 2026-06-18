@@ -1,0 +1,41 @@
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -10844,18 +10844,27 @@
+ 		 * in a script or a subshell does not need forking,
+ 		 * we can just exec it.
+ 		 */
++		/* NOMMU (cb): this wasm port has no working fork(). When the external
++		 * program must run as a CHILD (not the last command — EV_EXIT — or
++		 * traps may fire), spawn it via posix_spawn (cb_spawn) and keep running
++		 * in THIS shell, instead of forkshell() which hangs here. Redirects were
++		 * applied in-process by redirectsafe() above and are inherited by the
++		 * spawned child; command-prefix VAR=val assignments are exported via
++		 * environ. The spawned child shares this NOMMU process's single address
++		 * space and clobbers the global g_parsefile pointer, so save and restore
++		 * it (same hazard the forkshell helpers handle) — otherwise the
++		 * unwindfiles(file_stop) in `out:` spins forever (its
++		 * `while (g_parsefile != stop) popfile()` never reaches the moved stop).
++		 * EV_EXIT commands still shellexec-replace below (exec works on this
++		 * port). */
+ 		if (!(flags & EV_EXIT) || may_have_traps) {
+-			/* No, forking off a child is necessary */
+-			INT_OFF;
+-			get_tty_state();
+-			jp = makejob(/*cmd,*/ 1);
+-			if (forkshell(jp, cmd, FORK_FG) != 0) {
+-				/* parent */
+-				break;
+-			}
+-			/* child */
+-			FORCE_INT_ON;
+-			/* fall through to exec'ing external program */
++			char **sv_environ = environ;
++			struct parsefile *sv_parsefile = g_parsefile;
++			environ = listvars(VEXPORT, VUNSET, varlist.list, /*end:*/ NULL);
++			exitstatus = status = cb_spawn(argv);
++			environ = sv_environ;
++			g_parsefile = sv_parsefile;
++			goto bail;
+ 		}
+ 		shellexec(argv[0], argv, path, cmdentry.u.index);
+ 		/* NOTREACHED */

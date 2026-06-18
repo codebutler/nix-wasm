@@ -35,6 +35,13 @@ cross.stdenv.mkDerivation {
     ../patches/busybox/ash/0001-ash-cb-spawn.patch
     ../patches/busybox/ash/0002-ash-m3-m4.patch
     ../patches/busybox/ash/0003-ash-forkshell.patch
+    # NOMMU: route a CMDNORMAL external command that needs a child (not the last
+    # command) through cb_spawn instead of ash's native fork()+exec — the wasm
+    # port has no working fork(), so `cc foo; echo done` (any non-terminal
+    # external command) otherwise hangs. The guest's real find_command resolves
+    # found commands to CMDNORMAL (unlike pc's WASI build where externals stayed
+    # CMDUNKNOWN), so this default-case path is reachable here and must not fork.
+    ../patches/busybox/ash/0004-ash-nommu-cmdnormal-spawn.patch
   ];
 
   postPatch = ''
@@ -57,6 +64,19 @@ cross.stdenv.mkDerivation {
     sed -i 's|fslen = forkshell_capture(&fs, &fsbuf, &fsstatus);|struct parsefile *_spf = g_parsefile; fslen = forkshell_capture(\&fs, \&fsbuf, \&fsstatus); g_parsefile = _spf;|' shell/ash.c
     sed -i 's|status = forkshell_run(&fs, backgnd);|{ struct parsefile *_spf = g_parsefile; status = forkshell_run(\&fs, backgnd); g_parsefile = _spf; }|' shell/ash.c
     sed -i 's|status = forkshell_pipeline(n, flags);|{ struct parsefile *_spf = g_parsefile; status = forkshell_pipeline(n, flags); g_parsefile = _spf; }|' shell/ash.c
+
+    # FIX: the M3a redirect-detach (patch 0002) was a WASI workaround — there
+    # dup2-based redirects were stubbed, so it detached an external command's
+    # redirect list and re-wired it via cb_spawn_redirect. On THIS guest dup2
+    # works, so ash's own redirect() applies redirects in-process and the
+    # posix_spawn child inherits them (exactly like cb_spawn_pipeline inherits
+    # its pipe fds). Worse, the detach keys off the EARLY find_command
+    # (DO_REGBLTIN → CMDUNKNOWN) and fires before the later find_command
+    # reclassifies a found command to CMDNORMAL; the CMDNORMAL path then ignores
+    # the detached list, dropping the redirect entirely (e.g. autoconf's
+    # `cat >conftest.c <<EOF` never creates the file). Neutralize the detach so
+    # redirectsafe() handles every redirect (files, >&N, heredocs) in-process.
+    sed -i 's|if (cmdentry.cmdtype == CMDUNKNOWN && cmd->ncmd.redirect) {|if (0 \&\& cmdentry.cmdtype == CMDUNKNOWN \&\& cmd->ncmd.redirect) {|' shell/ash.c
 
     # Compile the guest cb adapter + the wasm SjLj runtime as part of the shell
     # dir (gated on CONFIG_ASH). The SjLj runtime provides __wasm_setjmp/_test/
