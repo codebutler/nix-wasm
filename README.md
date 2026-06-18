@@ -27,8 +27,10 @@ toolchain it stands on.
 | **guest kernel** (`vmlinux.wasm`) | ✅ **nix-built** from the pinned joelseverin/linux wasm port |
 | CI + binary cache (the host-builds-guest-substitutes model) | ⬜ planned — [issue #2](https://github.com/codebutler/nix-wasm/issues/2) |
 
-See **[docs/STATUS.md](docs/STATUS.md)** for the detailed log: what works, what's
-next, and what didn't work (the dead-ends, so they're not repeated).
+See **[CLAUDE.md](CLAUDE.md)** for the operating guide and the full record: the
+architecture, current state, hard-won gotchas, and the dead-ends (so they're not
+repeated). Future work is tracked as
+[GitHub issues](https://github.com/codebutler/nix-wasm/issues).
 
 ## How to build
 
@@ -61,7 +63,7 @@ after). On `x86_64-linux` (and CI) it substitutes from cache.
 cache (cache-friendly pin + `x86_64` + a wasm-artifact cache) and the **guest** to
 *substitute* pre-built wasm artifacts rather than build in-guest. From-source
 host rebuilds are a failure mode to design out. See
-[docs/STATUS.md § Caching strategy](docs/STATUS.md#caching-strategy-a-goal-not-just-an-observation).
+[CLAUDE.md § Caching](CLAUDE.md).
 
 ## Repo layout
 
@@ -78,7 +80,6 @@ toolchain/             the wasm toolchain, as focused Nix derivations:
   libcxx.nix           LLVM-21 libc++/libc++abi/libunwind for wasm
   sysroot.nix          assembles musl + kernel headers into the cc sysroot
 patches/               the kernel/musl/nix source patches
-docs/                  the detailed STATUS log (current state, dead-ends; future work is in GitHub issues)
 ```
 
 ## Two layers — important distinction

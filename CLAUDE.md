@@ -1,8 +1,8 @@
 # CLAUDE.md — nix-wasm
 
 Build `nix.wasm` (Nix for the `wasm32-linux-musl` NOMMU guest) and its toolchain,
-**entirely through Nix**. This file is the operating guide. Read `docs/STATUS.md`
-for the current state before doing anything.
+**entirely through Nix**. This file is the operating guide AND the record of
+current state and hard-won learnings — read it before doing anything.
 
 ## PRIME DIRECTIVE (non-negotiable)
 
@@ -106,7 +106,8 @@ COMPILES C **and C++** in-browser entirely from Nix-built artifacts (`cc -O2 hel
 in-guest). Enabling clang needed a shared kernel fix: `CONFIG_BOOT_MEM_PAGES`
 0x2000→0x4000 (512MiB→1GiB) so the 57MB clang.wasm can be mmap'd contiguously after
 the sysroot unpack fragments the NOMMU heap. C startup needed two link/loader fixes
-(see `docs/STATUS.md` § in-guest compile startup SIGILL); `c++` adds `-D__linux__`
+(guest-cc `--gc-sections` + a loader data-relocs guard — see the guest-compile
+SIGILL note in agent memory + `toolchain/guest-cc.nix`); `c++` adds `-D__linux__`
 (libc++ pthread thread-API selection on the `-unknown` triple) + `--allow-undefined`
 (the host-provided `__cpp_exception` wasm-EH tag), with libc++ shipped in
 `cc-sysroot` (`sys/cxx`).
@@ -116,8 +117,9 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 **forkshell ash** (busybox-w32 lineage, NOMMU fork-without-exec over `posix_spawn`;
 `userspace/ash.nix` + `userspace/ash-cb-guest.c`), promoted to `/bin/sh` in
 `bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
-`$()`/subshell/pipeline, and `config.status` work (full record in `docs/STATUS.md`
-§ Autoconf-capable guest shell). The old "hush isn't POSIX-enough" gap is closed.
+`$()`/subshell/pipeline, and `config.status` work (full record in the
+`userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
+history). The old "hush isn't POSIX-enough" gap is closed.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
@@ -137,7 +139,7 @@ LLVM), and publish the wasm outputs (`cross.*`, `nix.wasm`, user packages) to a
 binary cache. The **guest** then *substitutes* pre-built wasm artifacts rather
 than building in-guest — that's the "install any package" model and what makes
 the crossSystem approach scale. From-source host rebuilds are a failure mode to
-design out. Full detail: `docs/STATUS.md` § Caching strategy.
+design out (see the Environment notes under Hard-won learnings).
 
 ## ccache (opt-in compile cache — dev iteration only)
 
@@ -181,11 +183,94 @@ input-addressed store path — they're for iteration, not for publishing as the
 canonical `.#guest-clang` / `.#kernel` artifacts. The wiring is a `useCcache`
 arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
 
+## Hard-won learnings (gotchas & dead-ends)
+
+Each was a real bug or a rejected approach; the detailed root-cause narrative
+lives in the relevant `.nix`/patch comment + git history. This is the index of
+*why* the non-obvious flags exist so they aren't "cleaned up" and re-broken.
+
+**Cross-build (shared crossSystem/overlay — what makes nixpkgs packages
+cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
+- **Static is a PLATFORM flag, not per-dep.** `crossSystem.isStatic = true` AND
+  force `hasSharedLibraries = true` back on (else sqlite reads the now-missing
+  `extensions.sharedLibrary` → eval abort). nixpkgs then applies `makeStatic`
+  everywhere; the `__musl_tp` general-dynamic-TLS reloc only trips when linking a
+  separate `.so`, so keeping everything static (incl. stdio) is correct, and
+  `-static` is a harmless no-op on our `-shared` dylink modules.
+- **`musl` must be OUR nix-built musl** (override the `musl` attr). nixpkgs'
+  cross-musl bootstrap embeds a compiler-rt built with the clang-rejected
+  `wasm32-unknown-linux-musl` triple, in a stage *neither `overlays` nor
+  `crossOverlays` reach* → cascades to everything (via `libiconv`). Wrapping our
+  own musl eliminates that bad bootstrap compiler-rt.
+- **compiler-rt triple** = force `wasm32-unknown-unknown` (clang rejects
+  `-linux-musl`); override `llvmPackages_21.compiler-rt` via `overrideScope` (the
+  top-level `compiler-rt` attr doesn't exist here — that override was dead code).
+- **ALWAYS guard overlay overrides with `prev.stdenv.hostPlatform.isWasm`** — the
+  overlay hits `buildPackages` too; an unguarded `zlib`/`openssl` override rebuilds
+  the *entire native toolchain* (coreutils, python) from source.
+- **libc++abi self-contained**: fold `Unwind-wasm.o` INTO `libc++abi.a`
+  (`toolchain/libcxx.nix`) so `_Unwind_*` resolves internally — cc-wrapper
+  consumers can't reliably inject `-lunwind` after clang's auto `-lc++abi`.
+- **bintools**: stock LLVM ships `ar`/`ranlib` *unprefixed* → add the
+  target-prefixed symlinks or `$AR`/`$RANLIB` come up empty.
+- **wasm-ld flag filter** must also drop `--compress-debug-sections` (silently
+  failed every sqlite autosetup link probe → bogus "Cannot find libm") alongside
+  the ELF-only flags (`--undefined-version`, …).
+- **crt `int main`**: a weak 2-arg crt `main` wrapper (`musl.nix`) so all of
+  `int main(void)` / `(int,char**)` link — else autoconf's "C compiler cannot
+  create executables" aborts every autoconf dep.
+
+**`nix.wasm` link/build (`nix-wasm.nix`):**
+- `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
+  `_Unwind_Backtrace`); `dontUseMesonConfigure` (the meson hook ran a native
+  configure first); patch out llhttp's `#if defined(__wasm__)` JS-host-callback
+  block (dead/wrong when embedded). The meson `-r` prelink can't emit wasm TLS
+  relocs → the custom `.o` link (a real wasm limit; see Architecture).
+- **`nuke-refs` the closure** (`nixWasmClean`): `nix.wasm` embeds dead build-path
+  refs (openssl/boost-dev/json → transitively native glibc + locales) that balloon
+  the served closure to ~258 MB / 18k files; strip them post-build.
+- **sqlite `-DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0`**: WAL's `-shm` shared-memory
+  file is unsupported on the NOMMU guest fs → `SQLITE_IOERR` on the store DB.
+
+**Guest runtime / kernel:**
+- **No fork/vfork — clone-with-fn only.** A fresh wasm instance can't resume the
+  parent mid-function → `fork()`/`vfork()` SIGILL/abort. Everything that "spawns"
+  (busybox, ash, `make`, nix's external `sh` builder) goes through `posix_spawn` /
+  clone-with-fn; this is why busybox + ash carry the clone-with-fn patches.
+- **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
+  `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
+  (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.
+- **User stack 8 KiB→4 MiB** (`patches/kernel/0007`): musl `realpath()` alone
+  overflows 8 KiB and NOMMU can't grow the stack (was both the "readlink -f
+  corrupts long paths" bug and the nix.wasm startup "memory access out of bounds").
+  4 MiB (not 8) so the alloc fits an order-11 buddy block.
+- **Single-user nix** (`userspace/system.nix`): `build-users-group = ""` +
+  `filter-syscalls = false` (no seccomp on wasm) — either otherwise aborts `nix-env`.
+- **`store-manifest` splits large files into lazy `store-content/<sha256>` blobs**
+  so the ~113 MB toolchain fetches on first exec, not at boot.
+
+**Dead-ends — do NOT retry:**
+- `crossSystem.hasSharedLibraries = false` — too aggressive; sqlite eval abort.
+- `stdenvAdapters.makeStaticLibraries` — doesn't compose with our
+  `replaceCrossStdenv` (`dontAddStaticConfigureFlags` → `null` → eval error).
+- Unscoped overlay overrides — poison `buildPackages` (see the `isWasm` guard above).
+- `nixos-26.05` pin *locally on aarch64* — triggers from-source LLVM (the aarch64
+  cache lacks the exact build). 26.05 is the right pin for **x86_64 CI** only.
+- Minimal per-dep derivations — see PRIME DIRECTIVE corollary 1.
+
+**Environment:**
+- Pin: `nixos-unstable` @ `9ae611a` (LLVM **21.1.8**); CI should prefer
+  `nixos-26.05` (same clang-21.1.8, fully cached on x86_64).
+- aarch64 cache lags x86_64 and lacks heavy builds → first local build compiles
+  LLVM from source (~1–2 h, then cached locally). Hence corollary 3.
+- Known-good oracle: `~/lwbuild/ws/install/*-wasm32_nommu` (read-only; validate
+  against it, never rebuild it here).
+
 ## Plans & future work
 
 Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →
-guest-clang/cc → kernel); the code + `docs/STATUS.md` are the record. Remaining
-work and design notes live as GitHub issues, not in-repo plan files:
+guest-clang/cc → kernel); the code + this file + git history are the record.
+Remaining work and design notes live as GitHub issues, not in-repo plan files:
 
 - **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, guest
   substitutes). The last phase; see the Caching design goal above.
@@ -196,5 +281,5 @@ work and design notes live as GitHub issues, not in-repo plan files:
   `nix-env -iA`); fix folds into #2.
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
-forkshell-ash — and the rationale/master-plan docs were removed once done; the
-code, `STATUS.md`, and git history are the record.)
+forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
+removed once done; the code, this file, and git history are the record.)

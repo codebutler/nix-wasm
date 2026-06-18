@@ -66,7 +66,8 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
       # busybox ASH — the autoconf-capable guest shell (forkshell, NOMMU
-      # fork-without-exec via the guest cb adapter). See docs/STATUS.md § guest shell.
+      # fork-without-exec via the guest cb adapter). See CLAUDE.md (Architecture)
+      # + the userspace/ash.nix postPatch comments.
       wasmAsh = import ./userspace/ash.nix {
         inherit pkgs cross;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;

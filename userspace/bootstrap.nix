@@ -73,7 +73,7 @@ pkgs.writeText "init" ''
     # activation, once the served closure (and its ash) is mounted. System
     # services invoke the profile-absolute busybox sh directly, so only
     # `#!/bin/sh` scripts and the interactive login shell pick up ash.
-    # See docs/STATUS.md § Autoconf-capable guest shell.
+    # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
     [ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh
 
     # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
