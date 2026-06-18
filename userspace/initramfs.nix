@@ -24,7 +24,7 @@ pkgs.runCommand "wasm-initramfs"
     # busybox binary + its complete applet symlink set (relative -> busybox).
     cp -a ${busybox}/bin/. "$root/bin/"
     chmod u+w "$root/bin"
-    ${if phase0 != null then ''cp ${phase0}/bin/. "$root/bin/" -r'' else ""}
+    ${if phase0 != null then ''cp -r ${phase0}/bin/. "$root/bin/"'' else ""}
     # /bin/sh is among them; ensure it exists even if a future busybox drops it.
     [ -e "$root/bin/sh" ] || ln -sf busybox "$root/bin/sh"
 

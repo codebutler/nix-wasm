@@ -6,6 +6,11 @@ cross.stdenv.mkDerivation {
   pname = "phase0-tests";
   version = "0.1.0";
   inherit src;
+  buildPhase = ''
+    runHook preBuild
+    make CFLAGS="-O2 -Wall -Wextra -Wno-unused-parameter"
+    runHook postBuild
+  '';
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin
@@ -15,4 +20,5 @@ cross.stdenv.mkDerivation {
     done
     runHook postInstall
   '';
+  meta.description = "Phase 0 kernel-primitive probes (wasm guest)";
 }
