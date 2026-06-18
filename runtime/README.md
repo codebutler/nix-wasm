@@ -81,15 +81,15 @@ Output that arrives before `onData` is called is buffered per console.
 
 ### Building blocks
 
-| Export                                                 | Description                                                                         |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `createNixClosureStore(storeJsonUrl, { onProgress? })` | Read-only 9P VFS for the `/nix` closure (lazy blobs from `nix-cache/`)              |
-| `createNixCacheExport(cacheDirUrl)`                    | Read-only 9P VFS for `/nix-cache` (in-guest binary cache substituter)               |
-| `createNixStore(packages?)`                            | Minimal in-memory nix store for tests                                               |
-| `makeConsoleSession(console, hooks?)`                  | Wraps a console handle with `waitForPrompt` / `waitForOutput` / `send` / `snapshot` |
-| `MemVfs`                                               | In-memory VFS — reference implementation and test double                            |
-| `HVC_CONSOLES`                                         | Default console count (8)                                                           |
-| `DEFAULT_CMDLINE`                                      | Default kernel command line                                                         |
+| Export                                                 | Description                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `createNixClosureStore(storeJsonUrl, { onProgress? })` | Read-only 9P VFS for the `/nix` closure (lazy blobs from `nix-cache/`)    |
+| `createNixCacheExport(cacheDirUrl)`                    | Read-only 9P VFS for `/nix-cache` (in-guest binary cache substituter)     |
+| `createNixStore(packages?)`                            | Minimal in-memory nix store for tests                                     |
+| `makeConsoleSession(console, hooks?)`                  | Wraps a console handle with `write`, `onData`, `resize`, `kill`, `hangup` |
+| `MemVfs`                                               | In-memory VFS — reference implementation and test double                  |
+| `HVC_CONSOLES`                                         | Default console count (8)                                                 |
+| `DEFAULT_CMDLINE`                                      | Default kernel command line                                               |
 
 ### VFS contract
 

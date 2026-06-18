@@ -122,9 +122,8 @@ ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
 node web/smoke.mjs
 ```
 
-`makeConsoleSession` wraps a boot handle with a programmatic expect API
-(`waitForPrompt` / `waitForOutput` / `send` / `snapshot` / `kill`) for
-scripting bespoke checks against a freshly-built guest.
+`makeConsoleSession` wraps a boot handle's console with session conveniences:
+`write`, `onData`, `resize`, `kill`, `hangup`.
 
 **Four CI gates for runtime/** (all must pass before pushing):
 
