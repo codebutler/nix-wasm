@@ -141,7 +141,7 @@ vendored (excluded from all three static gates).
 
 **It works end-to-end** (2026-06-17). `nix build .#nix-wasm` builds the wasm Nix;
 the dep closure (`cross.*`), the kernel, and the curated guest userspace all build
-reproducibly. In the pc harness (`scripts/linux-demo/exec-nixsystem.mjs`) the
+reproducibly. In the runtime harness (`runtime/node/smoke.mjs`) the
 Nix-built userspace boots — served-closure `/nix` overlay → busybox-init → getty →
 autologin → root shell — and **`nix-env -iA sl` substitutes `sl` from the binary
 cache and renders it** (Phase A + B both PASS). Every wasm fix is a SHARED

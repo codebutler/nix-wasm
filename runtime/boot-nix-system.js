@@ -20,7 +20,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
  * }} opts
- * @returns {Promise<ReturnType<import('./boot.js').bootLinux>>}
+ * @returns {ReturnType<import('./boot.js').bootLinux>}
  */
 export async function bootNixSystem(opts) {
   const base = new URL(
