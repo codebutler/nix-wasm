@@ -14,11 +14,17 @@
 //                       irq -> vq_out_cb completes the guest's wait.
 //
 // For 1b/M3 we implement the control-message round-trip the guest needs to
-// probe /dev/wl0 and create a context VFD (VIRTWL_IOCTL_NEW_CTX). SEND/RECV of
-// actual wayland bytes is stubbed enough to round-trip (acks SEND, no real
-// compositor yet — that is Phase 1d / Phase 2). In-worker servicing is fine.
+// probe /dev/wl0 and create a context VFD (VIRTWL_IOCTL_NEW_CTX). For 1d we now
+// also parse the wayland bytes carried by a VFD_SEND, run them through a minimal
+// host Wayland SERVER (wl-server.js — registry handshake only, no compositor),
+// and push the server's reply bytes BACK to the guest over the IN queue as a
+// VFD_RECV addressed to the same ctx vfd_id. The driver's vq_handle_recv routes
+// that to the ctx's read queue, waylandproxyd's VIRTWL_IOCTL_RECV reads it, and
+// forwards it to the client socket — completing wl_display_roundtrip(). Real
+// compositing (surfaces/buffers/pixels) is still Phase 2 / Greenfield.
 
 import { VirtioWasmDevice } from "./device.js";
+import { WlServer } from "./wl-server.js";
 
 // virtio_wl ctrl types (uapi/linux/virtio_wl.h).
 const VIRTIO_WL_CMD_VFD_NEW = 0x100;
@@ -27,7 +33,7 @@ const VIRTIO_WL_CMD_VFD_SEND = 0x102;
 const VIRTIO_WL_CMD_VFD_RECV = 0x103;
 const VIRTIO_WL_CMD_VFD_NEW_CTX = 0x104;
 const VIRTIO_WL_CMD_VFD_NEW_PIPE = 0x105;
-const VIRTIO_WL_CMD_VFD_HUP = 0x106;
+const _VIRTIO_WL_CMD_VFD_HUP = 0x106; // (host->guest HUP; not emitted yet)
 const VIRTIO_WL_CMD_VFD_NEW_CTX_NAMED = 0x10a;
 
 const VIRTIO_WL_RESP_OK = 0x1000;
@@ -39,6 +45,14 @@ const VIRTIO_WL_VFD_READ = 0x2;
 
 const VIRTWL_VQ_IN = 0;
 const VIRTWL_VQ_OUT = 1;
+
+// struct virtio_wl_ctrl_vfd_send / _recv header (little-endian):
+//   0  u32 hdr.type
+//   4  u32 hdr.flags
+//   8  u32 vfd_id      (the ctx the data belongs to)
+//   12 u32 vfd_count   (number of trailing __le32 vfd ids; 0 for the handshake)
+//   16 .. vfd ids (vfd_count * 4), then raw wayland data
+const SEND_HDR_SIZE = 16;
 
 // struct virtio_wl_ctrl_vfd_new layout (little-endian):
 //   0  u32 hdr.type
@@ -55,7 +69,18 @@ export class WlDevice extends VirtioWasmDevice {
     super(opts);
     this._nextVfdId = 1; // host-allocated vfd ids would set the HOST bit; the
     // guest allocates ctx/pipe ids itself, so we only echo them back.
-    this.contexts = new Map(); // vfd_id -> { type }
+    this.contexts = new Map(); // vfd_id -> { type, server }
+  }
+
+  /** Lazily get (or create) the per-ctx Wayland server for a vfd_id. */
+  _serverFor(vfdId) {
+    let ctx = this.contexts.get(vfdId);
+    if (!ctx) {
+      ctx = { type: VIRTIO_WL_CMD_VFD_NEW_CTX };
+      this.contexts.set(vfdId, ctx);
+    }
+    if (!ctx.server) ctx.server = new WlServer((m) => this.log(m));
+    return ctx.server;
   }
 
   getFeatures() {
@@ -70,11 +95,12 @@ export class WlDevice extends VirtioWasmDevice {
   }
 
   onNotify(q) {
-    if ((q >>> 0) === VIRTWL_VQ_OUT) {
+    if (q >>> 0 === VIRTWL_VQ_OUT) {
       this._serviceOut();
-    } else if ((q >>> 0) === VIRTWL_VQ_IN) {
-      // Guest (re)posted inbufs. Nothing to push yet (no compositor traffic).
-      this.log(`[virtio-wl] IN queue refilled (no pending host msgs)`);
+    } else if (q >>> 0 === VIRTWL_VQ_IN) {
+      // Guest (re)posted inbufs. If a prior SEND produced a reply we couldn't
+      // deliver because no IN buffer was available yet, flush it now.
+      this._flushPendingIn();
     }
   }
 
@@ -87,26 +113,96 @@ export class WlDevice extends VirtioWasmDevice {
 
     let serviced = 0;
     let chain;
+    // Wayland replies queued while servicing this batch; pushed to the IN queue
+    // AFTER all OUT acks so the driver sees the SEND complete first.
+    const inReplies = [];
     while ((chain = vr.next())) {
       const req = vr.readOut(chain); // the request bytes
-      const resp = this._handle(req);
-      // Write the response over the in_sg (capped to its capacity).
+      const { resp, inReply } = this._handle(req);
+      // Write the OUT response (the ack) over the in_sg (capped to capacity).
       const written = vr.writeIn(chain, resp);
       vr.pushUsed(chain.head, written);
       serviced++;
+      if (inReply) inReplies.push(inReply);
     }
 
     if (serviced > 0) this.raiseIrq();
+
+    // Deliver any wayland server replies over the IN queue (a separate vring).
+    for (const r of inReplies) this._queueIn(r.vfdId, r.data);
+    this._flushPendingIn();
+  }
+
+  // --- host -> guest IN-queue push (the 1d extension point) -----------------
+  //
+  // Server->client wayland bytes are delivered as a VFD_RECV on the IN queue,
+  // addressed to the same ctx vfd_id the SEND came from. The driver's
+  // vq_handle_recv routes it to the ctx's read queue; waylandproxyd's
+  // VIRTWL_IOCTL_RECV reads it and writes it to the client socket. The guest
+  // prefills the IN queue with PAGE_SIZE write-only buffers; if none is free we
+  // stash the reply and flush on the next IN refill notify.
+
+  /** Pending {vfdId, data} replies awaiting a free IN buffer. */
+  _pendingIn = [];
+
+  _queueIn(vfdId, data) {
+    this._pendingIn.push({ vfdId, data });
+  }
+
+  _flushPendingIn() {
+    if (this._pendingIn.length === 0) return;
+    const vr = this.vring(VIRTWL_VQ_IN);
+    if (!vr) {
+      this.log(`[virtio-wl] IN push deferred: queue not set up yet`);
+      return;
+    }
+    let pushed = 0;
+    while (this._pendingIn.length > 0) {
+      if (!vr.hasAvail()) {
+        this.log(`[virtio-wl] IN push deferred: no free inbuf (${this._pendingIn.length} pending)`);
+        break;
+      }
+      const chain = vr.next();
+      if (!chain) break;
+      const { vfdId, data } = this._pendingIn.shift();
+      const msg = this._vfdRecv(vfdId, data);
+      const cap = vr.inCapacity(chain);
+      if (msg.length > cap) {
+        this.log(`[virtio-wl] IN buffer too small (${cap} < ${msg.length}); truncating`);
+      }
+      const written = vr.writeIn(chain, msg);
+      vr.pushUsed(chain.head, written);
+      this.log(
+        `[virtio-wl] IN push: VFD_RECV vfd_id=${vfdId} ${data.length}B wayland (used ${written}B)`,
+      );
+      pushed++;
+    }
+    if (pushed > 0) this.raiseIrq();
+  }
+
+  /** Build a VFD_RECV control message: hdr(type,flags) + vfd_id + vfd_count(0)
+   *  + raw wayland data. */
+  _vfdRecv(vfdId, data) {
+    const b = new Uint8Array(SEND_HDR_SIZE + data.length);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, VIRTIO_WL_CMD_VFD_RECV, true); // hdr.type
+    dv.setUint32(4, 0, true); // hdr.flags
+    dv.setUint32(8, vfdId >>> 0, true); // vfd_id
+    dv.setUint32(12, 0, true); // vfd_count = 0 (no fds in the handshake)
+    b.set(data, SEND_HDR_SIZE);
+    return b;
   }
 
   /**
-   * Parse one virtwl OUT request and return the response bytes the guest reads
-   * back via its in_sg. The guest's response buffer is typically the same
-   * struct it sent, so we return a full ctrl_vfd_new-sized reply for NEW_*,
-   * else a bare ctrl_hdr.
+   * Parse one virtwl OUT request. Returns { resp, inReply } where `resp` is the
+   * bytes written back over the OUT in_sg (the ack the driver waits on) and
+   * `inReply` (or null) is a wayland reply {vfdId, data} to push via the IN
+   * queue. The guest's OUT response buffer is typically the same struct it sent,
+   * so NEW_* return a full ctrl_vfd_new-sized reply, else a bare ctrl_hdr.
    */
   _handle(req) {
-    if (req.length < HDR_SIZE) return this._hdr(VIRTIO_WL_RESP_INVALID_TYPE);
+    if (req.length < HDR_SIZE)
+      return { resp: this._hdr(VIRTIO_WL_RESP_INVALID_TYPE), inReply: null };
     const dv = new DataView(req.buffer, req.byteOffset, req.byteLength);
     const type = dv.getUint32(0, true);
 
@@ -118,22 +214,39 @@ export class WlDevice extends VirtioWasmDevice {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         this.contexts.set(vfdId, { type });
         this.log(`[virtio-wl] NEW (type=0x${type.toString(16)}) vfd_id=${vfdId} -> RESP_VFD_NEW`);
-        return this._vfdNew(vfdId, /*size*/ 0, /*pfn*/ 0n, VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ);
+        return {
+          resp: this._vfdNew(
+            vfdId,
+            /*size*/ 0,
+            /*pfn*/ 0n,
+            VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ,
+          ),
+          inReply: null,
+        };
       }
       case VIRTIO_WL_CMD_VFD_CLOSE: {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         this.contexts.delete(vfdId);
         this.log(`[virtio-wl] CLOSE vfd_id=${vfdId} -> RESP_OK`);
-        return this._hdr(VIRTIO_WL_RESP_OK);
+        return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
       }
       case VIRTIO_WL_CMD_VFD_SEND: {
-        // Ack the send. A real compositor would route the wayland bytes here.
-        this.log(`[virtio-wl] SEND ${req.length}B -> RESP_OK (stub, no compositor)`);
-        return this._hdr(VIRTIO_WL_RESP_OK);
+        // ctrl_vfd_send: hdr(8) + vfd_id(4) + vfd_count(4) + [vfd ids] + data.
+        const vfdId = dv.getUint32(8, true);
+        const vfdCount = dv.getUint32(12, true);
+        const dataOff = SEND_HDR_SIZE + vfdCount * 4;
+        const data = req.subarray(dataOff);
+        this.log(`[virtio-wl] SEND vfd_id=${vfdId} ${data.length}B wayland (${vfdCount} fds)`);
+        const server = this._serverFor(vfdId);
+        const reply = server.handle(data);
+        const inReply = reply.length ? { vfdId, data: reply } : null;
+        if (inReply) this.log(`[virtio-wl] wl-server produced ${reply.length}B reply -> IN queue`);
+        // Ack the SEND itself over OUT (the driver's finish_completion).
+        return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply };
       }
       default:
         this.log(`[virtio-wl] unhandled type 0x${type.toString(16)} -> INVALID_TYPE`);
-        return this._hdr(VIRTIO_WL_RESP_INVALID_TYPE);
+        return { resp: this._hdr(VIRTIO_WL_RESP_INVALID_TYPE), inReply: null };
     }
   }
 

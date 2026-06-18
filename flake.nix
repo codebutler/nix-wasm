@@ -95,6 +95,14 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
+      # the Phase 1 deliverable. Links the cross libwayland-client and runs the
+      # canonical wl_display_connect → get_registry → roundtrip → enumerate
+      # globals flow THROUGH waylandproxyd, end-to-end across the transport.
+      wasmWlHandshake = import ./userspace/wlhandshake.nix {
+        inherit pkgs cross;
+      };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
       guestClang = import ./toolchain/guest-clang.nix {
@@ -160,7 +168,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -254,6 +262,9 @@
 
         # Wayland Phase 1 (1c M3): the AF_UNIX test client for waylandproxyd.
         wlclient = wasmWlClient;
+
+        # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
+        wlhandshake = wasmWlHandshake;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
