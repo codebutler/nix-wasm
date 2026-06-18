@@ -11,7 +11,9 @@
 # nixpkgs busybox already ships every applet as a RELATIVE symlink (-> busybox)
 # in $out/bin, so `cp -a` of that dir gives the real binary + all applets +
 # /bin/sh, deterministically and without executing any guest code.
-{ pkgs, busybox, init }:
+# `extraBins`: extra guest derivations whose $out/bin/* are copied into /bin
+# (Phase 1 1b ships the /dev/wl0 self-test binary, wltest, this way).
+{ pkgs, busybox, init, extraBins ? [ ] }:
 pkgs.runCommand "wasm-initramfs"
   {
     nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
@@ -25,6 +27,14 @@ pkgs.runCommand "wasm-initramfs"
     cp -a ${busybox}/bin/. "$root/bin/"
     # /bin/sh is among them; ensure it exists even if a future busybox drops it.
     [ -e "$root/bin/sh" ] || ln -sf busybox "$root/bin/sh"
+
+    # extra guest binaries (Phase 1 1b: /bin/wltest). The busybox cp -a above
+    # left $root/bin entries read-only; make the dir writable before adding more.
+    chmod -R u+w "$root/bin"
+    for d in ${pkgs.lib.concatMapStringsSep " " (b: "${b}/bin") extraBins}; do
+      [ -d "$d" ] && cp "$d"/* "$root/bin/"
+    done
+    chmod -R u+w "$root/bin"
 
     # the generated /init (entrypoint; kernel cmdline init=/init).
     cp ${init} "$root/init"

@@ -73,6 +73,12 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # Wayland Phase 1 (1b M3): the /dev/wl0 userspace round-trip self-test.
+      wasmWlTest = import ./userspace/wltest.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
       guestClang = import ./toolchain/guest-clang.nix {
@@ -138,6 +144,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
+        extraBins = [ wasmWlTest ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -217,6 +224,9 @@
 
         userspace-busybox = wasmBusybox;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
+
+        # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
+        wltest = wasmWlTest;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
