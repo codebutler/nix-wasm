@@ -19,6 +19,7 @@
 // CONSOLE so no boot/prompt bytes are lost.
 
 import { linux } from "./kernel-host.js";
+import { makeSharedQueues } from "./virtio/shared-queues.js";
 import { Ring } from "./ninep/ring.js";
 import { createNinePServer } from "./ninep/server.js";
 import { createNinePTransport } from "./ninep/transport.js";
@@ -128,6 +129,11 @@ export async function bootLinux(opts) {
   });
   transport.run(); // Atomics.waitAsync server loop; self-driving, resolves on stop()
 
+  // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB), threaded
+  // into every task worker so a queue set up on the boot worker is serviceable
+  // from a userspace task worker (same model as the 9P ring).
+  const virtioQueues = makeSharedQueues();
+
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
   const os = await linux({
     worker_url: workerUrl,
@@ -138,6 +144,7 @@ export async function bootLinux(opts) {
     log: onLog,
     console_write: emit,
     ninep_ring: ring.buffer,
+    virtio_queues: virtioQueues,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
 

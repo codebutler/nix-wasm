@@ -30,6 +30,8 @@ export const linux = async ({
   log,
   console_write,
   ninep_ring,
+  // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
+  virtio_queues,
   // pc: accepted for caller API stability but now a no-op — the new exec ABI
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
@@ -286,6 +288,7 @@ export const linux = async ({
       last_task: last_task,
       runner_name: name,
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
+      virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
     });
 

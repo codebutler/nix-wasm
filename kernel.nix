@@ -114,13 +114,14 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_NET --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB --enable CONFIG_9P_FS \
       --enable CONFIG_DEVTMPFS --enable CONFIG_DEVTMPFS_MOUNT \
       --enable CONFIG_FILE_LOCKING \
-      `# Wayland Phase 1 (1a): virtio core + the minimal Wasm host-callback` \
-      `# transport + its echo self-test (patch 0013). VIRTIO/VIRTIO_MENU are` \
-      `# off in wasm32_nommu_defconfig; turn them on so virtio.c/virtio_ring.c` \
-      `# build, then enable our transport. No DMA layer is needed — the` \
-      `# transport withholds VIRTIO_F_ACCESS_PLATFORM so vring uses identity` \
-      `# nommu offsets (see virtio_wasm.c).` \
+      `# Wayland Phase 1 (1a/1b): virtio core + the Wasm host-callback transport` \
+      `# (patch 0013), its 2-vq echo self-test, and the virtio_wl driver` \
+      `# (/dev/wl0). VIRTIO/VIRTIO_MENU are off in wasm32_nommu_defconfig; turn` \
+      `# them on so virtio.c/virtio_ring.c build, then enable our transport +` \
+      `# drivers. No DMA layer is needed — the transport withholds` \
+      `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
+      --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
       --enable CONFIG_SCHED_STACK_END_CHECK \
       --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
       `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \

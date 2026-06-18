@@ -9,7 +9,9 @@
 // import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
 import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
-import { makeEchoDevice } from "./virtio/echo-device.js";
+import { EchoDevice } from "./virtio/echo-device.js";
+import { WlDevice } from "./virtio/wl-device.js";
+import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
   let port = self;
@@ -200,33 +202,52 @@ import { makeEchoDevice } from "./virtio/echo-device.js";
   /// 9P host-call (ticket #74), set up in init() if a ring SAB was provided.
   let ninep_request = null;
 
-  /// Wayland Phase 1 (1a): the JS virtio echo device model. Lazily built on the
-  /// first wasm_virtio_setup_queue/notify call because it needs the guest's
-  /// raise_interrupt export (only available once vmlinux_instance exists). The
-  /// kick comes from the CPU-0 worker (where the test driver's late_initcall
-  /// runs), which holds the same shared `memory` and a vmlinux_instance whose
-  /// raise_interrupt operates on the shared per-CPU raised_irqs state.
-  let virtio_echo = null;
-  const get_virtio_echo = () => {
-    if (!virtio_echo && vmlinux_instance) {
-      virtio_echo = makeEchoDevice({
+  /// Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB),
+  /// attached in init(). Shared so a queue set up on the boot worker is
+  /// serviceable from a userspace task worker.
+  let virtio_queues = null;
+
+  /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
+  /// transport, keyed by the host device index `dev` the guest passes in every
+  /// import call. Lazily built on first use because they need the guest's
+  /// raise_interrupt export (only available once vmlinux_instance exists; the
+  /// kick comes from the CPU-0 worker, which holds the same shared `memory`).
+  /// The transport assigns dev=0 to virtio_wl and dev=1 to the echo self-test,
+  /// with irq = VIRTIO_WASM_IRQ_BASE(8) + dev (see drivers/virtio/virtio_wasm.c).
+  ///
+  /// CPU-0 RULE (1a finding, now owned by VirtioWasmDevice): pc boots maxcpus=1,
+  /// so CPU 0 is the only online CPU; the kernel's nominal IRQ_CPU=1 idle loop
+  /// never runs (raise_interrupt(1,…) sets a bit nobody reads). Every device
+  /// derives its interrupt-target CPU from the online mask (default {0}) — when
+  /// a task blocks (wait_for_completion), CPU 0's idle task runs arch_cpu_idle(),
+  /// memory.atomic.wait64's on raised_irqs[0], and dispatches on wake.
+  const VIRTIO_WASM_IRQ_BASE = 8;
+  const VW_DEV_WL = 0;
+  const VW_DEV_ECHO = 1;
+  /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
+  const virtio_devices = new Map();
+  const get_virtio_device = (dev) => {
+    const id = dev >>> 0;
+    let d = virtio_devices.get(id);
+    if (!d && vmlinux_instance && virtio_queues) {
+      const common = {
+        dev: id,
+        irq: VIRTIO_WASM_IRQ_BASE + id,
         memory,
-        // irq=8 matches VIRTIO_WASM_IRQ in drivers/virtio/virtio_wasm.c.
-        //
-        // CPU CHOICE (1a finding): the kernel's IRQ model assumes a dedicated
-        // IRQ_CPU=1 whose idle loop polls raised_irqs[1]. But pc boots
-        // maxcpus=1 (boot.js DEFAULT_CMDLINE) — only CPU 0 is ever online, so
-        // raise_interrupt(1, …) sets a bit nobody reads. We raise on CPU 0: when
-        // a task blocks (e.g. wait_for_completion), CPU 0's idle task runs
-        // arch_cpu_idle(), which memory.atomic.wait64's on raised_irqs[0] and
-        // dispatches do_irq_stacked() on wake.
         raiseInterrupt: (cpu, irq) => vmlinux_instance.exports.raise_interrupt(cpu, irq),
-        irqCpu: 0,
-        irq: 8,
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: virtio_queues,
         log: (m) => log(m),
-      });
+      };
+      if (id === VW_DEV_WL) d = new WlDevice(common);
+      else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
+      else {
+        log(`[virtio] import for unknown device index ${id}`);
+        return null;
+      }
+      virtio_devices.set(id, d);
     }
-    return virtio_echo;
+    return d;
   };
 
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
@@ -474,18 +495,36 @@ import { makeEchoDevice } from "./virtio/echo-device.js";
     // shared winsize array the main thread writes via set_winsize.
     wasm_driver_hvc_winsize: (vtermno) => (winsizes ? Atomics.load(winsizes, vtermno | 0) : 0),
 
-    // Wayland Phase 1 (1a): the minimal `virtio_wasm` transport's two host
-    // imports. setup_queue hands us the split-vring byte offsets (nommu identity
-    // phys) so the device can index `memory.buffer` directly; notify is the
-    // guest->host kick. The echo is serviced synchronously here, then the device
-    // calls raise_interrupt(IRQ_CPU, irq) to deliver the used-buffer interrupt.
-    wasm_virtio_setup_queue: (q, desc, avail, used, num) => {
-      const dev = get_virtio_echo();
-      if (dev) dev.setupQueue(q, desc, avail, used, num);
+    // Wayland Phase 1 (1a/1b): the `virtio_wasm` transport's host imports. Every
+    // call leads with the host device index `dev`. setup_queue hands us a vq's
+    // split-vring byte offsets (nommu identity phys) so the device indexes
+    // `memory.buffer` directly; notify is the guest->host kick. The device
+    // services the queue synchronously here, then raise_interrupt(0, irq)
+    // delivers the used-buffer interrupt. get_features/config_read/config_write/
+    // reset back the transport's virtio_config_ops with real host state.
+    wasm_virtio_setup_queue: (dev, q, desc, avail, used, num) => {
+      const d = get_virtio_device(dev);
+      if (d) d.setupQueue(q, desc, avail, used, num);
     },
-    wasm_virtio_notify: (q) => {
-      const dev = get_virtio_echo();
-      if (dev) dev.notify(q);
+    wasm_virtio_notify: (dev, q) => {
+      const d = get_virtio_device(dev);
+      if (d) d.onNotify(q);
+    },
+    wasm_virtio_get_features: (dev) => {
+      const d = get_virtio_device(dev);
+      return d ? d.getFeatures() : 0n;
+    },
+    wasm_virtio_config_read: (dev, off, buf, len) => {
+      const d = get_virtio_device(dev);
+      if (d) d.configRead(Number(off), d.memView(buf, len));
+    },
+    wasm_virtio_config_write: (dev, off, buf, len) => {
+      const d = get_virtio_device(dev);
+      if (d) d.configWrite(Number(off), d.memView(buf, len));
+    },
+    wasm_virtio_reset: (dev) => {
+      const d = get_virtio_device(dev);
+      if (d) d.reset();
     },
   };
 
@@ -522,6 +561,10 @@ import { makeEchoDevice } from "./virtio/echo-device.js";
       }
       if (message.winsize_buf) {
         winsizes = new Int32Array(message.winsize_buf);
+      }
+      // Wayland Phase 1 (1b): attach the shared virtio queue-layout store.
+      if (message.virtio_queues) {
+        virtio_queues = new SharedQueues(message.virtio_queues);
       }
 
       if (message.user_executable) {
