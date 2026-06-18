@@ -136,8 +136,12 @@
 
       # ---- thin initramfs /init (generated) + the initramfs cpio ------------
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
+      phase0Tests = import ./phase0-tests.nix {
+        inherit cross;
+        src = ./phase0-tests;
+      };
       wasmInitramfs = import ./userspace/initramfs.nix {
-        inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
+        inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap; phase0 = phase0Tests;
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -235,6 +239,7 @@
 
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
+        phase0-tests = phase0Tests;
 
         # The wasm-system closure exported as store.json for pc to serve over 9P.
         wasm-store-manifest = wasmStoreManifest;

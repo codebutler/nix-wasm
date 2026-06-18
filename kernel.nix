@@ -106,7 +106,7 @@ pkgs.stdenv.mkDerivation {
     # but the working overlay upper is RAMFS (always built in, backs the
     # initramfs). CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
     bash ./scripts/config --file build/.config \
-      --enable CONFIG_NET --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB --enable CONFIG_9P_FS \
+      --enable CONFIG_NET --enable CONFIG_UNIX --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB --enable CONFIG_9P_FS \
       --enable CONFIG_DEVTMPFS --enable CONFIG_DEVTMPFS_MOUNT \
       --enable CONFIG_FILE_LOCKING \
       --enable CONFIG_SCHED_STACK_END_CHECK \

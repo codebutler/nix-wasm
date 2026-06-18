@@ -11,7 +11,7 @@
 # nixpkgs busybox already ships every applet as a RELATIVE symlink (-> busybox)
 # in $out/bin, so `cp -a` of that dir gives the real binary + all applets +
 # /bin/sh, deterministically and without executing any guest code.
-{ pkgs, busybox, init }:
+{ pkgs, busybox, init, phase0 ? null }:
 pkgs.runCommand "wasm-initramfs"
   {
     nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
@@ -23,6 +23,8 @@ pkgs.runCommand "wasm-initramfs"
 
     # busybox binary + its complete applet symlink set (relative -> busybox).
     cp -a ${busybox}/bin/. "$root/bin/"
+    chmod u+w "$root/bin"
+    ${if phase0 != null then ''cp ${phase0}/bin/. "$root/bin/" -r'' else ""}
     # /bin/sh is among them; ensure it exists even if a future busybox drops it.
     [ -e "$root/bin/sh" ] || ln -sf busybox "$root/bin/sh"
 
