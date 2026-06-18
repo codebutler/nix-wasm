@@ -8,7 +8,7 @@
     "noEmit": true,
     "strict": false,
     "skipLibCheck": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"]
+    "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"]
   },
   "include": ["**/*.js", "**/*.mjs"],
   "exclude": ["node_modules", "web/vendor"]
