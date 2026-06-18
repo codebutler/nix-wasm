@@ -65,11 +65,24 @@ const SEND_HDR_SIZE = 16;
 const HDR_SIZE = 8;
 
 export class WlDevice extends VirtioWasmDevice {
+  /**
+   * @param {object} opts
+   * @param {{
+   *   onOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => void
+   * }} [opts.waylandBridge]
+   *   Phase 2 inversion hook. When present, a VFD_SEND's wayland bytes are
+   *   routed OUT to the host (which feeds the main-thread Greenfield compositor)
+   *   instead of the in-worker WlServer stub. `clientId` is the per-ctx vfd_id —
+   *   one Greenfield client per guest Wayland connection. Server→client replies
+   *   come back asynchronously via injectIn(clientId, data). Without this hook
+   *   the device falls back to the local WlServer (Phase 1 1d behavior + tests).
+   */
   constructor(opts) {
     super(opts);
     this._nextVfdId = 1; // host-allocated vfd ids would set the HOST bit; the
     // guest allocates ctx/pipe ids itself, so we only echo them back.
     this.contexts = new Map(); // vfd_id -> { type, server }
+    this._bridge = opts.waylandBridge || null;
   }
 
   /** Lazily get (or create) the per-ctx Wayland server for a vfd_id. */
@@ -87,6 +100,65 @@ export class WlDevice extends VirtioWasmDevice {
     // VIRTIO_WL_F_TRANS_FLAGS (bit 0) — new flag semantics. We don't claim
     // SEND_FENCES (bit 1; that's the virtgpu path we don't support).
     return 1n; // 1 << VIRTIO_WL_F_TRANS_FLAGS
+  }
+
+  // --- Phase 2 / M3: guest-memory shm pools --------------------------------
+  //
+  // A VFD_NEW(NEW_ALLOC) is the guest asking for a shared buffer. In the virtwl
+  // ABI the host backs the vfd with memory and returns the `pfn` (guest physical
+  // frame) the guest mmaps. On this wasm32 NOMMU port "guest physical" is just a
+  // byte offset into the single shared `memory.buffer`, so a pfn IS an offset
+  // (>> PAGE_SHIFT). Once allocated, the host can hand Greenfield a live
+  // `Uint8Array` VIEW over that region as the shm "fd" — Shm.ts createPool takes
+  // the fd as a Uint8Array and reads pixels straight out of it, no copy.
+  //
+  // NOTE (open for 2c): the *ownership* of the backing region — whether the host
+  // carves it from a reserved arena or the guest driver pre-allocates the pages
+  // and passes the pfn in — depends on the kernel virtio_wl driver's NEW_ALLOC
+  // contract (kernel pin 039e5f3e). The pfn↔offset↔view arithmetic below is the
+  // resolution the design calls for; the registry handshake (M4) carries no fds,
+  // so this path is wired-but-unexercised until the wl-eyes pixel path in 2c.
+
+  /** Build (and record) the backing region for a NEW_ALLOC shm vfd.
+   *  Returns { offset, size, pfn } or null. */
+  _allocShmRegion(vfdId, size) {
+    // The guest hands us the pfn it wants this vfd mapped at via a follow-up
+    // (the driver remap), recorded in _shmPfn; until then we resolve lazily
+    // from the pfn the guest reports on first SEND. We only record intent here.
+    const region = { offset: 0, size: size >>> 0, pfn: 0, pending: true };
+    if (!this._shmRegions) this._shmRegions = new Map();
+    this._shmRegions.set(vfdId, region);
+    return region;
+  }
+
+  /** Resolve a shm vfd_id to a live Uint8Array VIEW over guest memory for
+   *  Greenfield's `fds` array, or null if the region isn't backed yet. */
+  _resolveShmFd(vfdId) {
+    const ctx = this.contexts.get(vfdId);
+    const region = ctx?.region || this._shmRegions?.get(vfdId);
+    if (!region || !region.size) return null;
+    // pfn → byte offset (PAGE_SIZE = 4096 on this port).
+    const offset = region.offset || region.pfn * 4096;
+    if (offset <= 0) {
+      this.log(`[virtio-wl] shm vfd_id=${vfdId} has no backed offset yet (pfn=${region.pfn})`);
+      return null;
+    }
+    try {
+      return new Uint8Array(this.memory.buffer, offset, region.size);
+    } catch (e) {
+      this.log(`[virtio-wl] shm view failed for vfd_id=${vfdId} @${offset}+${region.size}: ${e}`);
+      return null;
+    }
+  }
+
+  /** Public: inject a server→client wayland reply for a client (ctx vfd_id),
+   *  delivered to the guest over the IN queue. The Phase 2 main-thread Greenfield
+   *  bridge calls this from `client.connection.onFlush`. Decoupled from the OUT
+   *  notify — wakes the guest via the IN-queue used-buffer IRQ. */
+  injectIn(clientId, data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    this._queueIn(clientId >>> 0, bytes);
+    this._flushPendingIn();
   }
 
   // virtio_wl_config is empty; nothing to serve.
@@ -207,10 +279,38 @@ export class WlDevice extends VirtioWasmDevice {
     const type = dv.getUint32(0, true);
 
     switch (type) {
+      case VIRTIO_WL_CMD_VFD_NEW: {
+        // VFD_NEW (NEW_ALLOC): a guest shm allocation. struct ctrl_vfd_new:
+        //   hdr(8) + vfd_id(4) + flags(4) + pfn(u64) + size(u32).
+        // The guest passes the requested `size` (and pfn=0); the host backs it
+        // with a region of guest memory and returns the pfn the guest mmaps.
+        // On this wasm NOMMU port guest-physical == byte offset into the shared
+        // `memory.buffer`, so the pfn we hand back IS the offset of the region
+        // (which the host can then read directly as a Uint8Array view — that is
+        // the M3 vfd→view resolution). See _allocShmRegion / _resolveShmFd.
+        const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
+        const flags = req.length >= 16 ? dv.getUint32(12, true) : 0;
+        const size = req.length >= 28 ? dv.getUint32(24, true) : 0;
+        const region = size > 0 ? this._allocShmRegion(vfdId, size) : null;
+        this.contexts.set(vfdId, { type, flags, size, region });
+        this.log(
+          `[virtio-wl] NEW_ALLOC vfd_id=${vfdId} size=${size}` +
+            (region ? ` pfn=${region.pfn} (offset ${region.offset})` : ` (no region)`) +
+            ` -> RESP_VFD_NEW`,
+        );
+        return {
+          resp: this._vfdNew(
+            vfdId,
+            /*size*/ region ? region.size : 0,
+            /*pfn*/ region ? BigInt(region.pfn) : 0n,
+            VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ,
+          ),
+          inReply: null,
+        };
+      }
       case VIRTIO_WL_CMD_VFD_NEW_CTX:
       case VIRTIO_WL_CMD_VFD_NEW_CTX_NAMED:
-      case VIRTIO_WL_CMD_VFD_NEW_PIPE:
-      case VIRTIO_WL_CMD_VFD_NEW: {
+      case VIRTIO_WL_CMD_VFD_NEW_PIPE: {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         this.contexts.set(vfdId, { type });
         this.log(`[virtio-wl] NEW (type=0x${type.toString(16)}) vfd_id=${vfdId} -> RESP_VFD_NEW`);
@@ -235,8 +335,26 @@ export class WlDevice extends VirtioWasmDevice {
         const vfdId = dv.getUint32(8, true);
         const vfdCount = dv.getUint32(12, true);
         const dataOff = SEND_HDR_SIZE + vfdCount * 4;
+        // Trailing vfd ids (Phase 2 / M3: a wl_shm_create_pool carries the shm
+        // vfd here). Resolve each to a host fd surrogate (a Uint8Array VIEW over
+        // the guest memory region the vfd backs) for Greenfield's `fds` array.
+        const fds = [];
+        for (let i = 0; i < vfdCount; i++) {
+          const fdVfdId = dv.getUint32(SEND_HDR_SIZE + i * 4, true);
+          const fd = this._resolveShmFd(fdVfdId);
+          if (fd) fds.push(fd);
+          else this.log(`[virtio-wl] SEND carried vfd_id=${fdVfdId} with no resolvable shm region`);
+        }
         const data = req.subarray(dataOff);
         this.log(`[virtio-wl] SEND vfd_id=${vfdId} ${data.length}B wayland (${vfdCount} fds)`);
+        if (this._bridge) {
+          // Phase 2 inversion: route OUT to the host → main-thread Greenfield.
+          // The server→client reply returns asynchronously via injectIn(); only
+          // the synchronous OUT ack is returned here.
+          this._bridge.onOut(vfdId, data.slice(), fds);
+          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
+        }
+        // Phase 1 fallback: the in-worker WlServer stub (registry handshake).
         const server = this._serverFor(vfdId);
         const reply = server.handle(data);
         const inReply = reply.length ? { vfdId, data: reply } : null;

@@ -63,6 +63,7 @@ const dec = new TextDecoder();
  *   nixStore?: any,                   // a read-only /nix store VFS (createNixClosureStore); registered as the `nix` 9P export — carries the whole userspace + toolchain closure
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
+ *   wayland?: { onOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[], replyTo: (b: Uint8Array) => void) => void },  // Phase 2 (2b): worker→main Greenfield bridge
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
@@ -134,6 +135,24 @@ export async function bootLinux(opts) {
   // from a userspace task worker (same model as the 9P ring).
   const virtioQueues = makeSharedQueues();
 
+  // Wayland Phase 2 (2b inversion): if the caller supplies a compositor bridge,
+  // wire it. `opts.wayland.onOut(clientId, buffer, fds, replyTo)` is invoked when
+  // a guest VFD_SEND posts wayland bytes out; the caller feeds them to its
+  // compositor and calls `replyTo(buffer)` (a curried os.wayland_in for that
+  // client) with each server→client reply.
+  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>void } | undefined} */
+  const waylandOpt = opts.wayland;
+  /** @type {any} */
+  let osRef = null;
+  const wayland = waylandOpt
+    ? {
+        onOut: (clientId, buffer, fds) => {
+          const replyTo = (b) => osRef && osRef.wayland_in(clientId, b);
+          waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
+        },
+      }
+    : undefined;
+
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
   const os = await linux({
     worker_url: workerUrl,
@@ -145,8 +164,10 @@ export async function bootLinux(opts) {
     console_write: emit,
     ninep_ring: ring.buffer,
     virtio_queues: virtioQueues,
+    wayland,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
+  osRef = os;
 
   let alive = true;
   return {

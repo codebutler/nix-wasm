@@ -239,8 +239,34 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         sharedQueues: virtio_queues,
         log: (m) => log(m),
       };
-      if (id === VW_DEV_WL) d = new WlDevice(common);
-      else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
+      if (id === VW_DEV_WL) {
+        // Wayland Phase 2 (2b inversion): the virtio_wl device runs in this
+        // worker, but the Greenfield compositor it talks to is on the MAIN
+        // thread. So a guest VFD_SEND's wayland bytes are posted OUT to the host
+        // (kernel-host forwards them into Greenfield's `client.connection`); the
+        // compositor's reply comes back via a `wayland-in` message → injectIn()
+        // → the IN vring. The OUT ack stays synchronous in onNotify; the reply
+        // is decoupled (delivered by the IN-queue used-buffer IRQ), so a bare
+        // async postMessage is sufficient — no SAB-futex sync point needed (the
+        // guest blocks on the IRQ in wait_for_completion, not inside notify).
+        common.waylandBridge = {
+          onOut: (clientId, data, fds) => {
+            // ArrayBuffer copies cross the postMessage boundary; the fds are
+            // Uint8Array VIEWS over the SHARED memory.buffer, so transferring
+            // their .buffer (the whole SAB) is wrong — pass {offset,length} and
+            // let the main thread re-view the same shared buffer.
+            const fdViews = fds.map((v) => ({ byteOffset: v.byteOffset, length: v.byteLength }));
+            port.postMessage({
+              method: "wayland_out",
+              dev: id,
+              clientId: clientId >>> 0,
+              buffer: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+              fds: fdViews,
+            });
+          },
+        };
+        d = new WlDevice(common);
+      } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
       else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;
@@ -530,6 +556,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 
   /// Callbacks from the main thread.
   const message_callbacks = {
+    // Wayland Phase 2 (2b inversion): a server→client reply from the main-thread
+    // Greenfield compositor. Inject it into the virtio_wl device's IN vring so
+    // the guest's wl_display reads it (waylandproxyd → client socket). The reply
+    // raises the IN-queue IRQ, waking the guest blocked in wait_for_completion.
+    wayland_in: (message) => {
+      const d = virtio_devices.get((message.dev ?? VW_DEV_WL) >>> 0);
+      if (d && typeof d.injectIn === "function") {
+        d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
+      } else {
+        log(`[virtio-wl] wayland_in for dev ${message.dev} but no device/injectIn`);
+      }
+    },
     init: (message) => {
       variant = message.variant;
       arch_bits = variant.startsWith("wasm32_") ? 32 : 64;

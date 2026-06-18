@@ -19,6 +19,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   cmdline?: string,
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
+ *   wayland?: { onOut: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>void },  // Phase 2: worker→main Greenfield bridge
  * }} opts
  * @returns {ReturnType<import('./boot.js').bootLinux>}
  */
@@ -38,6 +39,7 @@ export async function bootNixSystem(opts) {
     cmdline: opts.cmdline,
     onLog: opts.onLog,
     onModuleCached: opts.onModuleCached,
+    wayland: opts.wayland,
     nixStore: useNix
       ? await createNixClosureStore(u("store.json"), { onProgress: opts.onDownload })
       : undefined,
