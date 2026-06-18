@@ -34,10 +34,13 @@ export const linux = async ({
   virtio_queues,
   // Wayland Phase 2 (2b inversion): optional host hook for the worker→main
   // Greenfield bridge. `onOut(clientId, buffer, fds)` is called when a guest
-  // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
-  // main-thread compositor. Replies come back through `os.wayland_in(...)`,
-  // which routes to the worker that owns that client.
+  // VFD_SEND posts wayland bytes out of the worker (which is BLOCKED on the
+  // wayland SAB channel awaiting the reply); the host feeds them into the
+  // main-thread compositor and writes the reply back over that SAB channel.
   wayland,
+  // Wayland Phase 2 (2b): the SAB channel { ctrl, bytes } threaded into every
+  // worker so the blocking onOut round-trip works from any task worker.
+  wayland_channel,
   // pc: accepted for caller API stability but now a no-op — the new exec ABI
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
@@ -69,11 +72,6 @@ export const linux = async ({
   /// workers so the hvc driver can poll it (wasm_driver_hvc_winsize) and
   /// __hvc_resize the tty. pc (ticket #74, TIOCSWINSZ). 16 = max hvc consoles.
   const winsizes = new Int32Array(new SharedArrayBuffer(16 * 4));
-
-  /// Wayland Phase 2 (2b inversion): clientId (ctx vfd_id) → the task worker that
-  /// posted the OUT, so a compositor reply (wayland_in) routes back to the worker
-  /// that owns that virtio_wl device instance (and can inject into its IN vring).
-  const wayland_client_worker = new Map();
 
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
@@ -161,12 +159,13 @@ export const linux = async ({
     },
 
     // Wayland Phase 2 (2b inversion): a guest VFD_SEND's wayland bytes posted
-    // out of a task worker. Remember which worker owns this client so replies
-    // (os.wayland_in) route back to it, re-view the shm fds over the SHARED
-    // memory, and hand it all to the host bridge → main-thread Greenfield.
-    wayland_out: (message, worker) => {
+    // out of a task worker (which is now blocked on the wayland SAB channel
+    // awaiting the reply). Re-view the shm fds over the SHARED memory and hand
+    // it to the host bridge → main-thread Greenfield. The bridge (wired in
+    // boot.js) writes the compositor's reply back over the SAB channel + notifies
+    // the blocked worker — this thread does NOT post back to the worker.
+    wayland_out: (message, _worker) => {
       const clientId = message.clientId >>> 0;
-      wayland_client_worker.set(clientId, { worker, dev: message.dev });
       const fds = (message.fds || []).map(
         (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
       );
@@ -317,6 +316,7 @@ export const linux = async ({
       runner_name: name,
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
+      wayland_channel: wayland_channel, // Wayland 2b: sync OUT round-trip SAB
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
     });
 
@@ -352,26 +352,6 @@ export const linux = async ({
     set_winsize: (vtermno, cols, rows) => {
       const packed = (((rows | 0) & 0xffff) << 16) | ((cols | 0) & 0xffff);
       Atomics.store(winsizes, vtermno | 0, packed);
-    },
-
-    // Wayland Phase 2 (2b inversion): deliver a server→client reply from the
-    // main-thread Greenfield compositor back to the guest. Routes to the task
-    // worker that owns the client; the worker injects it into the IN vring.
-    // `buffer` may be a Uint8Array or ArrayBuffer.
-    wayland_in: (clientId, buffer) => {
-      const cid = clientId >>> 0;
-      const ref = wayland_client_worker.get(cid);
-      if (!ref) {
-        log(`[wayland] IN for unknown client ${cid} (no owning worker)`);
-        return;
-      }
-      const ab =
-        buffer instanceof ArrayBuffer
-          ? buffer
-          : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-      ref.worker.postMessage({ method: "wayland_in", dev: ref.dev, clientId: cid, buffer: ab }, [
-        ab,
-      ]);
     },
   };
 };

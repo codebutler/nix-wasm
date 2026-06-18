@@ -68,14 +68,17 @@ export class WlDevice extends VirtioWasmDevice {
   /**
    * @param {object} opts
    * @param {{
-   *   onOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => void
+   *   onOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => (Uint8Array | null)
    * }} [opts.waylandBridge]
    *   Phase 2 inversion hook. When present, a VFD_SEND's wayland bytes are
    *   routed OUT to the host (which feeds the main-thread Greenfield compositor)
    *   instead of the in-worker WlServer stub. `clientId` is the per-ctx vfd_id —
-   *   one Greenfield client per guest Wayland connection. Server→client replies
-   *   come back asynchronously via injectIn(clientId, data). Without this hook
-   *   the device falls back to the local WlServer (Phase 1 1d behavior + tests).
+   *   one Greenfield client per guest Wayland connection. onOut is SYNCHRONOUS:
+   *   it blocks the worker (on a SAB futex) until the compositor's reply bytes
+   *   are available and RETURNS them, which the OUT-service path then injects
+   *   into the IN queue + raises the IRQ in this worker (the one holding the
+   *   live wasm instance for raise_interrupt). Without this hook the device
+   *   falls back to the local WlServer (Phase 1 1d behavior + tests).
    */
   constructor(opts) {
     super(opts);
@@ -349,10 +352,22 @@ export class WlDevice extends VirtioWasmDevice {
         this.log(`[virtio-wl] SEND vfd_id=${vfdId} ${data.length}B wayland (${vfdCount} fds)`);
         if (this._bridge) {
           // Phase 2 inversion: route OUT to the host → main-thread Greenfield.
-          // The server→client reply returns asynchronously via injectIn(); only
-          // the synchronous OUT ack is returned here.
-          this._bridge.onOut(vfdId, data.slice(), fds);
-          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
+          //
+          // SYNCHRONOUS round-trip (SAB-futex, not bare async postMessage): the
+          // guest's RECV completes via a virtio IRQ (raise_interrupt, a wasm
+          // export), but by the time a compositor reply arrives the OWNING worker
+          // is blocked in wait_for_completion (Atomics.wait) and can't process an
+          // async `wayland_in` postMessage — so async breaks. Instead `onOut`
+          // posts the bytes to the main thread and BLOCKS this worker (which is
+          // currently running inside wasm_virtio_notify, not blocked elsewhere)
+          // on a SAB futex until the main thread feeds Greenfield and writes the
+          // reply back. We then inject the reply via the IN queue + raise_interrupt
+          // RIGHT HERE — in the worker that holds the live wasm instance. The 9P
+          // ring uses the same main-services-while-worker-blocks shape.
+          const reply = this._bridge.onOut(vfdId, data.slice(), fds);
+          const inReply = reply && reply.length ? { vfdId, data: reply } : null;
+          if (inReply) this.log(`[virtio-wl] Greenfield reply ${reply.length}B -> IN queue (sync)`);
+          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply };
         }
         // Phase 1 fallback: the in-worker WlServer stub (registry handshake).
         const server = this._serverFor(vfdId);

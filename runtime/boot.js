@@ -136,21 +136,54 @@ export async function bootLinux(opts) {
   const virtioQueues = makeSharedQueues();
 
   // Wayland Phase 2 (2b inversion): if the caller supplies a compositor bridge,
-  // wire it. `opts.wayland.onOut(clientId, buffer, fds, replyTo)` is invoked when
-  // a guest VFD_SEND posts wayland bytes out; the caller feeds them to its
-  // compositor and calls `replyTo(buffer)` (a curried os.wayland_in for that
-  // client) with each server→client reply.
+  // wire it over a SAB channel. A guest VFD_SEND posts its wayland bytes out and
+  // BLOCKS the worker on `waylandCtrl[0]` (Atomics.wait); this main thread runs
+  // `opts.wayland.onOut(clientId, buffer, fds, replyTo)`, feeds the compositor,
+  // and the caller calls `replyTo(bytes)` with the server→client reply, which we
+  // write into the SAB reply buffer and notify — unblocking the worker, which
+  // injects the reply into the IN vring + raises the IRQ. Synchronous because the
+  // owning worker is blocked and can't service an async postMessage (9P shape).
   /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>void } | undefined} */
   const waylandOpt = opts.wayland;
-  /** @type {any} */
-  let osRef = null;
+  const WL_CH_IDLE = 0;
+  const WL_REPLY_CAP = 256 * 1024; // max server→client reply bytes per SEND
+  let waylandChannel = undefined;
+  let waylandCtrl = null; // Int32Array [STATE, LEN]
+  let waylandBytes = null; // Uint8Array reply buffer (SAB-backed)
   const wayland = waylandOpt
-    ? {
-        onOut: (clientId, buffer, fds) => {
-          const replyTo = (b) => osRef && osRef.wayland_in(clientId, b);
-          waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
-        },
-      }
+    ? (() => {
+        waylandCtrl = new Int32Array(new SharedArrayBuffer(2 * 4));
+        waylandBytes = new Uint8Array(new SharedArrayBuffer(WL_REPLY_CAP));
+        waylandChannel = { ctrl: waylandCtrl.buffer, bytes: waylandBytes.buffer };
+        return {
+          onOut: (clientId, buffer, fds) => {
+            // Accumulate every reply the compositor flushes for this SEND, then
+            // release the worker. onFlush is synchronous inside message(), so the
+            // bytes are ready by the time onOut returns; we settle the channel
+            // once here. (Greenfield may flush more than one batch — concat.)
+            const chunks = [];
+            const replyTo = (b) => b && b.length && chunks.push(b);
+            try {
+              waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
+            } catch (e) {
+              onLog("[wayland] onOut threw: " + (e && e.stack ? e.stack : e));
+            }
+            let total = 0;
+            for (const c of chunks) total += c.length;
+            const len = Math.min(total, WL_REPLY_CAP);
+            let off = 0;
+            for (const c of chunks) {
+              if (off >= len) break;
+              const take = Math.min(c.length, len - off);
+              waylandBytes.set(c.subarray(0, take), off);
+              off += take;
+            }
+            Atomics.store(waylandCtrl, 1, len); // LEN
+            Atomics.store(waylandCtrl, 0, WL_CH_IDLE); // STATE → IDLE (done)
+            Atomics.notify(waylandCtrl, 0, 1);
+          },
+        };
+      })()
     : undefined;
 
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
@@ -165,9 +198,9 @@ export async function bootLinux(opts) {
     ninep_ring: ring.buffer,
     virtio_queues: virtioQueues,
     wayland,
+    wayland_channel: waylandChannel,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
-  osRef = os;
 
   let alive = true;
   return {

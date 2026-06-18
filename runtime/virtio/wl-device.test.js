@@ -51,19 +51,39 @@ function makeDevice(extra = {}) {
   });
 }
 
-test("VFD_SEND routes OUT to the host bridge (no in-worker reply)", () => {
+test("VFD_SEND routes OUT to the host bridge; the SYNCHRONOUS reply becomes the inReply", () => {
   const out = [];
-  const dev = makeDevice({ waylandBridge: { onOut: (cid, data, fds) => out.push({ cid, data, fds }) } });
+  // The bridge's onOut is synchronous: it returns the compositor's reply bytes
+  // (in the worker it blocks on the SAB until the main thread fills them).
+  const reply = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
+  const dev = makeDevice({
+    waylandBridge: {
+      onOut: (cid, data, fds) => {
+        out.push({ cid, data, fds });
+        return reply;
+      },
+    },
+  });
   const payload = new Uint8Array([1, 0, 0, 0, 0xc, 0, 1, 0]); // wl_display.get_registry-ish
   const { resp, inReply } = dev._handle(buildSend(7, payload));
   // OUT ack is RESP_OK, synchronous.
   expect(new DataView(resp.buffer).getUint32(0, true)).toBe(RESP_OK);
-  // No in-worker reply — it comes async via injectIn from the main thread.
-  expect(inReply).toBeNull();
   // The bytes were posted out, addressed to the ctx vfd_id as clientId.
   expect(out.length).toBe(1);
   expect(out[0].cid).toBe(7);
   expect([...out[0].data]).toEqual([...payload]);
+  // The synchronous reply is returned as the inReply for the OUT-service path to
+  // inject into the IN vring (in the same worker, so raise_interrupt works).
+  expect(inReply).not.toBeNull();
+  expect(inReply.vfdId).toBe(7);
+  expect([...inReply.data]).toEqual([...reply]);
+});
+
+test("VFD_SEND with a bridge returning no reply yields no inReply", () => {
+  const dev = makeDevice({ waylandBridge: { onOut: () => null } });
+  const { resp, inReply } = dev._handle(buildSend(7, new Uint8Array([1, 0, 0, 0, 8, 0, 0, 0])));
+  expect(new DataView(resp.buffer).getUint32(0, true)).toBe(RESP_OK);
+  expect(inReply).toBeNull();
 });
 
 test("without a bridge, VFD_SEND falls back to the WlServer stub (Phase 1)", () => {
