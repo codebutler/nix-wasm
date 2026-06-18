@@ -4,10 +4,10 @@ import { terminateAllWorkers } from "./web-shims.mjs";
 import { bootNixSystem } from "../index.js";
 import { MemVfs } from "../ninep/mem-vfs.js";
 
-// Artifacts: default to the env var, else a conventional local path. CI sets
-// LINUX_WASM_ARTIFACTS to the `nix build` output dir.
+// Artifacts: default to the env var, else the repo-relative web/artifacts dir.
+// CI sets LINUX_WASM_ARTIFACTS to the `nix build` output dir.
 const ARTIFACTS =
-  process.env.LINUX_WASM_ARTIFACTS || "file:///home/vbvntv/Code/pc/vendor/linux-wasm/"; // local-dev fallback
+  process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

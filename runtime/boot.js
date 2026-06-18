@@ -188,5 +188,3 @@ export async function bootLinux(opts) {
 }
 
 export { DEFAULT_CMDLINE };
-// (re-exported for callers that want to feed pre-encoded bytes)
-export const encodeInput = (s) => enc.encode(s);
