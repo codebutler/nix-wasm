@@ -178,6 +178,15 @@ Verified clean (`exec-nixenv-clean.{html,mjs}`): fresh boot → `nix-env -iA sl`
 exit 0, `command -v sl` → `/root/.nix-profile/bin/sl`. (Closure pre-copied with
 `nix copy`; see the NOMMU 9P note below.)
 
+**`nix profile install` does NOT work in-guest (use `nix-env -iA`)** — the index
+entries in `pkgs.nix` are `outPath`-only "fake derivations" (`builtins.storePath`,
+no `drvPath`), since the guest substitutes prebuilt paths and never builds.
+`nix-env -iA` reads `outPath` directly; the new `nix profile install` calls
+`queryDrvPath()` to form a `DerivedPath::Built` and rejects them with
+`error: '<name>' is not a derivation`. Correct fix (folded into Phase 5): ship the
+real `.drv`s in the published closure so the new CLI can realise-by-substitution.
+Tracked as codebutler/nix-wasm#1.
+
 ---
 
 ## ⬜ What's next — full checklist

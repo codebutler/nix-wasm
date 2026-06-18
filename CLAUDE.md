@@ -111,12 +111,21 @@ the sysroot unpack fragments the NOMMU heap. C startup needed two link/loader fi
 (the host-provided `__cpp_exception` wasm-EH tag), with libc++ shipped in
 `cc-sysroot` (`sys/cxx`).
 
+**In-guest autotools also works** (2026-06-17): a real autoconf `./configure &&
+make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
+**forkshell ash** (busybox-w32 lineage, NOMMU fork-without-exec over `posix_spawn`;
+`userspace/ash.nix` + `userspace/ash-cb-guest.c`), promoted to `/bin/sh` in
+`bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
+`$()`/subshell/pipeline, and `config.status` work (full record in `docs/STATUS.md`
+§ Autoconf-capable guest shell). The old "hush isn't POSIX-enough" gap is closed.
+
 Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
 design goal below: build on x86_64, publish the wasm outputs, guest substitutes).
-The biggest functional gap for autotools packages is the **guest shell**: hush
-isn't POSIX-enough for autoconf `./configure` — see `docs/plan-guest-shell.md`
-(plain-Makefile + `nix-build` C/C++ builds work today; autotools `configure` does
-not). Archive ops work: `tar` (czf/xzf, patched) is validated; `wget` is N/A on the
+One known wrinkle folded into Phase 5: in-guest installs use `nix-env -iA` (the
+cache index is `outPath`-only "fake derivations"); `nix profile install` rejects
+those for lacking a `drvPath` — shipping real `.drv`s in the published closure
+fixes it (codebutler/nix-wasm#1). Archive ops work: `tar` (czf/xzf, patched) is
+validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
 internet fetch), so the disabled network/service vfork applets aren't needed.
 
@@ -175,17 +184,14 @@ arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
 ## Plans
 
 - `docs/plan-environment.md` — the 5-phase master plan (toolchain → userspace →
-  guest-clang → kernel → CI) for the full "NixOS in wasm" vision. Phases 1, 2, 4
-  are done; 3 and 5 remain.
+  guest-clang → kernel → CI) for the full "NixOS in wasm" vision. Phases 1–4
+  are done; 5 (CI + binary cache) remains.
 - `docs/plan-rationale.md` — why this replaced the shell-script approach.
 - `docs/plan-clang-native-driver.md` — future work: retire the `cc`/`c++` shell
   wrappers by making `clang`/`clang++` act as their own driver for the wasm target
   (config file / custom ToolChain), gated on whether LLVM's linker spawn uses
   posix_spawn on the NOMMU port.
-- `docs/plan-guest-shell.md` — the critical path for autotools `./configure`: hush
-  (the current `/bin/sh`) isn't POSIX-enough for autoconf; plan to port busybox
-  `ash` to the clone-with-fn NOMMU spawn model.
 
 (The per-task implementation plans — Phase-1 toolchain, the userspace Plans 1/2,
-the kernel-nixify plan — were executed and removed; the code + `STATUS.md` are the
-record. They live in git history if needed.)
+the kernel-nixify plan, the guest-shell forkshell-ash plan — were executed and
+removed; the code + `STATUS.md` are the record. They live in git history if needed.)
