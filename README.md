@@ -10,7 +10,7 @@ created by Nix** — "NixOS, in the browser." `nix.wasm` is the keystone (once t
 guest has a working Nix, it can install packages); this repo builds it and the
 toolchain it stands on.
 
-## Status (2026-06-15)
+## Status (2026-06-17)
 
 | Layer | State |
 |---|---|
@@ -21,7 +21,11 @@ toolchain it stands on.
 | arbitrary nixpkgs packages (`hello`, `sl`, …) | ✅ **many build with no overlay entry** — static is a platform property (`crossSystem.isStatic`) |
 | **in-guest `nix --version`** (runs on the pc guest, no SIGILL) | ✅ **passes** — `nix (Nix) 2.34.7` via the pc headless-kernel harness (`exec-nix.mjs`) |
 | **in-guest `nix-env -iA sl`** (install a package by name) | ✅ **passes** — substitutes `sl` from a binary cache, installs to the profile, exit 0 |
-| userspace / guest-clang / kernel / CI (the rest of "NixOS in wasm") | ⬜ planned (`docs/plan-environment.md`) |
+| **guest userspace** (curated NixOS-module closure + patched busybox, boots) | ✅ **boots** — served `/nix` overlay → busybox-init → getty → autologin → root shell |
+| **in-guest compiler** (`cc`/`c++`, clang-21+lld→wasm, all Nix-built) | ✅ **compiles C & C++ in-browser** (`cc -O2 hello.c && ./hello`) |
+| **in-guest autotools** (`./configure && make && ./prog`) | ✅ **works end-to-end** — forkshell ash is `/bin/sh` |
+| **guest kernel** (`vmlinux.wasm`) | ✅ **nix-built** from the pinned joelseverin/linux wasm port |
+| CI + binary cache (the host-builds-guest-substitutes model) | ⬜ planned — [issue #2](https://github.com/codebutler/nix-wasm/issues/2) |
 
 See **[docs/STATUS.md](docs/STATUS.md)** for the detailed log: what works, what's
 next, and what didn't work (the dead-ends, so they're not repeated).
@@ -74,7 +78,7 @@ toolchain/             the wasm toolchain, as focused Nix derivations:
   libcxx.nix           LLVM-21 libc++/libc++abi/libunwind for wasm
   sysroot.nix          assembles musl + kernel headers into the cc sysroot
 patches/               the kernel/musl/nix source patches
-docs/                  the plans + the detailed STATUS log
+docs/                  the detailed STATUS log (current state, dead-ends; future work is in GitHub issues)
 ```
 
 ## Two layers — important distinction

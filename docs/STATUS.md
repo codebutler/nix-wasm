@@ -347,7 +347,7 @@ ash too (boot banner: "built-in shell (ash)").
 Caveat: large-file writes to the **9P `/mnt/pc` test mount** fail (config.status to
 that mount errored "write failure"); this is a MemVfs/9P-transport test-harness
 limitation, NOT a guest/ash bug — real in-guest builds use ramfs / the `/nix`
-overlay (ramfs upper), where it works. Full detail: `docs/plan-guest-shell.md`.
+overlay (ramfs upper), where it works.
 
 ### ✅ Real autoconf `./configure && make` — WORKS end-to-end in-guest (2026-06-17)
 A2 (run a genuine autoconf-generated `configure` + `make` in-guest) used a
@@ -360,7 +360,7 @@ binary) → `./hello` → RC=0, prints `AC-acdemo-ok-9`. The full configure→ma
 autotools loop runs entirely inside the wasm guest. Superseded the old "hush can't
 parse autoconf / ash not compiled in" framing — ash IS built (`.#guest-ash`), is
 `/bin/sh`, and is the autoconf-grade parser; `make` (pdpmake) drives the cc/wasm-ld
-build. Next: broader real-package coverage. Plan: `docs/plan-guest-shell.md`.
+build. Next: broader real-package coverage.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
@@ -504,8 +504,7 @@ We **want the host to build from cache, not from source** — on two levels:
    guest downloads) and what makes the crossSystem approach scale.
    - Not yet built. Needs: a binary-cache store of the wasm `cross.*` outputs +
      `nix.wasm`, served same-origin to the guest, with `nix.wasm`'s substituter
-     config pointed at it. (CI job to populate it; see `docs/plan-environment.md`
-     Phase 5.)
+     config pointed at it. (CI job to populate it; Phase 5 — codebutler/nix-wasm#2.)
 
 **TL;DR:** host = cached builds (cache-friendly pin + x86_64 + a wasm artifact
 cache); guest = substitute-only. From-source rebuilds on the host are a failure

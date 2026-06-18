@@ -1,5 +1,5 @@
 # busybox ASH for the wasm32-linux-musl NOMMU guest — the autoconf-capable shell
-# that hush can't be (see docs/plan-guest-shell.md). ash's dash-derived parser
+# that hush can't be (see docs/STATUS.md § Autoconf-capable guest shell). ash's dash-derived parser
 # runs autoconf `configure`; the NOMMU "fork-without-exec" problem (subshells,
 # $(shell-code), pipelines, heredocs) is solved by pc's forkshell port
 # (busybox-w32 lineage), reused here with a GUEST backend:
@@ -60,7 +60,7 @@ cross.stdenv.mkDerivation {
     # basepf, so the unreachable stop is never hit) — hanging the command after a
     # $()/subshell/pipeline. g_parsefile is only RESET here, not freed, so save it
     # across each forkshell helper and restore it. (Root-caused via pid-tagged
-    # traces; see docs/plan-guest-shell.md.)
+    # traces; see docs/STATUS.md § Autoconf-capable guest shell.)
     sed -i 's|fslen = forkshell_capture(&fs, &fsbuf, &fsstatus);|struct parsefile *_spf = g_parsefile; fslen = forkshell_capture(\&fs, \&fsbuf, \&fsstatus); g_parsefile = _spf;|' shell/ash.c
     sed -i 's|status = forkshell_run(&fs, backgnd);|{ struct parsefile *_spf = g_parsefile; status = forkshell_run(\&fs, backgnd); g_parsefile = _spf; }|' shell/ash.c
     sed -i 's|status = forkshell_pipeline(n, flags);|{ struct parsefile *_spf = g_parsefile; status = forkshell_pipeline(n, flags); g_parsefile = _spf; }|' shell/ash.c

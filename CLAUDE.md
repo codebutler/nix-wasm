@@ -119,8 +119,8 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `$()`/subshell/pipeline, and `config.status` work (full record in `docs/STATUS.md`
 § Autoconf-capable guest shell). The old "hush isn't POSIX-enough" gap is closed.
 
-Remaining (see `docs/plan-environment.md`): **Phase 5** (CI + binary cache — the
-design goal below: build on x86_64, publish the wasm outputs, guest substitutes).
+Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
+x86_64, publish the wasm outputs, guest substitutes; issue #2).
 One known wrinkle folded into Phase 5: in-guest installs use `nix-env -iA` (the
 cache index is `outPath`-only "fake derivations"); `nix profile install` rejects
 those for lacking a `drvPath` — shipping real `.drv`s in the published closure
@@ -181,17 +181,20 @@ input-addressed store path — they're for iteration, not for publishing as the
 canonical `.#guest-clang` / `.#kernel` artifacts. The wiring is a `useCcache`
 arg on `toolchain/{guest-clang,kernel-llvm}.nix` (cmake `COMPILER_LAUNCHER`).
 
-## Plans
+## Plans & future work
 
-- `docs/plan-environment.md` — the 5-phase master plan (toolchain → userspace →
-  guest-clang → kernel → CI) for the full "NixOS in wasm" vision. Phases 1–4
-  are done; 5 (CI + binary cache) remains.
-- `docs/plan-rationale.md` — why this replaced the shell-script approach.
-- `docs/plan-clang-native-driver.md` — future work: retire the `cc`/`c++` shell
-  wrappers by making `clang`/`clang++` act as their own driver for the wasm target
-  (config file / custom ToolChain), gated on whether LLVM's linker spawn uses
-  posix_spawn on the NOMMU port.
+Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →
+guest-clang/cc → kernel); the code + `docs/STATUS.md` are the record. Remaining
+work and design notes live as GitHub issues, not in-repo plan files:
 
-(The per-task implementation plans — Phase-1 toolchain, the userspace Plans 1/2,
-the kernel-nixify plan, the guest-shell forkshell-ash plan — were executed and
-removed; the code + `STATUS.md` are the record. They live in git history if needed.)
+- **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, guest
+  substitutes). The last phase; see the Caching design goal above.
+- **#3** — retire the `cc`/`c++` shell wrappers by making `clang`/`clang++`
+  their own driver for the wasm target (config file / custom ToolChain), gated on
+  whether LLVM's linker spawn uses `posix_spawn` on the NOMMU port.
+- **#1** — `nix profile install` rejects the `outPath`-only guest index (use
+  `nix-env -iA`); fix folds into #2.
+
+(The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
+forkshell-ash — and the rationale/master-plan docs were removed once done; the
+code, `STATUS.md`, and git history are the record.)
