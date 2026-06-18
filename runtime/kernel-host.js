@@ -170,7 +170,14 @@ export const linux = async ({
         (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
       );
       if (wayland && typeof wayland.onOut === "function") {
-        wayland.onOut(clientId, new Uint8Array(message.buffer), fds);
+        // onOut is ASYNC (it drains Greenfield's deferred flush queue before
+        // settling the SAB). The worker is blocked in Atomics.wait, so awaiting
+        // here lets the main thread run those microtasks; the worker wakes when
+        // onOut settles the channel. No await on the handler itself is needed —
+        // the promise self-settles the SAB.
+        Promise.resolve(wayland.onOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
+          log("[wayland] onOut rejected: " + (e && e.stack ? e.stack : e)),
+        );
       } else {
         log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
       }
@@ -352,6 +359,23 @@ export const linux = async ({
     set_winsize: (vtermno, cols, rows) => {
       const packed = (((rows | 0) & 0xffff) << 16) | ((cols | 0) & 0xffff);
       Atomics.store(winsizes, vtermno | 0, packed);
+    },
+
+    // Wayland Phase 2 (2c): deliver an UNSOLICITED server→client event from the
+    // main-thread compositor to the guest. Posts to cpu 0's worker (which owns the
+    // virtio_wl device + the live wasm instance); the worker injects it into the
+    // IN vring + raises the IRQ (see kernel-worker `wayland_in`). Used for events
+    // Greenfield flushes outside a guest SEND's synchronous round-trip
+    // (xdg_surface.configure, frame callbacks, wl_buffer.release, …).
+    wayland_push_in: (clientId, bytes) => {
+      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      cpus[0]?.worker?.postMessage(
+        {
+          method: "wayland_in",
+          clientId: clientId >>> 0,
+          buffer: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+        },
+      );
     },
   };
 };

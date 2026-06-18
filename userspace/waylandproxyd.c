@@ -162,10 +162,43 @@ static int client_send(int sock, const uint8_t *data, size_t len, int *fds, int 
 }
 
 /*
+ * Live shm pool mirrors. A wl_shm client (e.g. wl-eyes) creates its pool from a
+ * tmpfs fd, mmaps THAT, and keeps drawing into it across frames — it never
+ * re-sends the fd. The host (Greenfield) reads pixels out of the virtwl VFD's
+ * guest-RAM buffer. So a single copy at create_pool time is stale (the client
+ * paints AFTER, on configure). We keep both mappings alive for the pool lifetime
+ * and re-sync src(tmpfs)→dst(vfd) on every client→host message (the commit that
+ * follows a paint), so the host always sees the latest pixels.
+ */
+#define MAX_POOLS 16
+struct pool_mirror {
+	int vfd; /* the virtwl vfd id (also the open fd) */
+	size_t size;
+	void *src; /* client tmpfs mmap (PROT_READ; survives client close(fd)) */
+	void *dst; /* vfd guest-RAM mmap (PROT_WRITE) */
+};
+static struct pool_mirror pools[MAX_POOLS];
+static int npools;
+
+/* Re-copy every live pool's client bytes into its vfd buffer (host-visible). */
+static void resync_pools(void)
+{
+	for (int i = 0; i < npools; i++) {
+		struct pool_mirror *p = &pools[i];
+		if (p->src && p->dst) {
+			memcpy(p->dst, p->src, p->size);
+			printf("waylandproxyd: resync pool vfd=%d firstpix=0x%08x\n",
+			       p->vfd, *(unsigned int *)p->src);
+			fflush(stdout);
+		}
+	}
+}
+
+/*
  * Translate a plain client fd (a shm/memfd) into a virtwl shm vfd the host can
- * access: allocate a vfd of the client fd's size, copy the bytes across.
- * Returns the new vfd (>=0) or -1. The wl_shm.create_pool path; only exercised
- * once the JS host speaks Wayland (1d), but built here so the seam is complete.
+ * access: allocate a vfd of the client fd's size, copy the bytes across, and
+ * register a live mirror so later frames re-sync (see resync_pools).
+ * Returns the new vfd (>=0) or -1.
  */
 static int fd_to_vfd(int wl0, int client_fd)
 {
@@ -185,10 +218,25 @@ static int fd_to_vfd(int wl0, int client_fd)
 	void *dst = mmap(NULL, st.st_size, PROT_WRITE, MAP_SHARED, alloc.fd, 0);
 	if (src != MAP_FAILED && dst != MAP_FAILED)
 		memcpy(dst, src, st.st_size);
-	if (src != MAP_FAILED)
-		munmap(src, st.st_size);
-	if (dst != MAP_FAILED)
-		munmap(dst, st.st_size);
+	printf("waylandproxyd: fd_to_vfd vfd=%d size=%ld src=%p dst=%p firstpix=0x%08x\n",
+	       alloc.fd, (long)st.st_size, src, dst,
+	       (dst != MAP_FAILED) ? *(unsigned int *)dst : 0xdeadbeef);
+	fflush(stdout);
+
+	/* Keep the mappings alive (the mmaps survive the client's close(fd)) and
+	 * register the pool so resync_pools() refreshes it on every later frame. */
+	if (src != MAP_FAILED && dst != MAP_FAILED && npools < MAX_POOLS) {
+		pools[npools].vfd = alloc.fd;
+		pools[npools].size = st.st_size;
+		pools[npools].src = src;
+		pools[npools].dst = dst;
+		npools++;
+	} else {
+		if (src != MAP_FAILED)
+			munmap(src, st.st_size);
+		if (dst != MAP_FAILED)
+			munmap(dst, st.st_size);
+	}
 	return alloc.fd;
 }
 
@@ -203,6 +251,14 @@ static int splice_client_to_host(int wl0, int ctx, int client)
 		return 0; /* EOF */
 	if (n < 0)
 		return (errno == EAGAIN || errno == EWOULDBLOCK) ? 1 : -1;
+
+	/*
+	 * Refresh every live shm pool before forwarding this message. The client
+	 * paints into its tmpfs mapping then sends a commit; mirroring here means the
+	 * vfd (host-visible) carries the just-drawn pixels by the time Greenfield
+	 * processes the commit. (Cheap: a handful of ~300 KB memcpys per frame.)
+	 */
+	resync_pools();
 
 	struct txn_buf txn;
 	memset(&txn, 0, sizeof(txn));
@@ -227,8 +283,14 @@ static int splice_client_to_host(int wl0, int ctx, int client)
 	memcpy(txn.payload, data, n);
 
 	int ret = ioctl(ctx, VIRTWL_IOCTL_SEND, &txn);
-	for (int i = 0; i < nvfds; i++)
-		close(vfds[i]); /* the SEND copied them to the host */
+	/*
+	 * Do NOT close the shm-pool vfds: the host reads pixels out of the vfd's
+	 * guest-RAM buffer for the pool's lifetime, and resync_pools() keeps mirroring
+	 * the client's writes into it. Closing here would free the buffer (and the
+	 * host would see freed/garbage memory). Pipe/ctx vfds aren't created on this
+	 * path. (Pool vfds + their mmaps are reclaimed at client disconnect.)
+	 */
+	(void)vfds;
 
 	if (ret) {
 		fprintf(stderr, "waylandproxyd: SEND failed ret=%d errno=%d\n", ret, errno);

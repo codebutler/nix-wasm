@@ -641,7 +641,7 @@ new file mode 100644
 index 0000000..a4c90ac
 --- /dev/null
 +++ b/drivers/virtio/virtio_wl.c
-@@ -0,0 +1,1530 @@
+@@ -0,0 +1,1615 @@
 +/*
 + *  Wayland Virtio Driver
 + *  Copyright (C) 2017 Google, Inc.
@@ -738,6 +738,20 @@ index 0000000..a4c90ac
 +	uint64_t pfn;
 +	uint32_t size;
 +	bool hungup;
++	/*
++	 * nommu/Wasm shm backing (pc Wayland Phase 2 2c). Upstream virtwl relies on
++	 * the HOST injecting device memory at a pfn and the guest io_remap_pfn_range
++	 * mmapping it. That can't work on this NOMMU port: there is no MMU to map a
++	 * VM_PFNMAP device region, so the guest's mmap of the vfd FAILS (MAP_FAILED)
++	 * and the host's injected pages are never written. Instead the GUEST
++	 * allocates the shm buffer in its OWN RAM (alloc_pages_exact) at NEW_ALLOC
++	 * and reports virt_to_phys(buf)>>PAGE_SHIFT (the linear-memory byte offset,
++	 * since virt_to_phys is identity on nommu) as the pfn the host views; mmap
++	 * then nommu-maps this guest-owned buffer directly (remap_pfn_range over real
++	 * RAM, which nommu CAN satisfy because vaddr==paddr==offset).
++	 */
++	void *shm_buf;
++	size_t shm_size;
 +
 +	struct list_head in_queue; /* list of virtwl_vfd_qentry */
 +	wait_queue_head_t in_waitq;
@@ -1110,6 +1124,9 @@ index 0000000..a4c90ac
 + */
 +static void virtwl_vfd_free(struct virtwl_vfd *vfd)
 +{
++	/* nommu/Wasm (pc 2c): release the guest-owned shm backing, if any. */
++	if (vfd->shm_buf)
++		free_pages_exact(vfd->shm_buf, vfd->shm_size);
 +	kfree(vfd);
 +}
 +
@@ -1631,6 +1648,14 @@ index 0000000..a4c90ac
 +	return size;
 +}
 +
++/*
++ * nommu/Wasm (pc 2c): mmap a guest-allocated shm vfd. The buffer lives in guest
++ * RAM (alloc_pages_exact in do_new); on nommu vaddr==paddr==linear offset, so the
++ * mapping is a plain remap_pfn_range over real RAM (NOT io_remap of injected
++ * device memory, which has no MMU to translate and fails MAP_FAILED). On nommu
++ * the actual direct mapping is set up by virtwl_vfd_get_unmapped_area +
++ * mmap_capabilities below; this .mmap just validates + tags the vma.
++ */
 +static int virtwl_vfd_mmap(struct file *filp, struct vm_area_struct *vma)
 +{
 +	struct virtwl_vfd *vfd = filp->private_data;
@@ -1639,7 +1664,7 @@ index 0000000..a4c90ac
 +
 +	mutex_lock(&vfd->lock);
 +
-+	if (!vfd->pfn) {
++	if (!vfd->shm_buf || !vfd->pfn) {
 +		ret = -EACCES;
 +		goto out_unlock;
 +	}
@@ -1649,16 +1674,43 @@ index 0000000..a4c90ac
 +		goto out_unlock;
 +	}
 +
-+	ret = io_remap_pfn_range(vma, vma->vm_start, vfd->pfn, vm_size,
-+				 vma->vm_page_prot);
-+	if (ret)
-+		goto out_unlock;
-+
-+	vm_flags_set(vma, VM_PFNMAP | VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
++	/*
++	 * nommu: do_mmap already pointed the region at the guest buffer via
++	 * virtwl_vfd_get_unmapped_area (NOMMU_MAP_DIRECT). Nothing to remap; just
++	 * tag the vma. (This driver only builds on the NOMMU wasm port.)
++	 */
++	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 +
 +out_unlock:
 +	mutex_unlock(&vfd->lock);
 +	return ret;
++}
++
++/*
++ * nommu direct-mapping hooks. NOMMU mmap can only share an existing kernel
++ * allocation; it asks the file where the bytes live (get_unmapped_area returns
++ * the buffer's kernel address) and whether a direct shared map is allowed
++ * (mmap_capabilities). With both, the userspace mapping IS the kernel buffer —
++ * vaddr == &shm_buf == virt_to_phys == the host-visible linear offset.
++ */
++static unsigned long virtwl_vfd_get_unmapped_area(struct file *filp,
++						  unsigned long addr,
++						  unsigned long len,
++						  unsigned long pgoff,
++						  unsigned long flags)
++{
++	struct virtwl_vfd *vfd = filp->private_data;
++
++	if (!vfd->shm_buf)
++		return -ENOSYS;
++	if ((pgoff << PAGE_SHIFT) + len > vfd->shm_size)
++		return -EINVAL;
++	return (unsigned long)vfd->shm_buf + (pgoff << PAGE_SHIFT);
++}
++
++static unsigned int virtwl_vfd_mmap_capabilities(struct file *filp)
++{
++	return NOMMU_MAP_DIRECT | NOMMU_MAP_READ | NOMMU_MAP_WRITE;
 +}
 +
 +static unsigned int virtwl_vfd_poll(struct file *filp,
@@ -1755,6 +1807,28 @@ index 0000000..a4c90ac
 +	vfd->id = ret;
 +	ret = 0;
 +
++	/*
++	 * nommu/Wasm (pc 2c): for a guest shm allocation, allocate the backing
++	 * buffer in guest RAM up front (outside the switch — a statement-expression
++	 * allocator macro inside a switch-case trips the wasm clang). The
++	 * NEW_ALLOC case reports its pfn below.
++	 */
++	if (ioctl_new->type == VIRTWL_IOCTL_NEW_ALLOC) {
++		size_t alloc_size = PAGE_ALIGN(ioctl_new->size);
++
++		if (!alloc_size) {
++			ret = -EINVAL;
++			goto remove_vfd;
++		}
++		vfd->shm_buf = alloc_pages_exact(alloc_size,
++						 GFP_KERNEL | __GFP_ZERO);
++		if (!vfd->shm_buf) {
++			ret = -ENOMEM;
++			goto remove_vfd;
++		}
++		vfd->shm_size = alloc_size;
++	}
++
 +	ctrl_new->vfd_id = vfd->id;
 +	switch (ioctl_new->type) {
 +	case VIRTWL_IOCTL_NEW_CTX:
@@ -1767,8 +1841,17 @@ index 0000000..a4c90ac
 +		memcpy(ctrl_new->name, ioctl_new->name, sizeof(ctrl_new->name));
 +		break;
 +	case VIRTWL_IOCTL_NEW_ALLOC:
++		/*
++		 * nommu/Wasm (pc 2c): the GUEST owns the shm backing. The buffer was
++		 * allocated above (shm_alloc) in guest RAM; report
++		 * virt_to_phys(buf)>>PAGE_SHIFT as the pfn (identity on nommu, so this
++		 * IS the host-visible linear offset) so mmap can map it + the host can
++		 * view it.
++		 */
 +		ctrl_new->hdr.type = VIRTIO_WL_CMD_VFD_NEW;
-+		ctrl_new->size = PAGE_ALIGN(ioctl_new->size);
++		ctrl_new->size = vfd->shm_size;
++		ctrl_new->pfn = (u64)virt_to_phys(vfd->shm_buf) >> PAGE_SHIFT;
++		ctrl_new->flags = VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ;
 +		break;
 +	case VIRTWL_IOCTL_NEW_PIPE_READ:
 +		ctrl_new->hdr.type = VIRTIO_WL_CMD_VFD_NEW_PIPE;
@@ -2017,6 +2100,8 @@ index 0000000..a4c90ac
 +	.read = virtwl_vfd_read,
 +	.write = virtwl_vfd_write,
 +	.mmap = virtwl_vfd_mmap,
++	.get_unmapped_area = virtwl_vfd_get_unmapped_area,
++	.mmap_capabilities = virtwl_vfd_mmap_capabilities,
 +	.poll = virtwl_vfd_poll,
 +	.unlocked_ioctl = virtwl_ioctl,
 +	.compat_ioctl = virtwl_ioctl_compat,

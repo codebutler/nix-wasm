@@ -262,6 +262,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // postMessage. So onOut posts the bytes, then blocks on the wayland SAB
         // channel until the main thread fills the reply — exactly the 9P ring's
         // main-services-while-worker-blocks shape.
+        // Wayland Phase 2 (2c): SYNCHRONOUS SAB round-trip. A guest VFD_SEND's
+        // bytes are posted OUT to the main thread (which feeds Greenfield) and the
+        // worker BLOCKS on the SAB until the main thread writes back ALL of
+        // Greenfield's resulting bytes — replies to this SEND *and* the events
+        // Greenfield emits while processing it (notably xdg_surface.configure,
+        // emitted when the role-establishing commit assigns the toplevel role).
+        // The main side (wayland-compositor.js) drains Greenfield's flush queue
+        // (microtasks) before settling the SAB, so deferred events ride this same
+        // round-trip. Async postMessage can't be used: while the guest task waits
+        // on the vfd read it blocks the worker in Atomics.wait, so onmessage never
+        // runs (the 2b finding). injectIn (async IN) stays for events with no
+        // pending SEND to ride (frame callbacks), delivered when the worker idles.
         common.waylandBridge = {
           onOut: (clientId, data, fds) => {
             if (!wayland_channel) {
@@ -270,8 +282,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             }
             const ctrl = wayland_channel.ctrl; // Int32Array [STATE, LEN]
             const replyBuf = wayland_channel.bytes; // Uint8Array (SAB-backed)
-            // fds are Uint8Array VIEWS over SHARED memory.buffer; pass
-            // {offset,length} so the main thread re-views the same shared buffer.
             const fdViews = fds.map((v) => ({ byteOffset: v.byteOffset, length: v.byteLength }));
             Atomics.store(ctrl, 0, WL_CH_PENDING);
             port.postMessage({
@@ -281,7 +291,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               buffer: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
               fds: fdViews,
             });
-            // Block until the main thread writes the reply (or a timeout).
             const r = Atomics.wait(ctrl, 0, WL_CH_PENDING, 15000);
             if (r === "timed-out") {
               log(`[virtio-wl] OUT reply timed out for client ${clientId}`);
@@ -991,6 +1000,22 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // handle this as an error and wait. Our life ends when the kernel kills us by terminating the whole Worker. Oh,
       // and exex() can trap us, in which case we have to circle back to loading new user code and executing it agian.
       vmlinux_setup().then(vmlinux_run).catch(wasm_error).then(user_executable_chain);
+    },
+
+    // Wayland Phase 2 (2c): an UNSOLICITED server→client event from the
+    // main-thread compositor (e.g. xdg_surface.configure, emitted after Greenfield
+    // assigns the toplevel role — it arrives in a flush OUTSIDE any guest SEND's
+    // synchronous round-trip, so the SAB reply path can't carry it). The boot
+    // worker (which holds the live wasm instance) is idle here — the guest task is
+    // blocked IN THE KERNEL on the vfd read, not in wasm_virtio_notify — so we can
+    // inject it into the IN vring + raise the IRQ right now, waking the guest.
+    wayland_in: (message) => {
+      const d = get_virtio_device(VW_DEV_WL);
+      if (!d || typeof d.injectIn !== "function") {
+        log(`[virtio-wl] wayland_in but device not ready`);
+        return;
+      }
+      d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
     },
   };
 

@@ -143,7 +143,7 @@ export async function bootLinux(opts) {
   // write into the SAB reply buffer and notify — unblocking the worker, which
   // injects the reply into the IN vring + raises the IRQ. Synchronous because the
   // owning worker is blocked and can't service an async postMessage (9P shape).
-  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>void } | undefined} */
+  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>Promise<void>|void } | undefined} */
   const waylandOpt = opts.wayland;
   const WL_CH_IDLE = 0;
   const WL_REPLY_CAP = 256 * 1024; // max server→client reply bytes per SEND
@@ -156,15 +156,18 @@ export async function bootLinux(opts) {
         waylandBytes = new Uint8Array(new SharedArrayBuffer(WL_REPLY_CAP));
         waylandChannel = { ctrl: waylandCtrl.buffer, bytes: waylandBytes.buffer };
         return {
-          onOut: (clientId, buffer, fds) => {
-            // Accumulate every reply the compositor flushes for this SEND, then
-            // release the worker. onFlush is synchronous inside message(), so the
-            // bytes are ready by the time onOut returns; we settle the channel
-            // once here. (Greenfield may flush more than one batch — concat.)
+          // ASYNC onOut: feed Greenfield, then DRAIN its deferred flush queue
+          // (microtasks/promises) before settling the SAB. Greenfield emits
+          // xdg_surface.configure in a microtask after the role-establishing
+          // commit, so a synchronous settle would miss it (wl-eyes would hang
+          // waiting for configure). The worker is blocked in Atomics.wait, so the
+          // main thread is free to run those microtasks here. Returns a Promise;
+          // the kernel-host wayland_out handler awaits it before the worker reads.
+          onOut: async (clientId, buffer, fds) => {
             const chunks = [];
             const replyTo = (b) => b && b.length && chunks.push(b);
             try {
-              waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
+              await waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
             } catch (e) {
               onLog("[wayland] onOut threw: " + (e && e.stack ? e.stack : e));
             }
@@ -185,6 +188,7 @@ export async function bootLinux(opts) {
         };
       })()
     : undefined;
+  let waylandPushIn = null; // os.wayland_push_in (async IN, for no-SEND events)
 
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
   const os = await linux({
@@ -201,6 +205,10 @@ export async function bootLinux(opts) {
     wayland_channel: waylandChannel,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
+
+  // Wayland Phase 2 (2c): now that the boot worker exists, wire the async IN sink
+  // so the compositor bridge can deliver server→client bytes to the guest.
+  if (wayland) waylandPushIn = os.wayland_push_in;
 
   let alive = true;
   return {

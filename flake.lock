@@ -18,7 +18,24 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "wl-eyes": "wl-eyes"
+      }
+    },
+    "wl-eyes": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781782571,
+        "narHash": "sha256-TpDdDP4BJsV7VDUQjeVMBdz81OElPfpxYwKcqvc2Vvc=",
+        "ref": "refs/heads/master",
+        "rev": "6cd1ccb69f8a1d178337257dd79b404843feb17a",
+        "revCount": 1,
+        "type": "git",
+        "url": "file:///home/vbvntv/Code/wl-eyes"
+      },
+      "original": {
+        "type": "git",
+        "url": "file:///home/vbvntv/Code/wl-eyes"
       }
     }
   },

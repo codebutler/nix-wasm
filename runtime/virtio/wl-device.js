@@ -86,6 +86,9 @@ export class WlDevice extends VirtioWasmDevice {
     // guest allocates ctx/pipe ids itself, so we only echo them back.
     this.contexts = new Map(); // vfd_id -> { type, server }
     this._bridge = opts.waylandBridge || null;
+    // Phase 2 2c: log shm region checksums + wire opcodes to prove the pixel
+    // path. Off by default; opt in via the bridge for a debug session.
+    this._shmDebug = !!opts.shmDebug;
   }
 
   /** Lazily get (or create) the per-ctx Wayland server for a vfd_id. */
@@ -122,14 +125,22 @@ export class WlDevice extends VirtioWasmDevice {
   // resolution the design calls for; the registry handshake (M4) carries no fds,
   // so this path is wired-but-unexercised until the wl-eyes pixel path in 2c.
 
-  /** Build (and record) the backing region for a NEW_ALLOC shm vfd.
-   *  Returns { offset, size, pfn } or null. */
-  _allocShmRegion(vfdId, size) {
-    // The guest hands us the pfn it wants this vfd mapped at via a follow-up
-    // (the driver remap), recorded in _shmPfn; until then we resolve lazily
-    // from the pfn the guest reports on first SEND. We only record intent here.
-    const region = { offset: 0, size: size >>> 0, pfn: 0, pending: true };
+  /** Record the backing region for a NEW_ALLOC shm vfd.
+   *  Returns { offset, size, pfn } or null.
+   *
+   *  Ownership (settled in 2c): the GUEST allocates the shm buffer in its own RAM
+   *  (alloc_pages_exact in the patched virtio_wl driver) and reports
+   *  virt_to_phys(buf)>>PAGE_SHIFT as the `pfn` in the NEW_ALLOC request. Because
+   *  virt_to_phys is identity on this NOMMU port, that pfn<<PAGE_SHIFT IS the byte
+   *  offset of the buffer inside the single shared WebAssembly.Memory — so the
+   *  host just records it and views those exact bytes (no host allocation, no
+   *  memory.grow, no injected device memory: the earlier host-arena attempt FAILED
+   *  because nommu has no MMU to map injected device pages and the guest's mmap
+   *  returned MAP_FAILED). See _resolveShmFd. */
+  _allocShmRegion(vfdId, size, pfn) {
     if (!this._shmRegions) this._shmRegions = new Map();
+    const offset = (pfn >>> 0) * 4096;
+    const region = { offset, size: size >>> 0, pfn: pfn >>> 0, pending: false };
     this._shmRegions.set(vfdId, region);
     return region;
   }
@@ -140,14 +151,28 @@ export class WlDevice extends VirtioWasmDevice {
     const ctx = this.contexts.get(vfdId);
     const region = ctx?.region || this._shmRegions?.get(vfdId);
     if (!region || !region.size) return null;
-    // pfn → byte offset (PAGE_SIZE = 4096 on this port).
     const offset = region.offset || region.pfn * 4096;
     if (offset <= 0) {
       this.log(`[virtio-wl] shm vfd_id=${vfdId} has no backed offset yet (pfn=${region.pfn})`);
       return null;
     }
     try {
-      return new Uint8Array(this.memory.buffer, offset, region.size);
+      // Re-view EACH time: memory.grow detaches the old ArrayBuffer, so a view
+      // cached across a grow would be stale/zero-length. memory.buffer always
+      // returns the current (shared) buffer.
+      const view = new Uint8Array(this.memory.buffer, offset, region.size);
+      // Instrumentation (2c shm proof): checksum the first row so the log shows
+      // whether the host sees the guest's pixels (non-zero) or garbage/zeros.
+      if (this._shmDebug) {
+        let sum = 0;
+        const n = Math.min(view.length, 360 * 4);
+        for (let i = 0; i < n; i++) sum = (sum + view[i]) | 0;
+        this.log(
+          `[virtio-wl] shm vfd_id=${vfdId} view @0x${offset.toString(16)}+${region.size} ` +
+            `firstRowSum=${sum >>> 0} head=${view[0]},${view[1]},${view[2]},${view[3]}`,
+        );
+      }
+      return view;
     } catch (e) {
       this.log(`[virtio-wl] shm view failed for vfd_id=${vfdId} @${offset}+${region.size}: ${e}`);
       return null;
@@ -250,6 +275,18 @@ export class WlDevice extends VirtioWasmDevice {
       this.log(
         `[virtio-wl] IN push: VFD_RECV vfd_id=${vfdId} ${data.length}B wayland (used ${written}B)`,
       );
+      if (this._shmDebug && data.length <= 512) {
+        const ddv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const parts = [];
+        for (let o = 0; o + 8 <= data.length; ) {
+          const obj = ddv.getUint32(o, true);
+          const so = ddv.getUint32(o + 4, true);
+          parts.push(`obj=${obj} ev=${so & 0xffff} sz=${so >>> 16}`);
+          if ((so >>> 16) < 8) break;
+          o += so >>> 16;
+        }
+        this.log(`[virtio-wl]   IN wire: ${parts.join(" | ")}`);
+      }
       pushed++;
     }
     if (pushed > 0) this.raiseIrq();
@@ -285,28 +322,30 @@ export class WlDevice extends VirtioWasmDevice {
       case VIRTIO_WL_CMD_VFD_NEW: {
         // VFD_NEW (NEW_ALLOC): a guest shm allocation. struct ctrl_vfd_new:
         //   hdr(8) + vfd_id(4) + flags(4) + pfn(u64) + size(u32).
-        // The guest passes the requested `size` (and pfn=0); the host backs it
-        // with a region of guest memory and returns the pfn the guest mmaps.
-        // On this wasm NOMMU port guest-physical == byte offset into the shared
-        // `memory.buffer`, so the pfn we hand back IS the offset of the region
-        // (which the host can then read directly as a Uint8Array view — that is
-        // the M3 vfd→view resolution). See _allocShmRegion / _resolveShmFd.
+        // The GUEST allocates the buffer in its own RAM and sends its physical
+        // pfn (== linear-memory offset >> PAGE_SHIFT, virt_to_phys identity on
+        // nommu) + size. We record the region over that offset and ECHO the pfn
+        // back unchanged so the driver's vfd->pfn stays correct (do NOT overwrite
+        // it with a host-chosen value — that broke the mmap). See _allocShmRegion.
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         const flags = req.length >= 16 ? dv.getUint32(12, true) : 0;
+        const pfn = req.length >= 24 ? Number(dv.getBigUint64(16, true)) : 0;
         const size = req.length >= 28 ? dv.getUint32(24, true) : 0;
-        const region = size > 0 ? this._allocShmRegion(vfdId, size) : null;
+        const region = size > 0 && pfn > 0 ? this._allocShmRegion(vfdId, size, pfn) : null;
         this.contexts.set(vfdId, { type, flags, size, region });
         this.log(
           `[virtio-wl] NEW_ALLOC vfd_id=${vfdId} size=${size}` +
-            (region ? ` pfn=${region.pfn} (offset ${region.offset})` : ` (no region)`) +
+            (region
+              ? ` guest pfn=${region.pfn} (offset 0x${region.offset.toString(16)})`
+              : ` (no region: pfn=${pfn})`) +
             ` -> RESP_VFD_NEW`,
         );
         return {
           resp: this._vfdNew(
             vfdId,
-            /*size*/ region ? region.size : 0,
-            /*pfn*/ region ? BigInt(region.pfn) : 0n,
-            VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ,
+            /*size*/ region ? region.size : size,
+            /*pfn*/ BigInt(pfn),
+            flags || VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ,
           ),
           inReply: null,
         };
@@ -350,6 +389,20 @@ export class WlDevice extends VirtioWasmDevice {
         }
         const data = req.subarray(dataOff);
         this.log(`[virtio-wl] SEND vfd_id=${vfdId} ${data.length}B wayland (${vfdCount} fds)`);
+        if (this._shmDebug && data.length <= 512) {
+          const ddv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+          const parts = [];
+          for (let o = 0; o + 8 <= data.length; ) {
+            const obj = ddv.getUint32(o, true);
+            const so = ddv.getUint32(o + 4, true);
+            const op = so & 0xffff;
+            const sz = so >>> 16;
+            parts.push(`obj=${obj} op=${op} sz=${sz}`);
+            if (sz < 8) break;
+            o += sz;
+          }
+          this.log(`[virtio-wl]   wire: ${parts.join(" | ")}`);
+        }
         if (this._bridge) {
           // Phase 2 inversion: route OUT to the host → main-thread Greenfield.
           //

@@ -1,8 +1,11 @@
 {
   description = "wasm32-linux-musl NOMMU toolchain + Nix, built with Nix (#139/#141)";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # wl-eyes: a native Wayland client (source-only; built by ./wl-eyes.nix against
+  # the wasm32 cross stack). flake = false → consumed as a plain source tree.
+  inputs.wl-eyes = { url = "git+file:///home/vbvntv/Code/wl-eyes"; flake = false; };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, wl-eyes }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -103,6 +106,19 @@
         inherit pkgs cross;
       };
 
+      # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app. Links the
+      # cross libwayland-client + libffi (raw backend) + wayland-protocols
+      # (xdg-shell), generates the xdg-shell glue with the BUILD-host
+      # wayland-scanner, and rasterizes two pointer-tracking eyes into a wl_shm
+      # pool. Baked into the initramfs as /bin/wl-eyes. See wl-eyes.nix.
+      wlEyes = import ./wl-eyes.nix {
+        inherit cross;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+        src = wl-eyes;
+      };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
       guestClang = import ./toolchain/guest-clang.nix {
@@ -168,7 +184,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -265,6 +281,10 @@
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;
+
+        # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app
+        # (wl_shm + xdg-shell + wl_pointer) cross-built to wasm → $out/bin/wl-eyes.
+        wl-eyes = wlEyes;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
