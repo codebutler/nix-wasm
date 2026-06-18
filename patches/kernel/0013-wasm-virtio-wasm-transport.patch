@@ -641,7 +641,7 @@ new file mode 100644
 index 0000000..a4c90ac
 --- /dev/null
 +++ b/drivers/virtio/virtio_wl.c
-@@ -0,0 +1,1615 @@
+@@ -0,0 +1,1625 @@
 +/*
 + *  Wayland Virtio Driver
 + *  Copyright (C) 2017 Google, Inc.
@@ -1974,9 +1974,10 @@ index 0000000..a4c90ac
 +	}
 +
 +	for (i = 0; i < vfd_count; i++) {
-+		ret = anon_inode_getfd("[virtwl_vfd]", &virtwl_vfd_fops,
++		/* per-vfd inode (see NEW_ALLOC note) so NOMMU mmap doesn't alias */
++		ret = anon_inode_create_getfd("[virtwl_vfd]", &virtwl_vfd_fops,
 +				       vfds[i], virtwl_vfd_file_flags(vfds[i])
-+				       | O_CLOEXEC);
++				       | O_CLOEXEC, NULL);
 +		if (ret < 0)
 +			goto free_vfds;
 +
@@ -2037,8 +2038,17 @@ index 0000000..a4c90ac
 +	if (IS_ERR(vfd))
 +		return PTR_ERR(vfd);
 +
-+	ret = anon_inode_getfd("[virtwl_vfd]", &virtwl_vfd_fops, vfd,
-+			       virtwl_vfd_file_flags(vfd) | O_CLOEXEC);
++	/*
++	 * nommu/Wasm (pc 2c): each vfd MUST get its OWN inode. anon_inode_getfd
++	 * shares one global inode across all vfds; NOMMU do_mmap() matches shared
++	 * file mappings BY INODE, so a second shm vfd's mmap reuses the first
++	 * vfd's region/address instead of calling get_unmapped_area for its own
++	 * shm_buf — both pools alias one buffer and the host reads the wrong (or
++	 * zero) pixels. anon_inode_create_getfd mints a fresh inode per vfd so
++	 * each mmap lands on its own backing.
++	 */
++	ret = anon_inode_create_getfd("[virtwl_vfd]", &virtwl_vfd_fops, vfd,
++			       virtwl_vfd_file_flags(vfd) | O_CLOEXEC, NULL);
 +	if (ret < 0) {
 +		do_vfd_close(vfd);
 +		return ret;
