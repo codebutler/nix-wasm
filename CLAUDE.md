@@ -87,6 +87,39 @@ sudo -E nix build .#nix-wasm --print-out-paths               # the goal
 - The eval cache is a single SQLite db — concurrent `nix` invocations race
   ("database is busy"); don't run a status check against a live build.
 
+### Boot-test the built guest under Node (no browser) — pc's node-kernel harness
+
+This repo builds the guest; **pc** runs it. After rebuilding the kernel/userspace
+(`nix build .#kernel`, the store/closure, etc.) and re-vendoring the artifacts into
+pc's `vendor/linux-wasm/{vmlinux.wasm,initramfs.cpio.gz,store.json,store-content/,nix-cache/}`,
+boot-test them from **Node — no Chromium/Playwright** via pc's node-kernel harness
+(`scripts/linux-demo/node-kernel/`, added in codebutler/pc#238). It reuses pc's
+browser runtime (`js/linux/boot.js`, the 9P stack, the vendored runtime) unchanged —
+it just shims `Worker` (over `node:worker_threads`), a worker-side `self`, and
+`fetch` over `file://` — so it's the fast, scriptable counterpart to the Playwright
+`exec-nixsystem.mjs` / `exec-nix.mjs` harnesses (busybox boot ~2.5s, full nix-system
+boot ~7–8s vs the ~30–60s headless-browser boot).
+
+Run these from the **pc** repo root:
+
+```sh
+# Full nix-system smoke: boot → 9P read/write/ls → nix-env -iA sl from the cache.
+# Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run). The Playwright-free
+# port of the in-browser smoke; the fastest way to confirm a freshly-vendored guest.
+node --no-warnings scripts/linux-demo/node-kernel/smoke-node.mjs
+
+# Interactive guest root shell (Ctrl-] to quit). --no-nix = fast busybox-only boot
+# (skip the 27 MB served closure) when you only need a shell, not the /nix overlay.
+node --no-warnings scripts/linux-demo/node-kernel/attach.mjs [--no-nix]
+
+# Unit tests for the shims + the shared-WebAssembly.Memory worker bridge.
+node --test scripts/linux-demo/node-kernel/*.test.mjs
+```
+
+There's also a programmatic expect API (`bootNode()` → `waitForPrompt` /
+`waitForOutput` / `send` / `snapshot` / `kill`) for scripting bespoke checks against
+a freshly-built guest — see `scripts/linux-demo/node-kernel/README.md` in pc.
+
 ## Current state
 
 **It works end-to-end** (2026-06-17). `nix build .#nix-wasm` builds the wasm Nix;
