@@ -1,0 +1,498 @@
+diff --git a/drivers/virtio/Kconfig b/drivers/virtio/Kconfig
+index ce5bc0d9ea28..dbf7e5c496f6 100644
+--- a/drivers/virtio/Kconfig
++++ b/drivers/virtio/Kconfig
+@@ -171,6 +171,18 @@ config VIRTIO_MMIO_CMDLINE_DEVICES
+ 
+ 	 If unsure, say 'N'.
+ 
++config VIRTIO_WASM
++	bool "Wasm host-callback virtio transport (+ echo self-test)"
++	select VIRTIO
++	help
++	  Minimal virtio transport over Wasm host callbacks for Linux/Wasm
++	  ("pc" Wayland Phase 1). It registers a single test device and an
++	  in-kernel echo self-test driver that does a one-buffer virtqueue
++	  round-trip on boot, proving the guest<->host vring path and the
++	  host->guest used-buffer interrupt via raise_interrupt().
++
++	  Built-in only (Wasm cannot load modules). Say Y on Wasm if unsure.
++
+ config VIRTIO_DMA_SHARED_BUFFER
+ 	tristate
+ 	depends on DMA_SHARED_BUFFER
+diff --git a/drivers/virtio/Makefile b/drivers/virtio/Makefile
+index eefcfe90d6b8..7ec9959f5ba4 100644
+--- a/drivers/virtio/Makefile
++++ b/drivers/virtio/Makefile
+@@ -4,6 +4,7 @@ obj-$(CONFIG_VIRTIO_ANCHOR) += virtio_anchor.o
+ obj-$(CONFIG_VIRTIO_PCI_LIB) += virtio_pci_modern_dev.o
+ obj-$(CONFIG_VIRTIO_PCI_LIB_LEGACY) += virtio_pci_legacy_dev.o
+ obj-$(CONFIG_VIRTIO_MMIO) += virtio_mmio.o
++obj-$(CONFIG_VIRTIO_WASM) += virtio_wasm.o
+ obj-$(CONFIG_VIRTIO_PCI) += virtio_pci.o
+ virtio_pci-y := virtio_pci_modern.o virtio_pci_common.o
+ virtio_pci-$(CONFIG_VIRTIO_PCI_LEGACY) += virtio_pci_legacy.o
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+new file mode 100644
+index 000000000000..d53b451fa83b
+--- /dev/null
++++ b/drivers/virtio/virtio_wasm.c
+@@ -0,0 +1,457 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * virtio_wasm.c - a minimal virtio transport over Wasm host callbacks, plus a
++ * tiny in-kernel echo test driver bound to it (Linux/Wasm, "pc" Wayland Phase 1
++ * sub-step 1a — the de-risking spike).
++ *
++ * Goal: prove a guest<->host virtqueue round-trip end-to-end, ESPECIALLY that
++ * the JS host can deliver a used-buffer interrupt back into the guest via the
++ * guest's exported raise_interrupt(cpu, irq) (never exercised before).
++ *
++ * Mechanism (no DMA):
++ *   - The transport does NOT advertise VIRTIO_F_ACCESS_PLATFORM, so virtio_ring
++ *     takes the !vring_use_map_api() path: vring_alloc_queue() uses
++ *     alloc_pages_exact() and sets the descriptor "dma_addr_t" to
++ *     virt_to_phys(queue). On nommu wasm, virt_to_phys() is identity, so the
++ *     vring desc/avail/used addresses ARE raw WebAssembly.Memory byte offsets
++ *     the JS host indexes straight into instance.exports.memory.buffer.
++ *   - Kick (guest->host): virtqueue_kick() -> our notify() -> wasm_virtio_notify()
++ *     import (resolved from "env", same mechanism as 9P's wasm_driver_9p_request).
++ *   - We hand the host the vring layout via wasm_virtio_setup_queue() right after
++ *     vring_create_virtqueue(), so the host knows where the split ring lives.
++ *   - Interrupt (host->guest): the host writes the used ring then calls the guest
++ *     export raise_interrupt(IRQ_CPU, irq). init_IRQ() already wired
++ *     handle_simple_irq + wasm_irq_chip for irqs 2..63, so request_irq() works and
++ *     the handler calls vring_interrupt(irq, vq) -> the vq callback.
++ *
++ * Built-in only (Wasm cannot load modules). All one file, guarded by
++ * CONFIG_VIRTIO_WASM.
++ */
++
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/slab.h>
++#include <linux/interrupt.h>
++#include <linux/virtio.h>
++#include <linux/virtio_config.h>
++#include <linux/virtio_ring.h>
++#include <linux/completion.h>
++
++/*
++ * Host imports (resolved as wasm imports from "env"). The JS runtime adds these
++ * to host_callbacks in runtime/kernel-worker.js.
++ *
++ *   wasm_virtio_notify(q): guest kicked queue q; host should service it.
++ *   wasm_virtio_setup_queue(q, desc, avail, used, num): tell the host the byte
++ *     offsets (== nommu phys == raw linear-memory offsets) of the split vring.
++ */
++extern void wasm_virtio_notify(u32 q);
++extern void wasm_virtio_setup_queue(u32 q, u64 desc, u64 avail, u64 used,
++				    u32 num);
++
++/* Spike-local choices. */
++#define VIRTIO_WASM_VENDOR	0x000000CBu	/* "cb" */
++#define VIRTIO_WASM_DEVICE_ID	0xCB01u		/* the echo test device id */
++#define VIRTIO_WASM_IRQ		8		/* a free irq (2..63) */
++#define VIRTIO_WASM_QSIZE	8		/* tiny one-vq ring */
++#define VIRTIO_WASM_VRING_ALIGN	4096
++
++struct virtio_wasm_device {
++	struct virtio_device vdev;
++	u8 status;
++	struct virtqueue *vq;
++};
++
++static struct virtio_wasm_device *to_vw(struct virtio_device *vdev)
++{
++	return container_of(vdev, struct virtio_wasm_device, vdev);
++}
++
++/* ---- virtio_config_ops ---- */
++
++static u64 vw_get_features(struct virtio_device *vdev)
++{
++	/*
++	 * Modern virtio core requires VIRTIO_F_VERSION_1. We deliberately do
++	 * NOT offer VIRTIO_F_ACCESS_PLATFORM so the no-DMA identity-offset path
++	 * is taken in virtio_ring (the whole point of the spike).
++	 */
++	return 1ULL << VIRTIO_F_VERSION_1;
++}
++
++static int vw_finalize_features(struct virtio_device *vdev)
++{
++	/* Give virtio_ring a chance to accept its transport features. */
++	vring_transport_features(vdev);
++
++	if (!__virtio_test_bit(vdev, VIRTIO_F_VERSION_1)) {
++		dev_err(&vdev->dev, "virtio_wasm requires VIRTIO_F_VERSION_1\n");
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static void vw_get(struct virtio_device *vdev, unsigned int offset,
++		   void *buf, unsigned int len)
++{
++	/* No device-specific config space in this spike. */
++	memset(buf, 0, len);
++}
++
++static void vw_set(struct virtio_device *vdev, unsigned int offset,
++		   const void *buf, unsigned int len)
++{
++}
++
++static u8 vw_get_status(struct virtio_device *vdev)
++{
++	return to_vw(vdev)->status;
++}
++
++static void vw_set_status(struct virtio_device *vdev, u8 status)
++{
++	to_vw(vdev)->status = status;
++}
++
++static void vw_reset(struct virtio_device *vdev)
++{
++	to_vw(vdev)->status = 0;
++}
++
++static u32 vw_generation(struct virtio_device *vdev)
++{
++	return 0;
++}
++
++/* Kick: guest -> host. Called by virtio_ring when the guest exposes buffers. */
++static bool vw_notify(struct virtqueue *vq)
++{
++	wasm_virtio_notify((u32)vq->index);
++	return true;
++}
++
++/* IRQ handler: host raised our irq after writing the used ring. */
++static irqreturn_t vw_interrupt(int irq, void *opaque)
++{
++	struct virtio_wasm_device *vw = opaque;
++
++	if (!vw->vq)
++		return IRQ_NONE;
++	return vring_interrupt(irq, vw->vq);
++}
++
++static int vw_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
++		       struct virtqueue *vqs[],
++		       struct virtqueue_info vqs_info[],
++		       struct irq_affinity *desc)
++{
++	struct virtio_wasm_device *vw = to_vw(vdev);
++	struct virtqueue_info *vqi;
++	struct virtqueue *vq;
++	int err;
++
++	if (nvqs != 1)
++		return -EINVAL;
++
++	vqi = &vqs_info[0];
++	if (!vqi->name) {
++		vqs[0] = NULL;
++		return 0;
++	}
++
++	err = request_irq(VIRTIO_WASM_IRQ, vw_interrupt, 0,
++			  "virtio_wasm", vw);
++	if (err) {
++		dev_err(&vdev->dev, "request_irq(%d) failed: %d\n",
++			VIRTIO_WASM_IRQ, err);
++		return err;
++	}
++
++	vq = vring_create_virtqueue(0, VIRTIO_WASM_QSIZE,
++				    VIRTIO_WASM_VRING_ALIGN, vdev,
++				    true,  /* weak_barriers */
++				    false, /* may_reduce_num */
++				    false, /* ctx */
++				    vw_notify, vqi->callback, vqi->name);
++	if (!vq) {
++		free_irq(VIRTIO_WASM_IRQ, vw);
++		return -ENOMEM;
++	}
++
++	vw->vq = vq;
++	vqs[0] = vq;
++
++	/*
++	 * Hand the host the vring layout. On nommu these "dma" addrs are raw
++	 * linear-memory byte offsets (virt_to_phys identity), so the JS device
++	 * can index instance.exports.memory.buffer directly.
++	 */
++	wasm_virtio_setup_queue(0,
++				(u64)virtqueue_get_desc_addr(vq),
++				(u64)virtqueue_get_avail_addr(vq),
++				(u64)virtqueue_get_used_addr(vq),
++				(u32)virtqueue_get_vring_size(vq));
++
++	dev_info(&vdev->dev,
++		 "virtio_wasm vq ready: desc=%llx avail=%llx used=%llx num=%u irq=%d\n",
++		 (u64)virtqueue_get_desc_addr(vq),
++		 (u64)virtqueue_get_avail_addr(vq),
++		 (u64)virtqueue_get_used_addr(vq),
++		 (u32)virtqueue_get_vring_size(vq),
++		 VIRTIO_WASM_IRQ);
++
++	return 0;
++}
++
++static void vw_del_vqs(struct virtio_device *vdev)
++{
++	struct virtio_wasm_device *vw = to_vw(vdev);
++
++	if (vw->vq) {
++		vring_del_virtqueue(vw->vq);
++		vw->vq = NULL;
++		free_irq(VIRTIO_WASM_IRQ, vw);
++	}
++}
++
++static const struct virtio_config_ops virtio_wasm_config_ops = {
++	.get			= vw_get,
++	.set			= vw_set,
++	.generation		= vw_generation,
++	.get_status		= vw_get_status,
++	.set_status		= vw_set_status,
++	.reset			= vw_reset,
++	.find_vqs		= vw_find_vqs,
++	.del_vqs		= vw_del_vqs,
++	.get_features		= vw_get_features,
++	.finalize_features	= vw_finalize_features,
++};
++
++static void virtio_wasm_release(struct device *dev)
++{
++	struct virtio_device *vdev = container_of(dev, struct virtio_device,
++						  dev);
++	kfree(to_vw(vdev));
++}
++
++/* The single device this transport registers (the echo test device). */
++static struct virtio_wasm_device *vw_singleton;
++
++static int __init virtio_wasm_transport_init(void)
++{
++	struct virtio_wasm_device *vw;
++	int err;
++
++	vw = kzalloc(sizeof(*vw), GFP_KERNEL);
++	if (!vw)
++		return -ENOMEM;
++
++	vw->vdev.dev.release = virtio_wasm_release;
++	vw->vdev.config = &virtio_wasm_config_ops;
++	vw->vdev.id.device = VIRTIO_WASM_DEVICE_ID;
++	vw->vdev.id.vendor = VIRTIO_WASM_VENDOR;
++
++	err = register_virtio_device(&vw->vdev);
++	if (err) {
++		pr_err("virtio_wasm: register_virtio_device failed: %d\n", err);
++		put_device(&vw->vdev.dev);
++		return err;
++	}
++
++	vw_singleton = vw;
++	pr_info("virtio_wasm: transport registered device id=%#x vendor=%#x\n",
++		VIRTIO_WASM_DEVICE_ID, VIRTIO_WASM_VENDOR);
++	return 0;
++}
++
++/* ====================================================================== */
++/* The in-kernel echo TEST DRIVER bound to the device above.              */
++/* ====================================================================== */
++
++#define VW_TEST_MAGIC	0xA5A5C0DEu
++
++struct vw_test {
++	struct virtqueue *vq;
++	struct completion done;
++	u32 *txbuf;	/* what we send to the host */
++	u32 *rxbuf;	/* where the host echoes the reply */
++	bool callback_fired;
++};
++
++static struct vw_test *vw_test_state;
++
++/* vq callback: fires from vw_interrupt -> vring_interrupt when host raised irq. */
++static void vw_test_vq_cb(struct virtqueue *vq)
++{
++	struct vw_test *t = vw_test_state;
++	unsigned int len;
++	void *buf;
++
++	if (!t)
++		return;
++
++	t->callback_fired = true;
++	pr_info("virtio_wasm: TEST vq callback fired\n");
++
++	buf = virtqueue_get_buf(vq, &len);
++	if (!buf) {
++		pr_err("virtio_wasm: TEST callback but no used buffer\n");
++		complete(&t->done);
++		return;
++	}
++
++	pr_info("virtio_wasm: TEST got used buf len=%u rx[0]=%#x (sent %#x)\n",
++		len, t->rxbuf[0], t->txbuf[0]);
++	complete(&t->done);
++}
++
++static int vw_test_probe(struct virtio_device *vdev)
++{
++	struct virtqueue_info vqi = {
++		.name = "echo",
++		.callback = vw_test_vq_cb,
++		.ctx = false,
++	};
++	struct virtqueue *vqs[1];
++	struct vw_test *t;
++	struct scatterlist sg_out, sg_in;
++	struct scatterlist *sgs[2];
++	long ret;
++	int err;
++
++	pr_info("virtio_wasm: TEST driver probe RUNNING (M2 reached)\n");
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
++	if (!t)
++		return -ENOMEM;
++	init_completion(&t->done);
++	vw_test_state = t;
++
++	/* DMA-coherent-equivalent buffers: plain kalloc, identity phys on nommu. */
++	t->txbuf = kzalloc(sizeof(u32), GFP_KERNEL);
++	t->rxbuf = kzalloc(sizeof(u32), GFP_KERNEL);
++	if (!t->txbuf || !t->rxbuf) {
++		err = -ENOMEM;
++		goto err_free;
++	}
++
++	err = virtio_find_vqs(vdev, 1, vqs, &vqi, NULL);
++	if (err) {
++		pr_err("virtio_wasm: TEST find_vqs failed: %d\n", err);
++		goto err_free;
++	}
++	t->vq = vqs[0];
++	vdev->priv = t;
++
++	pr_info("virtio_wasm: TEST find_vqs ok (M3 reached)\n");
++
++	/* Tell the device we're good to go. */
++	virtio_device_ready(vdev);
++
++	/* Build a 2-descriptor chain: one out (request), one in (reply). */
++	t->txbuf[0] = VW_TEST_MAGIC;
++	t->rxbuf[0] = 0;
++	sg_init_one(&sg_out, t->txbuf, sizeof(u32));
++	sg_init_one(&sg_in, t->rxbuf, sizeof(u32));
++	sgs[0] = &sg_out;
++	sgs[1] = &sg_in;
++
++	err = virtqueue_add_sgs(t->vq, sgs, 1, 1, t, GFP_KERNEL);
++	if (err) {
++		pr_err("virtio_wasm: TEST add_sgs failed: %d\n", err);
++		goto err_free;
++	}
++
++	pr_info("virtio_wasm: TEST kicking vq (sent %#x)\n", t->txbuf[0]);
++	virtqueue_kick(t->vq);
++
++	/*
++	 * THE CRUX: wait for the host to echo + raise_interrupt -> vq callback.
++	 * If raise_interrupt does not wake the guest, this times out.
++	 */
++	ret = wait_for_completion_timeout(&t->done, msecs_to_jiffies(5000));
++	if (ret == 0) {
++		pr_err("RESULT virtio_wasm FAIL interrupt-not-delivered (callback_fired=%d)\n",
++		       t->callback_fired);
++		return 0;
++	}
++
++	if (!t->callback_fired) {
++		pr_err("RESULT virtio_wasm FAIL completion-without-callback\n");
++		return 0;
++	}
++
++	if (t->rxbuf[0] != (t->txbuf[0] ^ 0xFFFFFFFFu)) {
++		pr_err("RESULT virtio_wasm FAIL bad-echo rx=%#x expected=%#x\n",
++		       t->rxbuf[0], t->txbuf[0] ^ 0xFFFFFFFFu);
++		return 0;
++	}
++
++	pr_info("RESULT virtio_wasm PASS rx=%#x (host echoed ~tx, irq delivered)\n",
++		t->rxbuf[0]);
++	return 0;
++
++err_free:
++	pr_err("RESULT virtio_wasm FAIL setup err=%d\n", err);
++	kfree(t->txbuf);
++	kfree(t->rxbuf);
++	kfree(t);
++	vw_test_state = NULL;
++	return err;
++}
++
++static void vw_test_remove(struct virtio_device *vdev)
++{
++	struct vw_test *t = vdev->priv;
++
++	vdev->config->reset(vdev);
++	vdev->config->del_vqs(vdev);
++	if (t) {
++		kfree(t->txbuf);
++		kfree(t->rxbuf);
++		kfree(t);
++	}
++	vw_test_state = NULL;
++}
++
++static const struct virtio_device_id vw_test_id_table[] = {
++	{ VIRTIO_WASM_DEVICE_ID, VIRTIO_WASM_VENDOR },
++	{ 0 },
++};
++
++static struct virtio_driver vw_test_driver = {
++	.driver.name	= "virtio_wasm_echo",
++	.id_table	= vw_test_id_table,
++	.probe		= vw_test_probe,
++	.remove		= vw_test_remove,
++};
++
++static int __init virtio_wasm_init(void)
++{
++	int err;
++
++	/* Register the driver first so the device's probe runs on registration. */
++	err = register_virtio_driver(&vw_test_driver);
++	if (err) {
++		pr_err("virtio_wasm: register_virtio_driver failed: %d\n", err);
++		return err;
++	}
++
++	err = virtio_wasm_transport_init();
++	if (err) {
++		unregister_virtio_driver(&vw_test_driver);
++		return err;
++	}
++	return 0;
++}
++
++/*
++ * late_initcall: the virtio bus + core (subsys_initcall via module_init in
++ * virtio.c) and the irq subsystem must be up first. The secondary IRQ_CPU is
++ * also brought up during boot before initcalls finish servicing, so the irq
++ * path is live.
++ */
++late_initcall(virtio_wasm_init);
++
++MODULE_DESCRIPTION("Minimal virtio transport + echo self-test over Wasm host callbacks");
++MODULE_LICENSE("GPL");

@@ -9,6 +9,7 @@
 // import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
 import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
+import { makeEchoDevice } from "./virtio/echo-device.js";
 
 (function (console) {
   let port = self;
@@ -198,6 +199,35 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
 
   /// 9P host-call (ticket #74), set up in init() if a ring SAB was provided.
   let ninep_request = null;
+
+  /// Wayland Phase 1 (1a): the JS virtio echo device model. Lazily built on the
+  /// first wasm_virtio_setup_queue/notify call because it needs the guest's
+  /// raise_interrupt export (only available once vmlinux_instance exists). The
+  /// kick comes from the CPU-0 worker (where the test driver's late_initcall
+  /// runs), which holds the same shared `memory` and a vmlinux_instance whose
+  /// raise_interrupt operates on the shared per-CPU raised_irqs state.
+  let virtio_echo = null;
+  const get_virtio_echo = () => {
+    if (!virtio_echo && vmlinux_instance) {
+      virtio_echo = makeEchoDevice({
+        memory,
+        // irq=8 matches VIRTIO_WASM_IRQ in drivers/virtio/virtio_wasm.c.
+        //
+        // CPU CHOICE (1a finding): the kernel's IRQ model assumes a dedicated
+        // IRQ_CPU=1 whose idle loop polls raised_irqs[1]. But pc boots
+        // maxcpus=1 (boot.js DEFAULT_CMDLINE) — only CPU 0 is ever online, so
+        // raise_interrupt(1, …) sets a bit nobody reads. We raise on CPU 0: when
+        // a task blocks (e.g. wait_for_completion), CPU 0's idle task runs
+        // arch_cpu_idle(), which memory.atomic.wait64's on raised_irqs[0] and
+        // dispatches do_irq_stacked() on wake.
+        raiseInterrupt: (cpu, irq) => vmlinux_instance.exports.raise_interrupt(cpu, irq),
+        irqCpu: 0,
+        irq: 8,
+        log: (m) => log(m),
+      });
+    }
+    return virtio_echo;
+  };
 
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
   let winsizes = null;
@@ -443,6 +473,20 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
     // window size, packed (rows<<16)|cols (0 = unset), read straight from the
     // shared winsize array the main thread writes via set_winsize.
     wasm_driver_hvc_winsize: (vtermno) => (winsizes ? Atomics.load(winsizes, vtermno | 0) : 0),
+
+    // Wayland Phase 1 (1a): the minimal `virtio_wasm` transport's two host
+    // imports. setup_queue hands us the split-vring byte offsets (nommu identity
+    // phys) so the device can index `memory.buffer` directly; notify is the
+    // guest->host kick. The echo is serviced synchronously here, then the device
+    // calls raise_interrupt(IRQ_CPU, irq) to deliver the used-buffer interrupt.
+    wasm_virtio_setup_queue: (q, desc, avail, used, num) => {
+      const dev = get_virtio_echo();
+      if (dev) dev.setupQueue(q, desc, avail, used, num);
+    },
+    wasm_virtio_notify: (q) => {
+      const dev = get_virtio_echo();
+      if (dev) dev.notify(q);
+    },
   };
 
   /// Callbacks from the main thread.
