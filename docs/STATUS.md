@@ -283,42 +283,58 @@ generation, and `@file` response-file passthrough. Validated in-guest: a `make`
 build using `-isystem`, `-include`, `-MMD -MF` (depfile `c.o: c.c prefix.h`
 produced) and `-Wl,--gc-sections` compiles, links, and runs.
 
-### ⚙️ Autoconf-capable guest shell — forkshell ash built; blocked on a kernel wait4 bug (2026-06-17)
+### ⚙️ Autoconf-capable guest shell — forkshell ash; 4 spawn defects fixed, configure runs its whole preamble (2026-06-17)
 Brought pc's WASI **forkshell ash** (busybox-w32 lineage) to the guest as
 `.#guest-ash` (`userspace/ash.nix` + `ash-cb-guest.c` adapter over native
 posix_spawn/pipe/waitpid + `ash-wasm-sjlj.c`). ash's dash-derived parser is
-autoconf-grade, and the NOMMU "fork-without-exec" is handled by serialize →
-re-exec `ash --fs`. Working in-guest: builds, runs, **clean exit** (needed the
-wasm SjLj fix — musl-wasm `longjmp` is `call abort`), and **subshells `( )`**
-(`fork_run`) end-to-end. `$(…)` capture runs the body and captures the output **correctly** (`echo
-CAP=$(true; echo e2)` prints `CAP=e2`) but ash then **hangs at its own exit**.
-Root cause not yet isolated; an earlier "kernel `waitpid(WNOHANG)` bug" note was
-**WRONG** (disproven — `waitpid(-1,WNOHANG)`/no-children returns `ECHILD`; the
-"evidence" was a flaky harness). The hang is in ash's post-`$()` exit path
-(`exitshell`/`setjobctl`/a blocking wait). Next: instrument the exit path with raw
-traces on the current build (separated-step, tail-reading harness — the
-marker/combined-command harnesses gave false results). Full detail:
-`docs/plan-guest-shell.md` § Implementation status.
+autoconf-grade; the NOMMU "fork-without-exec" is serialize → re-exec `ash --fs`.
+Builtins, subshells `( )`, pipelines, `$(builtin)` capture, and clean exit all
+work (the exit needed the wasm SjLj fix — musl-wasm `longjmp` is `call abort`).
 
-### ⚠️ Real autoconf `./configure` — blocked on the guest shell (2026-06-17)
-A2 (run a genuine autoconf-generated `configure` + `make` in-guest) was run with a
-host-generated minimal autoconf project (real 4669-line `configure`: `AC_PROG_CC`,
-`AC_CHECK_HEADERS`, `AC_CHECK_FUNCS`, `config.h`, run-tests). **The toolchain side
-works** — the conftest compile/link/RUN loop, `cc` detection, and `make` all
-function (the startup-SIGILL + `c++` fixes hold up under configure's load). **The
-blocker is the shell:** the guest `/bin/sh` is busybox **hush**, which is not
-POSIX-complete enough for autoconf — configure dies with `sh: ambiguous redirect` /
-`sh: syntax error at 'fi'` and emits no Makefile.
+A **real autoconf `./configure`** (host-generated minimal project) was driven
+in-guest with pid-tagged / host-mount-readable instrumentation. It hung in the
+preamble; root-caused and fixed **four distinct NOMMU spawn defects** (commit
+`5bbe3b2`; each validated in isolation):
+1. **command-not-found hung** — `cb_spawn` ran `posix_spawnp` on a missing binary,
+   which never returns ENOENT here, so `wait_status()` blocked forever. Fixed with
+   a `cmd_found()` PATH gate (return 127, never spawn) + a non-NULL (empty)
+   `posix_spawn_file_actions` (NULL hangs).
+2. **external command needing a child hung** — ash's `evalcommand` default case
+   used native `forkshell()`/`fork()` for any external that isn't the last command
+   (`cc foo; echo done`). Patch `0004` routes that CMDNORMAL path through `cb_spawn`.
+3. **post-spawn `unwindfiles()` infinite loop** — a `cb_spawn` child clobbers the
+   shared-memory global `g_parsefile`; save/restore it around `cb_spawn`.
+4. **external-command redirects dropped** — the M3a redirect-detach (a WASI dup2
+   stub workaround) fired on the early DO_REGBLTIN classification and dropped a
+   found command's redirect (`cat >conftest.c <<EOF` never created the file).
+   Neutralized so ash's own `redirect()` handles all redirects in-process.
 
-This is the NOMMU-fork wall resurfacing (see fork/vfork notes): autoconf needs a
-real POSIX shell, but a real shell's subshell/pipeline/`$(…)` model duplicates the
-shell process via `fork()` — impossible on one shared NOMMU memory. hush was chosen
-and spawn-patched (clone-with-fn) precisely to sidestep that, but hush can't parse
-autoconf. `ash` is **not** compiled in (`# CONFIG_ASH is not set`) and would need
-its own fork sites ported to the clone-with-fn model. So: **plain-Makefile and
-`nix-build`-driven C/C++ builds compile cleanly in-guest; autotools `./configure`
-specifically is blocked** until the guest gets an autoconf-capable, NOMMU-safe
-shell. Plan: `docs/plan-guest-shell.md`.
+With these, in-guest `./configure` now runs through its **entire preamble** (shell
+detection, function defs, LINENO, command-not-found probes, all `cc --version/-v/-V`
+checks) and reaches the core tests. **One issue remains:** `forkshell_capture` (a
+`` `backtick` ``) hangs when the captured subshell contains anything beyond a
+single existing command (a `||`, a `|`, or a not-found command — i.e. an extra
+*nested* forkshell or a `cb_spawn`-127) **while stdout is already redirected**
+(autoconf's cosmetic `## Platform. ##` block: `{ cat <<EOF …backticks… } >&5`).
+Isolated precisely: plain `` `(uname -m)` `` in that context works; `` `(cmd) || …` ``,
+`` `(cmd) | sed` ``, and `` `(/nonexistent) 2>/dev/null` `` each hang on the *first*
+capture (not an fd leak — `open()` returns fd 3). The capture pipe's write-end is
+left open across the nested forkshell, so the parent's pipe read never EOFs. This
+is a deep nested-forkshell pipe/wait interaction in the forkshell port, distinct
+from the 4 fixes above, and gates only in-guest autotools (the design's real
+package path is host-cross-compile → guest-substitute, unaffected).
+Full detail: `docs/plan-guest-shell.md` § Implementation status.
+
+### ⚠️ Real autoconf `./configure` — preamble runs; one forkshell-capture edge remains (2026-06-17)
+A2 (run a genuine autoconf-generated `configure` in-guest) used a host-generated
+minimal project (real `configure`: `AC_PROG_CC`, `AC_CHECK_HEADERS/FUNCS`,
+`config.h`). The **toolchain side works** (conftest compile/link, `cc` detection),
+and the **shell side is now the forkshell ash** (no longer hush): the 4 spawn
+fixes above carry configure through its entire preamble into the core tests.
+Superseded the old "hush can't parse autoconf / ash not compiled in" framing — ash
+IS built (`.#guest-ash`) and is the autoconf-grade parser. The remaining blocker is
+the single `forkshell_capture`-in-brace-redirect hang documented in the section
+above. Plan: `docs/plan-guest-shell.md`.
 
 ### ✅ Userspace redesign — Plan 1 (the system closure) DONE
 The spike chose **Approach B** (curated `lib.evalModules`; Approach A pulled
