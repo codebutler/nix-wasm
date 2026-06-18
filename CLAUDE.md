@@ -87,38 +87,56 @@ sudo -E nix build .#nix-wasm --print-out-paths               # the goal
 - The eval cache is a single SQLite db — concurrent `nix` invocations race
   ("database is busy"); don't run a status check against a live build.
 
-### Boot-test the built guest under Node (no browser) — pc's node-kernel harness
+### Boot-test the built guest — in-repo runtime/ harness
 
-This repo builds the guest; **pc** runs it. After rebuilding the kernel/userspace
-(`nix build .#kernel`, the store/closure, etc.) and re-vendoring the artifacts into
-pc's `vendor/linux-wasm/{vmlinux.wasm,initramfs.cpio.gz,store.json,store-content/,nix-cache/}`,
-boot-test them from **Node — no Chromium/Playwright** via pc's node-kernel harness
-(`scripts/linux-demo/node-kernel/`, added in codebutler/pc#238). It reuses pc's
-browser runtime (`js/linux/boot.js`, the 9P stack, the vendored runtime) unchanged —
-it just shims `Worker` (over `node:worker_threads`), a worker-side `self`, and
-`fetch` over `file://` — so it's the fast, scriptable counterpart to the Playwright
-`exec-nixsystem.mjs` / `exec-nix.mjs` harnesses (busybox boot ~2.5s, full nix-system
-boot ~7–8s vs the ~30–60s headless-browser boot).
+nix-wasm now both *builds* the guest and *runs* it. The `runtime/` package
+(kernel host + 9P server + Nix store wiring) runs in Node and the browser; pc
+vendors it via `runtime/sync-to-pc.sh`.
 
-Run these from the **pc** repo root:
+Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
+from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). Point
+at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
+symlink `web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
+fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
+
+Run these from the **runtime/** directory:
 
 ```sh
-# Full nix-system smoke: boot → 9P read/write/ls → nix-env -iA sl from the cache.
-# Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run). The Playwright-free
-# port of the in-browser smoke; the fastest way to confirm a freshly-vendored guest.
-node --no-warnings scripts/linux-demo/node-kernel/smoke-node.mjs
+# Engine unit tests (79 tests, no artifacts needed):
+bun run test
 
-# Interactive guest root shell (Ctrl-] to quit). --no-nix = fast busybox-only boot
-# (skip the 27 MB served closure) when you only need a shell, not the /nix overlay.
-node --no-warnings scripts/linux-demo/node-kernel/attach.mjs [--no-nix]
+# Node integration tests:
+node --test node/
 
-# Unit tests for the shims + the shared-WebAssembly.Memory worker bridge.
-node --test scripts/linux-demo/node-kernel/*.test.mjs
+# Full nix-system smoke: boot → 9P read/write/ls → nix-env -iA sl.
+# Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/smoke.mjs
+
+# Interactive guest root shell (Ctrl-] to quit).
+# --no-nix = fast busybox-only boot when you don't need the /nix overlay.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs [--no-nix]
+
+# Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
+ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
+# Headless Playwright smoke (asserts WEB_OK):
+node web/smoke.mjs
 ```
 
-There's also a programmatic expect API (`bootNode()` → `waitForPrompt` /
-`waitForOutput` / `send` / `snapshot` / `kill`) for scripting bespoke checks against
-a freshly-built guest — see `scripts/linux-demo/node-kernel/README.md` in pc.
+`makeConsoleSession` wraps a boot handle with a programmatic expect API
+(`waitForPrompt` / `waitForOutput` / `send` / `snapshot` / `kill`) for
+scripting bespoke checks against a freshly-built guest.
+
+**Four CI gates for runtime/** (all must pass before pushing):
+
+```sh
+bun run test          # engine unit tests
+bun run lint          # oxlint, zero warnings tolerated
+bun run format:check  # oxfmt
+bun run typecheck     # tsc
+```
+
+`node/` and `web/` are tooling/demo (tsc-excluded); `web/vendor/ghostty` is
+vendored (excluded from all three static gates).
 
 ## Current state
 

@@ -65,25 +65,36 @@ cache (cache-friendly pin + `x86_64` + a wasm-artifact cache) and the **guest** 
 host rebuilds are a failure mode to design out. See
 [CLAUDE.md § Caching](CLAUDE.md).
 
-## How to test the built guest
+## Runtime (Node + browser)
 
-This repo *builds* the guest; [pc](https://github.com/codebutler/pc) *runs* it.
-After rebuilding the kernel/userspace and re-vendoring the artifacts into pc's
-`vendor/linux-wasm/`, boot-test them **from Node — no browser** via pc's node-kernel
-harness (`scripts/linux-demo/node-kernel/`):
+nix-wasm now both *builds* the guest and *runs* it. The `runtime/` package
+contains the kernel host, 9P server, Nix store wiring, and the
+`bootNixSystem` entry point. It runs in Node (no browser needed) and in the
+browser, and pc vendors it via `runtime/sync-to-pc.sh`.
 
 ```sh
-# in the pc repo — full nix-system smoke (boot → 9P read/write/ls → nix-env -iA sl)
-node --no-warnings scripts/linux-demo/node-kernel/smoke-node.mjs
-# or drop into an interactive guest shell (Ctrl-] to quit; --no-nix = fast busybox boot)
-node --no-warnings scripts/linux-demo/node-kernel/attach.mjs
+# Engine unit tests (no artifacts needed):
+cd runtime && bun run test
+
+# Node integration tests:
+cd runtime && node --test node/
+
+# Full nix-system smoke (boot → 9P read/write/ls → nix-env -iA sl):
+cd runtime && LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/smoke.mjs
+
+# Interactive guest shell (Ctrl-] to quit; --no-nix = fast busybox boot):
+cd runtime && LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs
+
+# Browser demo:
+cd runtime && ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs
 ```
 
-It reuses pc's browser runtime unchanged (shimming `Worker`, `self`, and `fetch`
-over `file://`), so it's the fast, scriptable counterpart to the in-browser
-Playwright harnesses (`exec-nixsystem.mjs` / `exec-nix.mjs`) — a full nix-system
-boot in ~7–8s instead of the ~30–60s headless-browser boot. See
-[CLAUDE.md § Build / test](CLAUDE.md) for details.
+Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
+from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). For
+local dev both the Node CLI and the browser demo default to pc's vendored set.
+
+See [`runtime/README.md`](runtime/README.md) for the full API, VFS contract, and
+gate details.
 
 ## Repo layout
 
