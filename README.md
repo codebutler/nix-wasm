@@ -65,6 +65,26 @@ cache (cache-friendly pin + `x86_64` + a wasm-artifact cache) and the **guest** 
 host rebuilds are a failure mode to design out. See
 [CLAUDE.md § Caching](CLAUDE.md).
 
+## How to test the built guest
+
+This repo *builds* the guest; [pc](https://github.com/codebutler/pc) *runs* it.
+After rebuilding the kernel/userspace and re-vendoring the artifacts into pc's
+`vendor/linux-wasm/`, boot-test them **from Node — no browser** via pc's node-kernel
+harness (`scripts/linux-demo/node-kernel/`):
+
+```sh
+# in the pc repo — full nix-system smoke (boot → 9P read/write/ls → nix-env -iA sl)
+node --no-warnings scripts/linux-demo/node-kernel/smoke-node.mjs
+# or drop into an interactive guest shell (Ctrl-] to quit; --no-nix = fast busybox boot)
+node --no-warnings scripts/linux-demo/node-kernel/attach.mjs
+```
+
+It reuses pc's browser runtime unchanged (shimming `Worker`, `self`, and `fetch`
+over `file://`), so it's the fast, scriptable counterpart to the in-browser
+Playwright harnesses (`exec-nixsystem.mjs` / `exec-nix.mjs`) — a full nix-system
+boot in ~7–8s instead of the ~30–60s headless-browser boot. See
+[CLAUDE.md § Build / test](CLAUDE.md) for details.
+
 ## Repo layout
 
 ```
