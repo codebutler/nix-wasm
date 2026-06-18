@@ -96,6 +96,28 @@ in
     }))
     prev.openssl;
 
+  # --- libffi: replace the emscripten-JS wasm backend with a raw one ----------
+  # libffi 3.5 auto-selects src/wasm/ffi.c for any wasm32 host, but that file is
+  # written entirely in EM_JS — it implements ffi_call/closures as JavaScript the
+  # *emscripten* runtime executes, and unconditionally #include's
+  # <emscripten/emscripten.h>. Our non-emscripten wasm guest has no JS host, so it
+  # neither compiles nor could work. libffi's own ffitarget.h already defines the
+  # non-emscripten ABI (FFI_WASM32, "raw") and picks it as FFI_DEFAULT_ABI when
+  # __EMSCRIPTEN__ is unset — it just never implemented it. We drop in that
+  # implementation: ffi_call dispatched through statically-typed call_indirect
+  # trampolines (the only way to make an indirect call on wasm) over all-i32
+  # argument lists with scalar returns — complete & correct for libwayland's
+  # protocol dispatch and any int/pointer C ABI; fails loud on what the raw wasm
+  # ABI genuinely can't express (64-bit/float/struct args, varargs, closures).
+  # See patches/libffi/wasm32-raw-ffi.c for the full rationale.
+  libffi = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        cp ${./patches/libffi/wasm32-raw-ffi.c} src/wasm/ffi.c
+      '';
+    }))
+    prev.libffi;
+
   # boost: strip the b2 `architecture=`/`binary-format=` target metadata —
   # nixpkgs derives them from the platform (cpu.family="wasm", execFormat="wasm"),
   # but Boost.Build rejects "wasm" ("not a known value of feature <architecture>").
