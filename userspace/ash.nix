@@ -78,6 +78,27 @@ cross.stdenv.mkDerivation {
     # redirectsafe() handles every redirect (files, >&N, heredocs) in-process.
     sed -i 's|if (cmdentry.cmdtype == CMDUNKNOWN && cmd->ncmd.redirect) {|if (0 \&\& cmdentry.cmdtype == CMDUNKNOWN \&\& cmd->ncmd.redirect) {|' shell/ash.c
 
+    # FIX: clear the inherited redirlist in a forkshell child before it runs.
+    # The forkshell serializer copies the parent's redirlist (the active brace/
+    # command redirects) into the child. On a real fork that's fine — the saved
+    # backup fds are valid in the forked copy. But this child is a re-exec'd
+    # `ash --fs` that inherited only the ALREADY-APPLIED fds (via posix_spawn);
+    # the squirreled-away backup fds the redirtab references don't exist here.
+    # So when the child exits, exitreset()→unwindredir(NULL) tries to restore
+    # fds from invalid backups and HANGS. (Manifests as `$( (cmd) || … )` /
+    # any backtick whose body can't exec-replace, inside a `{ … } >&5` block —
+    # autoconf's `## Platform. ##` section: the capture pipe is never closed, so
+    # the parent's read never EOFs.) The child just _exit()s, which closes its
+    # fds — it must NOT unwind the parent's redirect stack. Clearing redirlist
+    # leaves a clean stack for the child's OWN redirects (pushed/popped during
+    # its execution) while making the inherited entries a no-op.
+    #
+    # Also pin SIGCHLD to SIG_DFL for the child's lifetime: it does its own
+    # specific-pid waits (cb_spawn / __cb_fork_*) and never needs ash's
+    # SIGCHLD-driven job control, whose dowait(NONBLOCK)→waitpid(-1,WNOHANG)
+    # blocks on this NOMMU kernel when there are no children.
+    sed -i 's|\tforkshell_child(fs);|\t{ struct sigaction _fsd; memset(\&_fsd, 0, sizeof _fsd); _fsd.sa_handler = SIG_DFL; sigaction(SIGCHLD, \&_fsd, (struct sigaction *)0); }\n\tfs->gvp->redirlist = NULL; /* drop inherited (parent) redirects; see above */\n\tforkshell_child(fs);|' shell/ash.c
+
     # Compile the guest cb adapter + the wasm SjLj runtime as part of the shell
     # dir (gated on CONFIG_ASH). The SjLj runtime provides __wasm_setjmp/_test/
     # __wasm_longjmp + the __c_longjmp tag that `-mllvm -wasm-enable-sjlj` needs
