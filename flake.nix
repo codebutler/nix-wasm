@@ -4,8 +4,15 @@
   # wl-eyes: a native Wayland client (source-only; built by ./wl-eyes.nix against
   # the wasm32 cross stack). flake = false → consumed as a plain source tree.
   inputs.wl-eyes = { url = "git+file:///home/vbvntv/Code/wl-eyes"; flake = false; };
+  # weston: upstream source for the weston-flowers demo client (built by
+  # ./weston-flowers.nix — minimal toytoolkit subset, see that file). Pinned to
+  # the 14.0.1 release tarball; flake = false → plain source tree.
+  inputs.weston = {
+    url = "https://gitlab.freedesktop.org/wayland/weston/-/releases/14.0.1/downloads/weston-14.0.1.tar.xz";
+    flake = false;
+  };
 
-  outputs = { self, nixpkgs, wl-eyes }:
+  outputs = { self, nixpkgs, wl-eyes, weston }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -119,6 +126,24 @@
         src = wl-eyes;
       };
 
+      # Wayland Phase 2 (4b): weston-flowers — the REAL upstream weston demo
+      # client, cross-built from a minimal cairo-toytoolkit subset (flower.c +
+      # window.c + shared/*). The first cairo-backed Wayland client on the stack.
+      # Links the image-surface-only cross cairo (4b M1) + pixman + zlib +
+      # wayland-client/cursor + xkbcommon. Baked into the initramfs as
+      # /bin/weston-flowers. See weston-flowers.nix.
+      westonFlowers = import ./weston-flowers.nix {
+        inherit cross;
+        cairo = cross.cairo;
+        pixman = cross.pixman;
+        zlib = cross.zlib;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi;
+        src = weston;
+      };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
       guestClang = import ./toolchain/guest-clang.nix {
@@ -184,7 +209,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes westonFlowers ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -285,6 +310,10 @@
         # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app
         # (wl_shm + xdg-shell + wl_pointer) cross-built to wasm → $out/bin/wl-eyes.
         wl-eyes = wlEyes;
+
+        # Wayland Phase 2 (4b): weston-flowers — real upstream weston demo
+        # (cairo toytoolkit) cross-built to wasm → $out/bin/weston-flowers.
+        weston-flowers = westonFlowers;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
