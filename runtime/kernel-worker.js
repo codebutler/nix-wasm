@@ -9,6 +9,7 @@
 // import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
 import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
+import { makeHostBridge } from "./hostbridge.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
@@ -316,8 +317,31 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
   let winsizes = null;
 
+  // host-bridge (Phase 1, WASM_HOSTBRIDGE_ABI = 1): the kernel's copy_to/from_user
+  // and strncpy_from_user now route through the wasm_user_copy_to/_from/_strncpy
+  // host imports instead of an in-image memcpy. Task 1 resolver = the SHARED
+  // kernel buffer for every pid, so this is a pure indirection with no behavior
+  // change (the per-process memory split lands in Task 2 by swapping resolveMem).
+  //
+  // makeHostBridge captures `kernelMemory` once, but reads `kernelMemory.buffer`
+  // on every call — `memory` is assigned in init() (and re-grown over the boot),
+  // so we pass a tiny stand-in whose `.buffer` getter forwards to the live module
+  // -level `memory`, keeping these valid across memory growth. They live INSIDE
+  // the static host_callbacks object (not appended later) so the arch_bits==64
+  // BigInt-wrap loop in init() wraps them like every other callback — on wasm64
+  // their i64 args/results are coerced correctly; on wasm32 it's a no-op.
+  const _bridge = makeHostBridge(
+    { get buffer() { return memory.buffer; } },
+    (_pid) => ({ u8: () => new Uint8Array(memory.buffer) }),
+  );
+
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
   const host_callbacks = {
+    // host-bridge uaccess imports (see _bridge above; ABI v1, shared resolver).
+    wasm_user_copy_to: _bridge.wasm_user_copy_to,
+    wasm_user_copy_from: _bridge.wasm_user_copy_from,
+    wasm_user_strncpy: _bridge.wasm_user_strncpy,
+
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {
       // New web workers cannot be spawned from within a Worker in most browsers. It can currently not be spawned from
