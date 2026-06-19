@@ -77,17 +77,17 @@ export class WlDevice extends VirtioWasmDevice {
   /**
    * @param {object} opts
    * @param {{
-   *   onOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => (Uint8Array | null)
+   *   sendOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => void
    * }} [opts.waylandBridge]
-   *   Phase 2 inversion hook. When present, a VFD_SEND's wayland bytes are
-   *   routed OUT to the host (which feeds the main-thread Greenfield compositor)
-   *   instead of the in-worker WlServer stub. `clientId` is the per-ctx vfd_id —
-   *   one Greenfield client per guest Wayland connection. onOut is SYNCHRONOUS:
-   *   it blocks the worker (on a SAB futex) until the compositor's reply bytes
-   *   are available and RETURNS them, which the OUT-service path then injects
-   *   into the IN queue + raises the IRQ in this worker (the one holding the
-   *   live wasm instance for raise_interrupt). Without this hook the device
-   *   falls back to the local WlServer (Phase 1 1d behavior + tests).
+   *   Phase 4f bridge hook. When present, a VFD_SEND's wayland bytes are routed
+   *   OUT to the host (which feeds the main-thread Greenfield compositor) instead
+   *   of the in-worker WlServer stub. `clientId` is the per-ctx vfd_id — one
+   *   Greenfield client per guest Wayland connection. `sendOut` is FIRE-AND-FORGET
+   *   (no return value, no blocking): the guest's SEND completes on the synchronous
+   *   OUT ack, and the compositor's server→client response arrives later over the
+   *   IN queue via the host's pushIn → host-WlDevice.injectIn (the single async
+   *   host→guest path). Without this hook the device falls back to the local
+   *   WlServer (Phase 1 1d behavior + tests), which still uses inReply.
    */
   constructor(opts) {
     super(opts);
@@ -192,13 +192,34 @@ export class WlDevice extends VirtioWasmDevice {
     }
   }
 
-  /** Public: inject a server→client wayland reply for a client (ctx vfd_id),
-   *  delivered to the guest over the IN queue. The Phase 2 main-thread Greenfield
-   *  bridge calls this from `client.connection.onFlush`. Decoupled from the OUT
-   *  notify — wakes the guest via the IN-queue used-buffer IRQ. */
-  injectIn(clientId, data) {
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    this._queueIn(clientId >>> 0, bytes);
+  /** Public: inject a server→client wayland message for a client (ctx vfd_id),
+   *  delivered to the guest over the IN queue, raising the used-buffer IRQ to wake
+   *  a parked guest. This is the SINGLE async host→guest path (Phase 4f): the
+   *  main-thread Greenfield bridge calls it from `client.connection.onFlush` for
+   *  EVERY server→client event — replies, xdg_surface.configure, wl_pointer.*,
+   *  wl_keyboard.*, frame callbacks, wl_buffer.release. Decoupled from the OUT ack
+   *  (which the worker sends synchronously); Wayland events are inherently async.
+   *  @param {number} clientId  ctx vfd_id
+   *  @param {Uint8Array|ArrayBuffer} data  the wire bytes
+   *  @param {Uint8Array[]} [fds]  server→client fd payloads (e.g. the keymap),
+   *    each materialized as a host→guest vfd (VFD_NEW host-id) referenced by a
+   *    single VFD_RECV — the same wire contract the OUT path used to build. */
+  injectIn(clientId, data, fds) {
+    const id = clientId >>> 0;
+    const bytes = data ? (data instanceof Uint8Array ? data : new Uint8Array(data)) : new Uint8Array(0);
+    if (fds && fds.length) {
+      for (const msg of this._buildFdDelivery(id, bytes, fds)) this._queueRaw(msg);
+    } else {
+      this._queueIn(id, bytes);
+    }
+    this._flushPendingIn();
+  }
+
+  /** Public: flush any IN messages deferred for lack of a free guest inbuf. The
+   *  host calls this when the guest refills the IN avail ring (a VQ_IN kick the
+   *  worker forwards) — the host owns the IN vring but the kick lands on the
+   *  worker. A no-op when nothing is pending. */
+  flushIn() {
     this._flushPendingIn();
   }
 
@@ -211,9 +232,12 @@ export class WlDevice extends VirtioWasmDevice {
     if (q >>> 0 === VIRTWL_VQ_OUT) {
       this._serviceOut();
     } else if (q >>> 0 === VIRTWL_VQ_IN) {
-      // Guest (re)posted inbufs. If a prior SEND produced a reply we couldn't
-      // deliver because no IN buffer was available yet, flush it now.
-      this._flushPendingIn();
+      // Guest refilled the IN avail ring. With the Phase 4f bridge the HOST owns
+      // IN delivery, so forward the refill to it (the kick lands on the worker but
+      // the host's WlDevice holds the deferred queue). The local _pendingIn is only
+      // used by the Phase-1 WlServer fallback (no bridge), so flush that directly.
+      if (this._bridge && this._bridge.onInRefill) this._bridge.onInRefill();
+      else this._flushPendingIn();
     }
   }
 
@@ -495,40 +519,26 @@ export class WlDevice extends VirtioWasmDevice {
           this.log(`[virtio-wl]   wire: ${parts.join(" | ")}`);
         }
         if (this._bridge) {
-          // Phase 2 inversion: route OUT to the host → main-thread Greenfield.
+          // Phase 4f: route OUT to the host → main-thread Greenfield, FIRE-AND-
+          // FORGET. The guest's SEND completes on the OUT ack returned below
+          // (RESP_OK); the server→client response — replies, xdg_surface.configure,
+          // wl_pointer/keyboard events, frame callbacks, the keymap fd — arrives
+          // LATER, asynchronously, over the IN queue via the host's
+          // pushIn → host-WlDevice.injectIn.
           //
-          // SYNCHRONOUS round-trip (SAB-futex, not bare async postMessage): the
-          // guest's RECV completes via a virtio IRQ (raise_interrupt, a wasm
-          // export), but by the time a compositor reply arrives the OWNING worker
-          // is blocked in wait_for_completion (Atomics.wait) and can't process an
-          // async `wayland_in` postMessage — so async breaks. Instead `onOut`
-          // posts the bytes to the main thread and BLOCKS this worker (which is
-          // currently running inside wasm_virtio_notify, not blocked elsewhere)
-          // on a SAB futex until the main thread feeds Greenfield and writes the
-          // reply back. We then inject the reply via the IN queue + raise_interrupt
-          // RIGHT HERE — in the worker that holds the live wasm instance. The 9P
-          // ring uses the same main-services-while-worker-blocks shape.
-          const reply = this._bridge.onOut(vfdId, data.slice(), fds);
-          // The bridge returns either a bare Uint8Array (bytes only, the common
-          // case) or { bytes, fds } when Greenfield emitted server→client fds
-          // (e.g. the wl_keyboard keymap). Server→client fds become host vfds:
-          // emit a VFD_NEW per fd (host-bit id) so the guest driver registers it,
-          // then ONE VFD_RECV carrying the reply bytes + those vfd ids — the
-          // driver surfaces them to the client (waylandproxyd forwards over
-          // SCM_RIGHTS). See _buildKeymapDelivery.
-          const replyBytes = reply instanceof Uint8Array ? reply : reply?.bytes;
-          const replyFds = reply && !(reply instanceof Uint8Array) ? reply.fds : null;
-          let inReply = null;
-          if (replyFds && replyFds.length) {
-            inReply = { raw: this._buildFdDelivery(vfdId, replyBytes, replyFds) };
-            this.log(
-              `[virtio-wl] Greenfield reply ${replyBytes?.length || 0}B + ${replyFds.length} fd(s) -> IN queue (sync)`,
-            );
-          } else if (replyBytes && replyBytes.length) {
-            inReply = { vfdId, data: replyBytes };
-            this.log(`[virtio-wl] Greenfield reply ${replyBytes.length}B -> IN queue (sync)`);
-          }
-          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply };
+          // This replaces the old synchronous SAB round-trip. That round-trip only
+          // existed because a parked worker couldn't service an async IN delivery;
+          // the self-wake IN path (host writes the IN vring + raises the IRQ on
+          // raised_irqs directly) removed that constraint. Wayland events are
+          // inherently async — the client never blocks on its own request, it reads
+          // responses later from its event loop — so delivering them synchronously
+          // as "the reply to this SEND" was a category error: any event that fired
+          // after the round-trip's deferred-flush window (notably steady-state
+          // frame callbacks) was written to an already-closed reply slot and lost,
+          // stalling animation. Single producer per direction now: the worker owns
+          // OUT (this synchronous ack), the host owns IN (all async events).
+          this._bridge.sendOut(vfdId, data.slice(), fds);
+          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
         }
         // Phase 1 fallback: the in-worker WlServer stub (registry handshake).
         const server = this._serverFor(vfdId);

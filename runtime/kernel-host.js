@@ -39,15 +39,12 @@ export const linux = async ({
   ninep_ring,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
-  // Wayland Phase 2 (2b inversion): optional host hook for the worker→main
-  // Greenfield bridge. `onOut(clientId, buffer, fds)` is called when a guest
-  // VFD_SEND posts wayland bytes out of the worker (which is BLOCKED on the
-  // wayland SAB channel awaiting the reply); the host feeds them into the
-  // main-thread compositor and writes the reply back over that SAB channel.
+  // Wayland Phase 4f: optional host hook for the worker→main Greenfield bridge.
+  // `sendOut(clientId, buffer, fds)` is called FIRE-AND-FORGET when a guest
+  // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
+  // main-thread compositor and the response returns asynchronously over the IN
+  // queue via wayland_push_in (no SAB reply channel).
   wayland,
-  // Wayland Phase 2 (2b): the SAB channel { ctrl, bytes } threaded into every
-  // worker so the blocking onOut round-trip works from any task worker.
-  wayland_channel,
   // pc: accepted for caller API stability but now a no-op — the new exec ABI
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
@@ -216,29 +213,31 @@ export const linux = async ({
       }
     },
 
-    // Wayland Phase 2 (2b inversion): a guest VFD_SEND's wayland bytes posted
-    // out of a task worker (which is now blocked on the wayland SAB channel
-    // awaiting the reply). Re-view the shm fds over the SHARED memory and hand
-    // it to the host bridge → main-thread Greenfield. The bridge (wired in
-    // boot.js) writes the compositor's reply back over the SAB channel + notifies
-    // the blocked worker — this thread does NOT post back to the worker.
+    // Wayland Phase 4f: a guest VFD_SEND's wayland bytes posted out of a task
+    // worker, FIRE-AND-FORGET (the worker does not block — it already wrote the
+    // SEND's synchronous OUT ack). Re-view the shm fds over the SHARED memory and
+    // hand them to the host bridge → main-thread Greenfield. Greenfield's
+    // server→client response comes back asynchronously over the IN queue via
+    // wayland_push_in (host-side WlDevice + self-wake), NOT as a reply here.
     wayland_out: (message, _worker) => {
       const clientId = message.clientId >>> 0;
       const fds = (message.fds || []).map(
         (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
       );
-      if (wayland && typeof wayland.onOut === "function") {
-        // onOut is ASYNC (it drains Greenfield's deferred flush queue before
-        // settling the SAB). The worker is blocked in Atomics.wait, so awaiting
-        // here lets the main thread run those microtasks; the worker wakes when
-        // onOut settles the channel. No await on the handler itself is needed —
-        // the promise self-settles the SAB.
-        Promise.resolve(wayland.onOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
-          log("[wayland] onOut rejected: " + (e && e.stack ? e.stack : e)),
+      if (wayland && typeof wayland.sendOut === "function") {
+        Promise.resolve(wayland.sendOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
+          log("[wayland] sendOut rejected: " + (e && e.stack ? e.stack : e)),
         );
       } else {
         log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
       }
+    },
+
+    // Wayland Phase 4f: the guest refilled the IN avail ring; flush any IN
+    // messages the host deferred for lack of a free inbuf. The VQ_IN kick lands
+    // on the worker, which forwards it here (the host owns the IN vring).
+    wayland_in_refill: (_message) => {
+      hostWl()?.flushIn();
     },
 
     console_read: (message, worker) => {
@@ -381,7 +380,6 @@ export const linux = async ({
       runner_name: name,
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
-      wayland_channel: wayland_channel, // Wayland 2b: sync OUT round-trip SAB
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
     });
 
@@ -419,27 +417,30 @@ export const linux = async ({
       Atomics.store(winsizes, vtermno | 0, packed);
     },
 
-    // Wayland (idle wake): deliver an UNSOLICITED server→client event from the
-    // main-thread compositor to the guest — events Greenfield flushes OUTSIDE a
-    // guest SEND's synchronous round-trip (wl_pointer.motion/enter, frame
-    // callbacks, wl_buffer.release, xdg_surface.configure on a host-driven resize).
+    // Wayland Phase 4f: the SINGLE host→guest delivery path. The main-thread
+    // compositor calls this for EVERY server→client event — replies,
+    // xdg_surface.configure, wl_pointer/keyboard, frame callbacks, wl_buffer.release,
+    // and server→client fds (the wl_keyboard keymap, passed in `fds`).
     //
     // Injected DIRECTLY on this (main) thread, NOT posted to the worker: when the
     // guest is idle its Worker is parked in arch_cpu_idle's wait64 and never
-    // dequeues a postMessage (the 4e finding — this is why the cursor didn't
-    // track). The host WlDevice writes the IN vring over the shared queue SAB and
-    // raiseHostWlIrq wakes the parked CPU. Events that ride a SEND still go through
-    // the worker's SAB reply path; the compositor only calls this when no SEND is
-    // in flight. injectIn no-ops cleanly (logs "deferred") if the IN queue isn't
-    // set up yet (pre-handshake) or armed yet (addr not received).
-    wayland_push_in: (clientId, bytes) => {
+    // dequeues a postMessage (the 4e finding). The host WlDevice writes the IN
+    // vring over the shared queue SAB and raiseHostWlIrq wakes the parked CPU —
+    // this is also why no synchronous SAB reply is needed for SENDs (4f). injectIn
+    // no-ops cleanly (logs "deferred") if the IN queue isn't set up yet
+    // (pre-handshake) or the wake addr hasn't been published yet.
+    // @param {number} clientId  ctx vfd_id
+    // @param {Uint8Array} bytes  wire bytes
+    // @param {Uint8Array[]} [fds]  server→client fd payloads (keymap)
+    wayland_push_in: (clientId, bytes, fds) => {
       const dev = hostWl();
       if (!dev) {
         log("[wayland] push_in dropped: host idle-wake not armed yet");
         return;
       }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      dev.injectIn(clientId >>> 0, buf);
+      const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
+      dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
   };
 };
