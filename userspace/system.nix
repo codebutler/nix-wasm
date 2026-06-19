@@ -117,6 +117,8 @@ let
         # (TERM, TERMINFO_DIRS) which ash does not auto-source.
         environment.etc."profile".text = ''
           export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
+          export WAYLAND_DISPLAY=wayland-0
+          export XDG_RUNTIME_DIR=/tmp
           [ -r /etc/set-environment ] && . /etc/set-environment
         '';
 
