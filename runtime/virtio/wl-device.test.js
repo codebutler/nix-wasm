@@ -27,12 +27,15 @@ function buildSend(vfdId, data, vfds = []) {
   return b;
 }
 
-function buildNewAlloc(vfdId, size) {
+function buildNewAlloc(vfdId, size, pfn = 0) {
   // hdr(8) + vfd_id(4) + flags(4) + pfn(8) + size(4) = 28 bytes.
+  // The guest sends its own physical pfn (== linear-memory offset >> PAGE_SHIFT,
+  // virt_to_phys identity on nommu); the host records a region over pfn*4096.
   const b = new Uint8Array(28);
   const dv = new DataView(b.buffer);
   dv.setUint32(0, VFD_NEW, true);
   dv.setUint32(8, vfdId, true);
+  dv.setBigUint64(16, BigInt(pfn), true);
   dv.setUint32(24, size, true);
   return b;
 }
@@ -105,12 +108,14 @@ test("without a bridge, VFD_SEND falls back to the WlServer stub (Phase 1)", () 
 test("NEW_ALLOC records a shm region; SEND with that vfd yields a Uint8Array fd view", () => {
   const out = [];
   const dev = makeDevice({ waylandBridge: { onOut: (cid, data, fds) => out.push({ cid, data, fds }) } });
-  // Allocate a shm vfd. The host returns RESP_VFD_NEW; record the region.
-  const { resp } = dev._handle(buildNewAlloc(9, 4096));
+  // Allocate a shm vfd. The guest passes its physical pfn (2 → offset 8192,
+  // within the 4-page test memory); the host returns RESP_VFD_NEW and records a
+  // region over pfn*4096. This is the driver's NEW_ALLOC pfn contract (2c).
+  const { resp } = dev._handle(buildNewAlloc(9, 4096, /*pfn*/ 2));
   expect(new DataView(resp.buffer).getUint32(0, true)).toBe(RESP_VFD_NEW);
-  // Force a backed offset so the view resolves (the real offset comes from the
-  // driver's pfn contract in 2c; here we assert the resolution arithmetic).
-  dev.contexts.get(9).region.offset = 8192;
+  // The region resolves at pfn*4096 = 8192 (no manual poke — the offset comes
+  // straight from the guest pfn in the NEW_ALLOC request).
+  expect(dev.contexts.get(9).region.offset).toBe(8192);
   // wl_shm.create_pool carries the shm vfd in the SEND's trailing fd list.
   dev._handle(buildSend(7, new Uint8Array([0]), [9]));
   expect(out.length).toBe(1);
