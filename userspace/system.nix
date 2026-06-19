@@ -96,6 +96,12 @@ let
         ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
+        # UTF-8 locale: musl has C.UTF-8 built in (no glibcLocales / i18n.* stack,
+        # which would pull the wrong libc). This is what busybox ash's
+        # CHECK_UNICODE_IN_ENV reads to turn on width-aware line editing. Flows the
+        # NixOS-native way: the shells-environment module renders it into
+        # /etc/set-environment, which /etc/profile sources below.
+        environment.variables.LANG = "C.UTF-8";
         # Link ncurses' terminfo DB into the profile and point ncurses at it, so
         # curses apps (sl, …) find xterm-256color. system.path's default
         # pathsToLink does NOT include /share/terminfo, so add it explicitly.
@@ -115,11 +121,17 @@ let
         # NO MORE /opt/bin side-mount; the toolchain is just Nix packages here),
         # then the baked initramfs /bin,/sbin. Then source set-environment
         # (TERM, TERMINFO_DIRS) which ash does not auto-source.
+        # A colored prompt lives here (not environment.interactiveShellInit): that
+        # NixOS option is rendered into the module-generated /etc/profile, but we
+        # override /etc/profile with this custom text, so it would never be sourced.
+        # busybox ash's FANCY_PROMPT interprets \u\h\w\$ + \[\]-bracketed zero-width
+        # color escapes. Root's \$ renders as '#'.
         environment.etc."profile".text = ''
           export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
           export WAYLAND_DISPLAY=wayland-0
           export XDG_RUNTIME_DIR=/tmp
           [ -r /etc/set-environment ] && . /etc/set-environment
+          PS1='\[\033[1;32m\]\u@\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
         '';
 
         nix.enable = true;
