@@ -183,6 +183,25 @@ export const linux = async ({
       }
     },
 
+    // Task 2.1 (ABI v2): a task worker asked (via mintUserMem → postMessage) for
+    // a process's private base-0 memory. Browsers may not create+transfer a
+    // WebAssembly.Memory FROM a worker, so it's minted HERE on the main thread
+    // and transferred back to the requesting worker, which registers it in its
+    // pid-keyed `userMems`. shared:false — this is the process's OWN address
+    // space (the kernel/driver `memory` above stays the shared one). Grow-only:
+    // small initial (cover data+stack+slack), generous maximum (refined design
+    // §3). T2.1 is scaffolding — never consulted at instantiation yet (T2.3) —
+    // but the mint+transfer handshake is wired now so the ABI is complete.
+    create_user_mem: (message, worker) => {
+      const mem = new WebAssembly.Memory({
+        initial: Ulong(message.init_pages),
+        maximum: Ulong(message.max_pages),
+        shared: false,
+        address: "i" + arch_bits,
+      });
+      worker.postMessage({ method: "user_mem_ready", pid: message.pid, memory: mem }, [mem]);
+    },
+
     console_read: (message, worker) => {
       const memory_u8 = new Uint8Array(memory.buffer);
       const vt = message.vtermno | 0;

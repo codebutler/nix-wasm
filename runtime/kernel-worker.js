@@ -317,7 +317,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
   let winsizes = null;
 
-  // host-bridge (Phase 1, WASM_HOSTBRIDGE_ABI = 1): the kernel's copy_to/from_user
+  // host-bridge (WASM_HOSTBRIDGE_ABI = 2): the kernel's copy_to/from_user
   // and strncpy_from_user now route through the wasm_user_copy_to/_from/_strncpy
   // host imports instead of an in-image memcpy. Task 1 resolver = the SHARED
   // kernel buffer for every pid, so this is a pure indirection with no behavior
@@ -330,9 +330,47 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // the static host_callbacks object (not appended later) so the arch_bits==64
   // BigInt-wrap loop in init() wraps them like every other callback — on wasm64
   // their i64 args/results are coerced correctly; on wasm32 it's a no-op.
+  //
+  // Task 2.1 (ABI v2 scaffolding): the resolver becomes PID-KEYED with a SHARED
+  // FALLBACK — `userMems.get(pid)?.memory ?? <shared memory>`. `userMems` stays
+  // empty until the kernel calls wasm_user_mem_create (that's T2.2), so for now
+  // EVERY pid still resolves to the shared `memory`: boot is unchanged. The
+  // memory-lifecycle ops (create/grow/free) + `userMems` registry land here but
+  // are NOT yet wired into user instantiation (the flip is T2.3).
+  /** @type {Map<number, { memory: WebAssembly.Memory, table: WebAssembly.Table | null }>} */
+  const userMems = new Map();
+  // mintUserMem: mint a process's private (non-shared) base-0 memory. The
+  // refined design (§3) mints on the MAIN thread and transfers it to this worker
+  // (browsers may not create+transfer a Memory from a worker). We post
+  // `create_user_mem` to main, which mints + transfers it back as
+  // `user_mem_ready` (registered into `userMems` by the message handler below).
+  // Because this worker calls `create` synchronously (and a worker blocked in
+  // Atomics.wait can't service the postMessage carrying the transferred Memory —
+  // the "2b finding"), the synchronous return is a worker-local mint that is
+  // immediately usable; the main-thread copy supersedes it on arrival. T2.1 is
+  // scaffolding (the registry is never consulted at boot), so this is inert;
+  // T2.3 — when `create` fires before the data vm_mmap and the worker yields —
+  // resolves the synchronous-readiness handoff. See task-2.1-report.md.
+  const mintUserMem = (pid, init_pages) => {
+    // Ask the main thread to mint + transfer the canonical private memory.
+    port.postMessage({
+      method: "create_user_mem",
+      pid: pid,
+      init_pages: init_pages,
+      // generous maximum — grow-only engine; only committed pages cost (design §3).
+      max_pages: 0x8000,
+    });
+    // Synchronous, immediately-usable handle for this worker.
+    return new WebAssembly.Memory({ initial: init_pages, maximum: 0x8000, shared: false });
+  };
   const _bridge = makeHostBridge(
     { get buffer() { return memory.buffer; } },
-    (_pid) => ({ u8: () => new Uint8Array(memory.buffer) }),
+    (pid) => {
+      const e = userMems.get(pid);
+      const buf = e ? e.memory.buffer : memory.buffer;
+      return { u8: () => new Uint8Array(buf) };
+    },
+    { userMems, mintUserMem },
   );
 
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
@@ -342,8 +380,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     wasm_user_copy_from: _bridge.wasm_user_copy_from,
     wasm_user_strncpy: _bridge.wasm_user_strncpy,
     // Task 2.0: __clear_user / strnlen_user / the auxv memcpy no longer deref a
-    // user pointer directly — clear routes through this memzero op (ABI still 1).
+    // user pointer directly — clear routes through this memzero op.
     wasm_user_memzero: _bridge.wasm_user_memzero,
+    // Task 2.1 (ABI v2): the memory-lifecycle ops. The current vmlinux does NOT
+    // import these yet (T2.2 adds the kernel decls + call sites); providing
+    // unused imports is harmless and must not break instantiation. Until the
+    // kernel calls create, `userMems` stays empty → resolver shared fallback →
+    // boot unchanged.
+    wasm_user_mem_create: _bridge.wasm_user_mem_create,
+    wasm_user_mem_grow: _bridge.wasm_user_mem_grow,
+    wasm_user_mem_free: _bridge.wasm_user_mem_free,
 
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {
@@ -1043,6 +1089,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         return;
       }
       d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
+    },
+
+    // Task 2.1 (ABI v2): the main thread minted + transferred a process's
+    // private base-0 memory in response to this worker's `create_user_mem` post
+    // (mintUserMem). Register the CANONICAL main-thread Memory in `userMems`,
+    // superseding the worker-local stand-in mintUserMem returned synchronously.
+    // T2.1 is scaffolding — the registry is not yet consulted at instantiation
+    // (T2.3) — so this is inert at boot; it's wired now so the handshake exists.
+    user_mem_ready: (message) => {
+      const pid = message.pid;
+      const existing = userMems.get(pid);
+      userMems.set(pid, { memory: message.memory, table: existing ? existing.table : null });
     },
   };
 

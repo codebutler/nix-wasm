@@ -1,7 +1,7 @@
 // hostbridge.test.mjs — Phase 1 (Task 1) host-bridge uaccess indirection.
 //
 // Asserts:
-//   (a) the cross-repo ABI is pinned: WASM_HOSTBRIDGE_ABI === 1, and the
+//   (a) the cross-repo ABI is at v2 (bumped in Task 2.1), and the
 //       bridge's copy_to/from/strncpy behave over a (shared) buffer resolver;
 //   (b) the kernel module statically IMPORTS the three host-bridge functions
 //       wasm_user_copy_to/_from/_strncpy (static WebAssembly.Module.imports scan);
@@ -27,9 +27,11 @@ const skipArtifacts = haveArtifacts
   ? false
   : "set LINUX_WASM_ARTIFACTS or symlink runtime/web/artifacts to a `nix build` output";
 
-// (a) ABI + bridge semantics — pure unit test, no artifacts needed.
-test("WASM_HOSTBRIDGE_ABI is pinned to 1", () => {
-  assert.equal(WASM_HOSTBRIDGE_ABI, 1);
+// (a) ABI + bridge semantics — pure unit test, no artifacts needed. The ABI was
+// bumped 1 → 2 in Task 2.1 (memory-lifecycle ABI); the copy_to/from/strncpy
+// semantics this file pins are unchanged across that bump.
+test("WASM_HOSTBRIDGE_ABI is at least 2 (memory-lifecycle ABI)", () => {
+  assert.ok(WASM_HOSTBRIDGE_ABI >= 2, `expected ABI >= 2, got ${WASM_HOSTBRIDGE_ABI}`);
 });
 
 test("makeHostBridge copy_to/from/strncpy operate over the resolved buffer", () => {

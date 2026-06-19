@@ -36,9 +36,11 @@ const skipArtifacts = haveArtifacts
   ? false
   : "set LINUX_WASM_ARTIFACTS or symlink runtime/web/artifacts to a `nix build` output";
 
-// (a) ABI is unchanged (still 1) and the new memzero op zero-fills correctly.
-test("WASM_HOSTBRIDGE_ABI is still 1 (memzero is forward-declared at v1)", () => {
-  assert.equal(WASM_HOSTBRIDGE_ABI, 1);
+// (a) the memzero op (forward-declared at v1 in T2.0) zero-fills correctly. The
+// ABI itself was bumped 1 → 2 in Task 2.1 (the memory-lifecycle ABI); memzero's
+// semantics this file pins are unchanged across that bump.
+test("WASM_HOSTBRIDGE_ABI is at least 2 (memzero forward-declared at v1, bumped in T2.1)", () => {
+  assert.ok(WASM_HOSTBRIDGE_ABI >= 2, `expected ABI >= 2, got ${WASM_HOSTBRIDGE_ABI}`);
 });
 
 test("makeHostBridge.wasm_user_memzero zero-fills the resolved buffer", () => {
