@@ -50,6 +50,12 @@ pkgs.stdenv.mkDerivation {
     # the guest<->host vring round-trip AND host->guest used-buffer interrupt
     # delivery via raise_interrupt(). Enabled by CONFIG_VIRTIO_WASM below.
     ./patches/kernel/0013-wasm-virtio-wasm-transport.patch
+    # Phase 1 (Task 1): route copy_to/from_user + strncpy_from_user through the
+    # host-bridge import (drops UACCESS_MEMCPY, adds ARCH_HAS_STRNCPY_FROM_USER)
+    # so the kernel reaches a process's memory via the runtime. The runtime still
+    # services it against the SHARED buffer — zero behavior change; this de-risks
+    # the ABI before the per-process memory split (Task 2).
+    ./patches/kernel/0014-wasm-uaccess-hostbridge.patch
   ];
 
   nativeBuildInputs = [
