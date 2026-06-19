@@ -63,6 +63,18 @@ pkgs.stdenv.mkDerivation {
     # import + copy_to_user) so they survive the Task 2 per-process memory split.
     # Zero behavior change on the shared resolver; ABI stays at 1.
     ./patches/kernel/0015-wasm-uaccess-residual.patch
+    # Phase 1 (Task 2.2): per-`mm` base-0 user-address-space allocator + the
+    # user/kernel gate (mm->context.user_as_{size,brk,free,live}), wired to the
+    # runtime memory-lifecycle ABI (wasm_user_mem_create at exec / free at
+    # exit_mmap; bumps WASM_HOSTBRIDGE_ABI to 2). Landed DARK behind the
+    # `wasm_user_as` early-param (default OFF): with the flag off, user_as_live is
+    # never set, every gate site takes the legacy shared alloc_pages_exact path,
+    # create/free never fire, and the default boot is unchanged. With the flag on,
+    # a late_initcall self-test proves the allocator (WASM_USER_AS_SELFTEST: PASS)
+    # — the running-process-over-private-memory proof is deferred to T2.3 (the
+    # instantiation flip), since a flag-on userspace still instantiates against
+    # the SHARED memory.
+    ./patches/kernel/0016-wasm-perprocess-allocator.patch
   ];
 
   nativeBuildInputs = [

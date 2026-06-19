@@ -193,9 +193,15 @@ export const linux = async ({
     // §3). T2.1 is scaffolding — never consulted at instantiation yet (T2.3) —
     // but the mint+transfer handshake is wired now so the ABI is complete.
     create_user_mem: (message, worker) => {
+      // `WebAssembly.Memory` descriptors take PLAIN Numbers for initial/maximum
+      // (even on a wasm64 / "i64" address memory). These page counts originate
+      // from the kernel's i64 `wasm_user_mem_create(pid, init_pages)` arg, so on
+      // a 64-bit arch they may arrive as BigInt — `Number(...)` coerces them; the
+      // old `Ulong(...)` wrapped them back to BigInt on wasm64 (`Ulong === BigInt`
+      // there), which `WebAssembly.Memory` rejects. (T2.1 Minor fix.)
       const mem = new WebAssembly.Memory({
-        initial: Ulong(message.init_pages),
-        maximum: Ulong(message.max_pages),
+        initial: Number(message.init_pages),
+        maximum: Number(message.max_pages),
         shared: false,
         address: "i" + arch_bits,
       });
