@@ -19,10 +19,14 @@
  *   sommelier.c does (minus all X11/gbm).
  *
  * NOMMU: single process, no fork/exec, no threads, no setjmp. One poll() loop
- *   multiplexes: the listen socket, the connected client socket, and the virtwl
- *   ctx fd (which is poll()-able — POLLIN when the host has queued bytes for the
- *   guest, POLLOUT when the OUT vq has room). For the 1c bar we handle a single
- *   client connection at a time; the loop generalizes to N clients trivially.
+ *   multiplexes: the listen socket, and — for EACH connected client — the
+ *   client AF_UNIX socket plus that client's own virtwl ctx fd (poll()-able:
+ *   POLLIN when the host has queued bytes for that ctx). For the multi-client
+ *   bar (Phase 3 3c) each accepted connection gets its OWN VIRTWL_IOCTL_NEW_CTX
+ *   (its own ctx fd) → its own host Greenfield client → its own pc window. The
+ *   per-client state (ctx fd + the shm pool mirrors for fd↔vfd translation) is
+ *   held in a small fixed array; RECV on a ctx fd only drains THAT ctx's queue,
+ *   so host→guest bytes route back to the right client socket automatically.
  *
  * fd translation (wl_shm path):
  *   Wayland passes fds over the client socket via SCM_RIGHTS (e.g.
@@ -171,24 +175,36 @@ static int client_send(int sock, const uint8_t *data, size_t len, int *fds, int 
  * follows a paint), so the host always sees the latest pixels.
  */
 #define MAX_POOLS 16
+#define MAX_CLIENTS 8
 struct pool_mirror {
 	int vfd; /* the virtwl vfd id (also the open fd) */
 	size_t size;
 	void *src; /* client tmpfs mmap (PROT_READ; survives client close(fd)) */
 	void *dst; /* vfd guest-RAM mmap (PROT_WRITE) */
 };
-static struct pool_mirror pools[MAX_POOLS];
-static int npools;
 
-/* Re-copy every live pool's client bytes into its vfd buffer (host-visible). */
-static void resync_pools(void)
+/*
+ * One connected guest Wayland client. Each gets its OWN virtwl ctx (so the host
+ * spins up an independent Greenfield client → its own pc window) and its OWN set
+ * of shm pool mirrors (fd↔vfd translation is per-client; a second client's pool
+ * must never resync into the first's vfd).
+ */
+struct client_state {
+	int sock; /* connected AF_UNIX client socket, or -1 if the slot is free */
+	int ctx; /* this client's virtwl ctx fd (VIRTWL_IOCTL_NEW_CTX) */
+	struct pool_mirror pools[MAX_POOLS];
+	int npools;
+};
+
+/* Re-copy this client's live pool bytes into its vfd buffers (host-visible). */
+static void resync_pools(struct client_state *cl)
 {
-	for (int i = 0; i < npools; i++) {
-		struct pool_mirror *p = &pools[i];
+	for (int i = 0; i < cl->npools; i++) {
+		struct pool_mirror *p = &cl->pools[i];
 		if (p->src && p->dst) {
 			memcpy(p->dst, p->src, p->size);
-			printf("waylandproxyd: resync pool vfd=%d firstpix=0x%08x\n",
-			       p->vfd, *(unsigned int *)p->src);
+			printf("waylandproxyd: resync pool ctx=%d vfd=%d firstpix=0x%08x\n",
+			       cl->ctx, p->vfd, *(unsigned int *)p->src);
 			fflush(stdout);
 		}
 	}
@@ -200,7 +216,7 @@ static void resync_pools(void)
  * register a live mirror so later frames re-sync (see resync_pools).
  * Returns the new vfd (>=0) or -1.
  */
-static int fd_to_vfd(int wl0, int client_fd)
+static int fd_to_vfd(int wl0, struct client_state *cl, int client_fd)
 {
 	struct stat st;
 	if (fstat(client_fd, &st) < 0 || st.st_size <= 0)
@@ -225,12 +241,12 @@ static int fd_to_vfd(int wl0, int client_fd)
 
 	/* Keep the mappings alive (the mmaps survive the client's close(fd)) and
 	 * register the pool so resync_pools() refreshes it on every later frame. */
-	if (src != MAP_FAILED && dst != MAP_FAILED && npools < MAX_POOLS) {
-		pools[npools].vfd = alloc.fd;
-		pools[npools].size = st.st_size;
-		pools[npools].src = src;
-		pools[npools].dst = dst;
-		npools++;
+	if (src != MAP_FAILED && dst != MAP_FAILED && cl->npools < MAX_POOLS) {
+		cl->pools[cl->npools].vfd = alloc.fd;
+		cl->pools[cl->npools].size = st.st_size;
+		cl->pools[cl->npools].src = src;
+		cl->pools[cl->npools].dst = dst;
+		cl->npools++;
 	} else {
 		if (src != MAP_FAILED)
 			munmap(src, st.st_size);
@@ -241,12 +257,13 @@ static int fd_to_vfd(int wl0, int client_fd)
 }
 
 /* Splice client→host: read client wire bytes+fds, translate fds, SEND on ctx. */
-static int splice_client_to_host(int wl0, int ctx, int client)
+static int splice_client_to_host(int wl0, struct client_state *cl)
 {
+	int ctx = cl->ctx;
 	uint8_t data[WIRE_BUF];
 	int cfds[MAX_FDS];
 	int nfds = 0;
-	ssize_t n = client_recv(client, data, cfds, &nfds);
+	ssize_t n = client_recv(cl->sock, data, cfds, &nfds);
 	if (n == 0)
 		return 0; /* EOF */
 	if (n < 0)
@@ -258,7 +275,7 @@ static int splice_client_to_host(int wl0, int ctx, int client)
 	 * vfd (host-visible) carries the just-drawn pixels by the time Greenfield
 	 * processes the commit. (Cheap: a handful of ~300 KB memcpys per frame.)
 	 */
-	resync_pools();
+	resync_pools(cl);
 
 	struct txn_buf txn;
 	memset(&txn, 0, sizeof(txn));
@@ -269,7 +286,7 @@ static int splice_client_to_host(int wl0, int ctx, int client)
 	int vfds[MAX_FDS];
 	int nvfds = 0;
 	for (int i = 0; i < nfds; i++) {
-		int vfd = fd_to_vfd(wl0, cfds[i]);
+		int vfd = fd_to_vfd(wl0, cl, cfds[i]);
 		close(cfds[i]); /* done with the client's copy */
 		if (vfd < 0) {
 			fprintf(stderr, "waylandproxyd: fd_to_vfd failed for fd %d\n", cfds[i]);
@@ -296,14 +313,16 @@ static int splice_client_to_host(int wl0, int ctx, int client)
 		fprintf(stderr, "waylandproxyd: SEND failed ret=%d errno=%d\n", ret, errno);
 		return -1;
 	}
-	printf("waylandproxyd: forwarded %zdB + %d fd(s) client->host\n", n, nvfds);
+	printf("waylandproxyd: forwarded %zdB + %d fd(s) client->host (ctx=%d)\n", n, nvfds, ctx);
 	fflush(stdout);
 	return 1;
 }
 
-/* Splice host→client: RECV from ctx, forward bytes+vfds over SCM_RIGHTS. */
-static int splice_host_to_client(int ctx, int client)
+/* Splice host→client: RECV from this client's ctx, forward bytes+vfds. */
+static int splice_host_to_client(struct client_state *cl)
 {
+	int ctx = cl->ctx;
+	int client = cl->sock;
 	struct txn_buf txn;
 	memset(&txn, 0, sizeof(txn));
 	txn.hdr.len = WIRE_BUF;
@@ -338,27 +357,47 @@ static int splice_host_to_client(int ctx, int client)
 	return 1;
 }
 
+/* Allocate a fresh virtwl ctx fd (one per client). Returns the fd or -1. */
+static int new_ctx(int wl0)
+{
+	struct virtwl_ioctl_new newctx;
+	memset(&newctx, 0, sizeof(newctx));
+	newctx.type = VIRTWL_IOCTL_NEW_CTX;
+	newctx.fd = -1;
+	if (ioctl(wl0, VIRTWL_IOCTL_NEW, &newctx) || newctx.fd < 0)
+		return -1;
+	return newctx.fd;
+}
+
+/* Tear down a client slot: ctx fd, socket, and all its pool mirrors. */
+static void close_client(struct client_state *cl)
+{
+	for (int i = 0; i < cl->npools; i++) {
+		struct pool_mirror *p = &cl->pools[i];
+		if (p->src)
+			munmap(p->src, p->size);
+		if (p->dst)
+			munmap(p->dst, p->size);
+	}
+	cl->npools = 0;
+	if (cl->ctx >= 0)
+		close(cl->ctx);
+	if (cl->sock >= 0)
+		close(cl->sock);
+	cl->ctx = -1;
+	cl->sock = -1;
+}
+
 int main(void)
 {
-	/* 1. Open /dev/wl0 and establish a virtwl context (the host channel). */
+	/* 1. Open /dev/wl0 — the host channel. Each accepted client gets its OWN
+	 *    ctx allocated lazily off this fd (see new_ctx), so N concurrent guest
+	 *    Wayland clients map to N independent host Greenfield clients/windows. */
 	int wl0 = open("/dev/wl0", O_RDWR | O_CLOEXEC);
 	if (wl0 < 0) {
 		printf("RESULT waylandproxyd FAIL open(/dev/wl0) errno=%d\n", errno);
 		return 1;
 	}
-
-	struct virtwl_ioctl_new newctx;
-	memset(&newctx, 0, sizeof(newctx));
-	newctx.type = VIRTWL_IOCTL_NEW_CTX;
-	newctx.fd = -1;
-	if (ioctl(wl0, VIRTWL_IOCTL_NEW, &newctx) || newctx.fd < 0) {
-		printf("RESULT waylandproxyd FAIL NEW_CTX errno=%d\n", errno);
-		close(wl0);
-		return 1;
-	}
-	int ctx = newctx.fd;
-	printf("waylandproxyd: /dev/wl0 ctx established ctx_fd=%d\n", ctx);
-	fflush(stdout);
 
 	/* 2. Create + listen() on $XDG_RUNTIME_DIR/wayland-0. */
 	char path[128];
@@ -382,28 +421,47 @@ int main(void)
 		printf("RESULT waylandproxyd FAIL listen() errno=%d\n", errno);
 		return 1;
 	}
-	printf("RESULT waylandproxyd PASS ctx_fd=%d listening=%s (/dev/wl0 ctx up, wayland-0 ready)\n",
-	       ctx, path);
+	printf("RESULT waylandproxyd PASS listening=%s (/dev/wl0 open, wayland-0 ready, multi-client)\n",
+	       path);
 	fflush(stdout);
 
-	/* 3. poll() loop: listen socket + (one) client + the virtwl ctx fd. */
-	int client = -1;
+	/* 3. poll() loop: the listen socket + (per live client) its socket and its
+	 *    own ctx fd. Each client's host→guest bytes arrive on its ctx fd, so a
+	 *    RECV there routes straight back to the matching socket. */
+	struct client_state clients[MAX_CLIENTS];
+	for (int i = 0; i < MAX_CLIENTS; i++) {
+		clients[i].sock = -1;
+		clients[i].ctx = -1;
+		clients[i].npools = 0;
+	}
+
+	/* pollfd layout: [0] = lsock, then 2 entries per live client (sock, ctx).
+	 * Worst case: 1 + 2*MAX_CLIENTS. */
+	struct pollfd pfds[1 + 2 * MAX_CLIENTS];
+	/* Parallel map from each client pollfd index back to its client slot. */
+	int slot_of[1 + 2 * MAX_CLIENTS];
+	int is_ctx[1 + 2 * MAX_CLIENTS];
+
 	for (;;) {
-		struct pollfd pfds[3];
 		int n = 0;
-		int li = n;
 		pfds[n].fd = lsock;
 		pfds[n].events = POLLIN;
+		slot_of[n] = -1;
+		is_ctx[n] = 0;
 		n++;
-		int ci = -1, xi = -1;
-		if (client >= 0) {
-			ci = n;
-			pfds[n].fd = client;
+
+		for (int i = 0; i < MAX_CLIENTS; i++) {
+			if (clients[i].sock < 0)
+				continue;
+			pfds[n].fd = clients[i].sock;
 			pfds[n].events = POLLIN;
+			slot_of[n] = i;
+			is_ctx[n] = 0;
 			n++;
-			xi = n;
-			pfds[n].fd = ctx;
+			pfds[n].fd = clients[i].ctx;
 			pfds[n].events = POLLIN; /* host has bytes for the guest */
+			slot_of[n] = i;
+			is_ctx[n] = 1;
 			n++;
 		}
 
@@ -414,49 +472,78 @@ int main(void)
 			break;
 		}
 
-		/* New client connection. */
-		if (pfds[li].revents & POLLIN) {
-			int c = accept(lsock, NULL, NULL);
-			if (c >= 0) {
-				if (client < 0) {
-					client = c;
-					int fl = fcntl(client, F_GETFL, 0);
-					fcntl(client, F_SETFL, fl | O_NONBLOCK);
-					printf("RESULT waylandproxyd PASS accepted client fd=%d (splice begun)\n",
-					       client);
-					fflush(stdout);
-				} else {
-					/* 1c bar: one client at a time. */
+		/* New client connection → allocate a fresh ctx for it. */
+		if (pfds[0].revents & POLLIN) {
+			int c;
+			while ((c = accept(lsock, NULL, NULL)) >= 0) {
+				int slot = -1;
+				for (int i = 0; i < MAX_CLIENTS; i++)
+					if (clients[i].sock < 0) {
+						slot = i;
+						break;
+					}
+				if (slot < 0) {
+					fprintf(stderr, "waylandproxyd: no free client slot; rejecting\n");
 					close(c);
+					continue;
 				}
-			}
-		}
-
-		/* Client → host. */
-		if (ci >= 0 && (pfds[ci].revents & (POLLIN | POLLHUP))) {
-			int s = splice_client_to_host(wl0, ctx, client);
-			if (s <= 0) {
-				printf("waylandproxyd: client disconnected (splice end)\n");
+				int ctx = new_ctx(wl0);
+				if (ctx < 0) {
+					fprintf(stderr, "waylandproxyd: NEW_CTX failed errno=%d\n", errno);
+					close(c);
+					continue;
+				}
+				int fl = fcntl(c, F_GETFL, 0);
+				fcntl(c, F_SETFL, fl | O_NONBLOCK);
+				clients[slot].sock = c;
+				clients[slot].ctx = ctx;
+				clients[slot].npools = 0;
+				printf("RESULT waylandproxyd PASS accepted client fd=%d ctx_fd=%d slot=%d (splice begun)\n",
+				       c, ctx, slot);
 				fflush(stdout);
-				close(client);
-				client = -1;
-				continue;
 			}
+			/* accept() drained (EAGAIN) — fall through to per-client servicing. */
 		}
 
-		/* Host → client. */
-		if (xi >= 0 && (pfds[xi].revents & POLLIN)) {
-			if (splice_host_to_client(ctx, client) < 0) {
-				close(client);
-				client = -1;
+		/* Per-client splice. Iterate the pollfd map; a slot torn down mid-loop
+		 * leaves its later pollfd entries pointing at a closed fd, so guard on
+		 * the slot still being live. */
+		for (int k = 1; k < n; k++) {
+			int slot = slot_of[k];
+			if (slot < 0)
+				continue;
+			struct client_state *cl = &clients[slot];
+			if (cl->sock < 0)
+				continue; /* torn down earlier in this pass */
+			short re = pfds[k].revents;
+			if (!re)
+				continue;
+
+			if (!is_ctx[k]) {
+				/* Client → host. */
+				if (re & (POLLIN | POLLHUP)) {
+					int s = splice_client_to_host(wl0, cl);
+					if (s <= 0) {
+						printf("waylandproxyd: client slot=%d disconnected (splice end)\n",
+						       slot);
+						fflush(stdout);
+						close_client(cl);
+					}
+				}
+			} else {
+				/* Host → client. */
+				if (re & POLLIN) {
+					if (splice_host_to_client(cl) < 0)
+						close_client(cl);
+				}
 			}
 		}
 	}
 
-	if (client >= 0)
-		close(client);
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (clients[i].sock >= 0)
+			close_client(&clients[i]);
 	close(lsock);
-	close(ctx);
 	close(wl0);
 	unlink(path);
 	return 0;

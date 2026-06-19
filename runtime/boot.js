@@ -164,6 +164,14 @@ export async function bootLinux(opts) {
           // main thread is free to run those microtasks here. Returns a Promise;
           // the kernel-host wayland_out handler awaits it before the worker reads.
           onOut: async (clientId, buffer, fds) => {
+            // Acquire edge: the worker stored WL_CH_PENDING (release) AFTER the
+            // guest's shm-pool resync writes (waylandproxyd memcpy src→vfd dst,
+            // sequenced before the SEND ioctl that triggers this round-trip). A
+            // matching Atomics.load here establishes happens-before so those plain
+            // SharedArrayBuffer pool writes are visible when Greenfield reads the
+            // fd view during commit. Without it the main thread can read stale
+            // zeros (the buffer's bytes land "6s later" — i.e. on the next edge).
+            Atomics.load(waylandCtrl, 0);
             const chunks = [];
             const replyTo = (b) => b && b.length && chunks.push(b);
             try {
