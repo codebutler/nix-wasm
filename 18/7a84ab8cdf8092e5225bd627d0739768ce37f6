@@ -1,0 +1,28 @@
+runtime/node/task2.2-allocator-dark.test.mjs
+  s_d2c9c080387123::t_4ef163dacb1021 94-103,108-130,133,157-160
+  s_d2c9c080387123::t_f35d4f175c0c64 1-32,34-93,104-107,134,136-156,161-163
+  s_d2c9c080387123::t_d868c45bd1a202 131-132,135
+  s_d2c9c080387123::t_ee3ca2d4a66cf7 33
+kernel.nix
+  s_d2c9c080387123::t_65794d125766d4 66-77
+patches/kernel/0016-wasm-perprocess-allocator.patch
+  s_d2c9c080387123::t_23c5f14a4ac6a9 1-618,623,626,636,640,649-652,660-661,668,672,680-681,685,689-691,698-699,703
+runtime/kernel-host.js
+  s_d2c9c080387123::t_5a65c7016ae84b 196-201,203-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "187a84ab8cdf8092e5225bd627d0739768ce37f6",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
