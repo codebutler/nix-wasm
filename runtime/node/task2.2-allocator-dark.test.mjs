@@ -55,15 +55,23 @@ async function bootAndCollect({ cmdline, untilRe, settleMs = 90000 }) {
   return { handle, out };
 }
 
-// DEFAULT (dark, flag off): boots green, AND the lifecycle ops never fired
-// (no `wasm_user_as: create` marker), confirming the legacy shared path is taken.
+// EXPLICIT flag-off: pass a cmdline WITHOUT `wasm_user_as` to prove the dark
+// (legacy shared) path still boots green and the lifecycle ops never fire — the
+// backward-compat invariant. (Note: T2.3 turned the flag ON in DEFAULT_CMDLINE,
+// so the default boot now ACTIVATES the allocator; this test deliberately uses an
+// explicit flag-off cmdline to keep exercising the legacy path.)
+const FLAG_OFF_CMDLINE =
+  "maxcpus=1 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0";
 test(
-  "default boot stays green and the dark allocator never activates",
+  "explicit flag-off boot stays green and the allocator never activates",
   { timeout: 120000, skip: skipArtifacts },
   async () => {
-    const { handle, out } = await bootAndCollect({ untilRe: /[#$]\s*$/m });
+    const { handle, out } = await bootAndCollect({
+      cmdline: FLAG_OFF_CMDLINE,
+      untilRe: /[#$]\s*$/m,
+    });
     try {
-      assert.match(out, /[#$]\s*$/m, "expected a shell prompt on the default (flag-off) boot");
+      assert.match(out, /[#$]\s*$/m, "expected a shell prompt on the flag-off boot");
       assert.doesNotMatch(
         out,
         /wasm_user_as: create/,
@@ -81,7 +89,7 @@ test(
       while (Date.now() - t1 < 10000 && !/ALLOC_DARK_OK/.test(tail)) {
         await new Promise((r) => setTimeout(r, 200));
       }
-      assert.match(tail, /ALLOC_DARK_OK/, "shell is live on the default boot");
+      assert.match(tail, /ALLOC_DARK_OK/, "shell is live on the flag-off boot");
     } finally {
       handle.kill();
       await terminateAllWorkers();

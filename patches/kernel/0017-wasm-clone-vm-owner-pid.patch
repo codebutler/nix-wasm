@@ -1,0 +1,377 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 19 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: T2.3 — per-mm owner pid for CLONE_VM private-memory sharing
+
+Task 2.3 flips user processes onto per-process private WebAssembly.Memory. The
+runtime registry that holds each process's private Memory is keyed by the pid
+that exec'd the mm (wasm_user_mem_create). But busybox's NOMMU spawn is
+clone(CLONE_VM|CLONE_VFORK): a child runs (in its own worker) in the PARENT's
+address space until it exec's. That child has its own task_pid_nr(), so every
+host-bridge uaccess for it would key on the child pid → registry miss → wrong
+(shared-fallback) memory, corrupting/SIGILLing the clone callback that reads its
+arg from the shared parent memory.
+
+Fix: record the mm OWNER pid (the exec'ing task's pid) in mm_context at
+wasm_user_as_init, and make every host-bridge pid (uaccess copy/zero, mem grow,
+free) report that owner pid for any task running on the mm (wasm_user_as_pid(mm)
+/ wasm_user_as_owner_pid()). A CLONE_VM child then reports the SAME pid as its
+parent → its uaccess targets the shared parent private memory. On the child's
+own execvp a fresh mm + create gives it a new owner pid. Flag off / kthread /
+pre-exec fall back to task_pid_nr(current), preserving the legacy behavior.
+
+Pairs with the runtime change that hands the parent's private Memory to the
+CLONE_VM child worker (keyed by this owner pid).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/arch/wasm/include/asm/mmu.h b/arch/wasm/include/asm/mmu.h
+index 09d25ae08..b91655808 100644
+--- a/arch/wasm/include/asm/mmu.h
++++ b/arch/wasm/include/asm/mmu.h
+@@ -32,6 +32,17 @@ typedef struct {
+ 	unsigned long		user_as_brk;	/* next free bump offset */
+ 	struct list_head	user_as_free;	/* freed [start,len) extents */
+ 	bool			user_as_live;	/* set at exec; user/kernel gate */
++	/*
++	 * Task 2.3: the pid whose runtime registry entry owns this mm's private
++	 * WebAssembly.Memory — the pid that exec'd this mm (wasm_user_mem_create).
++	 * CLONE_VM children share this mm (and thus this Memory) but have their own
++	 * task_pid_nr(); ALL host-bridge calls for any task on this mm must report
++	 * THIS owner pid so the runtime resolves the one shared private Memory (the
++	 * registry is keyed by the owning pid, not the calling pid). Without this, a
++	 * CLONE_VM child's uaccess would key on its own pid → resolver miss → wrong
++	 * (shared-fallback) memory. See wasm_user_as_pid() and the runtime flip.
++	 */
++	int			user_as_owner_pid;
+ } mm_context_t;
+ 
+ #endif /* __ASSEMBLY__ */
+diff --git a/arch/wasm/include/asm/user_as.h b/arch/wasm/include/asm/user_as.h
+index 7d8b2189b..6d40d18e2 100644
+--- a/arch/wasm/include/asm/user_as.h
++++ b/arch/wasm/include/asm/user_as.h
+@@ -12,6 +12,8 @@
+ 
+ #include <linux/types.h>
+ #include <linux/mm_types.h>
++#include <linux/sched.h>
++#include <linux/pid.h>
+ #include <asm/mmu.h>
+ 
+ /* Runtime feature flag (early_param "wasm_user_as"); default false → dark. */
+@@ -22,6 +24,24 @@ static inline bool wasm_user_as_active(struct mm_struct *mm)
+ 	return wasm_user_as_enabled && mm && mm->context.user_as_live;
+ }
+ 
++/*
++ * Task 2.3: the pid every host-bridge call (uaccess copy/zero, mem grow, etc.)
++ * for `current` must report so the runtime resolves the ONE private Memory for
++ * `current`'s address space. When the per-mm allocator is live this is the mm
++ * OWNER pid (the pid that exec'd this mm) — so a CLONE_VM child sharing the mm
++ * reports the SAME pid as its parent and uaccess targets the shared private
++ * memory. Otherwise (flag off, kthread, pre-exec) fall back to the calling
++ * task's own pid, preserving the legacy shared-resolver behavior.
++ */
++static inline int wasm_user_as_owner_pid(void)
++{
++	struct task_struct *t = current;
++
++	if (t && wasm_user_as_active(t->mm))
++		return t->mm->context.user_as_owner_pid;
++	return t ? task_pid_nr(t) : 0;
++}
++
+ /*
+  * Initialise the per-`mm` allocator for `mm` with a private space of
+  * `size_bytes` (rounded to wasm pages). Sets user_as_live. Called from exec
+diff --git a/arch/wasm/include/asm/wasm.h b/arch/wasm/include/asm/wasm.h
+index 076dbfcef..befd83c79 100644
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -59,10 +59,18 @@ extern void          wasm_user_mem_free(int pid);
+ extern void wasm_start_cpu(unsigned int cpu, struct task_struct *idle_task);
+ extern void wasm_stop_cpu(unsigned int cpu);
+ 
++/*
++ * `mm_owner_pid` (Task 2.3): if the new task's mm already has a live per-process
++ * private memory (i.e. it shares an exec'd mm — a CLONE_VM child), this is the
++ * pid that owns that memory in the runtime registry; the runtime hands the child
++ * worker that pid's private Memory. 0 = a fresh mm (the task will exec and mint
++ * its own). Only meaningful with the wasm_user_as allocator on.
++ */
+ extern struct task_struct *wasm_create_and_run_task(
+ 	struct task_struct *prev_task, struct task_struct *new_task,
+ 	const char *name, unsigned long bin_start, unsigned long bin_end,
+-	unsigned long data_start, unsigned long table_start);
++	unsigned long data_start, unsigned long table_start,
++	int mm_owner_pid);
+ extern void wasm_release_task(struct task_struct *dead_task);
+ extern struct task_struct *wasm_serialize_tasks(struct task_struct *prev_task,
+ 	struct task_struct *next_task);
+diff --git a/arch/wasm/kernel/process.c b/arch/wasm/kernel/process.c
+index 68ad6f999..9b9e66610 100644
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -55,6 +55,7 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 	unsigned long bin_start = 0U;
+ 	unsigned long bin_end = 0U;
+ 	unsigned long data_start = 0U;
++	int mm_owner_pid = 0;	/* Task 2.3: see wasm_create_and_run_task */
+ 
+ 	if (task_thread_info(next_task)->flags & _TIF_NEVER_RUN) {
+ 		task_thread_info(next_task)->flags &= ~_TIF_NEVER_RUN;
+@@ -68,11 +69,21 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 			bin_start = next_task->mm->start_code;
+ 			bin_end = next_task->mm->end_code;
+ 			data_start = next_task->mm->start_data;
++			/*
++			 * Task 2.3: if this task's mm already has a live private
++			 * memory, it shares an exec'd mm (CLONE_VM child) — report
++			 * the owner pid so the runtime hands the child worker that
++			 * mm's private Memory instead of a fresh one. A fresh task
++			 * (mm not yet live) gets 0 and mints its own at exec.
++			 */
++			if (next_task->mm->context.user_as_live)
++				mm_owner_pid =
++					next_task->mm->context.user_as_owner_pid;
+ 		}
+ 
+ 		/* This is called instead of serialize the first time. */
+ 		last_task = wasm_create_and_run_task(prev_task, next_task, name,
+-			bin_start, bin_end, data_start, 0U);
++			bin_start, bin_end, data_start, 0U, mm_owner_pid);
+ 	} else {
+ 		last_task = wasm_serialize_tasks(prev_task, next_task);
+ 	}
+diff --git a/arch/wasm/kernel/uaccess.c b/arch/wasm/kernel/uaccess.c
+index 15a1dc970..b55ef1a61 100644
+--- a/arch/wasm/kernel/uaccess.c
++++ b/arch/wasm/kernel/uaccess.c
+@@ -12,12 +12,18 @@
+ #include <linux/uaccess.h>
+ #include <linux/export.h>
+ #include <asm/wasm.h>
++#include <asm/user_as.h>
+ 
++/*
++ * Task 2.3: uaccess targets `current`'s private Memory, resolved by the OWNER
++ * pid of current->mm (wasm_user_as_owner_pid) when the per-mm allocator is live
++ * — so a CLONE_VM child copies into the SHARED parent memory it actually runs
++ * in, not a (missing) entry under its own pid. Flag off / pre-exec / kthread →
++ * falls back to task_pid_nr(current), the legacy shared-resolver behavior.
++ */
+ static inline int wasm_current_pid(void)
+ {
+-	struct task_struct *t = current;
+-
+-	return t ? task_pid_nr(t) : 0;
++	return wasm_user_as_owner_pid();
+ }
+ 
+ unsigned long wasm_raw_copy_to_user(void __user *to, const void *from,
+diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
+index b6b7e0ce9..5bd8ecdad 100644
+--- a/arch/wasm/mm/user_as.c
++++ b/arch/wasm/mm/user_as.c
+@@ -52,11 +52,17 @@ struct user_as_extent {
+ 	unsigned long len;	/* bytes, page-aligned */
+ };
+ 
+-static int wasm_user_as_pid(void)
++/*
++ * The pid that owns `mm`'s runtime registry entry (its private Memory). Set at
++ * wasm_user_as_init (= the pid that exec'd this mm). All grow/zero/free bridge
++ * calls for this mm MUST report it so CLONE_VM children (which share this mm but
++ * have their own task_pid_nr) resolve the same private Memory. Task 2.3.
++ */
++static int wasm_user_as_pid(struct mm_struct *mm)
+ {
+-	struct task_struct *t = current;
+-
+-	return t ? task_pid_nr(t) : 0;
++	if (mm && mm->context.user_as_live)
++		return mm->context.user_as_owner_pid;
++	return current ? task_pid_nr(current) : 0;
+ }
+ 
+ int wasm_user_as_init(struct mm_struct *mm, unsigned long size_bytes)
+@@ -64,6 +70,8 @@ int wasm_user_as_init(struct mm_struct *mm, unsigned long size_bytes)
+ 	/* Round the private size up to a whole number of wasm pages. */
+ 	mm->context.user_as_size = ALIGN(size_bytes, WASM_PAGE_SIZE);
+ 	mm->context.user_as_brk = USER_AS_BASE;
++	/* Record the owner pid (the exec'ing task) before user_as_live is set. */
++	mm->context.user_as_owner_pid = current ? task_pid_nr(current) : 0;
+ 	INIT_LIST_HEAD(&mm->context.user_as_free);
+ 	mm->context.user_as_live = true;
+ 	return 0;
+@@ -118,7 +126,7 @@ unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len)
+ 	if (need_end > have) {
+ 		want = ALIGN(need_end - have, WASM_PAGE_SIZE);
+ 		delta_pages = want / WASM_PAGE_SIZE;	/* runtime grows in wasm pages */
+-		grown = wasm_user_mem_grow(wasm_user_as_pid(), delta_pages);
++		grown = wasm_user_mem_grow(wasm_user_as_pid(mm), delta_pages);
+ 		if (grown == (unsigned long)-1)
+ 			return 0;
+ 		mm->context.user_as_size = grown * WASM_PAGE_SIZE;
+@@ -211,13 +219,12 @@ void wasm_user_as_memzero(struct mm_struct *mm, unsigned long uaddr,
+ 			  unsigned long n)
+ {
+ 	/*
+-	 * pid resolved via `current`; the `mm` param is reserved/unused — the
+-	 * host-bridge always targets `current`'s address space (registry model R1:
+-	 * uaccess only ever targets current). Do NOT assume this zeroes a non-current
+-	 * mm's private memory — it does not.
++	 * Task 2.3: zero into THIS mm's private Memory, resolved by its OWNER pid
++	 * (wasm_user_as_pid(mm)). anon-zero/BSS-clear runs with mm == current->mm,
++	 * and a CLONE_VM child reports the same owner pid, so the bridge always
++	 * zeroes the correct private space.
+ 	 */
+-	(void)mm;
+-	wasm_user_memzero(wasm_user_as_pid(), uaddr, n);
++	wasm_user_memzero(wasm_user_as_pid(mm), uaddr, n);
+ }
+ 
+ void wasm_user_as_destroy(struct mm_struct *mm)
+@@ -235,7 +242,7 @@ void wasm_user_as_destroy(struct mm_struct *mm)
+ 	mm->context.user_as_brk = 0;
+ 	mm->context.user_as_size = 0;
+ 
+-	wasm_user_mem_free(wasm_user_as_pid());
++	wasm_user_mem_free(wasm_user_as_pid(mm));
+ }
+ 
+ /* Count freed extents currently on the list (self-test helper). */
+diff --git a/fs/binfmt_wasm.c b/fs/binfmt_wasm.c
+index cb01b809b..ccf9afb80 100644
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -26,6 +26,11 @@
+ #include <asm/wasm.h>
+ #include <asm/user_as.h>
+ 
++/*
++ * The pid passed to wasm_user_mem_create at exec. This is the exec'ing task's
++ * OWN pid, which becomes the mm's owner pid (wasm_user_as_init records it); all
++ * later bridge calls for any task on this mm report that owner pid (Task 2.3).
++ */
+ static inline int wasm_exec_pid(void)
+ {
+ 	struct task_struct *t = current;
+diff --git a/mm/nommu.c b/mm/nommu.c
+index 96dc68194..3cd11050e 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -561,10 +561,20 @@ static void free_page_series(struct mm_struct *mm, unsigned long from,
+ static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 	__releases(nommu_region_sem)
+ {
+-	BUG_ON(!nommu_region_tree.rb_node);
++	/*
++	 * Task 2.3: per-process private regions were never added to the global
++	 * nommu_region_tree (see add_nommu_region in do_mmap), so they must not be
++	 * deleted from it here, and the tree may legitimately be empty when one is
++	 * freed — skip the tree ops AND the empty-tree BUG_ON for them. Symmetric
++	 * with the add-side gate (same wasm_user_as_active(mm) condition; the owning
++	 * mm stays user_as_live until exit_mmap's destroy runs AFTER region teardown).
++	 */
++	bool private_as = wasm_user_as_active(mm);
++
++	BUG_ON(!private_as && !nommu_region_tree.rb_node);
+ 
+ 	if (--region->vm_usage == 0) {
+-		if (region->vm_top > region->vm_start)
++		if (!private_as && region->vm_top > region->vm_start)
+ 			delete_nommu_region(region);
+ 		up_write(&nommu_region_sem);
+ 
+@@ -1259,7 +1269,18 @@ unsigned long do_mmap(struct file *file,
+ 		ret = do_mmap_private(vma, region, len, capabilities);
+ 	if (ret < 0)
+ 		goto error_just_free;
+-	add_nommu_region(region);
++	/*
++	 * Task 2.3: the global nommu_region_tree is keyed on vm_start to find
++	 * SHAREABLE regions across processes. Under per-process memory each mm's
++	 * private space is base-0, so two processes both place mappings at
++	 * USER_AS_BASE (0x10000) — adding both to the global tree hits the BUG()
++	 * in add_nommu_region() (duplicate vm_start). Private per-mm regions are
++	 * never cross-process shareable, so skip the global tree for them (delete
++	 * is skipped symmetrically in __put_nommu_region). Gated by
++	 * user_as_active, so the legacy shared NOMMU path is unchanged.
++	 */
++	if (!wasm_user_as_active(current->mm))
++		add_nommu_region(region);
+ 
+ 	/* clear anonymous mappings that don't ask for uninitialized data */
+ 	if (!vma->vm_file &&
+@@ -1445,16 +1466,31 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
+ 		new->vm_ops->open(new);
+ 
+ 	down_write(&nommu_region_sem);
+-	delete_nommu_region(vma->vm_region);
+-	if (new_below) {
+-		vma->vm_region->vm_start = vma->vm_start = addr;
+-		vma->vm_region->vm_pgoff = vma->vm_pgoff += npages;
++	/*
++	 * Task 2.3: private per-mm regions aren't in the global tree (see
++	 * add_nommu_region in do_mmap) — skip the delete/re-add dance for them.
++	 */
++	if (!wasm_user_as_active(mm)) {
++		delete_nommu_region(vma->vm_region);
++		if (new_below) {
++			vma->vm_region->vm_start = vma->vm_start = addr;
++			vma->vm_region->vm_pgoff = vma->vm_pgoff += npages;
++		} else {
++			vma->vm_region->vm_end = vma->vm_end = addr;
++			vma->vm_region->vm_top = addr;
++		}
++		add_nommu_region(vma->vm_region);
++		add_nommu_region(new->vm_region);
+ 	} else {
+-		vma->vm_region->vm_end = vma->vm_end = addr;
+-		vma->vm_region->vm_top = addr;
++		/* Same field updates, just without the global-tree maintenance. */
++		if (new_below) {
++			vma->vm_region->vm_start = vma->vm_start = addr;
++			vma->vm_region->vm_pgoff = vma->vm_pgoff += npages;
++		} else {
++			vma->vm_region->vm_end = vma->vm_end = addr;
++			vma->vm_region->vm_top = addr;
++		}
+ 	}
+-	add_nommu_region(vma->vm_region);
+-	add_nommu_region(new->vm_region);
+ 	up_write(&nommu_region_sem);
+ 
+ 	setup_vma_to_mm(vma, mm);
+@@ -1497,14 +1533,24 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
+ 	BUG_ON(region->vm_usage != 1);
+ 
+ 	down_write(&nommu_region_sem);
+-	delete_nommu_region(region);
+-	if (from > region->vm_start) {
+-		to = region->vm_top;
+-		region->vm_top = region->vm_end = from;
++	/* Task 2.3: private per-mm regions aren't in the global tree — skip it. */
++	if (!wasm_user_as_active(vma->vm_mm)) {
++		delete_nommu_region(region);
++		if (from > region->vm_start) {
++			to = region->vm_top;
++			region->vm_top = region->vm_end = from;
++		} else {
++			region->vm_start = to;
++		}
++		add_nommu_region(region);
+ 	} else {
+-		region->vm_start = to;
++		if (from > region->vm_start) {
++			to = region->vm_top;
++			region->vm_top = region->vm_end = from;
++		} else {
++			region->vm_start = to;
++		}
+ 	}
+-	add_nommu_region(region);
+ 	up_write(&nommu_region_sem);
+ 
+ 	/* Owning mm = vma->vm_mm (== current->mm on this do_munmap path, but use

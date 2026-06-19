@@ -133,7 +133,15 @@ export const linux = async ({
 
     create_and_run_task: (message) => {
       // ret_from_fork will make sure the task switch finishes.
-      make_task(message.prev_task, message.new_task, message.name, message.user_executable);
+      // Task 2.3: `clone_vm` (if present) carries the parent's private Memory +
+      // owner pid for a CLONE_VM child sharing the parent's address space.
+      make_task(
+        message.prev_task,
+        message.new_task,
+        message.name,
+        message.user_executable,
+        message.clone_vm,
+      );
     },
 
     release_task: (message) => {
@@ -183,15 +191,17 @@ export const linux = async ({
       }
     },
 
-    // Task 2.1 (ABI v2): a task worker asked (via mintUserMem → postMessage) for
-    // a process's private base-0 memory. Browsers may not create+transfer a
-    // WebAssembly.Memory FROM a worker, so it's minted HERE on the main thread
-    // and transferred back to the requesting worker, which registers it in its
-    // pid-keyed `userMems`. shared:false — this is the process's OWN address
-    // space (the kernel/driver `memory` above stays the shared one). Grow-only:
-    // small initial (cover data+stack+slack), generous maximum (refined design
-    // §3). T2.1 is scaffolding — never consulted at instantiation yet (T2.3) —
-    // but the mint+transfer handshake is wired now so the ABI is complete.
+    // Task 2.3: DEAD PATH (kept inert). T2.1 minted a process's private base-0
+    // memory HERE on the main thread and transferred it to the requesting
+    // worker. The T2.3 correction mints the private memory WORKER-LOCAL +
+    // SYNCHRONOUSLY inside wasm_user_mem_create (kernel-worker.js mintUserMem),
+    // because a transferred Memory can never arrive in time (the worker runs
+    // exec → instantiation without yielding) and can't be transferred to a
+    // worker parked in Atomics.wait. R1 never needs main to hold a private
+    // Memory: uaccess + instantiation are in-worker; main-thread host callbacks
+    // touch only the shared KERNEL `memory`. The worker no longer posts
+    // `create_user_mem`, so this handler is unreachable; left inert (harmless if
+    // a stale path ever fired) rather than deleted.
     create_user_mem: (message, worker) => {
       // `WebAssembly.Memory` descriptors take PLAIN Numbers for initial/maximum
       // (even on a wasm64 / "i64" address memory). These page counts originate
@@ -276,7 +286,7 @@ export const linux = async ({
    * are brought up, they can run concurrently (and will effectively be managed by the Wasm host OS). While we are not
    * able to suspend them from JS, the host OS will do that.
    */
-  const make_task = (prev_task, new_task, name, user_executable) => {
+  const make_task = (prev_task, new_task, name, user_executable, clone_vm) => {
     // pc (new exec ABI): user_executable is the binary's byte range
     // ({bin_start,bin_end,data_start,table_start}) in the SHARED kernel memory.
     // Pass it straight to the new worker, which compiles it from shared memory.
@@ -285,6 +295,10 @@ export const linux = async ({
       prev_task: prev_task,
       new_task: new_task,
       user_executable: user_executable,
+      // Task 2.3: for a CLONE_VM child, the parent's private Memory + owner pid
+      // (structured-cloned in the init message — shared:true Memory is
+      // cross-worker shareable). The child registers + instantiates against it.
+      clone_vm: clone_vm || null,
     };
     tasks[new_task] = make_vmlinux_runner(name + " (" + new_task + ")", options);
   };

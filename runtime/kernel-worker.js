@@ -84,6 +84,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   let user_executable = null;
   let user_executable_params = null;
 
+  /// Task 2.3 (the flip): the pid whose private memory this worker instantiates
+  /// the user module against. The kernel calls wasm_user_mem_create(pid, …)
+  /// synchronously inside THIS worker during exec (load_wasm_file, before the
+  /// data vm_mmap), so we capture that pid here; user_executable_setup() then
+  /// resolves userMems.get(current_user_pid) for env.memory + the table. All the
+  /// kernel's uaccess/lifecycle bridge calls for the running task pass the same
+  /// task_pid_nr(current) (wasm_current_pid == wasm_exec_pid), so this single
+  /// pid keys the whole registry entry for the task this worker runs.
+  let current_user_pid = null;
+
   /// The user executabe instance, or null. Try using the instance variable in the promise over this one if possible.
   let user_executable_instance = null;
   let user_executable_imports = null;
@@ -339,29 +349,45 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // are NOT yet wired into user instantiation (the flip is T2.3).
   /** @type {Map<number, { memory: WebAssembly.Memory, table: WebAssembly.Table | null }>} */
   const userMems = new Map();
-  // mintUserMem: mint a process's private (non-shared) base-0 memory. The
-  // refined design (§3) mints on the MAIN thread and transfers it to this worker
-  // (browsers may not create+transfer a Memory from a worker). We post
-  // `create_user_mem` to main, which mints + transfers it back as
-  // `user_mem_ready` (registered into `userMems` by the message handler below).
-  // Because this worker calls `create` synchronously (and a worker blocked in
-  // Atomics.wait can't service the postMessage carrying the transferred Memory —
-  // the "2b finding"), the synchronous return is a worker-local mint that is
-  // immediately usable; the main-thread copy supersedes it on arrival. T2.1 is
-  // scaffolding (the registry is never consulted at boot), so this is inert;
-  // T2.3 — when `create` fires before the data vm_mmap and the worker yields —
-  // resolves the synchronous-readiness handoff. See task-2.1-report.md.
+  // mintUserMem: mint a process's private (non-shared) base-0 memory.
+  //
+  // Task 2.3 correction (supersedes the T2.1 design's "main-thread minting"):
+  // the owning worker mints its OWN private Memory SYNCHRONOUSLY here, with NO
+  // main-thread postMessage/transfer. Two reasons this is correct and required:
+  //
+  //  1. The kernel calls wasm_user_mem_create(pid, …) from C code running
+  //     synchronously inside THIS worker (during exec), then the worker proceeds
+  //     straight to instantiating the user module — it never yields the event
+  //     loop in between. A main-thread mint+transfer can only arrive via a later
+  //     `message` event, which a worker blocked in Atomics.wait (the syscall /
+  //     scheduler wait) can NEVER service. So a transferred Memory could not be
+  //     ready in time for the flip.
+  //  2. A `WebAssembly.Memory` cannot be transferred to a worker that is parked
+  //     in Atomics.wait, and R1 never needs the main thread to hold it: uaccess
+  //     (the host-bridge copy/zero ops) and user-module instantiation both run
+  //     IN-WORKER, and the main-thread host callbacks only ever touch KERNEL
+  //     buffers (the shared `memory`), never a process's private space.
+  //
+  // "Private" = a DISTINCT Memory per process (its own address space), NOT
+  // shared with any other process or the kernel — but it must still be a
+  // `shared: true` WebAssembly.Memory. The guest user modules are compiled with
+  // -matomics / a shared memory import (musl pthreads + Atomics), so a
+  // `shared:false` memory fails instantiation with "mismatch in shared state of
+  // memory" (declared=1, imported=0). `shared:true` only means "usable with
+  // Atomics + growable across threads"; it does NOT make this memory shared with
+  // other processes — each pid gets its own. The kernel's shared `memory` stays
+  // separate (drivers + bridge kbuf); isolation comes from each process getting
+  // a different Memory object here, resolved per-pid via userMems. (Task 4b
+  // CLONE_VM threads will deliberately share the parent pid's entry.)
+  // Grow-only: small initial (data+stack+slack, sized by the kernel), generous max.
+  const USER_MEM_MAX_PAGES = 0x8000; // 2 GiB cap; grow-only, only committed pages cost.
   const mintUserMem = (pid, init_pages) => {
-    // Ask the main thread to mint + transfer the canonical private memory.
-    port.postMessage({
-      method: "create_user_mem",
-      pid: pid,
-      init_pages: init_pages,
-      // generous maximum — grow-only engine; only committed pages cost (design §3).
-      max_pages: 0x8000,
+    return new WebAssembly.Memory({
+      initial: Number(init_pages),
+      maximum: USER_MEM_MAX_PAGES,
+      shared: true,
+      address: "i" + arch_bits,
     });
-    // Synchronous, immediately-usable handle for this worker.
-    return new WebAssembly.Memory({ initial: init_pages, maximum: 0x8000, shared: false });
   };
   const _bridge = makeHostBridge(
     { get buffer() { return memory.buffer; } },
@@ -382,12 +408,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     // Task 2.0: __clear_user / strnlen_user / the auxv memcpy no longer deref a
     // user pointer directly — clear routes through this memzero op.
     wasm_user_memzero: _bridge.wasm_user_memzero,
-    // Task 2.1 (ABI v2): the memory-lifecycle ops. The current vmlinux does NOT
-    // import these yet (T2.2 adds the kernel decls + call sites); providing
-    // unused imports is harmless and must not break instantiation. Until the
-    // kernel calls create, `userMems` stays empty → resolver shared fallback →
-    // boot unchanged.
-    wasm_user_mem_create: _bridge.wasm_user_mem_create,
+    // Task 2.3: the memory-lifecycle ops. The kernel (patch 0016, flag
+    // `wasm_user_as`) calls create at exec, grow on allocator overflow, free at
+    // exit_mmap — all with task_pid_nr(current). `create` mints the per-pid
+    // private memory (worker-local, synchronous; see mintUserMem) and registers
+    // it in `userMems`; `user_executable_setup` then instantiates the user
+    // module against userMems.get(current_user_pid).memory. We wrap create to
+    // RECORD that pid for this worker so the flip knows which entry to use.
+    wasm_user_mem_create: (pid, init_pages) => {
+      const rc = _bridge.wasm_user_mem_create(pid, init_pages);
+      if (rc === 0) current_user_pid = Number(pid);
+      return rc;
+    },
     wasm_user_mem_grow: _bridge.wasm_user_mem_grow,
     wasm_user_mem_free: _bridge.wasm_user_mem_free,
 
@@ -412,7 +444,38 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       bin_end,
       data_start,
       table_start,
+      mm_owner_pid,
     ) => {
+      // Task 2.3 — CLONE_VM hand-off. busybox's NOMMU spawn is
+      // clone(CLONE_VM|CLONE_VFORK): the child runs in a SEPARATE worker but
+      // shares the PARENT's address space until it exec's (the clone callback
+      // reads its arg from, and reports failure into, the parent's memory).
+      // Under per-process memory, the child worker must therefore instantiate
+      // the duplicated module against the PARENT's private Memory, not a fresh
+      // one. The kernel tells us WHICH task this is via `mm_owner_pid`: nonzero
+      // ⇒ the new task's mm already has a live private memory (a CLONE_VM child
+      // sharing an exec'd mm), and that's the OWNER pid keying it in the registry
+      // (the kernel also reports that owner pid for the child's uaccess, so the
+      // resolver finds the same buffer). 0 ⇒ a FRESH mm — the task will exec and
+      // mint its own memory, so no hand-off. (A data_start heuristic is WRONG
+      // here: every per-process mm shares the same base-0 start_data.) We pass
+      // the parent's private MEMORY (a shared:true Memory is structured-cloneable
+      // across workers). We do NOT (cannot) transfer the parent's TABLE —
+      // WebAssembly.Table is not structured-cloneable — and don't need to: the
+      // child instantiates the SAME module with the same __table_base, so its own
+      // fresh table is populated identically by the module's element segments.
+      // Re-instantiating against the parent's memory is SAFE: __wasm_init_memory
+      // is guarded by an in-memory atomic the parent already set (BSS/data are
+      // NOT re-cleared), and __wasm_apply_data_relocs is idempotent. On the
+      // child's later execvp a fresh wasm_user_mem_create mints its OWN private
+      // memory and supersedes this entry.
+      let clone_vm = null;
+      const owner_pid = mm_owner_pid != null ? Number(mm_owner_pid) : 0;
+      if (owner_pid) {
+        const e = userMems.get(owner_pid);
+        if (e) clone_vm = { owner_pid: owner_pid, memory: e.memory };
+      }
+
       // Tell main to create the new task, and then run it for the first time!
       port.postMessage({
         method: "create_and_run_task",
@@ -431,6 +494,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               table_start: table_start,
             }
           : null,
+
+        // Task 2.3: CLONE_VM children inherit the parent's private Memory+Table.
+        clone_vm: clone_vm,
       });
 
       // Serialize this (old) task.
@@ -711,6 +777,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         };
       }
 
+      // Task 2.3: a CLONE_VM child shares the parent's address space until it
+      // exec's. The parent handed us its private Memory + owner pid; register it
+      // so this worker instantiates the duplicated module against the PARENT's
+      // memory (the clone callback reads its arg + reports failure THERE) and so
+      // uaccess — which the kernel keys on the parent's OWNER pid for every task
+      // on this mm — resolves the right buffer. On the child's later execvp, a
+      // fresh wasm_user_mem_create supersedes this entry with the child's OWN
+      // private memory and re-points current_user_pid.
+      if (message.clone_vm) {
+        current_user_pid = Number(message.clone_vm.owner_pid);
+        userMems.set(current_user_pid, { memory: message.clone_vm.memory, table: null });
+      }
+
       if (message.user_executable) {
         // We are in a new runner that should duplicate the user executable. Happens when someone calls clone().
         // pc (new exec ABI): the binary lives as a byte range in the SHARED
@@ -890,9 +969,40 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         const stack_pointer = vmlinux_instance.exports.get_user_stack_pointer();
         const tls_base = vmlinux_instance.exports.get_user_tls_base();
 
+        // Task 2.3 (the flip): instantiate the user module against this process's
+        // OWN private base-0 WebAssembly.Memory, not the shared kernel `memory`.
+        // The kernel called wasm_user_mem_create(pid) during exec, which minted
+        // the per-pid entry into `userMems` and recorded `current_user_pid` (see
+        // the wasm_user_mem_create wrapper). __memory_base stays data_start —
+        // which the per-mm allocator now hands out as a SMALL PRIVATE offset
+        // (>= USER_AS_BASE = 0x10000), guard-page-at-0 reserved (design §1, §4).
+        //
+        // Fallback: if there is no private entry (the `wasm_user_as` flag is off,
+        // or this is a pre-flip / non-exec path), use the shared `memory` — this
+        // preserves the pre-T2.3 behavior so a flag-off build still boots.
+        const userMem =
+          current_user_pid != null ? userMems.get(current_user_pid) : undefined;
+        const env_memory = userMem ? userMem.memory : memory;
+        // The per-instance indirect function table now lives in the registry
+        // entry (so Task 4b CLONE_VM threads can share the parent pid's table).
+        // Create it once per pid and reuse it on re-instantiation.
+        if (userMem && !userMem.table) {
+          userMem.table = new WebAssembly.Table({
+            initial: Math.max(4096, user_executable_params.table_initial || 0),
+            element: "anyfunc",
+          });
+        }
+        const env_table =
+          userMem && userMem.table
+            ? userMem.table
+            : new WebAssembly.Table({
+                initial: Math.max(4096, user_executable_params.table_initial || 0),
+                element: "anyfunc",
+              });
+
         user_executable_imports = {
           env: {
-            memory: memory,
+            memory: env_memory,
             __memory_base: new WebAssembly.Global(
               { value: "i" + arch_bits, mutable: false },
               Ulong(user_executable_params.data_start),
@@ -903,11 +1013,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             ),
             // Sized per-binary from the import section (pc, #139 Gate 0.2) —
             // a table smaller than the binary's declared initial fails
-            // instantiate. 4096 remains the floor for safety.
-            __indirect_function_table: new WebAssembly.Table({
-              initial: Math.max(4096, user_executable_params.table_initial || 0),
-              element: "anyfunc",
-            }),
+            // instantiate. 4096 remains the floor for safety. Registry-owned
+            // (Task 2.3) so CLONE_VM threads share it; see env_table above.
+            __indirect_function_table: env_table,
             __table_base: new WebAssembly.Global(
               { value: "i" + arch_bits, mutable: false },
               Ulong(user_executable_params.table_start),
@@ -1091,12 +1199,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
     },
 
-    // Task 2.1 (ABI v2): the main thread minted + transferred a process's
-    // private base-0 memory in response to this worker's `create_user_mem` post
-    // (mintUserMem). Register the CANONICAL main-thread Memory in `userMems`,
-    // superseding the worker-local stand-in mintUserMem returned synchronously.
-    // T2.1 is scaffolding — the registry is not yet consulted at instantiation
-    // (T2.3) — so this is inert at boot; it's wired now so the handshake exists.
+    // Task 2.3: DEAD PATH. T2.1 minted a process's private memory on the MAIN
+    // thread and transferred it back here as `user_mem_ready`. The T2.3 design
+    // correction mints the private memory WORKER-LOCAL + SYNCHRONOUSLY (see
+    // mintUserMem) — a transferred Memory could never arrive in time, since the
+    // worker proceeds straight from wasm_user_mem_create to instantiation
+    // without yielding the event loop, and a Memory can't be transferred to a
+    // worker parked in Atomics.wait. The worker no longer posts `create_user_mem`,
+    // so this handler is unreachable; kept inert (idempotent registry write) for
+    // safety rather than removed.
     user_mem_ready: (message) => {
       const pid = message.pid;
       const existing = userMems.get(pid);

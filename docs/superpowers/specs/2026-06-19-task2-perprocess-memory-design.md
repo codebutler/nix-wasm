@@ -99,11 +99,26 @@ the pid-keyed resolver returns the worker-local memory. Justified because Linux 
 Resolver gains a shared-memory fallback when no private entry exists (early boot/kthreads/pre-exec),
 preserving Task 1 behavior.
 
-**Per-process memory is minted on the MAIN thread (approved)** and transferred to the requesting worker
-(browsers may not create+transfer `Memory` from a worker), mirroring how `wasm_start_cpu` bounces to main
-(`kernel-worker.js:346`). A `create_user_mem` handler in `kernel-host.js` mints
-`new WebAssembly.Memory({initial, maximum, shared:false})`. **Budget (approved): small initial** (cover
-data+stack+slack), **generous max** (grow-only; only committed pages cost) — no hard per-process cap for now.
+**Per-process memory is minted WORKER-LOCAL and SYNCHRONOUSLY (T2.3 correction — supersedes the T2.1
+"main-thread minting").** The owning worker runs `new WebAssembly.Memory({initial, maximum, shared:false})`
+**synchronously inside `wasm_user_mem_create`** — NO main-thread `postMessage`/transfer. Two reasons this is
+the only correct option:
+
+1. **Timing.** The kernel calls `wasm_user_mem_create(pid, …)` from C running synchronously inside the
+   owning worker during exec (`load_wasm_file`, before the data `vm_mmap`), then the worker proceeds straight
+   to instantiating the user module against that memory — it never yields the event loop in between. A
+   main-thread mint+transfer can only arrive via a later `message` event, which a worker blocked in
+   `Atomics.wait` (the syscall/scheduler wait) **can never service** — so the transferred `Memory` could not
+   be ready in time for the flip. (This is the "2b finding" generalized: a `WebAssembly.Memory` can't be
+   transferred to a worker parked in `Atomics.wait`.)
+2. **R1 never needs main to hold it.** Linux uaccess + user-module instantiation both run **in-worker**, and
+   the main-thread host callbacks touch only **KERNEL buffers** (the shared `memory`), never a process's
+   private space. So there is no consumer of the private `Memory` on the main thread.
+
+The `create_user_mem` handler in `kernel-host.js` (and the worker's `user_mem_ready` handler) therefore
+become **dead paths** — left inert, not removed. **Budget (approved): small initial** (cover data+stack+slack,
+sized by the kernel from `data_size + stack + 16 MiB`), **generous max** (`0x8000` pages = 2 GiB; grow-only,
+only committed pages cost) — no hard per-process cap for now.
 
 ## 4. Runtime instantiation change
 
@@ -131,6 +146,42 @@ const _bridge = makeHostBridge(
   `release_thread`→`wasm_release_task` (`process.c:233`). **Ordering:** free entry at `exit_mmap`, kill worker
   at `release_task`; the resolver's shared fallback covers any late benign race. (Validate in T2.4.)
 
+## 5b. T2.3 findings (the flip, as built)
+
+Building the flip surfaced three issues the original §4/§5 didn't anticipate; all are resolved and shipped
+(runtime + kernel patch 0017). A fourth (getty/login) is an open concern.
+
+1. **Private memory must be `shared:true`.** Guest user modules are compiled `-matomics` and IMPORT a shared
+   memory (musl pthreads + Atomics), so a `shared:false` private memory fails instantiation with "mismatch in
+   shared state of memory". "Private" = a DISTINCT Memory per process (its own address space), not
+   `shared:false`. The kernel `memory` stays a separate shared Memory.
+
+2. **CLONE_VM is NOT deferrable to Task 4b — it is THE spawn path.** busybox's NOMMU spawn is
+   `clone(CLONE_VM|CLONE_VFORK|SIGCHLD)`: the child runs (in its OWN worker) in the PARENT's address space
+   until it exec's (the clone callback reads its arg from, and reports failure into, the parent's memory). So
+   boot-to-shell REQUIRES the CLONE_VM child to instantiate against the PARENT's private Memory. Built:
+   the kernel records a per-mm OWNER pid (`user_as_owner_pid`, set at `wasm_user_as_init`) and reports it for
+   EVERY host-bridge call on that mm (uaccess/grow/zero/free → `wasm_user_as_pid(mm)` /
+   `wasm_user_as_owner_pid()`), so a CLONE_VM child's uaccess targets the shared parent memory; and
+   `__switch_to`/`wasm_create_and_run_task` passes `mm_owner_pid` (nonzero iff the new task's mm is already
+   live = a CLONE_VM child) so the runtime hands that child worker the parent's `shared:true` Memory (a
+   `data_start` heuristic is WRONG — every per-process mm shares base-0 `start_data`). The child uses its OWN
+   fresh Table (Tables aren't structured-cloneable, and aren't needed: same module + same `__table_base` ⇒
+   identical elem layout; re-instantiation is safe — `__wasm_init_memory`'s in-memory atomic is already set so
+   BSS isn't re-cleared, and `__wasm_apply_data_relocs` is idempotent).
+
+3. **The global `nommu_region_tree` is keyed on `vm_start` and breaks under per-process base-0.** Two
+   processes both map at `USER_AS_BASE` (0x10000) → `add_nommu_region` hits its duplicate-`vm_start` `BUG()`.
+   Private per-mm regions are never cross-process shareable, so patch 0017 skips the global tree (add AND
+   delete, symmetrically gated on `wasm_user_as_active(mm)`) for them — in `do_mmap`, `__put_nommu_region`,
+   `split_vma`, and `vmi_shrink_vma`; the empty-tree `BUG_ON` is skipped for private regions too.
+
+4. **OPEN — getty/login deadlock.** A full **busybox** boot over private memories works end to end (shell +
+   CLONE_VM pipes + malloc-heavy `sort`/8 MB pipe + nested `sh→sh→sh` exec chains + bg-job `wait`), but the
+   full **NixOS-userspace** boot deadlocks (no crash, frozen pid set) in the getty → login → autologin
+   CLONE_VFORK/controlling-tty chain. The flip mechanism is proven; this is a narrower terminal/session
+   follow-up. See `.superpowers/sdd/task-2.3-report.md`.
+
 ## 6. Scope boundary
 
 In scope: the allocator, the gate, the four imports + pid-resolver, private instantiation, exec/grow/teardown,
@@ -157,7 +208,9 @@ no COW, no demand paging, no `mmap`-of-files MMU, fixed stacks persist; allocato
 ## 8. Risks / assumptions
 
 - **Cross-pid copies:** R1 assumes no in-scope synchronous cross-pid user copy (`access_process_vm` = ptrace/proc, out of scope). Audit holds.
-- **Worker-vs-main minting:** defaulted to main-thread mint+transfer; confirm on target browsers (capability, not source-derivable).
+- **Worker-vs-main minting:** RESOLVED in T2.3 — minted WORKER-LOCAL + synchronously inside
+  `wasm_user_mem_create` (the main-thread mint+transfer can't deliver in time, and a `Memory` can't be
+  transferred to a worker parked in `Atomics.wait`). `create_user_mem`/`user_mem_ready` are now dead paths.
 - **File-backed data `mmap`:** assumed absent/rare (mallocng is anon); audit in T2.2, add bounce-buffer if found.
 - **Guard-page-at-0:** assumes dylink relocation tolerates `data_start=0x10000` (already uses a large nonzero base today). Verify in T2.3.
 - **`strnlen_user`:** last generic uaccess reading the user pointer directly (0014 deferred it); a hard bug the instant memory splits → T2.0 is a prerequisite.

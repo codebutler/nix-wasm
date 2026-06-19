@@ -75,6 +75,11 @@ pkgs.stdenv.mkDerivation {
     # instantiation flip), since a flag-on userspace still instantiates against
     # the SHARED memory.
     ./patches/kernel/0016-wasm-perprocess-allocator.patch
+    # Task 2.3: per-mm OWNER pid so CLONE_VM children (busybox NOMMU spawn) share
+    # the parent's private Memory — all host-bridge pids for a task report the
+    # mm owner pid, not the calling pid. Pairs with the runtime flip + the
+    # CLONE_VM Memory hand-off to the child worker.
+    ./patches/kernel/0017-wasm-clone-vm-owner-pid.patch
   ];
 
   nativeBuildInputs = [
