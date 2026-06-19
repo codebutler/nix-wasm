@@ -1,0 +1,46 @@
+runtime/node/task2.2-allocator-dark.test.mjs
+  s_d2c9c080387123::t_83c4591dfbd067 58-64,66,69-72,74,92
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_557236700fb4a3 411-422
+  s_d2c9c080387123::t_34a27fc781190d 352-370,383,385-387,389
+  s_d2c9c080387123::t_19237394d5f69d 371-382,388
+  s_d2c9c080387123::t_b10760a1f234d3 455-471,473-476
+  s_d2c9c080387123::t_5967b4e8751d1e 780-792
+  s_d2c9c080387123::t_4c07837b869c95 972-1002,1005,1016-1018
+  s_d2c9c080387123::t_9affc5b77b0670 1202-1210
+  s_d2c9c080387123::t_384c1e646b616d 447
+  s_d2c9c080387123::t_7e40676b649adc 449-453,472,477-478,497-499
+  s_d2c9c080387123::t_700089a73fdf46 87-96
+  s_d2c9c080387123::t_55ada48e7881ea 454
+runtime/node/task2.3-private-mem.test.mjs
+  s_d2c9c080387123::t_86afcc7aa8e54a 1-6,8-16,19-26,39-40,57,67,69,73,76-80,83-88
+  s_d2c9c080387123::t_1e6517598204af 7,17-18,27-38,41-56,58-66,68,70-72,74-75,81-82,89-95
+docs/superpowers/specs/2026-06-19-task2-perprocess-memory-design.md
+  s_d2c9c080387123::t_eef1af83367bc9 149-184
+  s_d2c9c080387123::t_001451b8fcda59 102-121
+  s_d2c9c080387123::t_13bffe69c22644 211-213
+runtime/boot.js
+  s_d2c9c080387123::t_ff661c2eee5672 46-53,55
+runtime/kernel-host.js
+  s_d2c9c080387123::t_34ee88f16dd329 289,298-301
+  s_d2c9c080387123::t_04c7d242480dc9 136-144
+  s_d2c9c080387123::t_2a3ac601182e6f 194-204
+kernel.nix
+  s_d2c9c080387123::t_f421685b7adcd2 78-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2346a1bebfe89025c697a8cee1f2fd086ff7c07e",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
