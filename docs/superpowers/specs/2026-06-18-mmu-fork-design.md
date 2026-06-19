@@ -29,6 +29,17 @@ so every pointer stays valid with **zero relocation**.
 - **Why per-process memory is the fix, not a hack:** it is exactly the "MMU-style
   port where each process has its own base-0 memory (pointers valid after bulk
   copy)" that the memory note named as the only real solution.
+- **No precedent in any wasm Linux kernel (checked 2026-06-19).** Per-process
+  memory isolation has no prior implementation across every branch of
+  `joelseverin/linux` and `joelseverin/linux-wasm` (including `wasm-7.0`, our pin
+  `039e5f3e`, and `master`). All branches are NOMMU with one shared address space;
+  "MMU support" is listed as *Future*, with the explicit note that "memory cannot
+  be mapped and shared between processes." Upstream's active memory direction is
+  **Memory64** (experimental, `NOMERGE`) — a bigger *single shared* 64-bit space,
+  orthogonal to isolation. The nearest mechanism precedent is **WALI** (arXiv
+  2312.03858), which grows wasm memory for `mmap` — but in the inverse
+  wasm-on-host model. This approach is first-of-its-kind on joelseverin's kernel.
+  See tracking issue codebutler/nix-wasm#12 for unrelated runtime/build sync.
 - **WASIX `proc_fork` is the existence proof.** Wasmer's WASIX implements real
   fork in the browser via *asyncify-freeze the stack → copy linear memory → resume
   in a new Worker*. It is **not reusable directly** — it lives at the
@@ -129,6 +140,48 @@ spawn — no asyncify, no slow path. Shippable on its own; de-risks Phase 2.
   exec's image load — all routed through the one page-aware choke point.
 - exec loads the binary image into a **fresh** memory for the execing process.
 
+### Substrate requirement: per-`mm` base-0 user allocator + memory-lifecycle ABI
+
+The Phase 1 substrate requires more than a pid-keyed resolver: because musl's
+mallocng allocates heap via `mmap()` (not `brk`), **all** user allocation — not
+just exec regions — must come from the process's private memory. A window-translation
+shortcut (mapping user offsets onto a region of the shared memory) is therefore
+insufficient. The approved design (see the refined spec
+`docs/superpowers/specs/2026-06-19-task2-perprocess-memory-design.md`) is:
+
+1. **Per-`mm` base-0 bump/free allocator** in `mm_context_t`
+   (`arch/wasm/include/asm/mmu.h`): fields `user_as_size`, `user_as_brk`,
+   `user_as_free`, `user_as_live`. Layout: guard page at 0 (NULL traps), data+bss
+   at `USER_AS_BASE=0x10000`, then stack/brk arena, then `mmap` bump upward.
+   Code stays in the shared kernel image (wasm code is not linear-addressable).
+
+2. **Four `wasm_user_mem_*` runtime imports** (`WASM_HOSTBRIDGE_ABI` → 2),
+   declared in `arch/wasm/include/asm/wasm.h`:
+   - `wasm_user_mem_create(pid, init_pages)` — mint a fresh per-pid
+     `WebAssembly.Memory` on the **main thread** and transfer to the worker
+     (browsers may not create `Memory` from a worker); called at exec after
+     `setup_new_exec`, before data `vm_mmap`.
+   - `wasm_user_mem_grow(pid, delta_pages)` — `memory.grow` on the per-pid
+     memory when the allocator exhausts `user_as_size`; returns new page count
+     or `-1`.
+   - `wasm_user_mem_free(pid)` — drop the registry entry on `exit_mmap`; runtime
+     tears down the memory/table/worker.
+   - `wasm_user_memzero(pid, uaddr, n)` — anon-zero / BSS clear via the private
+     memory (replaces `memset` on the shared pool).
+
+3. **Registry model R1 (approved):** each user task's private `Memory` is owned
+   by the **worker running it** (Linux uaccess only ever targets `current` via
+   `wasm_current_pid()`); the resolver gains a shared-memory fallback for
+   kthreads/pre-exec. `access_process_vm` / `access_remote_vm` (ptrace/`/proc`)
+   are out of scope.
+
+4. **Budget (approved):** small initial pages (cover data+stack+slack); generous
+   max (grow-only; only committed pages cost). No hard per-process cap for now.
+
+For the full treatment (gate sites, exec/grow/teardown sequencing, the inversion
+rationale, and file:line citations) see the refined design doc. Task 2 in the
+implementation plan is re-decomposed into T2.0–T2.5 to match.
+
 ### Acceptance for Phase 1
 - Existing userspace boots and runs over per-process memories.
 - **Isolation probe:** process B cannot read or corrupt process A's memory.
@@ -193,6 +246,16 @@ Acceptance = **imported upstream conformance subset + bespoke wasm-specific case
 run in the pc harness (same style as `exec-nixsystem.mjs` Phase A/B), each case
 compiled in-guest by `guest-cc` and CI-runnable as a flake attr + harness script.
 
+**Task 2 re-decomposition (Phase 1 substrate):** the original single "Task 2" in
+the implementation plan has been replaced with six tasks T2.0–T2.5 (see the
+refined design `docs/superpowers/specs/2026-06-19-task2-perprocess-memory-design.md`
+§7 and the updated plan `docs/superpowers/plans/2026-06-18-mmu-fork-phase1.md`).
+The old Task 2 Step 5 ("point driver buffer reads at the process memory") has been
+**removed** — drivers (9p, hvc, random) read from **kernel** buffers allocated in
+the shared pool (`get_user_pages` → kernel bounce buffer); the host-bridge is the
+sole path that touches user-memory bytes. Pointing driver reads directly at a
+per-process memory was wrong and has been deleted from the plan.
+
 ### Imported (backbone)
 - **Open POSIX Test Suite** `conformance/interfaces/{fork,waitpid,exec}/`
   (in LTP) — one-assertion-per-file, portable standalone C; maps ~1:1 to the matrix
@@ -250,6 +313,29 @@ integration cost.
   the exec-ABI-skew failure mode seen previously.
 - **`get_user_pages` callers.** Audit all callers (9p was the known one) and confirm
   each routes through the host-bridge under per-process memory.
+
+**New open items from the refined per-process-memory design (Task 2):**
+
+- **Cross-pid copies / R1 assumption.** R1 (worker-owned per-pid memory) assumes no
+  in-scope synchronous cross-pid user copy. `access_process_vm`/`access_remote_vm`
+  are ptrace/`/proc` — currently out of scope. If a future kernel path issues a
+  cross-mm user copy, R1 must be revisited. Audit holds for current scope.
+- **Worker-vs-main minting.** `wasm_user_mem_create` mints `Memory` on the main
+  thread and transfers to the requesting worker (browsers may not create `Memory`
+  from a worker). Confirm this capability on all target browser engines before T2.1.
+- **File-backed data `mmap` audit.** Assumed absent (mallocng is anon; the only
+  file-backed `vm_mmap` is the code image, which stays shared). Verify in T2.2 that
+  no data-file path reaches `do_mmap_private` with a private target; add a kernel
+  bounce buffer if found.
+- **Guard-page-at-0.** Layout assumes `data_start=0x10000` (`USER_AS_BASE`) is
+  tolerated by dylink relocation. It uses a large nonzero base today — verify
+  `__memory_base` / data-segment offsets are consistent in T2.3.
+- **`strnlen_user` prerequisite.** `strnlen_user` still reads the user pointer
+  directly (deferred in patch 0014); this becomes a hard crash the instant memory
+  splits. T2.0 must close this before any private-memory work proceeds.
+- **Teardown ordering.** `exit_mmap` frees the registry entry; `release_task` kills
+  the worker. The resolver's shared-memory fallback covers benign races, but
+  use-after-free is possible if a bridge call races the worker kill. Validate in T2.4.
 
 ## 10. Out of scope / future specs
 
