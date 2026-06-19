@@ -1,0 +1,279 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: close residual direct-deref uaccess holes (T2.0)
+
+Phase 1 (Task 2.0): route the last four uaccess sites that still read/write a
+user pointer DIRECTLY (bypassing the Task 1 host-bridge) through the bridge.
+These work today only because user==kernel address; the moment the per-process
+memory split lands (Task 2.3) they would corrupt kernel memory. ZERO behavior
+change on the shared resolver; ABI stays at WASM_HOSTBRIDGE_ABI = 1.
+
+The four holes:
+  1. __clear_user  — asm-generic/uaccess.h memset()s the user pointer directly.
+     Provide an out-of-line arch __clear_user (wasm_clear_user) that zeroes via
+     the new wasm_user_memzero host-bridge import.
+  2. strnlen_user  — the generic lib/strnlen_user.c scans the user pointer
+     directly (unsafe_get_user). select ARCH_HAS_STRNLEN_USER to drop it and
+     provide an arch strnlen_user that reads through wasm_user_copy_from.
+  3. create_wasm_tables — the raw memcpy(sp, wasm_auxv, ...) to the user stack
+     pointer becomes copy_to_user (already bridge-routed via the 0014 patch).
+  4. arch/wasm/include/asm/futex.h — futex_atomic_cmpxchg_inatomic and
+     arch_futex_atomic_op_inuser did __atomic_* builtins directly on
+     (volatile u32 *)uaddr (a u32 __user *). Rewrite the read-modify-write via
+     get_user/put_user (host-bridged raw_copy_*). Safe non-atomically because
+     these run in_atomic (pagefault/preempt disabled) and all user tasks are
+     pinned to one CPU (patch 0004): no concurrent CPU, no preemption mid-seq.
+     (Found in review of the first T2.0 pass.)
+
+New host import (declared in asm/wasm.h, becomes a wasm `env` import):
+  wasm_user_memzero(pid, uaddr, n)  -> bytes NOT zeroed (0 on success)
+The runtime services it against the shared buffer for now (forward-declared at
+ABI v1; the per-pid memory split wires it in Task 2.1+).
+
+diff --git a/arch/wasm/Kconfig b/arch/wasm/Kconfig
+index 63960ada6..542941e13 100644
+--- a/arch/wasm/Kconfig
++++ b/arch/wasm/Kconfig
+@@ -21,6 +21,7 @@ config WASM
+ 	select THREAD_INFO_IN_TASK
+ 	select GENERIC_SMP_IDLE_THREAD
+ 	select ARCH_HAS_STRNCPY_FROM_USER
++	select ARCH_HAS_STRNLEN_USER
+ 	select ARCH_USE_QUEUED_RWLOCKS
+ 	select GENERIC_CPU_DEVICES
+ 	select GENERIC_CSUM
+diff --git a/arch/wasm/include/asm/uaccess.h b/arch/wasm/include/asm/uaccess.h
+index 15a88bfc1..fb806840b 100644
+--- a/arch/wasm/include/asm/uaccess.h
++++ b/arch/wasm/include/asm/uaccess.h
+@@ -51,8 +51,25 @@ raw_copy_from_user(void *to, const void __user *from, unsigned long n)
+ #define __HAVE_ARCH_STRNCPY_FROM_USER
+ extern long strncpy_from_user(char *dst, const char __user *src, long count);
+ 
+-/* get_user/put_user, clear_user, strnlen_user, the __get/__put_user_fn fallback
+- * (which routes through raw_copy_* above) all come from asm-generic. */
++/* ARCH_HAS_STRNLEN_USER: provide strnlen_user (drops lib/strnlen_user.c, the
++ * last generic uaccess that reads the user pointer directly via
++ * unsafe_get_user — valid only while user==kernel; a hard bug the instant the
++ * memory splits in Task 2). Routed through the bridge in uaccess.c. */
++#define __HAVE_ARCH_STRNLEN_USER
++extern __must_check long strnlen_user(const char __user *str, long count);
++
++/* Task 2.0: __clear_user must not memset() the user pointer directly (the
++ * asm-generic default does). Define it out-of-line so it can read the current
++ * pid and route the zero through the host-bridge (wasm_user_memzero). Defined
++ * BEFORE including asm-generic, which guards its default with `#ifndef
++ * __clear_user`. */
++extern __must_check unsigned long wasm_clear_user(void __user *to,
++						  unsigned long n);
++#define __clear_user wasm_clear_user
++
++/* get_user/put_user, clear_user (wrapping our __clear_user), the
++ * __get/__put_user_fn fallback (which routes through raw_copy_* above) come
++ * from asm-generic; strncpy_from_user/strnlen_user are overridden above. */
+ #include <asm-generic/uaccess.h>
+ 
+ #endif /* _ASM_WASM_UACCESS_H */
+diff --git a/arch/wasm/include/asm/wasm.h b/arch/wasm/include/asm/wasm.h
+index 4245d05d6..690fdb5bc 100644
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -21,6 +21,15 @@ extern unsigned long wasm_user_copy_from(int pid, unsigned long dst_kaddr,
+ 					 unsigned long src_uaddr, unsigned long n);
+ extern long wasm_user_strncpy(int pid, unsigned long dst_kaddr,
+ 			      unsigned long src_uaddr, unsigned long count);
++/*
++ * Task 2.0: zero `n` bytes at user `uaddr` in process `pid`. Services
++ * __clear_user (and, in Task 2, the anon-zero / BSS clear) so they no longer
++ * memset() the user pointer directly. Returns the number of bytes NOT zeroed
++ * (0 on success). ABI stays at 1 — this is forward-declared here; the runtime
++ * services it against the shared buffer until the per-process split.
++ */
++extern unsigned long wasm_user_memzero(int pid, unsigned long uaddr,
++				       unsigned long n);
+ 
+ extern void wasm_start_cpu(unsigned int cpu, struct task_struct *idle_task);
+ extern void wasm_stop_cpu(unsigned int cpu);
+diff --git a/arch/wasm/kernel/uaccess.c b/arch/wasm/kernel/uaccess.c
+index 743831ba7..15a1dc970 100644
+--- a/arch/wasm/kernel/uaccess.c
++++ b/arch/wasm/kernel/uaccess.c
+@@ -56,3 +56,54 @@ long strncpy_from_user(char *dst, const char __user *src, long count)
+ 	return res;
+ }
+ EXPORT_SYMBOL(strncpy_from_user);
++
++/*
++ * Task 2.0: __clear_user used to memset() the user pointer directly (the
++ * asm-generic default). Route the zero through the host-bridge so it targets
++ * the process's address space, not the kernel's. Returns the number of bytes
++ * NOT cleared (0 on success), matching the __clear_user/clear_user contract.
++ */
++unsigned long wasm_clear_user(void __user *to, unsigned long n)
++{
++	return wasm_user_memzero(wasm_current_pid(), (unsigned long)to, n);
++}
++EXPORT_SYMBOL(wasm_clear_user);
++
++/*
++ * Task 2.0: strnlen_user used to scan the user pointer directly (the generic
++ * lib/strnlen_user.c via unsafe_get_user). Override it (ARCH_HAS_STRNLEN_USER)
++ * and read the bytes through the bridge instead — correct once the memory
++ * splits in Task 2. Returns the size of the string INCLUDING the terminating
++ * NUL; a value > count means "too long"; 0 on fault.
++ */
++long strnlen_user(const char __user *str, long count)
++{
++	char buf[64];
++	unsigned long off = 0;
++
++	if (unlikely(count <= 0))
++		return 0;
++
++	while (off < (unsigned long)count) {
++		unsigned long chunk = (unsigned long)count - off;
++		unsigned long i;
++
++		if (chunk > sizeof(buf))
++			chunk = sizeof(buf);
++
++		/* copy_from returns bytes NOT copied (0 on success). */
++		if (wasm_user_copy_from(wasm_current_pid(), (unsigned long)buf,
++					(unsigned long)str + off, chunk))
++			return 0;
++
++		for (i = 0; i < chunk; i++) {
++			if (buf[i] == '\0')
++				return off + i + 1; /* length incl. NUL */
++		}
++		off += chunk;
++	}
++
++	/* No NUL within `count` bytes: the "too long" marker (> count). */
++	return count + 1;
++}
++EXPORT_SYMBOL(strnlen_user);
+diff --git a/fs/binfmt_wasm.c b/fs/binfmt_wasm.c
+index ccc48e9d3..fd37fb421 100644
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -98,7 +98,14 @@ static int create_wasm_tables(struct linux_binprm *bprm, unsigned long arg_start
+ 		return -EFAULT;
+ 	current->mm->env_end = (unsigned long)p;
+ 
+-	memcpy(sp, wasm_auxv, sizeof(wasm_auxv));
++	/*
++	 * Task 2.0: write the auxv through copy_to_user (host-bridge) instead of
++	 * a raw memcpy to the user pointer `sp`. The raw memcpy only works while
++	 * user==kernel; once the per-process memory split lands (Task 2) it would
++	 * scribble on kernel memory. copy_to_user returns bytes NOT copied.
++	 */
++	if (copy_to_user(sp, wasm_auxv, sizeof(wasm_auxv)))
++		return -EFAULT;
+ 
+ 	return 0;
+ }
+diff --git a/arch/wasm/include/asm/futex.h b/arch/wasm/include/asm/futex.h
+--- a/arch/wasm/include/asm/futex.h
++++ b/arch/wasm/include/asm/futex.h
+@@ -7,61 +7,78 @@
+ #include <linux/uaccess.h>
+ #include <asm/errno.h>
+ 
+-#define FUTEX_MAX_LOOPS	128
++/*
++ * Task 2.0: the futex ops must NOT touch the user pointer directly. The stock
++ * port did __atomic_* builtins on (volatile u32 *)uaddr, which derefs the user
++ * address in the kernel's own linear memory — fine only while user==kernel, but
++ * it reads/writes the KERNEL address space the instant the per-process memory
++ * split lands (Task 2.3). Route the read-modify-write through get_user/put_user
++ * instead (both bottom out in the 0014 host-bridged raw_copy_*).
++ *
++ * Atomicity: these run in_atomic (pagefault/preempt disabled) AND every user
++ * task is pinned to a single CPU (patch 0004 wasm-pin-user-tasks-single-cpu).
++ * With no concurrent CPU and no preemption mid-sequence, the non-atomic
++ * read -> compute -> write is race-free, so plain get_user/put_user preserve the
++ * exact semantics the generic futex core expects. The generic callers already
++ * wrap us in pagefault_disable(); we keep the access_ok() guard and use the
++ * __-prefixed accessors (access_ok done once, up front).
++ */
+ 
+ static inline int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+ 						u32 oldval, u32 newval)
+ {
+-	int loops;
+-	u32 expected;
++	u32 val;
+ 
+ 	if (!access_ok(uaddr, sizeof(u32)))
+ 		return -EFAULT;
+ 
+-	for (loops = 0; loops < FUTEX_MAX_LOOPS; ++loops) {
+-		expected = oldval;
+-		if (__atomic_compare_exchange_n((volatile u32 *)uaddr,
+-				&expected, newval, false, __ATOMIC_SEQ_CST,
+-				__ATOMIC_RELAXED)) {
+-			*uval = oldval;
+-			return 0;
+-		}
+-	}
++	if (__get_user(val, uaddr))
++		return -EFAULT;
++
++	*uval = val;
+ 
+-	return -EAGAIN;
++	if (val == oldval && __put_user(newval, uaddr))
++		return -EFAULT;
++
++	return 0;
+ }
+ 
+ static inline int arch_futex_atomic_op_inuser(int op, u32 oparg, int *oval,
+ 					      u32 __user *uaddr)
+ {
++	u32 oldval, newval;
++
+ 	if (!access_ok(uaddr, sizeof(u32)))
+ 		return -EFAULT;
+ 
++	if (__get_user(oldval, uaddr))
++		return -EFAULT;
++
+ 	switch (op) {
+ 	case FUTEX_OP_SET:
+-		*oval = __atomic_exchange_n(
+-			(volatile u32 *)uaddr, oparg,  __ATOMIC_SEQ_CST);
++		newval = oparg;
+ 		break;
+ 	case FUTEX_OP_ADD:
+-		*oval = __atomic_fetch_add(
+-			(volatile u32 *)uaddr, oparg,  __ATOMIC_SEQ_CST);
++		newval = oldval + oparg;
+ 		break;
+ 	case FUTEX_OP_OR:
+-		*oval = __atomic_fetch_or(
+-			(volatile u32 *)uaddr, oparg,  __ATOMIC_SEQ_CST);
++		newval = oldval | oparg;
+ 		break;
+ 	case FUTEX_OP_ANDN:
+-		*oval = __atomic_fetch_and(
+-			(volatile u32 *)uaddr, ~oparg,  __ATOMIC_SEQ_CST);
++		newval = oldval & ~oparg;
+ 		break;
+ 	case FUTEX_OP_XOR:
+-		*oval = __atomic_fetch_xor(
+-			(volatile u32 *)uaddr, oparg,  __ATOMIC_SEQ_CST);
++		newval = oldval ^ oparg;
+ 		break;
+ 	default:
+ 		return -ENOSYS;
+ 	}
+ 
++	if (__put_user(newval, uaddr))
++		return -EFAULT;
++
++	*oval = oldval;
++
+ 	return 0;
+ }
+ 

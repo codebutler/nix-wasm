@@ -341,6 +341,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     wasm_user_copy_to: _bridge.wasm_user_copy_to,
     wasm_user_copy_from: _bridge.wasm_user_copy_from,
     wasm_user_strncpy: _bridge.wasm_user_strncpy,
+    // Task 2.0: __clear_user / strnlen_user / the auxv memcpy no longer deref a
+    // user pointer directly — clear routes through this memzero op (ABI still 1).
+    wasm_user_memzero: _bridge.wasm_user_memzero,
 
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {

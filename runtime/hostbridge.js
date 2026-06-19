@@ -31,6 +31,17 @@ export function makeHostBridge(kernelMemory, resolveMem) {
       kbuf().set(src.subarray(src_uaddr, src_uaddr + n), dst_kaddr);
       return 0;
     },
+    // Zero n bytes at user(uaddr) in process `pid` (services __clear_user / the
+    // anon-zero / BSS clear, which used to memset() the user pointer directly).
+    // Returns the number of bytes NOT zeroed (0 on success), matching the
+    // kernel's clear_user contract. ABI is still 1 — this op is forward-declared
+    // here so Task 2.0 can route the residual holes through the bridge on the
+    // shared resolver; the per-pid memory split lands in Task 2.1+.
+    wasm_user_memzero(pid, uaddr, n) {
+      const dst = resolveMem(pid).u8();
+      dst.fill(0, uaddr, uaddr + n);
+      return 0;
+    },
     // Bounded NUL-terminated copy user(src_uaddr) -> kernel(dst_kaddr), at most
     // `count` bytes. Returns the length copied (excluding the NUL), or `count`
     // if no NUL was found within the limit.

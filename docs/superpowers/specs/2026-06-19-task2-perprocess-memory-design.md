@@ -142,7 +142,8 @@ no COW, no demand paging, no `mmap`-of-files MMU, fixed stacks persist; allocato
 ## 7. Re-decomposition (replaces old single Task 2; old Step 5 deleted — drivers read KERNEL buffers)
 
 - **T2.0** — close residual direct-deref uaccess holes (`__clear_user`, `strnlen_user`, `create_wasm_tables`
-  memcpy) through the bridge. Prerequisite, no behavior change, verifiable on the shared resolver.
+  memcpy, **and the `asm/futex.h` `__atomic_*`-on-`uaddr` ops** — found in review) through the bridge.
+  Prerequisite, no behavior change, verifiable on the shared resolver.
 - **T2.1** — ABI v2 scaffolding: the four imports + `userMems` map + pid-keyed resolver; `create` mints a
   memory not yet wired into instantiation; bump `WASM_HOSTBRIDGE_ABI=2`. Boot unaffected.
 - **T2.2** — kernel gate + per-`mm` allocator landed **dark** (feature-flagged: addresses recorded, not used);
@@ -160,6 +161,14 @@ no COW, no demand paging, no `mmap`-of-files MMU, fixed stacks persist; allocato
 - **File-backed data `mmap`:** assumed absent/rare (mallocng is anon); audit in T2.2, add bounce-buffer if found.
 - **Guard-page-at-0:** assumes dylink relocation tolerates `data_start=0x10000` (already uses a large nonzero base today). Verify in T2.3.
 - **`strnlen_user`:** last generic uaccess reading the user pointer directly (0014 deferred it); a hard bug the instant memory splits → T2.0 is a prerequisite.
+- **futex (found in T2.0 review):** `arch/wasm/include/asm/futex.h`'s `futex_atomic_cmpxchg_inatomic` /
+  `arch_futex_atomic_op_inuser` did `__atomic_*` builtins straight on `(volatile u32 *)uaddr` — a 4th direct
+  user deref the first T2.0 pass missed. Reachable (CONFIG_FUTEX=y; every guest pthread/mutex hits it) and
+  would read/write the KERNEL address space post-split. Rewritten as a `get_user`/`put_user` read-modify-write
+  (host-bridged). Non-atomic RMW is safe here because the ops run **in_atomic** (pagefault/preempt disabled)
+  AND all user tasks are pinned to a **single CPU** (patch 0004) → no concurrent CPU, no preemption
+  mid-sequence; the generic futex return/fault contract and the `access_ok` guard are preserved. No new bridge
+  op; ABI stays 1.
 - **Teardown ordering:** `exit_mmap` free vs `release_task` kill; validate no use-after-free in T2.4.
 
 ## Critical files

@@ -56,6 +56,13 @@ pkgs.stdenv.mkDerivation {
     # services it against the SHARED buffer — zero behavior change; this de-risks
     # the ABI before the per-process memory split (Task 2).
     ./patches/kernel/0014-wasm-uaccess-hostbridge.patch
+    # Phase 1 (Task 2.0): close the residual direct-deref uaccess holes that
+    # bypass the 0014 host-bridge — __clear_user (memset to user ptr),
+    # strnlen_user (generic lib/ scans the user ptr), and create_wasm_tables'
+    # raw auxv memcpy. Route them through the bridge (new wasm_user_memzero
+    # import + copy_to_user) so they survive the Task 2 per-process memory split.
+    # Zero behavior change on the shared resolver; ABI stays at 1.
+    ./patches/kernel/0015-wasm-uaccess-residual.patch
   ];
 
   nativeBuildInputs = [
