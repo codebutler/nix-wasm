@@ -1,0 +1,89 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 19 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: collect netfs readahead inline (no kworker offload)
+
+Fixes the full-NixOS boot deadlock in the getty/login exec chain under
+per-process memory (Task 2.3). The root cause is NOT the per-process-memory
+machinery itself — it is a pre-existing architectural mismatch that Task 2.3's
+timing/allocation changes tipped from latent into a hard wedge.
+
+netfs (used by the 9P `/nix` mount, cache=loose) issues page reads inline
+(v9fs_issue_read -> p9_client_read is synchronous over our SAB transport) but
+OFFLOADS the *collection* phase — the step that marks folios uptodate and
+UNLOCKS them — to a workqueue (system_dfl_wq) when NETFS_RREQ_OFFLOAD_COLLECTION
+is set, which netfs_readahead always sets. On this port the guest runs maxcpus=1
+with COOPERATIVE scheduling: a worker that blocks calls schedule() and only the
+idle task services device IRQs, only once every runnable task has parked. When 8
+gettys exec busybox+ash from the 9P store at once, each exec's page-cache reads
+spawn forced/async readahead whose collection is queued to a kworker; that
+kworker is runnable but can never get the single CPU, because an exec task is
+wedged holding the CPU (parked in folio_wait_bit_common for a readahead folio
+that only the kworker would unlock) and the other gettys are blocked acquiring
+the global nommu_region_sem. The readahead folios stay LOCKED forever ->
+filemap_get_pages() -> folio_wait_bit_common() never returns -> no forward
+progress. (Verified by isolation: with wasm_user_as OFF the same userspace boots
+to a shell; with it ON the system wedges with 1 task in do_mmap, 1 in
+down_write(nommu_region_sem), and 4 in folio_wait_bit_common <- filemap_read,
+plus parked kworkers.)
+
+Async-offload completion is fundamentally unsafe on a single cooperative CPU:
+any path that parks the only running task while waiting for a kworker to make
+progress can deadlock. The correct fix removes the kworker from the critical
+completion path: drive netfs read collection INLINE.
+
+netfs already supports inline collection — netfs_wait_for_in_progress() runs
+netfs_collect_in_app() in the waiting thread whenever NETFS_RREQ_OFFLOAD_COLLECTION
+is clear (that is exactly how the synchronous netfs_read_folio() path completes).
+So under CONFIG_WASM we make netfs_readahead behave like read_folio: do NOT set
+OFFLOAD_COLLECTION, and wait for the read to complete (collecting + unlocking the
+folios in this thread) before returning. The reads were already synchronous over
+our transport, so this only moves the folio unlock off the (unschedulable) kworker
+and onto the issuing thread — no new round-trips, deterministic unlock, and the
+nommu_region_sem holder always drains. Readahead becomes synchronous on this port,
+the correct trade on a cooperative single CPU (the served /nix store is read-only,
+so there is no writeback interaction).
+
+Guarded by CONFIG_WASM so every other arch keeps the upstream async-offload
+behavior unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+--- a/fs/netfs/buffered_read.c
++++ b/fs/netfs/buffered_read.c
+@@ -348,7 +348,19 @@
+ 	if (IS_ERR(rreq))
+ 		return;
+ 
++#ifndef CONFIG_WASM
++	/*
++	 * wasm (maxcpus=1, cooperative scheduling): do NOT offload the netfs
++	 * read collection phase to a workqueue. Offloaded collection (mark folio
++	 * uptodate + UNLOCK) depends on a kworker being scheduled, which deadlocks
++	 * when the single CPU is held by a task parked in folio_wait_bit_common()
++	 * waiting for those very folios to be unlocked. Without this flag the read
++	 * is collected INLINE by the waiter (netfs_collect_in_app), exactly like the
++	 * synchronous read_folio path — see netfs_wait_for_in_progress() and the
++	 * netfs_wait_for_read() call added at the end of this function.
++	 */
+ 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &rreq->flags);
++#endif
+ 
+ 	ret = netfs_begin_cache_read(rreq, ictx);
+ 	if (ret == -ENOMEM || ret == -EINTR || ret == -ERESTARTSYS)
+@@ -365,6 +377,16 @@
+ 		goto cleanup_free;
+ 	netfs_read_to_pagecache(rreq, ractl);
+ 
++#ifdef CONFIG_WASM
++	/*
++	 * Drive collection in THIS thread (folios get unlocked here, not by a
++	 * kworker) so a cooperative single CPU never wedges. The 9P reads were
++	 * already synchronous over the SAB transport, so this adds no round-trips —
++	 * it only moves the folio unlock off the (unschedulable) kworker.
++	 */
++	netfs_wait_for_read(rreq);
++#endif
++
+ 	return netfs_put_request(rreq, netfs_rreq_trace_put_return);
+ 
+ cleanup_free:

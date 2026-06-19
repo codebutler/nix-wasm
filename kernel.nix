@@ -80,6 +80,12 @@ pkgs.stdenv.mkDerivation {
     # mm owner pid, not the calling pid. Pairs with the runtime flip + the
     # CLONE_VM Memory hand-off to the child worker.
     ./patches/kernel/0017-wasm-clone-vm-owner-pid.patch
+    ./patches/kernel/0018-wasm-netfs-inline-readahead-collection.patch
+    # netfs read collection runs INLINE (not offloaded to a kworker) on the
+    # maxcpus=1 cooperative port: offloaded readahead collection unlocks folios
+    # from a kworker that can't be scheduled when the single CPU is wedged on
+    # those folios — the full-NixOS getty/login exec-storm deadlock. CONFIG_WASM
+    # guarded; every other arch keeps the upstream async-offload behavior.
   ];
 
   nativeBuildInputs = [
