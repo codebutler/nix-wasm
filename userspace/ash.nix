@@ -142,19 +142,51 @@ cross.stdenv.mkDerivation {
     # cross toolchain, not .config symbols.
     cfg=build/.config
     make "''${mk[@]}" allnoconfig
+    # The FEATURE_EDITING* / *_COMPLETION group turns on busybox's libbb/lineedit.c
+    # so the interactive ash (now the login /bin/sh, bootstrap.nix) has arrow-key
+    # editing, history, reverse-search, and tab completion (paths + commands on
+    # $PATH + usernames + ash builtins). Same lineedit code the busybox hush build
+    # already runs on this guest — completion is readdir/stat-based (no fork/exec),
+    # so it's NOMMU-safe. The int-valued MAX_LEN/HISTORY symbols are pulled in with
+    # their defaults (1024 / 255) by the oldconfig pass below.
+    # UNICODE_SUPPORT makes lineedit count cursor columns by display width (the
+    # Ghostty console is UTF-8), so multibyte/CJK/combining input doesn't corrupt
+    # the line. CHECK_UNICODE_IN_ENV gates that on a UTF-8 LANG/LC_ALL; we use the
+    # built-in wcwidth tables (NOT FEATURE_UNICODE_USING_LOCALE) to avoid depending
+    # on musl's limited locale support. SAVE_ON_EXIT flushes history on exit.
     for c in STATIC LFS \
              ASH SHELL_ASH SH_IS_ASH \
              ASH_ECHO ASH_PRINTF ASH_TEST ASH_SLEEP ASH_ALIAS ASH_GETOPTS \
              ASH_CMDCMD ASH_OPTIMIZE_FOR_SIZE ASH_INTERNAL_GLOB ASH_EXPAND_PRMT \
              ASH_RANDOM_SUPPORT ASH_BASH_COMPAT \
-             FEATURE_SH_MATH FEATURE_SH_MATH_64 FEATURE_SH_MATH_BASE; do
+             FEATURE_SH_MATH FEATURE_SH_MATH_64 FEATURE_SH_MATH_BASE \
+             FEATURE_EDITING FEATURE_TAB_COMPLETION FEATURE_USERNAME_COMPLETION \
+             FEATURE_REVERSE_SEARCH FEATURE_EDITING_SAVEHISTORY \
+             FEATURE_EDITING_SAVE_ON_EXIT \
+             FEATURE_EDITING_FANCY_PROMPT FEATURE_EDITING_WINCH \
+             UNICODE_SUPPORT FEATURE_CHECK_UNICODE_IN_ENV \
+             FEATURE_UNICODE_COMBINING_WCHARS FEATURE_UNICODE_WIDE_WCHARS; do
       sed -i "s/^# CONFIG_$c is not set\$/CONFIG_$c=y/" "$cfg"
       grep -q "^CONFIG_$c=y" "$cfg" || echo "CONFIG_$c=y" >> "$cfg"
+    done
+    # Int-valued editing knobs: allnoconfig zeroes these, but REVERSE_SEARCH and
+    # SAVEHISTORY reference the history ring (state->history), which lineedit.c
+    # only compiles when FEATURE_EDITING_HISTORY > 0 — so set them explicitly
+    # (the boolean loop above can't emit int values).
+    for kv in FEATURE_EDITING_MAX_LEN=1024 FEATURE_EDITING_HISTORY=255; do
+      sym=''${kv%%=*}
+      sed -i "/^CONFIG_$sym=/d;/^# CONFIG_$sym is not set\$/d" "$cfg"
+      echo "CONFIG_$kv" >> "$cfg"
     done
     # oldconfig (not silentoldconfig — it prompts for new symbols and dies on
     # redirected stdin); feeding empty lines takes each new symbol's default.
     ( set +o pipefail; yes "" | make "''${mk[@]}" oldconfig ) >/dev/null
     grep -q '^CONFIG_SHELL_ASH=y' "$cfg" || { echo "ERROR: ash not enabled"; cat "$cfg" | grep -iE "ASH|HUSH" ; exit 1; }
+    # Guard the interactive editing symbols: oldconfig silently drops a symbol whose
+    # deps go unmet, which would ship an ash with no completion and no warning.
+    for need in FEATURE_EDITING FEATURE_TAB_COMPLETION FEATURE_REVERSE_SEARCH UNICODE_SUPPORT; do
+      grep -q "^CONFIG_$need=y" "$cfg" || { echo "ERROR: $need dropped by oldconfig"; grep -i "$need" "$cfg" || true; exit 1; }
+    done
     runHook postConfigure
   '';
 

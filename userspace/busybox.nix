@@ -114,12 +114,25 @@ cross.stdenv.mkDerivation {
              FEATURE_TAR_TO_COMMAND; do
       sed -i "s/^CONFIG_$c=y\$/# CONFIG_$c is not set/" build/.config
     done
+    # Colorized `ls` with NO alias/env var: busybox's LS_COLOR_IS_DEFAULT makes the
+    # applet emit ANSI colors whenever stdout is a tty (it ignores $LS_COLORS and
+    # uses a built-in palette). GNU coreutils can't do this without `--color=auto`;
+    # busybox can, so the guest gets colored ls in scripts and subshells too, with
+    # zero profile config.
+    for c in FEATURE_LS_COLOR FEATURE_LS_COLOR_IS_DEFAULT; do
+      sed -i "s/^# CONFIG_$c is not set\$/CONFIG_$c=y/" build/.config
+      grep -q "^CONFIG_$c=y" build/.config || echo "CONFIG_$c=y" >> build/.config
+    done
     # No `make olddefconfig` (busybox 1.36 kconfig has no such target); the build
     # regenerates include/autoconf.h from .config via silentoldconfig, which keeps
     # these existing values disabled. Sanity-check a few stuck.
     for c in CROND HTTPD WGET NC TIME; do
       grep -q "^# CONFIG_$c is not set" build/.config \
         || { echo "ERROR: CONFIG_$c not disabled in .config" >&2; exit 1; }
+    done
+    for c in FEATURE_LS_COLOR_IS_DEFAULT; do
+      grep -q "^CONFIG_$c=y" build/.config \
+        || { echo "ERROR: CONFIG_$c not enabled in .config" >&2; exit 1; }
     done
     runHook postConfigure
   '';
