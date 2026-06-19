@@ -1,3 +1,6 @@
+// @ts-nocheck -- vendored linux-wasm runtime (browser-isms; not pc-typed), like
+// kernel-host.js / kernel-worker.js. Pulled into the typecheck graph once
+// kernel-host.js began importing WlDevice for host-side idle-wake injection.
 // wl-device.js — host (JS) model of the virtio-wl device for the `virtio_wasm`
 // transport (Linux/Wasm, "pc" Wayland Phase 1 1b). This is the device the guest
 // virtio_wl driver (drivers/virtio/virtio_wl.c, /dev/wl0) talks to.
@@ -43,6 +46,12 @@ const VIRTIO_WL_RESP_INVALID_TYPE = 0x1103;
 const VIRTIO_WL_VFD_WRITE = 0x1;
 const VIRTIO_WL_VFD_READ = 0x2;
 
+// Host-allocated vfd ids carry this bit (uapi VFD_ID_HOST_MASK); the guest
+// virtio_wl driver REQUIRES it on any VFD_NEW it receives from the host
+// (vq_handle_new rejects ids without it) and must NOT have the illegal sign bit.
+const VFD_HOST_ID_BIT = 0x40000000;
+const VFD_ILLEGAL_SIGN_BIT = 0x80000000;
+
 const VIRTWL_VQ_IN = 0;
 const VIRTWL_VQ_OUT = 1;
 
@@ -84,6 +93,10 @@ export class WlDevice extends VirtioWasmDevice {
     super(opts);
     this._nextVfdId = 1; // host-allocated vfd ids would set the HOST bit; the
     // guest allocates ctx/pipe ids itself, so we only echo them back.
+    // Monotonic counter for HOST-originated vfds (server→client fds, e.g. the
+    // wl_keyboard keymap). Each gets VFD_HOST_ID_BIT | n; the guest driver's
+    // vq_handle_new requires the host bit, the guest allocates its own ids low.
+    this._nextHostVfdId = 1;
     this.contexts = new Map(); // vfd_id -> { type, server }
     this._bridge = opts.waylandBridge || null;
     // Phase 2 2c: log shm region checksums + wire opcodes to prove the pixel
@@ -229,7 +242,13 @@ export class WlDevice extends VirtioWasmDevice {
     if (serviced > 0) this.raiseIrq();
 
     // Deliver any wayland server replies over the IN queue (a separate vring).
-    for (const r of inReplies) this._queueIn(r.vfdId, r.data);
+    // `inReply` is either { vfdId, data } (one VFD_RECV, the common case) or
+    // { raw: [Uint8Array,...] } (pre-built control messages — VFD_NEW(s) then a
+    // VFD_RECV carrying server→client fds, e.g. the keymap).
+    for (const r of inReplies) {
+      if (r.raw) for (const msg of r.raw) this._queueRaw(msg);
+      else this._queueIn(r.vfdId, r.data);
+    }
     this._flushPendingIn();
   }
 
@@ -249,6 +268,12 @@ export class WlDevice extends VirtioWasmDevice {
     this._pendingIn.push({ vfdId, data });
   }
 
+  /** Queue a PRE-BUILT virtwl control message (already a full ctrl struct, e.g.
+   *  a VFD_NEW or a VFD_RECV carrying fds) for the IN queue verbatim. */
+  _queueRaw(msg) {
+    this._pendingIn.push({ raw: msg });
+  }
+
   _flushPendingIn() {
     if (this._pendingIn.length === 0) return;
     const vr = this.vring(VIRTWL_VQ_IN);
@@ -264,18 +289,24 @@ export class WlDevice extends VirtioWasmDevice {
       }
       const chain = vr.next();
       if (!chain) break;
-      const { vfdId, data } = this._pendingIn.shift();
-      const msg = this._vfdRecv(vfdId, data);
+      const entry = this._pendingIn.shift();
+      const { vfdId, data } = entry;
+      const msg = entry.raw ? entry.raw : this._vfdRecv(vfdId, data);
       const cap = vr.inCapacity(chain);
       if (msg.length > cap) {
         this.log(`[virtio-wl] IN buffer too small (${cap} < ${msg.length}); truncating`);
       }
       const written = vr.writeIn(chain, msg);
       vr.pushUsed(chain.head, written);
-      this.log(
-        `[virtio-wl] IN push: VFD_RECV vfd_id=${vfdId} ${data.length}B wayland (used ${written}B)`,
-      );
-      if (this._shmDebug && data.length <= 512) {
+      if (entry.raw) {
+        const type = new DataView(msg.buffer, msg.byteOffset, msg.byteLength).getUint32(0, true);
+        this.log(`[virtio-wl] IN push: raw ctrl type=0x${type.toString(16)} (used ${written}B)`);
+      } else {
+        this.log(
+          `[virtio-wl] IN push: VFD_RECV vfd_id=${vfdId} ${data.length}B wayland (used ${written}B)`,
+        );
+      }
+      if (!entry.raw && this._shmDebug && data.length <= 512) {
         const ddv = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const parts = [];
         for (let o = 0; o + 8 <= data.length; ) {
@@ -302,6 +333,66 @@ export class WlDevice extends VirtioWasmDevice {
     dv.setUint32(8, vfdId >>> 0, true); // vfd_id
     dv.setUint32(12, 0, true); // vfd_count = 0 (no fds in the handshake)
     b.set(data, SEND_HDR_SIZE);
+    return b;
+  }
+
+  // --- server→client fd delivery (the keymap path) -------------------------
+  //
+  // Greenfield ships some events with an fd (wl_keyboard.keymap carries the xkb
+  // keymap). On a guest connection that fd must become a virtio_wl vfd the client
+  // receives over SCM_RIGHTS. The protocol: emit a host→guest VFD_NEW for each fd
+  // (registering it in the driver's idr under a HOST-bit id), then a VFD_RECV
+  // whose trailing vfd ids reference them — vq_handle_recv queues it on the ctx
+  // and the client's RECV ioctl surfaces the bytes + the new fds together. The
+  // VFD_NEW we send has the keymap byte length as `size` so the client's mmap
+  // length check passes; we do NOT inject a backing pfn (this NOMMU port has no
+  // host-arena path), so the client's mmap of the keymap fails gracefully with
+  // EACCES — which the toytoolkit keymap handler tolerates (it closes the fd and
+  // continues; weston-flowers never uses the keyboard). That is enough to satisfy
+  // the wire contract and unblock the attach/commit → flower render.
+
+  /** Build the ordered [VFD_NEW..., VFD_RECV(bytes + vfd ids)] control messages
+   *  for a server→client reply carrying fds. */
+  _buildFdDelivery(ctxVfdId, bytes, fdPayloads) {
+    const msgs = [];
+    const ids = [];
+    for (const payload of fdPayloads) {
+      const id = (VFD_HOST_ID_BIT | (this._nextHostVfdId++ & ~(VFD_HOST_ID_BIT | VFD_ILLEGAL_SIGN_BIT))) >>> 0;
+      ids.push(id);
+      msgs.push(this._vfdNewHost(id, payload.length));
+    }
+    msgs.push(this._vfdRecvWithFds(ctxVfdId, bytes || new Uint8Array(0), ids));
+    return msgs;
+  }
+
+  /** A host→guest VFD_NEW (the driver's vq_handle_new registers the vfd). 32B
+   *  through the union start: hdr + vfd_id + flags + pfn(u64) + size. */
+  _vfdNewHost(id, size) {
+    const b = new Uint8Array(32);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, VIRTIO_WL_CMD_VFD_NEW, true); // hdr.type
+    dv.setUint32(4, 0, true); // hdr.flags
+    dv.setUint32(8, id >>> 0, true); // vfd_id (HOST bit set)
+    dv.setUint32(12, VIRTIO_WL_VFD_READ, true); // flags: client reads the keymap
+    dv.setBigUint64(16, 0n, true); // pfn = 0 (no host backing; mmap fails gracefully)
+    dv.setUint32(24, size >>> 0, true); // size = keymap byte length
+    return b;
+  }
+
+  /** A VFD_RECV carrying bytes + trailing vfd ids (vfd_count = ids.length). */
+  _vfdRecvWithFds(ctxVfdId, data, ids) {
+    const b = new Uint8Array(SEND_HDR_SIZE + ids.length * 4 + data.length);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, VIRTIO_WL_CMD_VFD_RECV, true); // hdr.type
+    dv.setUint32(4, 0, true); // hdr.flags
+    dv.setUint32(8, ctxVfdId >>> 0, true); // vfd_id (the ctx)
+    dv.setUint32(12, ids.length >>> 0, true); // vfd_count
+    let off = SEND_HDR_SIZE;
+    for (const id of ids) {
+      dv.setUint32(off, id >>> 0, true);
+      off += 4;
+    }
+    b.set(data, off);
     return b;
   }
 
@@ -418,8 +509,25 @@ export class WlDevice extends VirtioWasmDevice {
           // RIGHT HERE — in the worker that holds the live wasm instance. The 9P
           // ring uses the same main-services-while-worker-blocks shape.
           const reply = this._bridge.onOut(vfdId, data.slice(), fds);
-          const inReply = reply && reply.length ? { vfdId, data: reply } : null;
-          if (inReply) this.log(`[virtio-wl] Greenfield reply ${reply.length}B -> IN queue (sync)`);
+          // The bridge returns either a bare Uint8Array (bytes only, the common
+          // case) or { bytes, fds } when Greenfield emitted server→client fds
+          // (e.g. the wl_keyboard keymap). Server→client fds become host vfds:
+          // emit a VFD_NEW per fd (host-bit id) so the guest driver registers it,
+          // then ONE VFD_RECV carrying the reply bytes + those vfd ids — the
+          // driver surfaces them to the client (waylandproxyd forwards over
+          // SCM_RIGHTS). See _buildKeymapDelivery.
+          const replyBytes = reply instanceof Uint8Array ? reply : reply?.bytes;
+          const replyFds = reply && !(reply instanceof Uint8Array) ? reply.fds : null;
+          let inReply = null;
+          if (replyFds && replyFds.length) {
+            inReply = { raw: this._buildFdDelivery(vfdId, replyBytes, replyFds) };
+            this.log(
+              `[virtio-wl] Greenfield reply ${replyBytes?.length || 0}B + ${replyFds.length} fd(s) -> IN queue (sync)`,
+            );
+          } else if (replyBytes && replyBytes.length) {
+            inReply = { vfdId, data: replyBytes };
+            this.log(`[virtio-wl] Greenfield reply ${replyBytes.length}B -> IN queue (sync)`);
+          }
           return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply };
         }
         // Phase 1 fallback: the in-worker WlServer stub (registry handshake).

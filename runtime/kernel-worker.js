@@ -297,12 +297,53 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               return null;
             }
             const len = Atomics.load(ctrl, 1) >>> 0;
+            const fdLen = ctrl.length > 2 ? Atomics.load(ctrl, 2) >>> 0 : 0;
             Atomics.store(ctrl, 0, WL_CH_IDLE);
-            if (len === 0) return null;
-            return replyBuf.slice(0, len);
+            // Decode any server→client fd payloads: [u32 fdCount][u32 len,bytes]*.
+            let replyFds = null;
+            if (fdLen >= 4 && wayland_channel.fdBytes) {
+              const fdv = new DataView(
+                wayland_channel.fdBytes.buffer,
+                wayland_channel.fdBytes.byteOffset,
+                wayland_channel.fdBytes.byteLength,
+              );
+              const count = fdv.getUint32(0, true);
+              let off = 4;
+              const out = [];
+              for (let i = 0; i < count && off + 4 <= fdLen; i++) {
+                const plen = fdv.getUint32(off, true);
+                off += 4;
+                if (off + plen > fdLen) break;
+                out.push(wayland_channel.fdBytes.slice(off, off + plen));
+                off += plen;
+              }
+              if (out.length) replyFds = out;
+            }
+            if (len === 0 && !replyFds) return null;
+            // Return a structured reply when fds are present; otherwise keep the
+            // legacy bare-Uint8Array shape (the device handles both).
+            const bytes = len ? replyBuf.slice(0, len) : new Uint8Array(0);
+            return replyFds ? { bytes, fds: replyFds } : bytes;
           },
         };
         d = new WlDevice(common);
+        // Wayland (idle wake): hand the main thread the address of raised_irqs[0]
+        // so it can deliver an unsolicited server→client event to a FULLY IDLE
+        // guest by replicating raise_interrupt() (OR irq bit + memory.atomic.notify
+        // on this word) directly on shared memory — the parked idle Worker can't
+        // run JS to service an async `wayland_in` postMessage (the 4e finding).
+        // per_cpu_ptr(&raised_irqs, 0) is fixed after per-cpu init; publish once.
+        // CPU 0 is the sole online CPU under maxcpus=1, so cpu 0 is the wait64 target.
+        try {
+          const fn = vmlinux_instance.exports.wasm_raised_irqs_ptr;
+          if (typeof fn === "function") {
+            port.postMessage({ method: "wayland_irq_addr", addr: Number(fn(0)) >>> 0 });
+          } else {
+            log("[virtio-wl] wasm_raised_irqs_ptr export missing (stale vmlinux?) — idle wake off");
+          }
+        } catch (e) {
+          log("[virtio-wl] wasm_raised_irqs_ptr failed: " + e);
+        }
       } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
       else {
         log(`[virtio] import for unknown device index ${id}`);
@@ -635,6 +676,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         wayland_channel = {
           ctrl: new Int32Array(message.wayland_channel.ctrl),
           bytes: new Uint8Array(message.wayland_channel.bytes),
+          // Optional server→client fd-payload region (e.g. the keymap fd).
+          fdBytes: message.wayland_channel.fdBytes
+            ? new Uint8Array(message.wayland_channel.fdBytes)
+            : null,
         };
       }
 
@@ -1001,22 +1046,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // and exex() can trap us, in which case we have to circle back to loading new user code and executing it agian.
       vmlinux_setup().then(vmlinux_run).catch(wasm_error).then(user_executable_chain);
     },
-
-    // Wayland Phase 2 (2c): an UNSOLICITED server→client event from the
-    // main-thread compositor (e.g. xdg_surface.configure, emitted after Greenfield
-    // assigns the toplevel role — it arrives in a flush OUTSIDE any guest SEND's
-    // synchronous round-trip, so the SAB reply path can't carry it). The boot
-    // worker (which holds the live wasm instance) is idle here — the guest task is
-    // blocked IN THE KERNEL on the vfd read, not in wasm_virtio_notify — so we can
-    // inject it into the IN vring + raise the IRQ right now, waking the guest.
-    wayland_in: (message) => {
-      const d = get_virtio_device(VW_DEV_WL);
-      if (!d || typeof d.injectIn !== "function") {
-        log(`[virtio-wl] wayland_in but device not ready`);
-        return;
-      }
-      d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
-    },
+    // Wayland (idle wake): there is intentionally NO `wayland_in` handler here.
+    // Unsolicited server→client events (pointer enter/motion/leave, keyboard,
+    // frame callbacks) are injected DIRECTLY by the main thread (kernel-host
+    // wayland_push_in → host WlDevice over the shared queue SAB), which then wakes
+    // the parked idle CPU by replicating raise_interrupt() on raised_irqs[0]. This
+    // replaces the old postMessage path, which the Phase 4e diagnosis showed could
+    // never fire while the guest was idle: the worker is parked in arch_cpu_idle's
+    // wait64, not its JS event loop, so a queued `wayland_in` was never dequeued
+    // (the cursor-not-tracking bug). Events that ride a guest SEND are still
+    // delivered inline via the SAB reply path (waylandBridge.onOut).
   };
 
   self.onmessage = (message_event) => {

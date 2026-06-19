@@ -50,6 +50,12 @@ pkgs.stdenv.mkDerivation {
     # the guest<->host vring round-trip AND host->guest used-buffer interrupt
     # delivery via raise_interrupt(). Enabled by CONFIG_VIRTIO_WASM below.
     ./patches/kernel/0013-wasm-virtio-wasm-transport.patch
+    # Wayland (idle wake): export wasm_raised_irqs_ptr(cpu) so the JS host can
+    # deliver a virtio used-buffer interrupt to a FULLY IDLE guest by replicating
+    # raise_interrupt() (OR irq bit + memory.atomic.notify on raised_irqs[cpu])
+    # directly on shared memory from the main thread — the owning Worker is parked
+    # in arch_cpu_idle()'s wait64 and can't run JS to service an unsolicited event.
+    ./patches/kernel/0014-wasm-export-raised-irqs-ptr.patch
   ];
 
   nativeBuildInputs = [

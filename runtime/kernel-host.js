@@ -16,6 +16,13 @@
 // blocks the top-level module-worker script served through the SW's
 // reconstructed COEP response (net::ERR_BLOCKED_BY_RESPONSE → opaque ErrorEvent).
 import { createModuleWorker } from "./make-worker.js";
+// Wayland (idle wake): the main thread injects unsolicited server→client events
+// into the guest's virtio_wl IN vring itself (the worker is parked in
+// arch_cpu_idle's wait64 and can't service a postMessage). It reuses the worker's
+// device model over the shared queue-layout SAB so vring + avail-cursor state stay
+// consistent across the two writers. See wayland_push_in below + kernel patch 0014.
+import { SharedQueues } from "./virtio/shared-queues.js";
+import { WlDevice } from "./virtio/wl-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -86,8 +93,59 @@ export const linux = async ({
     Atomics.store(locks._memory, locks[lock], 0);
   };
 
+  // Wayland (idle wake): host-side virtio_wl IN-injector. An unsolicited
+  // server→client event (cursor motion, frame callback) arriving while the guest
+  // is FULLY IDLE can't be delivered through the worker — its Worker is parked in
+  // arch_cpu_idle()'s memory.atomic.wait64 and never runs JS to service a
+  // postMessage (the 2c/4e finding). So the MAIN thread injects directly: a
+  // host-side WlDevice over the SAME cross-worker queue-layout SAB (so the IN
+  // vring + its avail cursor stay consistent with the worker's instance) whose
+  // raiseInterrupt replicates the kernel's raise_interrupt() on shared memory —
+  // OR the irq bit into raised_irqs[0] + memory.atomic.notify on it, waking the
+  // parked wait64. The worker publishes raised_irqs[0]'s address post-boot
+  // (wayland_irq_addr); patch 0014 exports wasm_raised_irqs_ptr() for it.
+  //
+  // Concurrency: the worker only touches the IN vring when IT has replies to push
+  // (during a guest SEND), and the compositor routes events to the SAB reply path
+  // (not push_in) while a SEND is in flight — so host and worker are not concurrent
+  // IN-vring writers in practice. An idle guest's wake is the LAST step here, after
+  // the vring write, so the guest can't kick before the buffer is published.
+  const VW_DEV_WL = 0;
+  const VIRTIO_WASM_IRQ_BASE = 8; // matches drivers/virtio/virtio_wasm.c + kernel-worker
+  const hostWlQueues = new SharedQueues(virtio_queues);
+  let wlRaisedIrqsAddr = null; // byte offset of raised_irqs[0].counter (8-byte aligned)
+  let hostWlDevice = null;
+  const raiseHostWlIrq = (_cpu, irq) => {
+    if (wlRaisedIrqsAddr == null) return;
+    // Re-view each time: memory.grow() detaches the prior ArrayBuffer.
+    const i32 = new Int32Array(memory.buffer);
+    const word = wlRaisedIrqsAddr >>> 2; // counter at offset 0; irq (8) < 32 → low word
+    Atomics.or(i32, word, 1 << irq);
+    Atomics.notify(i32, word, 1);
+  };
+  const hostWl = () => {
+    if (!hostWlDevice && wlRaisedIrqsAddr != null) {
+      hostWlDevice = new WlDevice({
+        dev: VW_DEV_WL,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_WL,
+        memory,
+        raiseInterrupt: raiseHostWlIrq,
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues,
+        log,
+      });
+    }
+    return hostWlDevice;
+  };
+
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
+    // Wayland (idle wake): the worker hands us raised_irqs[0]'s address once,
+    // post-boot, so raiseHostWlIrq can wake the parked idle CPU directly.
+    wayland_irq_addr: (message) => {
+      wlRaisedIrqsAddr = message.addr >>> 0;
+      log(`[wayland] host idle-wake armed: raised_irqs[0] @0x${wlRaisedIrqsAddr.toString(16)}`);
+    },
     start_primary: (message) => {
       // CPU 0 has init_task which sits in static storage. After booting it becomes CPU 0's idle task. The runner will
       // in this special case tell us where it is so that we can register it.
@@ -361,21 +419,27 @@ export const linux = async ({
       Atomics.store(winsizes, vtermno | 0, packed);
     },
 
-    // Wayland Phase 2 (2c): deliver an UNSOLICITED server→client event from the
-    // main-thread compositor to the guest. Posts to cpu 0's worker (which owns the
-    // virtio_wl device + the live wasm instance); the worker injects it into the
-    // IN vring + raises the IRQ (see kernel-worker `wayland_in`). Used for events
-    // Greenfield flushes outside a guest SEND's synchronous round-trip
-    // (xdg_surface.configure, frame callbacks, wl_buffer.release, …).
+    // Wayland (idle wake): deliver an UNSOLICITED server→client event from the
+    // main-thread compositor to the guest — events Greenfield flushes OUTSIDE a
+    // guest SEND's synchronous round-trip (wl_pointer.motion/enter, frame
+    // callbacks, wl_buffer.release, xdg_surface.configure on a host-driven resize).
+    //
+    // Injected DIRECTLY on this (main) thread, NOT posted to the worker: when the
+    // guest is idle its Worker is parked in arch_cpu_idle's wait64 and never
+    // dequeues a postMessage (the 4e finding — this is why the cursor didn't
+    // track). The host WlDevice writes the IN vring over the shared queue SAB and
+    // raiseHostWlIrq wakes the parked CPU. Events that ride a SEND still go through
+    // the worker's SAB reply path; the compositor only calls this when no SEND is
+    // in flight. injectIn no-ops cleanly (logs "deferred") if the IN queue isn't
+    // set up yet (pre-handshake) or armed yet (addr not received).
     wayland_push_in: (clientId, bytes) => {
+      const dev = hostWl();
+      if (!dev) {
+        log("[wayland] push_in dropped: host idle-wake not armed yet");
+        return;
+      }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      cpus[0]?.worker?.postMessage(
-        {
-          method: "wayland_in",
-          clientId: clientId >>> 0,
-          buffer: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
-        },
-      );
+      dev.injectIn(clientId >>> 0, buf);
     },
   };
 };

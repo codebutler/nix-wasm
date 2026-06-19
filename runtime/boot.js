@@ -68,6 +68,7 @@ const dec = new TextDecoder();
  * @returns {Promise<{
  *   consoleCount: number,
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
+ *   pushIn(clientId: number, bytes: Uint8Array): void,
  *   kill(): void,
  * }>}
  */
@@ -143,18 +144,26 @@ export async function bootLinux(opts) {
   // write into the SAB reply buffer and notify — unblocking the worker, which
   // injects the reply into the IN vring + raises the IRQ. Synchronous because the
   // owning worker is blocked and can't service an async postMessage (9P shape).
-  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>Promise<void>|void } | undefined} */
+  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array, fds?:Uint8Array[])=>void)=>Promise<void>|void } | undefined} */
   const waylandOpt = opts.wayland;
   const WL_CH_IDLE = 0;
   const WL_REPLY_CAP = 256 * 1024; // max server→client reply bytes per SEND
+  const WL_FD_CAP = 64 * 1024; // max server→client fd-payload bytes per SEND
   let waylandChannel = undefined;
-  let waylandCtrl = null; // Int32Array [STATE, LEN]
+  let waylandCtrl = null; // Int32Array [STATE, LEN, FD_LEN]
   let waylandBytes = null; // Uint8Array reply buffer (SAB-backed)
+  let waylandFdBytes = null; // Uint8Array fd-payload region (SAB-backed):
+  //   [u32 fdCount][ per fd: u32 len, then `len` bytes ]
   const wayland = waylandOpt
     ? (() => {
-        waylandCtrl = new Int32Array(new SharedArrayBuffer(2 * 4));
+        waylandCtrl = new Int32Array(new SharedArrayBuffer(3 * 4));
         waylandBytes = new Uint8Array(new SharedArrayBuffer(WL_REPLY_CAP));
-        waylandChannel = { ctrl: waylandCtrl.buffer, bytes: waylandBytes.buffer };
+        waylandFdBytes = new Uint8Array(new SharedArrayBuffer(WL_FD_CAP));
+        waylandChannel = {
+          ctrl: waylandCtrl.buffer,
+          bytes: waylandBytes.buffer,
+          fdBytes: waylandFdBytes.buffer,
+        };
         return {
           // ASYNC onOut: feed Greenfield, then DRAIN its deferred flush queue
           // (microtasks/promises) before settling the SAB. Greenfield emits
@@ -173,7 +182,14 @@ export async function bootLinux(opts) {
             // zeros (the buffer's bytes land "6s later" — i.e. on the next edge).
             Atomics.load(waylandCtrl, 0);
             const chunks = [];
-            const replyTo = (b) => b && b.length && chunks.push(b);
+            /** @type {Uint8Array[]} server→client fd payloads (e.g. the keymap). */
+            const replyFds = [];
+            const replyTo = (b, fdPayloads) => {
+              if (b && b.length) chunks.push(b);
+              if (fdPayloads && fdPayloads.length) {
+                for (const p of fdPayloads) if (p && p.length) replyFds.push(p);
+              }
+            };
             try {
               await waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
             } catch (e) {
@@ -189,6 +205,29 @@ export async function bootLinux(opts) {
               waylandBytes.set(c.subarray(0, take), off);
               off += take;
             }
+            // Pack the fd payloads into the fd region: [u32 fdCount][u32 len,bytes]*.
+            // Drop any that overflow WL_FD_CAP (the keymap is ~1-2KB; this is slack).
+            let fdLen = 0;
+            const fdDv = new DataView(waylandFdBytes.buffer);
+            const packable = [];
+            let need = 4;
+            for (const p of replyFds) {
+              if (need + 4 + p.length > WL_FD_CAP) {
+                onLog(`[wayland] fd payload dropped (region full): ${p.length}B`);
+                continue;
+              }
+              packable.push(p);
+              need += 4 + p.length;
+            }
+            fdDv.setUint32(0, packable.length, true);
+            fdLen = 4;
+            for (const p of packable) {
+              fdDv.setUint32(fdLen, p.length, true);
+              fdLen += 4;
+              waylandFdBytes.set(p, fdLen);
+              fdLen += p.length;
+            }
+            Atomics.store(waylandCtrl, 2, fdLen); // FD_LEN
             Atomics.store(waylandCtrl, 1, len); // LEN
             Atomics.store(waylandCtrl, 0, WL_CH_IDLE); // STATE → IDLE (done)
             Atomics.notify(waylandCtrl, 0, 1);
@@ -253,6 +292,19 @@ export async function bootLinux(opts) {
           backlog.set(vt, []);
         },
       };
+    },
+
+    /**
+     * Push an UNSOLICITED server→client wayland event to the guest, outside any
+     * pending guest SEND round-trip. The compositor uses this for events
+     * Greenfield emits on its own (pointer enter/motion/leave, keyboard, frame
+     * callbacks, wl_buffer.release): there is no `onOut`/`replyTo` cycle to ride,
+     * so the bytes go straight onto the IN vring + raise the IRQ, waking the
+     * guest if it is parked in poll()/dispatch. No-op if the wayland bridge is
+     * not wired. @param {number} clientId guest ctx vfd_id @param {Uint8Array} bytes
+     */
+    pushIn(clientId, bytes) {
+      waylandPushIn?.(clientId, bytes);
     },
 
     /** Stop the 9P server loop. (Worker teardown is the caller's concern.) */
