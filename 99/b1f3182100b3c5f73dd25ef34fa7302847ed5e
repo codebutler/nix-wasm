@@ -1,0 +1,21 @@
+patches/kernel/0018-wasm-netfs-inline-readahead-collection.patch
+  s_d2c9c080387123::t_f8202c92556449 1-87
+kernel.nix
+  s_d2c9c080387123::t_7367567757ba24 83-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "99b1f3182100b3c5f73dd25ef34fa7302847ed5e",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
