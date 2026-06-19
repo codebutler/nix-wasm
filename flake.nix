@@ -346,6 +346,9 @@
         "wayland"
         "wayland-protocols"
         "pixman"
+        # cairo: image-surface-only build (pixman+zlib) for the toolkit path —
+        # backs stock cairo+wl_shm clients like weston-flowers. See deps-overlay.nix.
+        "cairo"
       ]);
     };
 }
