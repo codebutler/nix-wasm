@@ -19,7 +19,7 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC }:
+{ pkgs, kernelSrc, kernelCC, wasmTrace ? false }:
 pkgs.stdenv.mkDerivation {
   pname = "vmlinux-wasm";
   version = "7.0-039e5f3e";
@@ -81,6 +81,23 @@ pkgs.stdenv.mkDerivation {
     # CLONE_VM Memory hand-off to the child worker.
     ./patches/kernel/0017-wasm-clone-vm-owner-pid.patch
     ./patches/kernel/0018-wasm-netfs-inline-readahead-collection.patch
+    # CONFIG_WASM_TRACE shared-memory kernel trace ringbuffer (debug facility,
+    # default OFF): a static BSS ring the kernel writes timestamped event records
+    # into, read OUT-OF-BAND by the JS runtime from the main thread — survives a
+    # wedge the cooperative scheduler would otherwise hide (console can't flush
+    # after the wedge point). Inert unless CONFIG_WASM_TRACE is set (the
+    # `wasmTrace` arg below), so the canonical .#kernel stays bit-for-bit.
+    ./patches/kernel/0019-wasm-trace-ringbuffer.patch
+    # Gate the global nommu_region_tree add/delete (and free_page_series'
+    # private-vs-shared routing) on a per-region wasm_private flag instead of
+    # wasm_user_as_active(mm). The mm's user_as state FLIPS during exec relative
+    # to a region's lifetime — the R/O code image is tree-added BEFORE
+    # user_as_live is set but freed AFTER, so an mm-state delete-gate orphaned a
+    # freed node in the rbtree → corruption → the 2nd full-NixOS getty/login
+    # boot deadlock (one task spinning in do_mmap's rb_first under
+    # nommu_region_sem). The immutable per-region flag makes add/delete
+    # symmetric. CONFIG_WASM-guarded; non-wasm path unchanged.
+    ./patches/kernel/0020-wasm-region-tree-private-flag.patch
     # netfs read collection runs INLINE (not offloaded to a kworker) on the
     # maxcpus=1 cooperative port: offloaded readahead collection unlocks folios
     # from a kworker that can't be scheduled when the single CPU is wedged on
@@ -170,6 +187,10 @@ pkgs.stdenv.mkDerivation {
       `# (2GiB) positive-address limit. Shared fix — helps any large-binary exec.` \
       --set-val CONFIG_BOOT_MEM_PAGES 0x4000 \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
+    ${pkgs.lib.optionalString wasmTrace ''
+      # Debug build only: enable the shared-memory trace ringbuffer (patch 0019).
+      bash ./scripts/config --file build/.config --enable CONFIG_WASM_TRACE
+    ''}
 
     make $makeFlags olddefconfig
 

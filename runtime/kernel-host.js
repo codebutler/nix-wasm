@@ -55,6 +55,55 @@ export const linux = async ({
   /// Dict of tasks.
   const tasks = {};
 
+  /// CONFIG_WASM_TRACE: location of the kernel's shared-memory trace ringbuffer
+  /// ({ring, head, slots_addr} BSS addresses), published by the CPU-0 worker at
+  /// boot. Read OUT-OF-BAND by dumpWtrace() (below) straight from the shared
+  /// `memory`, independent of console flush / which worker is wedged.
+  let wtrace_info = null;
+
+  // CONFIG_WASM_TRACE event-id → name map (asm/wtrace.h enum wtrace_event),
+  // shared by dumpWtrace() and the WT_DUMP_AT one-shot dumper.
+  const _wtEV = {
+    1: "MMAP_ENTER", 2: "MMAP_SEM_GET", 3: "MMAP_SEM_HELD", 4: "MMAP_SHARE_SCAN",
+    5: "MMAP_SHARE_ITER", 6: "MMAP_SHARE_HIT", 7: "MMAP_PRIVATE", 8: "MMAP_ADDREGION",
+    9: "MMAP_ADDREGION_DONE", 10: "MMAP_ZERO", 11: "MMAP_SEM_PUT", 12: "MMAP_DONE",
+    13: "ADDREG_ENTER", 14: "ADDREG_LOOP", 15: "ADDREG_BUG", 16: "ALLOC_ENTER",
+    17: "ALLOC_FREELIST", 18: "ALLOC_GROW", 19: "ALLOC_DONE", 20: "PUTREG_ENTER",
+    21: "PUTREG_DONE", 106: "MMAP_VMA_STORE",
+  };
+  // Read the kernel trace ringbuffer out-of-band from the shared `memory`
+  // (referenced lazily — declared below; only ever called post-boot). Returns
+  // the last `n` records, decoded. [] without CONFIG_WASM_TRACE (wtrace_info
+  // stays null). Exposed via the handle's dumpWtrace().
+  const handleDumpWtrace = (n = 256) => {
+    if (!wtrace_info) return [];
+    const REC = 56; // sizeof(struct wtrace_rec)
+    const dv = new DataView(memory.buffer);
+    const slots = dv.getUint32(wtrace_info.slots_addr, true);
+    const head = dv.getUint32(wtrace_info.head, true); /* unsigned long = 4 bytes on wasm32 */
+    if (!head) return [];
+    const out = [];
+    const start = Math.max(1, head - Math.min(n, slots) + 1);
+    for (let seq = start; seq <= head; seq++) {
+      const idx = (seq - 1) & (slots - 1);
+      const base = wtrace_info.ring + idx * REC;
+      const s0 = Number(dv.getBigUint64(base, true));
+      if (s0 === 0) continue;
+      const ts = Number(dv.getBigUint64(base + 8, true));
+      const pid = dv.getUint32(base + 16, true);
+      const cpu = dv.getUint32(base + 20, true);
+      const event = dv.getUint32(base + 24, true);
+      const a0 = Number(dv.getBigUint64(base + 32, true));
+      const a1 = Number(dv.getBigUint64(base + 40, true));
+      const a2 = Number(dv.getBigUint64(base + 48, true));
+      const s1 = Number(dv.getBigUint64(base, true));
+      if (s1 !== s0) continue;
+      out.push({ seq: s0, ts, pid, cpu, event, a0, a1, a2 });
+    }
+    out.sort((x, y) => x.seq - y.seq);
+    return out;
+  };
+
   /// pc (new exec ABI): the host-side compiled-Module cache (keyed by an opaque
   /// per-inode token) is GONE. binfmt_wasm now places the user binary as a byte
   /// range in the SHARED kernel memory; each task worker compiles it directly
@@ -93,6 +142,71 @@ export const linux = async ({
       // in this special case tell us where it is so that we can register it.
       log("Starting cpu 0 with init_task " + message.init_task);
       tasks[message.init_task] = cpus[0];
+      // CONFIG_WASM_TRACE: remember the trace ringbuffer location for dumpWtrace().
+      if (message.wtrace) wtrace_info = message.wtrace;
+      // WT_DUMP_AT=<ms>: one-shot self-contained dump of the trace ring to a
+      // file at a fixed wall-clock delay, then exit. Runs entirely on the main
+      // thread with direct `memory`+`wtrace_info` access (no test await chain),
+      // so it captures a quiet wedge before V8's shared-Memory external-memory
+      // accounting OOMs a long-lived harness. Diagnostic only (WT_DUMP_AT unset
+      // in normal use).
+      if (typeof process !== "undefined" && process.env && process.env.WT_DUMP_AT) {
+        const fs = require("fs");
+        const delay = Number(process.env.WT_DUMP_AT);
+        const file = process.env.WT_DUMP_FILE || "/tmp/wt-oneshot.txt";
+        const t = setTimeout(() => {
+          // Stream straight to an fd, reading one record at a time (no big
+          // arrays) — at the dump moment the process is near V8's limit from
+          // the workers' shared Memories, so allocate as little as possible.
+          let fd = -1;
+          try {
+            fd = fs.openSync(file, "w");
+            const dv = new DataView(memory.buffer);
+            const slots = dv.getUint32(wtrace_info.slots_addr, true);
+            const head = dv.getUint32(wtrace_info.head, true); /* unsigned long = 4 bytes on wasm32 */
+            const REC = 56;
+            const rd = (seq) => {
+              const idx = (seq - 1) & (slots - 1);
+              const b = wtrace_info.ring + idx * REC;
+              return {
+                seq: Number(dv.getBigUint64(b, true)),
+                pid: dv.getUint32(b + 16, true),
+                cpu: dv.getUint32(b + 20, true),
+                ev: dv.getUint32(b + 24, true),
+                a0: Number(dv.getBigUint64(b + 32, true)),
+                a1: Number(dv.getBigUint64(b + 40, true)),
+                a2: Number(dv.getBigUint64(b + 48, true)),
+              };
+            };
+            fs.writeSync(fd, `WT_DUMP_AT=${delay} head=${head} slots=${slots}\n`);
+            // last event per pid (single scan over the live window)
+            const N = Math.min(slots, head);
+            const lastByPid = new Map();
+            for (let seq = head - N + 1; seq <= head; seq++) {
+              if (seq < 1) continue;
+              const r = rd(seq);
+              if (r.seq === seq) lastByPid.set(r.pid, r);
+            }
+            fs.writeSync(fd, "=== last event per pid ===\n");
+            for (const [p, r] of [...lastByPid].sort((a, b) => a[0] - b[0]))
+              fs.writeSync(fd, `pid ${p}: ${_wtEV[r.ev] || r.ev} @${r.seq} a0=0x${(r.a0 >>> 0).toString(16)} a1=0x${(r.a1 >>> 0).toString(16)} a2=0x${(r.a2 >>> 0).toString(16)}\n`);
+            // tail 250
+            fs.writeSync(fd, "=== tail 250 ===\n");
+            for (let seq = Math.max(1, head - 250 + 1); seq <= head; seq++) {
+              const r = rd(seq);
+              if (r.seq !== seq) continue;
+              fs.writeSync(fd, `${r.seq} p${r.pid}/c${r.cpu} ${_wtEV[r.ev] || r.ev} a0=0x${(r.a0 >>> 0).toString(16)} a1=0x${(r.a1 >>> 0).toString(16)} a2=0x${(r.a2 >>> 0).toString(16)}\n`);
+            }
+            fs.closeSync(fd);
+            console.error(`[WT_DUMP_AT] wrote ${file} head=${head}`);
+          } catch (e) {
+            try { if (fd >= 0) fs.closeSync(fd); } catch {}
+            console.error("[WT_DUMP_AT] failed", String(e).slice(0, 120));
+          }
+          process.exit(0);
+        }, delay);
+        if (t.unref) t.unref();
+      }
     },
 
     start_secondary: (message) => {
@@ -399,6 +513,13 @@ export const linux = async ({
       const packed = (((rows | 0) & 0xffff) << 16) | ((cols | 0) & 0xffff);
       Atomics.store(winsizes, vtermno | 0, packed);
     },
+
+    // CONFIG_WASM_TRACE: read the kernel trace ringbuffer out-of-band from the
+    // shared memory. Returns the last `n` records (chronological), decoded. Safe
+    // to call at any time — even while a worker is wedged — because the main
+    // thread holds the same shared `memory` and never blocks. Returns [] when
+    // the kernel was built without CONFIG_WASM_TRACE (wtrace_info stays null).
+    dumpWtrace: (n = 256) => handleDumpWtrace(n),
 
     // Wayland Phase 2 (2c): deliver an UNSOLICITED server→client event from the
     // main-thread compositor to the guest. Posts to cpu 0's worker (which owns the

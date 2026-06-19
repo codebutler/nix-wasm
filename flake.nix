@@ -48,6 +48,10 @@
       kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
       kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
 
+      # Debug-only kernel with CONFIG_WASM_TRACE on (patch 0019 ringbuffer). NOT
+      # for publishing — diagnoses guest wedges out-of-band; build .#kernel-trace.
+      kernelTrace = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; wasmTrace = true; };
+
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
       # libllvm/lld/clang rebuild routes clang through ccache, turning a from-
@@ -217,6 +221,31 @@
         inherit pkgs; toplevel = wasmToplevel;
       };
 
+      # ---- DEBUG: a 1-getty variant of the served closure ------------------
+      # The full 8-getty boot spawns ~32 worker_threads, each holding a 2 GiB-max
+      # private WebAssembly.Memory — V8 reserves the full max as virtual address
+      # space for a shared:true memory, so 32×2 GiB overruns a 13 GiB host (OS
+      # OOM-kill). A 1-getty closure cuts the worker count enough to boot the
+      # full NixOS userspace headless for the do_mmap-wedge regression test. Same
+      # everything else; only the inittab getty count differs.
+      mkDebugManifest = n:
+        let
+          it = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; nrConsoles = n; };
+          tl = import ./userspace/toplevel.nix {
+            pkgs = cross;
+            busybox = wasmBusybox;
+            etc = wasmSystem.config.system.build.etc;
+            systemPath = wasmSystem.config.system.path;
+            passwd = wasmPasswd.passwd;
+            group = wasmPasswd.group;
+            inittab = it;
+            activate = wasmActivate;
+          };
+        in import ./userspace/store-manifest.nix { inherit pkgs; toplevel = tl; };
+      wasmStoreManifest1 = mkDebugManifest 1;
+      wasmStoreManifest2 = mkDebugManifest 2;
+      wasmStoreManifest3 = mkDebugManifest 3;
+
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
         owner = "NixOS";
@@ -268,6 +297,9 @@
 
         # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
         kernel = kernel;
+
+        # Debug-only: kernel with CONFIG_WASM_TRACE (out-of-band trace ring).
+        kernel-trace = kernelTrace;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
@@ -335,6 +367,15 @@
 
         # The wasm-system closure exported as store.json for pc to serve over 9P.
         wasm-store-manifest = wasmStoreManifest;
+
+        # DEBUG: reduced-getty served closures (fit the full-boot wedge
+        # regression within host RAM; see mkDebugManifest). 1getty boots
+        # interactively (no concurrent-exec race); 3getty triggers the
+        # nommu_region_sem race the 8-getty boot hits, with few enough workers
+        # to fit RAM.
+        wasm-store-manifest-1getty = wasmStoreManifest1;
+        wasm-store-manifest-2getty = wasmStoreManifest2;
+        wasm-store-manifest-3getty = wasmStoreManifest3;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''

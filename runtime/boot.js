@@ -263,6 +263,12 @@ export async function bootLinux(opts) {
       };
     },
 
+    /** CONFIG_WASM_TRACE: read the kernel's shared-memory trace ringbuffer
+     *  out-of-band (last `n` records). [] without CONFIG_WASM_TRACE. */
+    dumpWtrace(n) {
+      return os.dumpWtrace ? os.dumpWtrace(n) : [];
+    },
+
     /** Stop the 9P server loop. (Worker teardown is the caller's concern.) */
     kill() {
       if (!alive) return;

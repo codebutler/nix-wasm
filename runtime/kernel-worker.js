@@ -380,7 +380,11 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // a different Memory object here, resolved per-pid via userMems. (Task 4b
   // CLONE_VM threads will deliberately share the parent pid's entry.)
   // Grow-only: small initial (data+stack+slack, sized by the kernel), generous max.
-  const USER_MEM_MAX_PAGES = 0x8000; // 2 GiB cap; grow-only, only committed pages cost.
+  // 2 GiB cap; grow-only, only committed pages cost. Overridable via the
+  // WT_USERMEM_MAX env (diagnostics only — V8 reserves the full max as virtual
+  // address space for a shared:true Memory, so a headless many-worker boot on a
+  // RAM-constrained host can lower it to fit; unset in normal use → 0x8000).
+  const USER_MEM_MAX_PAGES = Number(globalThis.process?.env?.WT_USERMEM_MAX || 0x8000);
   const mintUserMem = (pid, init_pages) => {
     return new WebAssembly.Memory({
       initial: Number(init_pages),
@@ -884,9 +888,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       const vmlinux_run = () => {
         if (message.runner_type == "primary_cpu") {
           // Notify the main thread about init task so that it knows where it resides in memory.
+          // CONFIG_WASM_TRACE: also publish the shared-memory trace ringbuffer's
+          // location (base/head/slots are exported wasm globals holding their
+          // BSS addresses) so the main thread can read it OUT-OF-BAND, even when
+          // a worker is wedged and the console can't flush. Absent in a build
+          // without CONFIG_WASM_TRACE (the `?.value` guards).
+          const ex = vmlinux_instance.exports;
           port.postMessage({
             method: "start_primary",
-            init_task: vmlinux_instance.exports.init_task.value,
+            init_task: ex.init_task.value,
+            wtrace:
+              ex.wtrace_ring && ex.wtrace_head && ex.wtrace_slots
+                ? {
+                    ring: Number(ex.wtrace_ring.value),
+                    head: Number(ex.wtrace_head.value),
+                    slots_addr: Number(ex.wtrace_slots.value),
+                  }
+                : null,
           });
 
           // Setup the boot command line. We have the luxury to be able to write to it directly. The maximum length is

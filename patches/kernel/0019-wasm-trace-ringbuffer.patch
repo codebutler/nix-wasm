@@ -1,0 +1,409 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 19 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: CONFIG_WASM_TRACE shared-memory kernel trace ringbuffer
+
+A console-independent diagnosis facility for the cooperative maxcpus=1 wasm
+port. The kernel writes fixed-size timestamped event records into a static BSS
+ring (in the SHARED kernel WebAssembly.Memory); --export-all exposes the ring
+base/head/slot-count as wasm globals, so the JS runtime reads it OUT-OF-BAND
+from the main thread at any time -- independent of console flush, the scheduler,
+or which worker is wedged. Wired into do_mmap / add_nommu_region /
+__put_nommu_region / the per-mm allocator to capture the last events each task
+ran before a wedge.
+
+Gated by CONFIG_WASM_TRACE (default n); the hermetic build is unchanged.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/arch/wasm/Kconfig.debug b/arch/wasm/Kconfig.debug
+index a4e40e534..aa1dae44d 100644
+--- a/arch/wasm/Kconfig.debug
++++ b/arch/wasm/Kconfig.debug
+@@ -1 +1,16 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++
++config WASM_TRACE
++	bool "wasm shared-memory trace ringbuffer"
++	depends on WASM
++	default n
++	help
++	  A fixed-size kernel trace ringbuffer in the shared kernel
++	  WebAssembly.Memory, written by the kernel (timestamped event records)
++	  and read OUT-OF-BAND by the JS runtime from the main thread —
++	  independent of console flush and the cooperative scheduler. Used to
++	  diagnose wedges where printk after the wedge point never flushes
++	  (e.g. the per-process-memory do_mmap getty deadlock). Off by default;
++	  the hermetic build is unchanged.
++
++	  Say N unless you are debugging a guest hang.
+diff --git a/arch/wasm/include/asm/wtrace.h b/arch/wasm/include/asm/wtrace.h
+new file mode 100644
+index 000000000..96cb793f8
+--- /dev/null
++++ b/arch/wasm/include/asm/wtrace.h
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * wtrace — a fixed shared-memory kernel trace ringbuffer for the wasm port.
++ *
++ * The cooperative maxcpus=1 scheduler couples console flush to forward
++ * progress: when a task wedges, printk after the wedge point never flushes, so
++ * the console goes dark exactly where the bug is. wtrace sidesteps that: the
++ * kernel writes fixed-size timestamped event records into a static BSS ring
++ * (which lives in the SHARED kernel WebAssembly.Memory), advancing a head
++ * counter atomically. The JS runtime reads the ring OUT-OF-BAND from the main
++ * thread (it holds the same shared memory) at any time — independent of console
++ * flush, the scheduler, or which worker is wedged. So the last events each task
++ * executed before a wedge survive.
++ *
++ * Gated by CONFIG_WASM_TRACE (default off — the hermetic build is unchanged).
++ * The ring base/capacity/head are plain kernel globals; --export-all makes them
++ * wasm exports, so the runtime locates them exactly like boot_command_line.
++ */
++#ifndef _ASM_WASM_WTRACE_H
++#define _ASM_WASM_WTRACE_H
++
++#ifdef CONFIG_WASM_TRACE
++
++#include <linux/types.h>
++
++/* One ring slot. Kept POD + fixed-width so the JS side decodes it trivially. */
++struct wtrace_rec {
++	u64 seq;	/* monotonic record sequence (0 = never written) */
++	u64 ts_us;	/* wasm_cpu_clock_get_monotonic() microseconds */
++	u32 pid;	/* task_pid_nr(current), or 0 */
++	u32 cpu;	/* smp_processor_id() */
++	u32 event;	/* WT_* event id */
++	u32 _pad;
++	u64 a0, a1, a2;	/* event-specific payload */
++};
++
++#define WTRACE_RING_SLOTS 4096	/* power of two; ~256 KiB of BSS */
++
++/* Event ids. Keep in sync with the JS decoder (kernel-host.js wtrace names). */
++enum wtrace_event {
++	WT_MMAP_ENTER = 1,	/* do_mmap entry:        a0=addr a1=len a2=flags */
++	WT_MMAP_SEM_GET,	/* about to down_write(nommu_region_sem) */
++	WT_MMAP_SEM_HELD,	/* acquired nommu_region_sem */
++	WT_MMAP_SHARE_SCAN,	/* entering the shared-region rbtree scan: a0=pgoff a1=pglen */
++	WT_MMAP_SHARE_ITER,	/* one rbtree node visited: a0=region a1=vm_start a2=vm_pgoff */
++	WT_MMAP_SHARE_HIT,	/* found a shareable region: a0=region a1=start */
++	WT_MMAP_PRIVATE,	/* taking do_mmap_private: a0=file? */
++	WT_MMAP_ADDREGION,	/* about to add_nommu_region: a0=vm_start a1=vm_top */
++	WT_MMAP_ADDREGION_DONE,	/* add_nommu_region returned */
++	WT_MMAP_ZERO,		/* anon-zero clear: a0=start a1=len */
++	WT_MMAP_SEM_PUT,	/* about to up_write(nommu_region_sem) */
++	WT_MMAP_DONE,		/* do_mmap returning: a0=result */
++	WT_ADDREG_ENTER,	/* add_nommu_region entry: a0=vm_start a1=vm_top */
++	WT_ADDREG_LOOP,		/* add_nommu_region rbtree descent step: a0=pregion a1=vm_start */
++	WT_ADDREG_BUG,		/* add_nommu_region hit the overlap BUG: a0=vm_start */
++	WT_ALLOC_ENTER,		/* wasm_user_as_alloc entry: a0=len */
++	WT_ALLOC_FREELIST,	/* scanning the free-list: a0=extent a1=start a2=len */
++	WT_ALLOC_GROW,		/* growing private memory: a0=delta_pages */
++	WT_ALLOC_DONE,		/* wasm_user_as_alloc returning: a0=base */
++	WT_PUTREG_ENTER,	/* __put_nommu_region: a0=region a1=private_as */
++	WT_PUTREG_DONE,		/* __put_nommu_region returned */
++};
++
++/* The ring + its head, defined in arch/wasm/kernel/wtrace.c (exported). */
++extern struct wtrace_rec wtrace_ring[WTRACE_RING_SLOTS];
++extern unsigned long wtrace_head;	/* total records ever written (atomic) */
++extern unsigned long wtrace_slots;	/* == WTRACE_RING_SLOTS, for the JS side */
++
++void wtrace_emit(u32 event, u64 a0, u64 a1, u64 a2);
++
++#define WTRACE(ev, a0, a1, a2) wtrace_emit((ev), (u64)(a0), (u64)(a1), (u64)(a2))
++
++#else /* !CONFIG_WASM_TRACE */
++
++#define WTRACE(ev, a0, a1, a2) do { } while (0)
++
++#endif /* CONFIG_WASM_TRACE */
++
++#endif /* _ASM_WASM_WTRACE_H */
+diff --git a/arch/wasm/kernel/Makefile b/arch/wasm/kernel/Makefile
+index 626d38d03..29dc5031d 100644
+--- a/arch/wasm/kernel/Makefile
++++ b/arch/wasm/kernel/Makefile
+@@ -20,6 +20,7 @@ obj-y += syscall_table.o
+ obj-y += time.o
+ obj-y += traps.o
+ obj-y += uaccess.o
++obj-$(CONFIG_WASM_TRACE) += wtrace.o
+ 
+ ifndef CONFIG_64BIT
+ obj-y += sys_wasm32.o
+diff --git a/arch/wasm/kernel/wtrace.c b/arch/wasm/kernel/wtrace.c
+new file mode 100644
+index 000000000..fc2be3f0f
+--- /dev/null
++++ b/arch/wasm/kernel/wtrace.c
+@@ -0,0 +1,56 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * wtrace — shared-memory kernel trace ringbuffer (see asm/wtrace.h).
++ *
++ * Console-independent diagnosis facility for the cooperative maxcpus=1 wasm
++ * port. wtrace_emit writes one fixed record per call into a static BSS ring and
++ * bumps a global head counter with a relaxed atomic. The ring + head + slot
++ * count are plain globals; --export-all (arch/wasm/Makefile LDFLAGS_vmlinux)
++ * exports them, so the JS runtime reads them straight out of the shared kernel
++ * WebAssembly.Memory at any time, even while a task is wedged.
++ *
++ * Lock-free single-ring, last-N-wins: writers race only on the head increment
++ * (atomic), then stamp their own slot. Under maxcpus=1 there is effectively one
++ * writer at a time anyway; the atomic keeps it correct if that ever changes.
++ * Records can be torn if the reader races a writer mid-stamp, but the JS side
++ * reads each slot's seq twice (before/after) and retries — good enough for a
++ * post-mortem snapshot.
++ */
++#include <linux/types.h>
++#include <linux/atomic.h>
++#include <linux/smp.h>
++#include <linux/sched.h>
++#include <linux/pid.h>
++#include <asm/wtrace.h>
++
++extern unsigned long long wasm_cpu_clock_get_monotonic(void);
++
++struct wtrace_rec wtrace_ring[WTRACE_RING_SLOTS];
++unsigned long wtrace_head;
++unsigned long wtrace_slots = WTRACE_RING_SLOTS;
++
++static atomic_long_t wtrace_seq = ATOMIC_LONG_INIT(0);
++
++void wtrace_emit(u32 event, u64 a0, u64 a1, u64 a2)
++{
++	unsigned long seq = atomic_long_inc_return(&wtrace_seq);
++	unsigned long idx = (seq - 1) & (WTRACE_RING_SLOTS - 1);
++	struct wtrace_rec *r = &wtrace_ring[idx];
++
++	/*
++	 * Stamp seq LAST (after the body) with a release so the JS reader, which
++	 * checks seq before and after copying the slot, sees a complete record.
++	 * Write a sentinel seq=0 first so a half-written slot reads as "empty".
++	 */
++	WRITE_ONCE(r->seq, 0);
++	r->ts_us = wasm_cpu_clock_get_monotonic();
++	r->pid = current ? task_pid_nr(current) : 0;
++	r->cpu = raw_smp_processor_id();
++	r->event = event;
++	r->a0 = a0;
++	r->a1 = a1;
++	r->a2 = a2;
++	smp_wmb();
++	WRITE_ONCE(r->seq, seq);
++	WRITE_ONCE(wtrace_head, seq);
++}
+diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
+index 5bd8ecdad..e4121952e 100644
+--- a/arch/wasm/mm/user_as.c
++++ b/arch/wasm/mm/user_as.c
+@@ -34,6 +34,7 @@
+ #include <asm/mmu.h>
+ #include <asm/user_as.h>
+ #include <asm/wasm.h>
++#include <asm/wtrace.h>
+ 
+ bool wasm_user_as_enabled __ro_after_init;
+ 
+@@ -106,14 +107,18 @@ unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len)
+ {
+ 	unsigned long base, need_end, have, want, delta_pages, grown;
+ 
++	WTRACE(WT_ALLOC_ENTER, len, mm->context.user_as_brk,
++	       mm->context.user_as_size);
+ 	len = PAGE_ALIGN(len);
+ 	if (!len)
+ 		return 0;
+ 
+ 	/* Reuse a freed extent first (munmap reuse). */
+ 	base = alloc_from_freelist(mm, len);
+-	if (base)
++	if (base) {
++		WTRACE(WT_ALLOC_DONE, base, 1, len);
+ 		return base;
++	}
+ 
+ 	/* Else bump from the brk. */
+ 	base = mm->context.user_as_brk;
+@@ -126,6 +131,7 @@ unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len)
+ 	if (need_end > have) {
+ 		want = ALIGN(need_end - have, WASM_PAGE_SIZE);
+ 		delta_pages = want / WASM_PAGE_SIZE;	/* runtime grows in wasm pages */
++		WTRACE(WT_ALLOC_GROW, delta_pages, need_end, have);
+ 		grown = wasm_user_mem_grow(wasm_user_as_pid(mm), delta_pages);
+ 		if (grown == (unsigned long)-1)
+ 			return 0;
+@@ -135,6 +141,7 @@ unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len)
+ 	}
+ 
+ 	mm->context.user_as_brk = need_end;
++	WTRACE(WT_ALLOC_DONE, base, 0, len);
+ 	return base;
+ }
+ 
+diff --git a/mm/nommu.c b/mm/nommu.c
+index 3cd11050e..2d5bc1d12 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -44,6 +44,7 @@
+ /* Task 2: per-`mm` base-0 user address space allocator + the user/kernel gate. */
+ #include <asm/mmu.h>
+ #include <asm/user_as.h>
++#include <asm/wtrace.h>
+ #endif
+ #include "internal.h"
+ 
+@@ -478,6 +479,7 @@ static void add_nommu_region(struct vm_region *region)
+ 	struct vm_region *pregion;
+ 	struct rb_node **p, *parent;
+ 
++	WTRACE(WT_ADDREG_ENTER, region->vm_start, region->vm_top, region->vm_flags);
+ 	validate_nommu_regions();
+ 
+ 	parent = NULL;
+@@ -485,14 +487,18 @@ static void add_nommu_region(struct vm_region *region)
+ 	while (*p) {
+ 		parent = *p;
+ 		pregion = rb_entry(parent, struct vm_region, vm_rb);
++		WTRACE(WT_ADDREG_LOOP, (unsigned long)pregion, pregion->vm_start,
++		       region->vm_start);
+ 		if (region->vm_start < pregion->vm_start)
+ 			p = &(*p)->rb_left;
+ 		else if (region->vm_start > pregion->vm_start)
+ 			p = &(*p)->rb_right;
+ 		else if (pregion == region)
+ 			return;
+-		else
++		else {
++			WTRACE(WT_ADDREG_BUG, region->vm_start, pregion->vm_start, 0);
+ 			BUG();
++		}
+ 	}
+ 
+ 	rb_link_node(&region->vm_rb, parent, p);
+@@ -571,6 +577,8 @@ static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 	 */
+ 	bool private_as = wasm_user_as_active(mm);
+ 
++	WTRACE(WT_PUTREG_ENTER, (unsigned long)region, private_as,
++	       region->vm_usage);
+ 	BUG_ON(!private_as && !nommu_region_tree.rb_node);
+ 
+ 	if (--region->vm_usage == 0) {
+@@ -586,8 +594,10 @@ static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 		if (region->vm_flags & VM_MAPPED_COPY)
+ 			free_page_series(mm, region->vm_start, region->vm_top);
+ 		kmem_cache_free(vm_region_jar, region);
++		WTRACE(WT_PUTREG_DONE, (unsigned long)region, 1, 0);
+ 	} else {
+ 		up_write(&nommu_region_sem);
++		WTRACE(WT_PUTREG_DONE, (unsigned long)region, 0, region->vm_usage);
+ 	}
+ }
+ 
+@@ -1119,6 +1129,8 @@ unsigned long do_mmap(struct file *file,
+ 
+ 	*populate = 0;
+ 
++	WTRACE(WT_MMAP_ENTER, addr, len, flags);
++
+ 	/* decide whether we should attempt the mapping, and if so what sort of
+ 	 * mapping */
+ 	ret = validate_mmap_request(file, addr, len, prot, flags, pgoff,
+@@ -1156,7 +1168,9 @@ unsigned long do_mmap(struct file *file,
+ 		vma->vm_file = get_file(file);
+ 	}
+ 
++	WTRACE(WT_MMAP_SEM_GET, vm_flags, is_nommu_shared_mapping(vm_flags), (unsigned long)file);
+ 	down_write(&nommu_region_sem);
++	WTRACE(WT_MMAP_SEM_HELD, vm_flags, 0, 0);
+ 
+ 	/* if we want to share, we need to check for regions created by other
+ 	 * mmap() calls that overlap with our proposed mapping
+@@ -1173,9 +1187,13 @@ unsigned long do_mmap(struct file *file,
+ 		pglen = (len + PAGE_SIZE - 1) >> PAGE_SHIFT;
+ 		pgend = pgoff + pglen;
+ 
++		WTRACE(WT_MMAP_SHARE_SCAN, pgoff, pglen, 0);
+ 		for (rb = rb_first(&nommu_region_tree); rb; rb = rb_next(rb)) {
+ 			pregion = rb_entry(rb, struct vm_region, vm_rb);
+ 
++			WTRACE(WT_MMAP_SHARE_ITER, (unsigned long)pregion,
++			       pregion->vm_start, pregion->vm_pgoff);
++
+ 			if (!is_nommu_shared_mapping(pregion->vm_flags))
+ 				continue;
+ 
+@@ -1204,6 +1222,8 @@ unsigned long do_mmap(struct file *file,
+ 			}
+ 
+ 			/* we've found a region we can share */
++			WTRACE(WT_MMAP_SHARE_HIT, (unsigned long)pregion,
++			       pregion->vm_start, pregion->vm_usage);
+ 			pregion->vm_usage++;
+ 			vma->vm_region = pregion;
+ 			start = pregion->vm_start;
+@@ -1263,6 +1283,8 @@ unsigned long do_mmap(struct file *file,
+ 	/* set up the mapping
+ 	 * - the region is filled in if NOMMU_MAP_DIRECT is still set
+ 	 */
++	WTRACE(WT_MMAP_PRIVATE, (unsigned long)file, vma->vm_flags,
++	       wasm_user_as_active(current->mm));
+ 	if (file && vma->vm_flags & VM_SHARED)
+ 		ret = do_mmap_shared_file(vma);
+ 	else
+@@ -1279,8 +1301,11 @@ unsigned long do_mmap(struct file *file,
+ 	 * is skipped symmetrically in __put_nommu_region). Gated by
+ 	 * user_as_active, so the legacy shared NOMMU path is unchanged.
+ 	 */
+-	if (!wasm_user_as_active(current->mm))
++	if (!wasm_user_as_active(current->mm)) {
++		WTRACE(WT_MMAP_ADDREGION, region->vm_start, region->vm_top, 0);
+ 		add_nommu_region(region);
++		WTRACE(WT_MMAP_ADDREGION_DONE, region->vm_start, 0, 0);
++	}
+ 
+ 	/* clear anonymous mappings that don't ask for uninitialized data */
+ 	if (!vma->vm_file &&
+@@ -1292,13 +1317,19 @@ unsigned long do_mmap(struct file *file,
+ 		 * kernel pointer — zero it through the host-bridge (wasm_user_memzero)
+ 		 * instead of memset()ing a bogus kernel address. Gated by user_as_live.
+ 		 */
+-		if (wasm_user_as_active(current->mm))
++		if (wasm_user_as_active(current->mm)) {
++			WTRACE(WT_MMAP_ZERO, region->vm_start,
++			       region->vm_end - region->vm_start, 1);
+ 			wasm_user_as_memzero(current->mm, region->vm_start,
+ 					     region->vm_end - region->vm_start);
+-		else
++		} else
+ #endif
++		{
++		WTRACE(WT_MMAP_ZERO, region->vm_start,
++		       region->vm_end - region->vm_start, 0);
+ 		memset((void *)region->vm_start, 0,
+ 		       region->vm_end - region->vm_start);
++		}
+ 	}
+ 
+ 	/* okay... we have a mapping; now we have to register it */
+@@ -1308,6 +1339,7 @@ unsigned long do_mmap(struct file *file,
+ 
+ share:
+ 	BUG_ON(!vma->vm_region);
++	WTRACE(WT_MMAP_SHARE_HIT + 100, vma->vm_start, vma->vm_end, 0);
+ 	vma_iter_config(&vmi, vma->vm_start, vma->vm_end);
+ 	if (vma_iter_prealloc(&vmi, vma))
+ 		goto error_just_free;
+@@ -1324,7 +1356,9 @@ unsigned long do_mmap(struct file *file,
+ 		region->vm_icache_flushed = true;
+ 	}
+ 
++	WTRACE(WT_MMAP_SEM_PUT, result, 0, 0);
+ 	up_write(&nommu_region_sem);
++	WTRACE(WT_MMAP_DONE, result, 0, 0);
+ 
+ 	return result;
+ 
