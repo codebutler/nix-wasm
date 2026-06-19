@@ -30,6 +30,17 @@ export const linux = async ({
   log,
   console_write,
   ninep_ring,
+  // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
+  virtio_queues,
+  // Wayland Phase 2 (2b inversion): optional host hook for the worker→main
+  // Greenfield bridge. `onOut(clientId, buffer, fds)` is called when a guest
+  // VFD_SEND posts wayland bytes out of the worker (which is BLOCKED on the
+  // wayland SAB channel awaiting the reply); the host feeds them into the
+  // main-thread compositor and writes the reply back over that SAB channel.
+  wayland,
+  // Wayland Phase 2 (2b): the SAB channel { ctrl, bytes } threaded into every
+  // worker so the blocking onOut round-trip works from any task worker.
+  wayland_channel,
   // pc: accepted for caller API stability but now a no-op — the new exec ABI
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
@@ -144,6 +155,31 @@ export const linux = async ({
       // In case the task was dying, we're now done. prev_task will wait in serialize_me() but never be scheduled again.
       if (tasks[message.prev_task].kill) {
         kill_task(message.prev_task);
+      }
+    },
+
+    // Wayland Phase 2 (2b inversion): a guest VFD_SEND's wayland bytes posted
+    // out of a task worker (which is now blocked on the wayland SAB channel
+    // awaiting the reply). Re-view the shm fds over the SHARED memory and hand
+    // it to the host bridge → main-thread Greenfield. The bridge (wired in
+    // boot.js) writes the compositor's reply back over the SAB channel + notifies
+    // the blocked worker — this thread does NOT post back to the worker.
+    wayland_out: (message, _worker) => {
+      const clientId = message.clientId >>> 0;
+      const fds = (message.fds || []).map(
+        (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
+      );
+      if (wayland && typeof wayland.onOut === "function") {
+        // onOut is ASYNC (it drains Greenfield's deferred flush queue before
+        // settling the SAB). The worker is blocked in Atomics.wait, so awaiting
+        // here lets the main thread run those microtasks; the worker wakes when
+        // onOut settles the channel. No await on the handler itself is needed —
+        // the promise self-settles the SAB.
+        Promise.resolve(wayland.onOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
+          log("[wayland] onOut rejected: " + (e && e.stack ? e.stack : e)),
+        );
+      } else {
+        log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
       }
     },
 
@@ -286,6 +322,8 @@ export const linux = async ({
       last_task: last_task,
       runner_name: name,
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
+      virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
+      wayland_channel: wayland_channel, // Wayland 2b: sync OUT round-trip SAB
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
     });
 
@@ -321,6 +359,23 @@ export const linux = async ({
     set_winsize: (vtermno, cols, rows) => {
       const packed = (((rows | 0) & 0xffff) << 16) | ((cols | 0) & 0xffff);
       Atomics.store(winsizes, vtermno | 0, packed);
+    },
+
+    // Wayland Phase 2 (2c): deliver an UNSOLICITED server→client event from the
+    // main-thread compositor to the guest. Posts to cpu 0's worker (which owns the
+    // virtio_wl device + the live wasm instance); the worker injects it into the
+    // IN vring + raises the IRQ (see kernel-worker `wayland_in`). Used for events
+    // Greenfield flushes outside a guest SEND's synchronous round-trip
+    // (xdg_surface.configure, frame callbacks, wl_buffer.release, …).
+    wayland_push_in: (clientId, bytes) => {
+      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      cpus[0]?.worker?.postMessage(
+        {
+          method: "wayland_in",
+          clientId: clientId >>> 0,
+          buffer: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+        },
+      );
     },
   };
 };

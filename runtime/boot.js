@@ -19,6 +19,7 @@
 // CONSOLE so no boot/prompt bytes are lost.
 
 import { linux } from "./kernel-host.js";
+import { makeSharedQueues } from "./virtio/shared-queues.js";
 import { Ring } from "./ninep/ring.js";
 import { createNinePServer } from "./ninep/server.js";
 import { createNinePTransport } from "./ninep/transport.js";
@@ -62,6 +63,7 @@ const dec = new TextDecoder();
  *   nixStore?: any,                   // a read-only /nix store VFS (createNixClosureStore); registered as the `nix` 9P export — carries the whole userspace + toolchain closure
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
+ *   wayland?: { onOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[], replyTo: (b: Uint8Array) => void) => void },  // Phase 2 (2b): worker→main Greenfield bridge
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
@@ -128,6 +130,74 @@ export async function bootLinux(opts) {
   });
   transport.run(); // Atomics.waitAsync server loop; self-driving, resolves on stop()
 
+  // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB), threaded
+  // into every task worker so a queue set up on the boot worker is serviceable
+  // from a userspace task worker (same model as the 9P ring).
+  const virtioQueues = makeSharedQueues();
+
+  // Wayland Phase 2 (2b inversion): if the caller supplies a compositor bridge,
+  // wire it over a SAB channel. A guest VFD_SEND posts its wayland bytes out and
+  // BLOCKS the worker on `waylandCtrl[0]` (Atomics.wait); this main thread runs
+  // `opts.wayland.onOut(clientId, buffer, fds, replyTo)`, feeds the compositor,
+  // and the caller calls `replyTo(bytes)` with the server→client reply, which we
+  // write into the SAB reply buffer and notify — unblocking the worker, which
+  // injects the reply into the IN vring + raises the IRQ. Synchronous because the
+  // owning worker is blocked and can't service an async postMessage (9P shape).
+  /** @type {{ onOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>Promise<void>|void } | undefined} */
+  const waylandOpt = opts.wayland;
+  const WL_CH_IDLE = 0;
+  const WL_REPLY_CAP = 256 * 1024; // max server→client reply bytes per SEND
+  let waylandChannel = undefined;
+  let waylandCtrl = null; // Int32Array [STATE, LEN]
+  let waylandBytes = null; // Uint8Array reply buffer (SAB-backed)
+  const wayland = waylandOpt
+    ? (() => {
+        waylandCtrl = new Int32Array(new SharedArrayBuffer(2 * 4));
+        waylandBytes = new Uint8Array(new SharedArrayBuffer(WL_REPLY_CAP));
+        waylandChannel = { ctrl: waylandCtrl.buffer, bytes: waylandBytes.buffer };
+        return {
+          // ASYNC onOut: feed Greenfield, then DRAIN its deferred flush queue
+          // (microtasks/promises) before settling the SAB. Greenfield emits
+          // xdg_surface.configure in a microtask after the role-establishing
+          // commit, so a synchronous settle would miss it (wl-eyes would hang
+          // waiting for configure). The worker is blocked in Atomics.wait, so the
+          // main thread is free to run those microtasks here. Returns a Promise;
+          // the kernel-host wayland_out handler awaits it before the worker reads.
+          onOut: async (clientId, buffer, fds) => {
+            // Acquire edge: the worker stored WL_CH_PENDING (release) AFTER the
+            // guest's shm-pool resync writes (waylandproxyd memcpy src→vfd dst,
+            // sequenced before the SEND ioctl that triggers this round-trip). A
+            // matching Atomics.load here establishes happens-before so those plain
+            // SharedArrayBuffer pool writes are visible when Greenfield reads the
+            // fd view during commit. Without it the main thread can read stale
+            // zeros (the buffer's bytes land "6s later" — i.e. on the next edge).
+            Atomics.load(waylandCtrl, 0);
+            const chunks = [];
+            const replyTo = (b) => b && b.length && chunks.push(b);
+            try {
+              await waylandOpt.onOut?.(clientId, buffer, fds, replyTo);
+            } catch (e) {
+              onLog("[wayland] onOut threw: " + (e && e.stack ? e.stack : e));
+            }
+            let total = 0;
+            for (const c of chunks) total += c.length;
+            const len = Math.min(total, WL_REPLY_CAP);
+            let off = 0;
+            for (const c of chunks) {
+              if (off >= len) break;
+              const take = Math.min(c.length, len - off);
+              waylandBytes.set(c.subarray(0, take), off);
+              off += take;
+            }
+            Atomics.store(waylandCtrl, 1, len); // LEN
+            Atomics.store(waylandCtrl, 0, WL_CH_IDLE); // STATE → IDLE (done)
+            Atomics.notify(waylandCtrl, 0, 1);
+          },
+        };
+      })()
+    : undefined;
+  let waylandPushIn = null; // os.wayland_push_in (async IN, for no-SEND events)
+
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
   const os = await linux({
     worker_url: workerUrl,
@@ -138,8 +208,15 @@ export async function bootLinux(opts) {
     log: onLog,
     console_write: emit,
     ninep_ring: ring.buffer,
+    virtio_queues: virtioQueues,
+    wayland,
+    wayland_channel: waylandChannel,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
+
+  // Wayland Phase 2 (2c): now that the boot worker exists, wire the async IN sink
+  // so the compositor bridge can deliver server→client bytes to the guest.
+  if (wayland) waylandPushIn = os.wayland_push_in;
 
   let alive = true;
   return {

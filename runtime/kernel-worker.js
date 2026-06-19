@@ -9,6 +9,9 @@
 // import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
 import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
+import { EchoDevice } from "./virtio/echo-device.js";
+import { WlDevice } from "./virtio/wl-device.js";
+import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
   let port = self;
@@ -198,6 +201,117 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
 
   /// 9P host-call (ticket #74), set up in init() if a ring SAB was provided.
   let ninep_request = null;
+
+  /// Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB),
+  /// attached in init(). Shared so a queue set up on the boot worker is
+  /// serviceable from a userspace task worker.
+  let virtio_queues = null;
+
+  /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
+  /// transport, keyed by the host device index `dev` the guest passes in every
+  /// import call. Lazily built on first use because they need the guest's
+  /// raise_interrupt export (only available once vmlinux_instance exists; the
+  /// kick comes from the CPU-0 worker, which holds the same shared `memory`).
+  /// The transport assigns dev=0 to virtio_wl and dev=1 to the echo self-test,
+  /// with irq = VIRTIO_WASM_IRQ_BASE(8) + dev (see drivers/virtio/virtio_wasm.c).
+  ///
+  /// CPU-0 RULE (1a finding, now owned by VirtioWasmDevice): pc boots maxcpus=1,
+  /// so CPU 0 is the only online CPU; the kernel's nominal IRQ_CPU=1 idle loop
+  /// never runs (raise_interrupt(1,…) sets a bit nobody reads). Every device
+  /// derives its interrupt-target CPU from the online mask (default {0}) — when
+  /// a task blocks (wait_for_completion), CPU 0's idle task runs arch_cpu_idle(),
+  /// memory.atomic.wait64's on raised_irqs[0], and dispatches on wake.
+  const VIRTIO_WASM_IRQ_BASE = 8;
+  const VW_DEV_WL = 0;
+  const VW_DEV_ECHO = 1;
+
+  /// Wayland Phase 2 (2b inversion): the SAB channel for the synchronous OUT
+  /// round-trip. ctrl = Int32Array [STATE, LEN]; bytes = Uint8Array reply buf.
+  /// Worker sets STATE=PENDING + posts wayland_out, blocks on Atomics.wait;
+  /// main thread fills bytes + LEN, sets STATE=READY, notifies; worker reads.
+  const WL_CH_IDLE = 0;
+  const WL_CH_PENDING = 1;
+  /** @type {{ ctrl: Int32Array, bytes: Uint8Array } | null} */
+  let wayland_channel = null;
+  /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
+  const virtio_devices = new Map();
+  const get_virtio_device = (dev) => {
+    const id = dev >>> 0;
+    let d = virtio_devices.get(id);
+    if (!d && vmlinux_instance && virtio_queues) {
+      const common = {
+        dev: id,
+        irq: VIRTIO_WASM_IRQ_BASE + id,
+        memory,
+        raiseInterrupt: (cpu, irq) => vmlinux_instance.exports.raise_interrupt(cpu, irq),
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: virtio_queues,
+        log: (m) => log(m),
+      };
+      if (id === VW_DEV_WL) {
+        // Wayland Phase 2 (2b inversion): the virtio_wl device runs in THIS
+        // worker, but the Greenfield compositor is on the MAIN thread. A guest
+        // VFD_SEND's wayland bytes are posted OUT to the host (kernel-host feeds
+        // them into Greenfield's `client.connection`); the compositor's reply is
+        // written back over a SAB channel and injected into the IN queue here.
+        //
+        // SYNCHRONOUS via SAB futex (NOT bare async postMessage): the reply must
+        // be injected + IRQ-raised in this worker (it holds the live wasm
+        // instance for raise_interrupt), but by reply time the owning worker is
+        // blocked in wait_for_completion and can't service an async `wayland_in`
+        // postMessage. So onOut posts the bytes, then blocks on the wayland SAB
+        // channel until the main thread fills the reply — exactly the 9P ring's
+        // main-services-while-worker-blocks shape.
+        // Wayland Phase 2 (2c): SYNCHRONOUS SAB round-trip. A guest VFD_SEND's
+        // bytes are posted OUT to the main thread (which feeds Greenfield) and the
+        // worker BLOCKS on the SAB until the main thread writes back ALL of
+        // Greenfield's resulting bytes — replies to this SEND *and* the events
+        // Greenfield emits while processing it (notably xdg_surface.configure,
+        // emitted when the role-establishing commit assigns the toplevel role).
+        // The main side (wayland-compositor.js) drains Greenfield's flush queue
+        // (microtasks) before settling the SAB, so deferred events ride this same
+        // round-trip. Async postMessage can't be used: while the guest task waits
+        // on the vfd read it blocks the worker in Atomics.wait, so onmessage never
+        // runs (the 2b finding). injectIn (async IN) stays for events with no
+        // pending SEND to ride (frame callbacks), delivered when the worker idles.
+        common.waylandBridge = {
+          onOut: (clientId, data, fds) => {
+            if (!wayland_channel) {
+              log(`[virtio-wl] OUT but no wayland channel SAB (bridge disabled)`);
+              return null;
+            }
+            const ctrl = wayland_channel.ctrl; // Int32Array [STATE, LEN]
+            const replyBuf = wayland_channel.bytes; // Uint8Array (SAB-backed)
+            const fdViews = fds.map((v) => ({ byteOffset: v.byteOffset, length: v.byteLength }));
+            Atomics.store(ctrl, 0, WL_CH_PENDING);
+            port.postMessage({
+              method: "wayland_out",
+              dev: id,
+              clientId: clientId >>> 0,
+              buffer: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+              fds: fdViews,
+            });
+            const r = Atomics.wait(ctrl, 0, WL_CH_PENDING, 15000);
+            if (r === "timed-out") {
+              log(`[virtio-wl] OUT reply timed out for client ${clientId}`);
+              return null;
+            }
+            const len = Atomics.load(ctrl, 1) >>> 0;
+            Atomics.store(ctrl, 0, WL_CH_IDLE);
+            if (len === 0) return null;
+            return replyBuf.slice(0, len);
+          },
+        };
+        d = new WlDevice(common);
+      } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
+      else {
+        log(`[virtio] import for unknown device index ${id}`);
+        return null;
+      }
+      virtio_devices.set(id, d);
+    }
+    return d;
+  };
 
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
   let winsizes = null;
@@ -443,6 +557,38 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
     // window size, packed (rows<<16)|cols (0 = unset), read straight from the
     // shared winsize array the main thread writes via set_winsize.
     wasm_driver_hvc_winsize: (vtermno) => (winsizes ? Atomics.load(winsizes, vtermno | 0) : 0),
+
+    // Wayland Phase 1 (1a/1b): the `virtio_wasm` transport's host imports. Every
+    // call leads with the host device index `dev`. setup_queue hands us a vq's
+    // split-vring byte offsets (nommu identity phys) so the device indexes
+    // `memory.buffer` directly; notify is the guest->host kick. The device
+    // services the queue synchronously here, then raise_interrupt(0, irq)
+    // delivers the used-buffer interrupt. get_features/config_read/config_write/
+    // reset back the transport's virtio_config_ops with real host state.
+    wasm_virtio_setup_queue: (dev, q, desc, avail, used, num) => {
+      const d = get_virtio_device(dev);
+      if (d) d.setupQueue(q, desc, avail, used, num);
+    },
+    wasm_virtio_notify: (dev, q) => {
+      const d = get_virtio_device(dev);
+      if (d) d.onNotify(q);
+    },
+    wasm_virtio_get_features: (dev) => {
+      const d = get_virtio_device(dev);
+      return d ? d.getFeatures() : 0n;
+    },
+    wasm_virtio_config_read: (dev, off, buf, len) => {
+      const d = get_virtio_device(dev);
+      if (d) d.configRead(Number(off), d.memView(buf, len));
+    },
+    wasm_virtio_config_write: (dev, off, buf, len) => {
+      const d = get_virtio_device(dev);
+      if (d) d.configWrite(Number(off), d.memView(buf, len));
+    },
+    wasm_virtio_reset: (dev) => {
+      const d = get_virtio_device(dev);
+      if (d) d.reset();
+    },
   };
 
   /// Callbacks from the main thread.
@@ -478,6 +624,18 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
       }
       if (message.winsize_buf) {
         winsizes = new Int32Array(message.winsize_buf);
+      }
+      // Wayland Phase 1 (1b): attach the shared virtio queue-layout store.
+      if (message.virtio_queues) {
+        virtio_queues = new SharedQueues(message.virtio_queues);
+      }
+      // Wayland Phase 2 (2b): attach the SAB channel for the synchronous OUT
+      // round-trip (ctrl Int32Array [STATE, LEN] + reply byte buffer).
+      if (message.wayland_channel) {
+        wayland_channel = {
+          ctrl: new Int32Array(message.wayland_channel.ctrl),
+          bytes: new Uint8Array(message.wayland_channel.bytes),
+        };
       }
 
       if (message.user_executable) {
@@ -842,6 +1000,22 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
       // handle this as an error and wait. Our life ends when the kernel kills us by terminating the whole Worker. Oh,
       // and exex() can trap us, in which case we have to circle back to loading new user code and executing it agian.
       vmlinux_setup().then(vmlinux_run).catch(wasm_error).then(user_executable_chain);
+    },
+
+    // Wayland Phase 2 (2c): an UNSOLICITED server→client event from the
+    // main-thread compositor (e.g. xdg_surface.configure, emitted after Greenfield
+    // assigns the toplevel role — it arrives in a flush OUTSIDE any guest SEND's
+    // synchronous round-trip, so the SAB reply path can't carry it). The boot
+    // worker (which holds the live wasm instance) is idle here — the guest task is
+    // blocked IN THE KERNEL on the vfd read, not in wasm_virtio_notify — so we can
+    // inject it into the IN vring + raise the IRQ right now, waking the guest.
+    wayland_in: (message) => {
+      const d = get_virtio_device(VW_DEV_WL);
+      if (!d || typeof d.injectIn !== "function") {
+        log(`[virtio-wl] wayland_in but device not ready`);
+        return;
+      }
+      d.injectIn(message.clientId >>> 0, new Uint8Array(message.buffer));
     },
   };
 

@@ -1,8 +1,11 @@
 {
   description = "wasm32-linux-musl NOMMU toolchain + Nix, built with Nix (#139/#141)";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # wl-eyes: a native Wayland client (source-only; built by ./wl-eyes.nix against
+  # the wasm32 cross stack). flake = false → consumed as a plain source tree.
+  inputs.wl-eyes = { url = "git+file:///home/vbvntv/Code/wl-eyes"; flake = false; };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, wl-eyes }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -73,6 +76,49 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # Wayland Phase 1 (1b M3): the /dev/wl0 userspace round-trip self-test.
+      wasmWlTest = import ./userspace/wltest.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
+      # Wayland Phase 1 (1c, Sommelier pivot): the thin guest-side Wayland↔virtwl
+      # bridge. Opens /dev/wl0 + a wayland-0 AF_UNIX socket and splices the wire
+      # protocol (bytes + fds) between guest clients and the host compositor.
+      wasmWaylandProxyd = import ./userspace/waylandproxyd.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
+      # Wayland Phase 1 (1c M3): a minimal AF_UNIX test client that sends a
+      # wl_display.get_registry request to wayland-0 — proves waylandproxyd
+      # accepts a connection and forwards the initial bytes to the host.
+      wasmWlClient = import ./userspace/wlclient.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
+      # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
+      # the Phase 1 deliverable. Links the cross libwayland-client and runs the
+      # canonical wl_display_connect → get_registry → roundtrip → enumerate
+      # globals flow THROUGH waylandproxyd, end-to-end across the transport.
+      wasmWlHandshake = import ./userspace/wlhandshake.nix {
+        inherit pkgs cross;
+      };
+
+      # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app. Links the
+      # cross libwayland-client + libffi (raw backend) + wayland-protocols
+      # (xdg-shell), generates the xdg-shell glue with the BUILD-host
+      # wayland-scanner, and rasterizes two pointer-tracking eyes into a wl_shm
+      # pool. Baked into the initramfs as /bin/wl-eyes. See wl-eyes.nix.
+      wlEyes = import ./wl-eyes.nix {
+        inherit cross;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+        src = wl-eyes;
+      };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
       # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
       guestClang = import ./toolchain/guest-clang.nix {
@@ -138,6 +184,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -177,6 +224,11 @@
         '';
     in
     {
+      # The FULL wasm32 cross package set — exposing it as legacyPackages lets
+      # `nix build .#<anypkg>` work ad hoc (e.g. `.#wayland`, `.#pixman`) without
+      # enumerating it in `packages` below.
+      legacyPackages.${system} = cross;
+
       packages.${system} = {
         # Sanity anchor: the stock-LLVM-21 pin the whole plan rests on.
         llvmCheck = pkgs.writeText "llvm-version" pkgs.llvmPackages_21.clang.version;
@@ -217,6 +269,22 @@
 
         userspace-busybox = wasmBusybox;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
+
+        # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
+        wltest = wasmWlTest;
+
+        # Wayland Phase 1 (1c): the guest-side Wayland↔virtwl bridge binary.
+        waylandproxyd = wasmWaylandProxyd;
+
+        # Wayland Phase 1 (1c M3): the AF_UNIX test client for waylandproxyd.
+        wlclient = wasmWlClient;
+
+        # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
+        wlhandshake = wasmWlHandshake;
+
+        # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app
+        # (wl_shm + xdg-shell + wl_pointer) cross-built to wasm → $out/bin/wl-eyes.
+        wl-eyes = wlEyes;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
@@ -264,6 +332,20 @@
         "libblake3"
         "busybox"
         "ncurses" # userspace targets (Nix-built guest), exposed for build/testing
+      ])
+      # The Wayland stack (client + server libs), each cross-built to wasm.
+      # Exposed as `wl-<name>` so `nix build -k .#wl-…` surfaces every cross
+      # failure at once. wayland-scanner builds for the BUILD host (buildPackages
+      # native/target split, same as wl-eyes); the libwayland-* libraries cross-
+      # compile. These deps are what waylandproxyd (1c) + the stock-libwayland
+      # client test (1d) link against. Only libffi needed an overlay fix (the raw
+      # backend, see deps-overlay.nix); wayland/pixman/expat cross-build unmodified.
+      // builtins.listToAttrs (map (n: { name = "wl-${n}"; value = cross.${n}; }) [
+        "libffi"
+        "expat"
+        "wayland"
+        "wayland-protocols"
+        "pixman"
       ]);
     };
 }
