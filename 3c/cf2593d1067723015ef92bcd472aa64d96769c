@@ -1,0 +1,38 @@
+runtime/virtio/wl-device.js
+  s_2759e1f8dbb051::t_a88a7ec862f253 522-527,529-541
+  s_2759e1f8dbb051::t_83a067c0bb681c 235-240
+  s_2759e1f8dbb051::t_8364c0acf1c46e 80,82-90
+  s_2759e1f8dbb051::t_82c8f785be488e 195-222
+runtime/kernel-worker.js
+  s_2759e1f8dbb051::t_a9eae01cef4faa 244-257,259
+  s_2759e1f8dbb051::t_efecff3b2b39d7 981-990
+  s_2759e1f8dbb051::t_b75d30668adfb4 269-271
+runtime/kernel-host.js
+  s_2759e1f8dbb051::t_3dd964131c37dd 420-423,427-435,442-443
+  s_2759e1f8dbb051::t_86b1ce98fd4566 42-46
+  s_2759e1f8dbb051::t_2006001a17565f 216-221,227-229,236-240
+runtime/boot.js
+  s_2759e1f8dbb051::t_d01a3a8d6ae1d5 209-217,219-220
+  s_2759e1f8dbb051::t_143b12d29c350f 66,71
+  s_2759e1f8dbb051::t_7efa92a1c090ea 139-150,167-168
+runtime/virtio/wl-device.test.js
+  s_2759e1f8dbb051::t_5333a3fcfd629b 1-7,14,18,46-48,60,62-64,66,70,72-73,80,98,117-151
+runtime/boot-nix-system.js
+  s_2759e1f8dbb051::t_e3b50fb1e1558e 22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3ccf2593d1067723015ef92bcd472aa64d96769c",
+  "prompts": {},
+  "sessions": {
+    "s_2759e1f8dbb051": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8228b50b-0db4-4cce-bcbf-adbba2856d3b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
