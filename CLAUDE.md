@@ -139,8 +139,10 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/pango-smoke.mjs
 # MANUAL browser check — docs/superpowers/notes/m3b-gtk-visual.md).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/gtk-smoke.mjs
 
-# M4 galculator (GTK3 calculator: reaches GTK init in-guest, no wasm trap; visual
-# click-7x6=42 is a MANUAL browser check — docs/superpowers/notes/m4-galculator-visual.md).
+# M4 galculator (GTK3 calculator: --selftest parses the real .ui files from
+# PACKAGE_UI_DIR + runs the GTK widget gobject classes through the fpcast seam,
+# display-free; visual click-7x6=42 is a MANUAL browser check —
+# docs/superpowers/notes/m4-galculator-visual.md).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/galculator-smoke.mjs
 
 # Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
@@ -384,10 +386,16 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
 - **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
   2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
-  `isWasm`-guarded nixpkgs override that applies the shared `--fpcast-emu` post-link
-  pass in `postFixup` (gobject casts). No GSettings schema (galculator uses
+  `isWasm`-guarded nixpkgs override (NOT a from-scratch `userspace/galculator.nix` —
+  reuses nixpkgs' own recipe + its three patches, corollary 1) that applies the
+  shared `--fpcast-emu` post-link pass in `postFixup` (gobject casts) and **appends a
+  `--selftest` source patch** (`patches/galculator/0001-add-selftest.patch`) to
+  nixpkgs' patch list. No GSettings schema (galculator uses
   `~/.config/galculator/galculator.conf`). `.ui` files ride the served `/nix` closure
-  as filesystem data (`$out/share/galculator/ui/`). Two build fixes required: (1)
+  as filesystem data (`$out/share/galculator/ui/`), loaded at runtime from the
+  hardcoded `PACKAGE_UI_DIR` — so galculator must be in `environment.systemPackages`
+  (`userspace/system.nix`), NOT just the initramfs `extraBins`, or only the binary
+  reaches the guest and the `.ui` files are absent. Two build fixes required: (1)
   **graphite2 .la file** — cmake emits `library_names=libgraphite2.so` on a static
   build (no `.so` produced); downstream libtool-based autotools (galculator) try to
   link the nonexistent `.so`. Fix: `postInstall` sed rewrites the `.la` to clear
@@ -396,11 +404,19 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   `archive.dir.tar.xz` with a bare `xz` call; with `strictDeps=false` (needed for
   `AM_GLIB_GNU_GETTEXT` m4 macro lookup) the cross `xz` wasm binary shadows the
   native one. Fix: `preAutoreconf` creates `$TMPDIR/native-xz-bin/xz` symlink →
-  native `xz`, prepended to PATH. **Headless start behavior**: galculator prints
-  `GModule-CRITICAL: g_module_symbol: assertion 'module != NULL' failed` (benign —
-  static wasm has no dlopen; GLib probes for a GTK IM module and fails gracefully)
-  + `Gtk-WARNING: cannot open display` — no wasm trap. Smoke gate: REACHED_GTK
-  match + !TRAP. The full click-to-42 compute is a MANUAL browser check (PENDING).
+  native `xz`, prepended to PATH. **`--selftest` is the headless gate**: it must be
+  **display-free** — the cross GTK3 is wayland-only and the node harness has no
+  compositor, so `GtkBuilder` CANNOT instantiate the `.ui` widgets (GtkWindow
+  construction needs a GdkDisplay → fatal `Gtk-ERROR: Can't create a GtkStyleContext
+  without a display connection`). Like the M3b `gtk-hello` gate, the selftest instead
+  parses the real `.ui` files (`MAIN_GLADE_FILE` = `main_frame.ui`,
+  `BASIC_GLADE_FILE` = `basic_buttons_gtk3.ui`) with GLib's GMarkup XML parser —
+  asserting `GtkWindow "main_window"` + `GtkToggleButton "button_7"` — and
+  `g_type_class_ref`s those widget classes (display-free gobject class_init through
+  the fpcast seam), printing `GALCULATOR-SELFTEST: main_window=1 button_7=1
+  gtk_types=1 OK`. Gate: `node node/galculator-smoke.mjs` matches
+  `/GALCULATOR-SELFTEST: .* OK/`. The full click-to-42 compute is a MANUAL browser
+  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`).
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable

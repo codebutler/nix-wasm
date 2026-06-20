@@ -102,6 +102,10 @@ let
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
           guestFonts      # DejaVu Sans + fonts.conf + prebuilt fc-cache (M2 text stack)
           gtkAssets       # compiled GSettings schemas + hicolor icon theme (M3b)
+          cross.galculator  # M4: GTK3 calculator. In systemPackages (not just the
+                            # initramfs extraBins) so its store path — and thus its
+                            # $out/share/galculator/ui/*.ui, loaded at runtime from the
+                            # hardcoded PACKAGE_UI_DIR — enters the served /nix closure.
         ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -123,6 +127,8 @@ let
           "/share/fonts"
           "/share/glib-2.0/schemas"
           "/share/icons"
+          "/share/galculator"   # M4: galculator .ui files (profile symlink; the
+                                # binary loads them from its own store path directly)
         ];
         environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
         # fontconfig: point at the baked-in conf + cache so FcInit resolves

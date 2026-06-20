@@ -731,6 +731,15 @@ in
   galculator = whenWasm
     (p: p.overrideAttrs (o: {
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.binaryen ];
+      # M4 proof: a --selftest source patch that loads the real .ui files from
+      # PACKAGE_UI_DIR via gtk_builder_add_from_file (display-free, so it runs in
+      # the compositor-less node harness) and asserts GtkWindow "main_window"
+      # (main_frame.ui) + GtkToggleButton "button_7" (basic_buttons_gtk3.ui) exist
+      # in the parsed widget tree, printing `GALCULATOR-SELFTEST: ... OK`. Appended
+      # to nixpkgs' own galculator patches (fno-common/gettext-0.25/C23) — reuses
+      # the upstream recipe rather than forking it. The click-to-42 acceptance is a
+      # MANUAL browser check (docs/superpowers/notes/m4-galculator-visual.md).
+      patches = (o.patches or [ ]) ++ [ ./patches/galculator/0001-add-selftest.patch ];
       # `autopoint` (inside autoreconfHook) decompresses archive.dir.tar.xz with
       # a bare `xz` shell call. With strictDeps=false (galculator requires it for
       # the AM_GLIB_GNU_GETTEXT m4 macro) the cross buildInputs leak into PATH, so
