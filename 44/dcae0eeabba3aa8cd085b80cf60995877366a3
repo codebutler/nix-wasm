@@ -1,0 +1,23 @@
+runtime/node/galculator-smoke.mjs
+  s_791cc0179de687::t_bcbfeeda351f5c 3-6
+docs/superpowers/plans/2026-06-20-galculator-m4.md
+  s_791cc0179de687::t_39c5fe54c3972c 3-17
+docs/superpowers/specs/2026-06-20-galculator-on-wasm-design.md
+  s_791cc0179de687::t_a04e7944336aef 269-281
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "44dcae0eeabba3aa8cd085b80cf60995877366a3",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
