@@ -36,10 +36,12 @@ libwayland-client + xdg-shell (M0 only).
 - **libffi version:** the pinned nixpkgs libffi (3.5.x). The raw backend file is
   `src/wasm/ffi.c`, substituted via the overlay's `postPatch`.
 - **Bounds (principled defaults, parameterized):** `MAX_ARGS_ALL_I32 = 24`
-  (preserve the existing all-`i32` reach for libwayland), `MAX_ARGS_MIXED = 14`,
-  `MAX_NON_I32 = 2`. These are generous principled caps (no real GObject signal
-  marshals >2 non-pointer scalar args); they are generator parameters so a later
-  GTK-instrumentation pass (Plan 3 / M3) can bump them with a one-line change.
+  (preserve the existing all-`i32` reach for libwayland), `MAX_ARGS_MIXED = 10`,
+  `MAX_NON_I32 = 2`. These are generous principled caps (a marshalled GObject
+  signal has `nparams+2` args and GTK's widest signals are ~6 params, so arity-10
+  with up to two non-`i32` scalars covers anything real); they are generator
+  parameters so a later GTK-instrumentation pass (Plan 3 / M3) can bump them with a
+  one-line change. With these bounds the generator emits ~8k trampolines.
 - **FFI_TYPE enum values** (from libffi `ffi.h`, used by the generator and dispatch):
   `VOID=0 INT=1 FLOAT=2 DOUBLE=3 LONGDOUBLE=4 UINT8=5 SINT8=6 UINT16=7 SINT16=8`
   `UINT32=9 SINT32=10 UINT64=11 SINT64=12 STRUCT=13 POINTER=14 COMPLEX=15`.
@@ -519,7 +521,7 @@ loads each argument with the correctly-typed accessor, calls, and stores the res
 import itertools, sys
 
 MAX_ARGS_ALL_I32 = 24
-MAX_ARGS_MIXED   = 14
+MAX_ARGS_MIXED   = 10
 MAX_NON_I32      = 2
 
 # arg class -> (C param type, loader expr template over avalue[i])
@@ -587,9 +589,10 @@ if __name__ == "__main__":
 - [ ] **Step 2: Sanity-run the generator on the build host**
 
 Run: `python3 patches/libffi/gen-trampolines.py > /tmp/tramp.inc; wc -l /tmp/tramp.inc; head -20 /tmp/tramp.inc`
-Expected: a few thousand `case 0x...ULL:` lines; the stderr footer prints the
-trampoline count (should be in the low thousands, not tens of thousands — confirming
-the M=2 bound contains the blow-up). Each case casts `fn` to a concrete prototype.
+Expected: several thousand `case 0x...ULL:` lines; the stderr footer prints the
+trampoline count (≈8k with these bounds — several thousand, NOT tens of thousands;
+that confirms the M=2 / K=10 bounds contain the `4^N` blow-up). Each case casts `fn`
+to a concrete prototype.
 
 - [ ] **Step 3: Commit**
 
