@@ -1,0 +1,19 @@
+runtime/.gitignore
+  s_791cc0179de687::t_cd0c531a591b2d 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b20b386498e600549287e022dd3c373aa2c86986",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
