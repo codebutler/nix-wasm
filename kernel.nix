@@ -111,6 +111,14 @@ pkgs.stdenv.mkDerivation {
     # both the canonical flag-OFF boot AND a default flag-ON boot stay byte-for-
     # byte unchanged. Only the Task 2.4 teardown test passes the freelog param.
     ./patches/kernel/0021-wasm-user-as-free-marker.patch
+    # Force buffered v9fs I/O on wasm: v9fs routes cache=none (P9L_DIRECT) I/O to
+    # netfs_unbuffered_*, which pins the user buffer's pages (iov_iter_extract_
+    # pages) and copies them in kernel space — impossible under per-process memory
+    # (each process is a distinct WebAssembly.Memory the kernel can't address), so
+    # a 9P write to the writable /mnt/pc mount landed as zeros. Fall through to the
+    # cached path so the copy flows through the host-bridge copy_to/from_user choke
+    # point. CONFIG_WASM-guarded; other arches keep the upstream direct path.
+    ./patches/kernel/0022-wasm-9p-force-buffered.patch
   ];
 
   nativeBuildInputs = [
