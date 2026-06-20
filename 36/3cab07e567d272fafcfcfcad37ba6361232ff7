@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-06-20-galculator-m3b-gtk3.md
+  s_791cc0179de687::t_e84885135adfd6 1-461
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "363cab07e567d272fafcfcfcad37ba6361232ff7",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
