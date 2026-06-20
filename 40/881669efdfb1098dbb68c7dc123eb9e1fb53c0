@@ -1,0 +1,24 @@
+CLAUDE.md
+  s_791cc0179de687::t_0c323d55a0a231 97-100
+  s_791cc0179de687::t_d1f817a967ac29 323-329
+patches/kernel/0015-wasm-futex-time64-4arg-trampoline.patch
+  s_791cc0179de687::t_573213ea0a5424 5-9
+userspace/fpcast-emu.nix
+  s_791cc0179de687::t_dae6f4a893dc64 47-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "40881669efdfb1098dbb68c7dc123eb9e1fb53c0",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
