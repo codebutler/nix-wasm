@@ -1,0 +1,27 @@
+docs/superpowers/notes/m0-input-probe.md
+  s_791cc0179de687::t_a1abcc561753d0 1-72
+userspace/wl-input-probe.nix
+  s_791cc0179de687::t_383c3eae25877f 1-44
+userspace/wl-input-probe.c
+  s_791cc0179de687::t_2c1bf1edea60df 1-227
+flake.nix
+  s_791cc0179de687::t_b5c5437e95b169 140-148
+  s_791cc0179de687::t_a4cf211e035443 342-345
+  s_791cc0179de687::t_14510cc8ad42a5 232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "860765faeab89e0183c3c084d98e30d7e9ae6da2",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
