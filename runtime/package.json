@@ -15,7 +15,11 @@
     "format": "oxfmt --write --threads=1 . && oxfmt --write --threads=1 .",
     "format:check": "oxfmt --check --threads=1 .",
     "test": "bun test ./ninep/*.test.js ./nix-closure-store.test.js ./nix-store.test.js",
-    "test:node": "node --test node/"
+    "test:node": "node --test node/",
+    "artifacts": "bash scripts/build-artifacts.sh",
+    "serve": "node web/serve.mjs",
+    "demo": "bun run artifacts && node web/serve.mjs",
+    "smoke:web": "node web/smoke.mjs"
   },
   "devDependencies": {
     "oxfmt": "0.52.0",
