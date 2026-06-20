@@ -39,8 +39,8 @@ kill-risk (libffi) is validated first, in isolation.
 |---|-----------|-------|
 | **M0** | Input spike | A throwaway guest `wl_seat` client logs a pointer **button-press** + a **key** event from the browser (motion already works). |
 | **M1** | libffi f32/f64/i64 args | Standalone in-guest unit test calls C functions with mixed `double`/`int64`/`float`/pointer args through `ffi_call` and asserts correct results. Bounds (K, M) informed by instrumenting a real GTK run. |
-| **M2** | Text stack | freetype + fontconfig + harfbuzz + fribidi + pango cross-built; cairo rebuilt with freetype/fontconfig; a guest demo renders shaped text into a `wl_shm` window. |
-| **M3** | GTK3 + runtime | glib/gobject/gio, atk, gdk-pixbuf (built-in loaders), libepoxy (no-GL) cross-built; schemas/font/icons baked; `gtk3-widget-factory` (or a GTK hello-window) opens and paints in-guest. |
+| **M2** | Text stack (glib-free) | freetype + fribidi + fontconfig + harfbuzz cross-built; cairo rebuilt with freetype/fontconfig backends; a guest `wl-text --selftest` shapes (harfbuzz) + rasterizes (cairo-ft) a fontconfig-resolved string headlessly and asserts non-zero pixels (CI gate), + a `wl_shm` window for the visual check. **No glib/pango** (moved to M3). |
+| **M3** | GTK3 + runtime | **glib/gobject/gio + pango** (moved from M2), atk, gdk-pixbuf (built-in loaders), libepoxy (no-GL) cross-built; schemas/font/icons baked; `gtk3-widget-factory` (or a GTK hello-window) opens and paints in-guest. |
 | **M4** | galculator | Packaged + baked into initramfs; in-guest click `7 × 6 =` → `42`, captured by a smoke test. |
 
 Ground rules carried throughout:
@@ -152,27 +152,47 @@ its constituent scalar wasm types). If no → stays a loud abort. Recorded eithe
 
 ---
 
-## M2 — Text stack
+## M2 — Text stack (glib-free rasterization + shaping layer)
 
-Cross-built bottom-up, all `isWasm`-guarded in `deps-overlay.nix`:
+**Boundary decision (2026-06-20):** the earlier draft put **pango** in M2, but
+**pango is a glib/gobject library and cannot be built without glib** — the single
+biggest GTK dependency. Dragging glib into M2 to satisfy pango contradicted M3
+owning glib. Resolution: **M2 is the glib-free font/shaping/rasterization layer**
+(freetype + fribidi + fontconfig + harfbuzz + the cairo rebuild), proven with
+**cairo-ft + harfbuzz directly**; **glib + pango move to the front of M3**, where
+GTK needs glib anyway. Same libraries get built before GTK — only the glib/pango
+boundary moves. galculator's UI (button labels + a number display) doesn't exercise
+full pango layout until GTK pulls it in at M3, so cairo-ft + harfbuzz is a
+sufficient M2 proof.
+
+Cross-built bottom-up, all `isWasm`-guarded in `deps-overlay.nix` (many may
+cross-build cleanly via `cross.*` with no override; add an `isWasm`-guarded fix
+only where a build actually fails):
 
 - **freetype** — built *without* harfbuzz first (breaks the freetype↔harfbuzz
-  autohint cycle); zlib on; libpng optional; brotli/woff2 off.
-- **fribidi** — standalone.
-- **harfbuzz** — on freetype; glib optional (enable for pango's `hb-glib` if needed).
+  autohint cycle); zlib on; libpng/brotli/woff2 off.
+- **fribidi** — standalone. (Not needed by the M2 proof, but it's a cheap,
+  glib-free leaf and a hard pango dep, so building it here de-risks M3.)
+- **harfbuzz** — on freetype; **glib OFF** (keeps M2 glib-free; pango's `hb-glib`
+  glue is an M3 concern). Shaping via the core harfbuzz API is glib-independent.
 - **fontconfig** — needs freetype + expat (expat already cross-built). Runtime
   config + prebuilt cache (see baked assets).
-- **pango** — pangocairo + pangoft2 + pangofc backends (cairo + freetype +
-  fontconfig + harfbuzz + fribidi). Pango ≥1.44 has **no dynamic modules** —
-  shaping is in-process via harfbuzz, nothing to dlopen.
 - **cairo — rebuilt** with `freetype=enabled` + `fontconfig=enabled` (today
-  image-surface-only, commit `b624404`). Strictly **additive**: existing
-  image-surface clients keep working; we add backends to the **shared** cairo
-  rather than forking a variant.
+  image-surface-only, commit `b624404`; the override currently nulls those inputs
+  and passes `-Dfreetype=disabled -Dfontconfig=disabled`). Strictly **additive**:
+  the existing image-surface clients (weston-flowers) keep working; we add the
+  font backends to the **shared** cairo rather than forking a variant. Stays
+  glib-free (`-Dglib=disabled` unchanged), x11/png still off.
 
-**Proof:** `wl-text.c` — pangocairo shapes+renders a string into a cairo image
-surface, blitted into a `wl_shm` window; text visible in the browser. Proves the
-text path independent of GTK.
+**Proof:** `wl-text.c` — resolves a face via **fontconfig** (`FcFontMatch`), shapes
+a string with **harfbuzz** (`hb_shape`), and rasterizes the glyphs with **cairo-ft**
+(`cairo_ft_font_face_create_for_ft_face` + `cairo_show_glyphs`) into a cairo image
+surface. A `--selftest` mode renders headlessly and prints
+`WL-TEXT-SELFTEST: glyphs=<n> nonzero_px=<m> OK` to stdout (asserted by a Node boot
+smoke — a fully automated, compositor-free CI gate, like the M1 selftest). The
+default mode blits the same render into a `wl_shm` xdg-toplevel for the in-browser
+visual confirmation (manual, like M0). No glib, no pango — proves the rasterization
++ shaping + fontconfig path independent of GTK.
 
 ---
 
@@ -180,9 +200,18 @@ text path independent of GTK.
 
 ### Library graph (nixpkgs cross, `isWasm`-guarded, static, built-in modules)
 
+Built bottom-up. **glib + pango lead** (moved here from M2 — pango is a glib
+library; see the M2 boundary note):
+
 - **glib** (glib/gobject/gio) — pcre2, libffi (M1 backend), zlib. Build-time
   codegen (`glib-genmarshal`, `glib-compile-schemas`, `glib-compile-resources`)
-  from `buildPackages` (native; meson handles it). gio modules **built-in**.
+  from `buildPackages` (native; meson handles it). gio modules **built-in**. The
+  first real exercise of the M1 libffi backend's f64/i64 args via gobject.
+- **pango** — pangocairo + pangoft2 + pangofc backends on the M2 text stack
+  (cairo + freetype + fontconfig + harfbuzz + fribidi) + glib. Pango ≥1.44 has
+  **no dynamic modules** — shaping is in-process via harfbuzz, nothing to dlopen.
+  (M2 already built freetype/fontconfig/harfbuzz/fribidi + the cairo font
+  backends; this adds the glib-dependent layout layer on top.)
 - **atk** — glib only.
 - **gdk-pixbuf** — **built-in loaders** (`-Dbuiltin_loaders`, ≥ png for galculator
   icons) → no `loaders.cache`/dlopen. introspection off.
