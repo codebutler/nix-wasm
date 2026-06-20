@@ -1,0 +1,1 @@
+{ "packages": ["ghostty-web"], "expects": ["init", "Terminal", "FitAddon"], "tsNoCheck": true }

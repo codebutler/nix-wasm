@@ -102,7 +102,7 @@ engine that fails to instantiate glib/GTK binaries.**
 Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
 from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
-symlink `web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
+symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
 fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
 
 Run these from the **runtime/** directory:
@@ -112,43 +112,43 @@ Run these from the **runtime/** directory:
 bun run test
 
 # Node integration tests:
-node --test node/
+node --test demo/node/
 
 # Full nix-system smoke: boot → 9P read/write/ls → nix-env -iA sl.
 # Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/smoke.mjs
 
 # Interactive guest root shell (Ctrl-] to quit).
 # --no-nix = fast busybox-only boot when you don't need the /nix overlay.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs [--no-nix]
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/attach.mjs [--no-nix]
 
 # libffi raw-backend unit test (f32/f64/i64 by-value args): boot → run selftest.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/libffi-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/libffi-smoke.mjs
 
 # M2 text stack (fontconfig→freetype→harfbuzz→cairo-ft): boot full nix system → render selftest.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/wl-text-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/wl-text-smoke.mjs
 
 # M3a glib/gobject (+ libffi double marshaller): boot full nix system → gobject selftest.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/glib-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/glib-smoke.mjs
 
 # M3a pango layout (pango_cairo_show_layout → fontconfig → cairo-ft): boot → render selftest.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/pango-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/pango-smoke.mjs
 
 # M3b GTK3 (gtk_init + GtkWindow/GtkLabel widget tree, gobject through fpcast seam):
 # boot full nix system → gtk-hello --selftest (headless gate; visual window is a
 # MANUAL browser check — docs/superpowers/notes/m3b-gtk-visual.md).
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/gtk-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-smoke.mjs
 
 # M4 galculator (GTK3 calculator: --selftest parses the real .ui files from
 # PACKAGE_UI_DIR + runs the GTK widget gobject classes through the fpcast seam,
 # display-free; visual click-7x6=42 is a MANUAL browser check —
 # docs/superpowers/notes/m4-galculator-visual.md).
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/galculator-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.mjs
 
-# Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
-ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
+# Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
+ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
-node web/smoke.mjs
+node demo/web/smoke.mjs
 ```
 
 `makeConsoleSession` wraps a boot handle's console with session conveniences:
@@ -163,14 +163,14 @@ bun run format:check  # oxfmt
 bun run typecheck     # tsc
 ```
 
-`node/` and `web/` are tooling/demo (tsc-excluded); `web/vendor/ghostty` is
+`demo/node/` and `demo/web/` are tooling/demo (tsc-excluded); `demo/web/vendor/ghostty` is
 vendored (excluded from all three static gates).
 
 ## Current state
 
 **It works end-to-end** (2026-06-17). `nix build .#nix-wasm` builds the wasm Nix;
 the dep closure (`cross.*`), the kernel, and the curated guest userspace all build
-reproducibly. In the runtime harness (`runtime/node/smoke.mjs`) the
+reproducibly. In the runtime harness (`runtime/demo/node/smoke.mjs`) the
 Nix-built userspace boots — served-closure `/nix` overlay → busybox-init → getty →
 autologin → root shell — and **`nix-env -iA sl` substitutes `sl` from the binary
 cache and renders it** (Phase A + B both PASS). Every wasm fix is a SHARED
@@ -414,7 +414,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   asserting `GtkWindow "main_window"` + `GtkToggleButton "button_7"` — and
   `g_type_class_ref`s those widget classes (display-free gobject class_init through
   the fpcast seam), printing `GALCULATOR-SELFTEST: main_window=1 button_7=1
-  gtk_types=1 OK`. Gate: `node node/galculator-smoke.mjs` matches
+  gtk_types=1 OK`. Gate: `node demo/node/galculator-smoke.mjs` matches
   `/GALCULATOR-SELFTEST: .* OK/`. The full click-to-42 compute is a MANUAL browser
   check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`).
 

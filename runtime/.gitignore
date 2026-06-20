@@ -1,4 +1,3 @@
 node_modules/
 *.log
-web/artifacts
-web/vendor/greenfield
+demo/web/artifacts
