@@ -48,6 +48,10 @@
       kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
       kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
 
+      # Debug-only kernel with CONFIG_WASM_TRACE on (patch 0019 ringbuffer). NOT
+      # for publishing — diagnoses guest wedges out-of-band; build .#kernel-trace.
+      kernelTrace = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; wasmTrace = true; };
+
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
       # libllvm/lld/clang rebuild routes clang through ccache, turning a from-
@@ -104,6 +108,78 @@
         inherit pkgs cross;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
+
+      # Phase 1 (per-process memory) Task 2.4: the cross-process isolation probe
+      # (acceptance B1). Two guest binaries (/bin/isoa, /bin/isob) that prove a
+      # process cannot read another's private memory. See isolation-probe.nix.
+      wasmIsolationProbe = import ./userspace/isolation-probe.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
+      # Phase 2 Task 1a: the host-side asyncify build path for fork-capable guest
+      # binaries (cross.stdenv.cc + host wasm-opt --asyncify). asyncifyCc is the
+      # reusable builder; the smoke proves it emits the asyncify control exports.
+      # Phase 2 (option A): the musl-fork variant — canonical musl + patch 0008
+      # (real fork() over the capture_stack seam). A SEPARATE derivation, so the
+      # canonical `musl` above stays byte-identical; asyncify-cc links this
+      # variant's libc.a first so fork programs pick up the seam _Fork.
+      muslFork = import ./toolchain/musl.nix { inherit pkgs compilerRt; forkSeam = true; };
+      asyncifyCc = import ./userspace/asyncify-cc.nix {
+        inherit pkgs cross muslFork;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      wasmAsyncifyCcSmoke = asyncifyCc {
+        name = "fork-smoke";
+        src = ./userspace/fork-smoke.c;
+        onlylist = "main";
+      };
+      # Phase 2 Task 2: the minimal real fork() program — links the musl-fork
+      # seam (forkSeam) so fork() -> _Fork() -> capture_stack().
+      wasmForkReturnsTwice = asyncifyCc {
+        name = "fork-returns-twice";
+        src = ./userspace/fork-returns-twice.c;
+        forkSeam = true;
+        # The fork call graph (exact wasm names): _start -> _start_c ->
+        # __libc_start_main -(indirect)-> __main_void -> main -> fork -> _Fork
+        # -(GOT-indirect)-> capture_stack. Use ADDLIST, not onlylist: this is a PIC
+        # dylink module, so the call to the capture_stack IMPORT goes through the
+        # GOT (indirect) — asyncify's reachability finds NO direct caller, so
+        # onlylist (reachable ∩ list) is empty. addlist (reachable ∪ list)
+        # force-instruments every frame so the unwind propagates to the host entry.
+      };
+      # More fork() acceptance programs (same fork call graph → same addlist).
+      wasmForkNested = asyncifyCc {
+        name = "fork-nested";
+        src = ./userspace/fork-nested.c;
+        forkSeam = true;
+      };
+      wasmForkLoop = asyncifyCc {
+        name = "fork-loop";
+        src = ./userspace/fork-loop.c;
+        forkSeam = true;
+      };
+      wasmForkInThread = asyncifyCc {
+        name = "fork-in-thread";
+        src = ./userspace/fork-in-thread.c;
+        forkSeam = true;
+      };
+      # fork() from a HELPER frame (main->level2->level1->fork) — proves asyncify
+      # reachability from the (directly-called) capture_stack import instruments
+      # the whole transitive call graph at ANY depth, so no manual addlist is
+      # needed (the fix for the addlist generality limitation).
+      wasmForkHelper = asyncifyCc {
+        name = "fork-helper";
+        src = ./userspace/fork-helper.c;
+        forkSeam = true;
+      };
+      wasmForkStress = asyncifyCc {
+        name = "fork-stress";
+        src = ./userspace/fork-stress.c;
+        forkSeam = true;
+      };
+      wasmForkExec = asyncifyCc { name = "fork-exec"; src = ./userspace/fork-exec.c; forkSeam = true; };
+      wasmForkPipe = asyncifyCc { name = "fork-pipe"; src = ./userspace/fork-pipe.c; forkSeam = true; };
 
       # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
       # the Phase 1 deliverable. Links the cross libwayland-client and runs the
@@ -248,6 +324,19 @@
       # over the cc-sysroot's libc++ (sys/cxx), with wasm-EH + the libc++ link.
       guestCxx = import ./toolchain/guest-cxx.nix { inherit pkgs guestClang ccSysroot; };
 
+      # Phase 2 T1b: in-guest wasm-opt (Binaryen cross-built to wasm32) — lets the
+      # guest run the asyncify pass in-browser so a fork() program can be compiled
+      # interactively in the guest.
+      guestBinaryen = import ./toolchain/guest-binaryen.nix {
+        inherit pkgs musl libcxx compilerRt;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # The in-guest fork() compiler: cc-fork links musl-fork + runs the in-guest
+      # wasm-opt --asyncify, so `cc-fork prog.c && ./prog` returns twice in-guest.
+      guestCcFork = import ./toolchain/guest-cc-fork.nix {
+        inherit pkgs guestClang ccSysroot guestBinaryen muslFork;
+      };
+
       # ---- in-guest `make` (pdpmake → wasm32). Works unpatched: it spawns recipes
       # via system()→posix_spawn→clone(CLONE_VFORK), the only NOMMU spawn mode.
       makeWasm = import ./toolchain/make.nix {
@@ -261,7 +350,7 @@
         # The in-guest toolchain, folded into the system profile/closure (one
         # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
         # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
-        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh ];
+        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh guestCcFork guestBinaryen ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -288,13 +377,38 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator wasmIsolationProbe wasmForkReturnsTwice wasmForkNested wasmForkLoop wasmForkInThread wasmForkHelper wasmForkStress wasmForkExec wasmForkPipe ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
       wasmStoreManifest = import ./userspace/store-manifest.nix {
         inherit pkgs; toplevel = wasmToplevel;
       };
+
+      # ---- DEBUG: a 1-getty variant of the served closure ------------------
+      # The full 8-getty boot spawns ~32 worker_threads, each holding a 2 GiB-max
+      # private WebAssembly.Memory — V8 reserves the full max as virtual address
+      # space for a shared:true memory, so 32×2 GiB overruns a 13 GiB host (OS
+      # OOM-kill). A 1-getty closure cuts the worker count enough to boot the
+      # full NixOS userspace headless for the do_mmap-wedge regression test. Same
+      # everything else; only the inittab getty count differs.
+      mkDebugManifest = n:
+        let
+          it = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; nrConsoles = n; };
+          tl = import ./userspace/toplevel.nix {
+            pkgs = cross;
+            busybox = wasmBusybox;
+            etc = wasmSystem.config.system.build.etc;
+            systemPath = wasmSystem.config.system.path;
+            passwd = wasmPasswd.passwd;
+            group = wasmPasswd.group;
+            inittab = it;
+            activate = wasmActivate;
+          };
+        in import ./userspace/store-manifest.nix { inherit pkgs; toplevel = tl; };
+      wasmStoreManifest1 = mkDebugManifest 1;
+      wasmStoreManifest2 = mkDebugManifest 2;
+      wasmStoreManifest3 = mkDebugManifest 3;
 
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
@@ -348,6 +462,9 @@
         # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
         kernel = kernel;
 
+        # Debug-only: kernel with CONFIG_WASM_TRACE (out-of-band trace ring).
+        kernel-trace = kernelTrace;
+
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
 
@@ -355,6 +472,8 @@
         # headers — exposed for build/inspection before wiring into the system.
         # The in-guest compiler: $out/bin/{clang,wasm-ld} (+ lib/clang resource dir).
         guest-clang = guestClang;
+        guest-binaryen = guestBinaryen;
+        guest-cc-fork = guestCcFork;
 
         # Opt-in ccache build variants of the two from-source LLVM derivations —
         # for the dev iteration loop only (need `extra-sandbox-paths`; CLAUDE.md
@@ -382,6 +501,27 @@
 
         # Wayland Phase 1 (1c M3): the AF_UNIX test client for waylandproxyd.
         wlclient = wasmWlClient;
+
+        # Phase 1 (per-process memory) Task 2.4: cross-process isolation probe
+        # (/bin/isoa + /bin/isob) — acceptance B1.
+        isolation-probe = wasmIsolationProbe;
+
+        # Phase 2 Task 1a: host asyncify build-path smoke — a fork-capable module
+        # (env.capture_stack import + asyncify control exports).
+        asyncify-cc-smoke = wasmAsyncifyCcSmoke;
+
+        # Phase 2 Task 2: the musl-fork variant (canonical musl + patch 0008) and
+        # the minimal real fork() program that links it (fork -> _Fork ->
+        # capture_stack). Build targets for the T2 link gate + T5 acceptance.
+        musl-fork = muslFork;
+        fork-returns-twice = wasmForkReturnsTwice;
+        fork-nested = wasmForkNested;
+        fork-loop = wasmForkLoop;
+        fork-helper = wasmForkHelper;
+        fork-stress = wasmForkStress;
+        fork-exec = wasmForkExec;
+        fork-pipe = wasmForkPipe;
+        fork-in-thread = wasmForkInThread;
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;
@@ -449,6 +589,15 @@
         # The wasm-system closure exported as store.json for pc to serve over 9P.
         wasm-store-manifest = wasmStoreManifest;
 
+        # DEBUG: reduced-getty served closures (fit the full-boot wedge
+        # regression within host RAM; see mkDebugManifest). 1getty boots
+        # interactively (no concurrent-exec race); 3getty triggers the
+        # nommu_region_sem race the 8-getty boot hits, with few enough workers
+        # to fit RAM.
+        wasm-store-manifest-1getty = wasmStoreManifest1;
+        wasm-store-manifest-2getty = wasmStoreManifest2;
+        wasm-store-manifest-3getty = wasmStoreManifest3;
+
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
           mkdir -p $out
@@ -492,5 +641,36 @@
         # backs stock cairo+wl_shm clients like weston-flowers. See deps-overlay.nix.
         "cairo"
       ]);
+
+      # Phase-2 fork acceptance as automated checks (issue #22): build the boot
+      # artifacts and run the headless harnesses under node IN THE SANDBOX. The
+      # --no-nix boot needs no network (MemVfs + file:// artifacts), and node
+      # worker_threads + SharedArrayBuffer work fine sandboxed. `nix flake check`
+      # runs these; the heavy in-guest cc-fork test is intentionally NOT a default
+      # check (it loads a ~57 MB clang in-guest) — run it manually.
+      checks.${system} =
+        let
+          runtimeSrc = pkgs.lib.cleanSourceWith {
+            src = ./runtime;
+            filter = path: _type:
+              !(pkgs.lib.hasInfix "/web/vendor" path)
+              && !(pkgs.lib.hasInfix "/node_modules" path);
+          };
+          forkCheck = name: harness:
+            pkgs.runCommand "check-${name}" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+              cp -r ${runtimeSrc} runtime
+              chmod -R +w runtime
+              mkdir -p art
+              cp ${kernel}/vmlinux.wasm art/vmlinux.wasm
+              cp ${wasmInitramfs}/initramfs.cpio.gz art/initramfs.cpio.gz
+              export LINUX_WASM_ARTIFACTS="file://$PWD/art/"
+              node runtime/node/${harness}
+              touch $out
+            '';
+        in
+        {
+          fork-acceptance = forkCheck "fork-acceptance" "phase2-acceptance.mjs";
+          fork-stress = forkCheck "fork-stress" "phase2-stress.mjs";
+        };
     };
 }

@@ -19,7 +19,7 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC }:
+{ pkgs, kernelSrc, kernelCC, wasmTrace ? false }:
 pkgs.stdenv.mkDerivation {
   pname = "vmlinux-wasm";
   version = "7.0-039e5f3e";
@@ -68,6 +68,88 @@ pkgs.stdenv.mkDerivation {
     # directly, instead of failing with -ENODEV. File mmap then works like a
     # normal system — the correct shared fix, NOT a per-package workaround.
     ./patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
+    # Phase 1 (Task 1): route copy_to/from_user + strncpy_from_user through the
+    # host-bridge import (drops UACCESS_MEMCPY, adds ARCH_HAS_STRNCPY_FROM_USER)
+    # so the kernel reaches a process's memory via the runtime. The runtime still
+    # services it against the SHARED buffer — zero behavior change; this de-risks
+    # the ABI before the per-process memory split (Task 2).
+    ./patches/kernel/0017-wasm-uaccess-hostbridge.patch
+    # Phase 1 (Task 2.0): close the residual direct-deref uaccess holes that
+    # bypass the 0015 host-bridge — __clear_user (memset to user ptr),
+    # strnlen_user (generic lib/ scans the user ptr), and create_wasm_tables'
+    # raw auxv memcpy. Route them through the bridge (new wasm_user_memzero
+    # import + copy_to_user) so they survive the Task 2 per-process memory split.
+    # Zero behavior change on the shared resolver; ABI stays at 1.
+    ./patches/kernel/0018-wasm-uaccess-residual.patch
+    # Phase 1 (Task 2.2): per-`mm` base-0 user-address-space allocator + the
+    # user/kernel gate (mm->context.user_as_{size,brk,free,live}), wired to the
+    # runtime memory-lifecycle ABI (wasm_user_mem_create at exec / free at
+    # exit_mmap; bumps WASM_HOSTBRIDGE_ABI to 2). Landed DARK behind the
+    # `wasm_user_as` early-param (default OFF): with the flag off, user_as_live is
+    # never set, every gate site takes the legacy shared alloc_pages_exact path,
+    # create/free never fire, and the default boot is unchanged. With the flag on,
+    # a late_initcall self-test proves the allocator (WASM_USER_AS_SELFTEST: PASS)
+    # — the running-process-over-private-memory proof is deferred to T2.3 (the
+    # instantiation flip), since a flag-on userspace still instantiates against
+    # the SHARED memory.
+    ./patches/kernel/0019-wasm-perprocess-allocator.patch
+    # Task 2.3: per-mm OWNER pid so CLONE_VM children (busybox NOMMU spawn) share
+    # the parent's private Memory — all host-bridge pids for a task report the
+    # mm owner pid, not the calling pid. Pairs with the runtime flip + the
+    # CLONE_VM Memory hand-off to the child worker.
+    ./patches/kernel/0020-wasm-clone-vm-owner-pid.patch
+    ./patches/kernel/0021-wasm-netfs-inline-readahead-collection.patch
+    # CONFIG_WASM_TRACE shared-memory kernel trace ringbuffer (debug facility,
+    # default OFF): a static BSS ring the kernel writes timestamped event records
+    # into, read OUT-OF-BAND by the JS runtime from the main thread — survives a
+    # wedge the cooperative scheduler would otherwise hide (console can't flush
+    # after the wedge point). Inert unless CONFIG_WASM_TRACE is set (the
+    # `wasmTrace` arg below), so the canonical .#kernel stays bit-for-bit.
+    ./patches/kernel/0022-wasm-trace-ringbuffer.patch
+    # Gate the global nommu_region_tree add/delete (and free_page_series'
+    # private-vs-shared routing) on a per-region wasm_private flag instead of
+    # wasm_user_as_active(mm). The mm's user_as state FLIPS during exec relative
+    # to a region's lifetime — the R/O code image is tree-added BEFORE
+    # user_as_live is set but freed AFTER, so an mm-state delete-gate orphaned a
+    # freed node in the rbtree → corruption → the 2nd full-NixOS getty/login
+    # boot deadlock (one task spinning in do_mmap's rb_first under
+    # nommu_region_sem). The immutable per-region flag makes add/delete
+    # symmetric. CONFIG_WASM-guarded; non-wasm path unchanged.
+    ./patches/kernel/0023-wasm-region-tree-private-flag.patch
+    # netfs read collection runs INLINE (not offloaded to a kworker) on the
+    # maxcpus=1 cooperative port: offloaded readahead collection unlocks folios
+    # from a kworker that can't be scheduled when the single CPU is wedged on
+    # those folios — the full-NixOS getty/login exec-storm deadlock. CONFIG_WASM
+    # guarded; every other arch keeps the upstream async-offload behavior.
+    # Task 2.4: symmetric `wasm_user_as: free pid=N` teardown marker (pairs with
+    # the 0017 create marker) so the per-process memory registry balance is
+    # observable. Opt-in behind its OWN early-param `wasm_user_as_freelog`
+    # (default OFF) — NOT just the wasm_user_as flag — because this line fires at
+    # every process exit and would otherwise interleave into pipeline output; so
+    # both the canonical flag-OFF boot AND a default flag-ON boot stay byte-for-
+    # byte unchanged. Only the Task 2.4 teardown test passes the freelog param.
+    ./patches/kernel/0024-wasm-user-as-free-marker.patch
+    # Force buffered v9fs I/O on wasm: v9fs routes cache=none (P9L_DIRECT) I/O to
+    # netfs_unbuffered_*, which pins the user buffer's pages (iov_iter_extract_
+    # pages) and copies them in kernel space — impossible under per-process memory
+    # (each process is a distinct WebAssembly.Memory the kernel can't address), so
+    # a 9P write to the writable /mnt/pc mount landed as zeros. Fall through to the
+    # cached path so the copy flows through the host-bridge copy_to/from_user choke
+    # point. CONFIG_WASM-guarded; other arches keep the upstream direct path.
+    ./patches/kernel/0025-wasm-9p-force-buffered.patch
+    # Phase 2: real non-CLONE_VM fork() on NOMMU. copy_thread() duplicates the
+    # parent's private base-0 address space into the fork child (fixes the
+    # dup_mm-aliased free-list head + owner pid, mints the child Memory via the
+    # new wasm_user_mem_dup host import) and flags it so __switch_to tells the
+    # runtime (fork_parent_pid) to dup the AS + asyncify-rewind the captured
+    # fork() stack rather than _start a fresh image. Adds the wasm_fork_current
+    # export the runtime drives after the user fork() unwinds. ABI v3.
+    ./patches/kernel/0026-wasm-fork-dup-addrspace.patch
+    # Phase 2 / in-guest tooling: file-backed mmap bounce + write-back for the
+    # private AS, so in-guest wasm-ld/wasm-opt read inputs + write outputs
+    # (unblocks cc/cc-fork — the direct pagecache share / kernel_read-into-base
+    # can't reach a process's private base-0 Memory).
+    ./patches/kernel/0027-wasm-private-as-file-mmap-bounce.patch
   ];
 
   nativeBuildInputs = [
@@ -152,6 +234,10 @@ pkgs.stdenv.mkDerivation {
       `# (2GiB) positive-address limit. Shared fix — helps any large-binary exec.` \
       --set-val CONFIG_BOOT_MEM_PAGES 0x4000 \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
+    ${pkgs.lib.optionalString wasmTrace ''
+      # Debug build only: enable the shared-memory trace ringbuffer (patch 0020).
+      bash ./scripts/config --file build/.config --enable CONFIG_WASM_TRACE
+    ''}
 
     make $makeFlags olddefconfig
 

@@ -1,0 +1,204 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: route copy_to/from_user + strncpy_from_user through host-bridge imports
+
+Phase 1 (Task 1): introduce a kernel->runtime "host-bridge" for user-memory
+copies and route the arch's uaccess primitives through it. The runtime services
+the imports against the EXISTING shared buffer, so this is a pure indirection
+with ZERO behavior change. It establishes the choke point and the cross-repo ABI
+(WASM_HOSTBRIDGE_ABI = 1) before the per-process memory split (Task 2), which is
+then a runtime-only change (swap the resolver to a pid-keyed address space).
+
+Imports (declared in asm/wasm.h, become wasm `env` imports via the final
+vmlinux link's --import-undefined):
+  wasm_user_copy_to(pid, dst_uaddr, src_kaddr, n)     -> bytes NOT copied
+  wasm_user_copy_from(pid, dst_kaddr, src_uaddr, n)   -> bytes NOT copied
+  wasm_user_strncpy(pid, dst_kaddr, src_uaddr, count) -> len copied (or count)
+
+Mechanics:
+- Drop `select UACCESS_MEMCPY`: the generic asm-generic/uaccess.h memcpy
+  raw_copy_* are replaced by arch versions that call the bridge.
+- `select ARCH_HAS_STRNCPY_FROM_USER`: drops lib/strncpy_from_user.c (which reads
+  user memory directly via the user pointer -- only valid while user==kernel) in
+  favor of an arch strncpy_from_user over the bridge. strnlen_user stays generic
+  for Task 1 (still correct on the shared buffer; revisited in Task 2).
+- The three primitives are NON-inline (arch/wasm/kernel/uaccess.c) so they can
+  pull <linux/sched.h> for the current pid without an asm/uaccess.h include cycle.
+
+diff --git a/arch/wasm/Kconfig b/arch/wasm/Kconfig
+index 455e68627..63960ada6 100644
+--- a/arch/wasm/Kconfig
++++ b/arch/wasm/Kconfig
+@@ -20,7 +20,7 @@ config WASM
+ 
+ 	select THREAD_INFO_IN_TASK
+ 	select GENERIC_SMP_IDLE_THREAD
+-	select UACCESS_MEMCPY
++	select ARCH_HAS_STRNCPY_FROM_USER
+ 	select ARCH_USE_QUEUED_RWLOCKS
+ 	select GENERIC_CPU_DEVICES
+ 	select GENERIC_CSUM
+diff --git a/arch/wasm/include/asm/uaccess.h b/arch/wasm/include/asm/uaccess.h
+new file mode 100644
+index 000000000..15a88bfc1
+--- /dev/null
++++ b/arch/wasm/include/asm/uaccess.h
+@@ -0,0 +1,58 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * wasm uaccess: route user-memory copies through host-bridge imports
++ * (Phase 1). The runtime resolves the target address space; in Task 1 every
++ * process resolves to the shared buffer, so this is a pure indirection over the
++ * old asm-generic memcpy path with no behavior change.
++ *
++ * raw_copy_{to,from}_user and strncpy_from_user are implemented out-of-line in
++ * arch/wasm/kernel/uaccess.c so they can read `current` (<linux/sched.h>)
++ * without pulling sched.h into this header (include-cycle hazard). We keep the
++ * asm-generic get_user/put_user wrappers, which fall back to raw_copy_* here.
++ */
++#ifndef _ASM_WASM_UACCESS_H
++#define _ASM_WASM_UACCESS_H
++
++#include <linux/compiler.h>
++#include <linux/string.h>
++#include <asm-generic/access_ok.h>
++
++/* host-bridge imports (serviced by the JS runtime over the shared buffer). */
++extern unsigned long wasm_user_copy_to(int pid, unsigned long dst_uaddr,
++				       unsigned long src_kaddr, unsigned long n);
++extern unsigned long wasm_user_copy_from(int pid, unsigned long dst_kaddr,
++					 unsigned long src_uaddr, unsigned long n);
++extern long wasm_user_strncpy(int pid, unsigned long dst_kaddr,
++			      unsigned long src_uaddr, unsigned long count);
++
++/* out-of-line arch primitives (arch/wasm/kernel/uaccess.c). */
++extern unsigned long wasm_raw_copy_to_user(void __user *to, const void *from,
++					   unsigned long n);
++extern unsigned long wasm_raw_copy_from_user(void *to, const void __user *from,
++					     unsigned long n);
++
++static inline __must_check unsigned long
++raw_copy_to_user(void __user *to, const void *from, unsigned long n)
++{
++	return wasm_raw_copy_to_user(to, from, n);
++}
++
++static inline __must_check unsigned long
++raw_copy_from_user(void *to, const void __user *from, unsigned long n)
++{
++	return wasm_raw_copy_from_user(to, from, n);
++}
++
++#define INLINE_COPY_TO_USER
++#define INLINE_COPY_FROM_USER
++
++/* ARCH_HAS_STRNCPY_FROM_USER: provide strncpy_from_user (drops the generic one
++ * in lib/, which reads user memory directly via the user pointer). */
++#define __HAVE_ARCH_STRNCPY_FROM_USER
++extern long strncpy_from_user(char *dst, const char __user *src, long count);
++
++/* get_user/put_user, clear_user, strnlen_user, the __get/__put_user_fn fallback
++ * (which routes through raw_copy_* above) all come from asm-generic. */
++#include <asm-generic/uaccess.h>
++
++#endif /* _ASM_WASM_UACCESS_H */
+diff --git a/arch/wasm/include/asm/wasm.h b/arch/wasm/include/asm/wasm.h
+index 36fd7b70c..4245d05d6 100644
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -8,6 +8,20 @@
+ extern void wasm_panic(const char *msg);
+ extern void wasm_dump_stacktrace(char* buffer, unsigned long max_size);
+ 
++/*
++ * Host-bridge (Phase 1, WASM_HOSTBRIDGE_ABI = 1): user-memory copies. The host
++ * resolves the target process's address space by `pid`; in Task 1 every pid
++ * resolves to the shared buffer (no behavior change). copy_* return the number
++ * of bytes NOT copied (0 on success); strncpy returns the length copied
++ * (excluding NUL), or `count` if no NUL was found.
++ */
++extern unsigned long wasm_user_copy_to(int pid, unsigned long dst_uaddr,
++				       unsigned long src_kaddr, unsigned long n);
++extern unsigned long wasm_user_copy_from(int pid, unsigned long dst_kaddr,
++					 unsigned long src_uaddr, unsigned long n);
++extern long wasm_user_strncpy(int pid, unsigned long dst_kaddr,
++			      unsigned long src_uaddr, unsigned long count);
++
+ extern void wasm_start_cpu(unsigned int cpu, struct task_struct *idle_task);
+ extern void wasm_stop_cpu(unsigned int cpu);
+ 
+diff --git a/arch/wasm/kernel/Makefile b/arch/wasm/kernel/Makefile
+index 787a7c00e..626d38d03 100644
+--- a/arch/wasm/kernel/Makefile
++++ b/arch/wasm/kernel/Makefile
+@@ -19,6 +19,7 @@ obj-y += sys_wasm.o
+ obj-y += syscall_table.o
+ obj-y += time.o
+ obj-y += traps.o
++obj-y += uaccess.o
+ 
+ ifndef CONFIG_64BIT
+ obj-y += sys_wasm32.o
+diff --git a/arch/wasm/kernel/uaccess.c b/arch/wasm/kernel/uaccess.c
+new file mode 100644
+index 000000000..1a5eb6c0c
+--- /dev/null
++++ b/arch/wasm/kernel/uaccess.c
+@@ -0,0 +1,58 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * wasm uaccess primitives over the host-bridge imports (Phase 1).
++ *
++ * Out-of-line (not in asm/uaccess.h) so we can read the current task's pid via
++ * <linux/sched.h> without an include cycle. The pid is passed to the host so a
++ * future per-process memory split (Task 2) can target the right address space;
++ * in Task 1 the runtime ignores it and copies against the shared buffer.
++ */
++#include <linux/sched.h>
++#include <linux/pid.h>
++#include <linux/uaccess.h>
++#include <linux/export.h>
++#include <asm/wasm.h>
++
++static inline int wasm_current_pid(void)
++{
++	struct task_struct *t = current;
++
++	return t ? task_pid_nr(t) : 0;
++}
++
++unsigned long wasm_raw_copy_to_user(void __user *to, const void *from,
++				    unsigned long n)
++{
++	return wasm_user_copy_to(wasm_current_pid(), (unsigned long)to,
++				 (unsigned long)from, n);
++}
++EXPORT_SYMBOL(wasm_raw_copy_to_user);
++
++unsigned long wasm_raw_copy_from_user(void *to, const void __user *from,
++				      unsigned long n)
++{
++	return wasm_user_copy_from(wasm_current_pid(), (unsigned long)to,
++				   (unsigned long)from, n);
++}
++EXPORT_SYMBOL(wasm_raw_copy_from_user);
++
++long strncpy_from_user(char *dst, const char __user *src, long count)
++{
++	long res;
++
++	if (unlikely(count <= 0))
++		return 0;
++
++	res = wasm_user_strncpy(wasm_current_pid(), (unsigned long)dst,
++				(unsigned long)src, count);
++	/*
++	 * wasm_user_strncpy returns the number of bytes copied (excluding the
++	 * terminating NUL), or `count` if no NUL was found within the limit —
++	 * matching strncpy_from_user's contract. A negative value signals a
++	 * fault.
++	 */
++	if (res < 0)
++		return -EFAULT;
++	return res;
++}
++EXPORT_SYMBOL(strncpy_from_user);

@@ -1,0 +1,52 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Fri, 20 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: force buffered v9fs I/O (no unbuffered page-pinning)
+
+Phase 1 (per-process memory) capstone fix. With wasm_user_as ON, a 9P write
+to the writable /mnt/pc mount (cache=none -> P9L_DIRECT) landed as zeros.
+v9fs_file_write_iter routes P9L_DIRECT writes to netfs_unbuffered_write_iter,
+which pins the user buffer via netfs_extract_user_iter -> iov_iter_extract_
+pages and copies those KERNEL pages -- but each user process now owns a
+DISTINCT WebAssembly.Memory the kernel cannot address, so the pin resolves
+the shared kernel Memory at the user offset and the data is zero. Page
+pinning is fundamentally impossible across separate Memory objects.
+
+Fix: on CONFIG_WASM, never take the unbuffered branch in v9fs_file_{read,
+write}_iter; fall through to the cached netfs_file_{read,write}_iter path,
+whose copy flows through the host-bridge copy_to/from_user choke point
+(patch 0014). Generalizes the cache=loose read mounts to writes too.
+CONFIG_WASM-guarded; other arches keep the upstream direct path.
+
+--- a/fs/9p/vfs_file.c	2026-06-19 22:28:30.854982526 -0400
++++ b/fs/9p/vfs_file.c	2026-06-19 22:28:30.866860722 -0400
+@@ -362,7 +362,8 @@
+ 	p9_debug(P9_DEBUG_VFS, "fid %d count %zu offset %lld\n",
+ 		 fid->fid, iov_iter_count(to), iocb->ki_pos);
+ 
+-	if (fid->mode & P9L_DIRECT)
++	/* CONFIG_WASM: force the cached/buffered path (see v9fs_file_write_iter). */
++	if (!IS_ENABLED(CONFIG_WASM) && (fid->mode & P9L_DIRECT))
+ 		return netfs_unbuffered_read_iter(iocb, to);
+ 
+ 	p9_debug(P9_DEBUG_VFS, "(cached)\n");
+@@ -405,7 +406,19 @@
+ 
+ 	p9_debug(P9_DEBUG_VFS, "fid %d\n", fid->fid);
+ 
+-	if (fid->mode & (P9L_DIRECT | P9L_NOWRITECACHE))
++	/*
++	 * CONFIG_WASM: each user process has its OWN WebAssembly.Memory,
++	 * distinct from the kernel's. Unbuffered/direct I/O pins the user
++	 * buffer's pages (netfs_extract_user_iter -> iov_iter_extract_pages)
++	 * and copies them in kernel space -- impossible when the bytes live in
++	 * a separate Memory the kernel cannot address: the pin resolves the
++	 * shared kernel Memory at the user offset, so the write lands as zeros.
++	 * Force the cached/buffered path, whose copy flows through the
++	 * host-bridge copy_from_user choke point. Mirrors the cache=loose read
++	 * mounts (bootstrap.nix).
++	 */
++	if (!IS_ENABLED(CONFIG_WASM) &&
++	    (fid->mode & (P9L_DIRECT | P9L_NOWRITECACHE)))
+ 		return netfs_unbuffered_write_iter(iocb, from);
+ 
+ 	p9_debug(P9_DEBUG_CACHE, "(cached)\n");

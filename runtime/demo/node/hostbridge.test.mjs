@@ -1,0 +1,136 @@
+// hostbridge.test.mjs — Phase 1 (Task 1) host-bridge uaccess indirection.
+//
+// Asserts:
+//   (a) the cross-repo ABI is at v2 (bumped in Task 2.1), and the
+//       bridge's copy_to/from/strncpy behave over a (shared) buffer resolver;
+//   (b) the kernel module statically IMPORTS the three host-bridge functions
+//       wasm_user_copy_to/_from/_strncpy (static WebAssembly.Module.imports scan);
+//   (c) the existing boot still reaches a shell unchanged (no behavior change).
+//
+// (b)/(c) gate on the nix-built artifacts being present (LINUX_WASM_ARTIFACTS
+// or runtime/web/artifacts symlink), matching boot.test.mjs — they SKIP, not
+// fail, when artifacts are absent (prerequisite gate only).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { WASM_HOSTBRIDGE_ABI, makeHostBridge } from "../../hostbridge.js";
+import { installWebShims, terminateAllWorkers } from "./web-shims.mjs";
+import { bootNixSystem } from "../../index.js";
+import { MemVfs } from "../../ninep/mem-vfs.js";
+
+const ARTIFACTS =
+  process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;
+const vmlinuxPath = fileURLToPath(new URL("vmlinux.wasm", ARTIFACTS));
+const haveArtifacts = !ARTIFACTS.startsWith("file:") || existsSync(vmlinuxPath);
+const skipArtifacts = haveArtifacts
+  ? false
+  : "set LINUX_WASM_ARTIFACTS or symlink runtime/web/artifacts to a `nix build` output";
+
+// (a) ABI + bridge semantics — pure unit test, no artifacts needed. The ABI was
+// bumped 1 → 2 in Task 2.1 (memory-lifecycle ABI); the copy_to/from/strncpy
+// semantics this file pins are unchanged across that bump.
+test("WASM_HOSTBRIDGE_ABI is at least 2 (memory-lifecycle ABI)", () => {
+  assert.ok(WASM_HOSTBRIDGE_ABI >= 2, `expected ABI >= 2, got ${WASM_HOSTBRIDGE_ABI}`);
+});
+
+test("makeHostBridge copy_to/from/strncpy operate over the resolved buffer", () => {
+  // Task 1: kernel buffer === user buffer (shared). Model that with one buffer.
+  const mem = new WebAssembly.Memory({ initial: 1 }); // 64 KiB
+  const bridge = makeHostBridge(mem, (_pid) => ({ u8: () => new Uint8Array(mem.buffer) }));
+  const u8 = () => new Uint8Array(mem.buffer);
+
+  // copy_to: kernel(src) -> user(dst); returns bytes NOT copied (0 on success).
+  u8().set([1, 2, 3, 4], 100); // "kernel" source bytes
+  assert.equal(bridge.wasm_user_copy_to(7 /*pid ignored*/, 200, 100, 4), 0);
+  assert.deepEqual([...u8().subarray(200, 204)], [1, 2, 3, 4]);
+
+  // copy_from: user(src) -> kernel(dst); returns bytes NOT copied (0).
+  u8().set([9, 8, 7], 300);
+  assert.equal(bridge.wasm_user_copy_from(7, 400, 300, 3), 0);
+  assert.deepEqual([...u8().subarray(400, 403)], [9, 8, 7]);
+
+  // strncpy: bounded NUL-terminated copy; returns length copied (excl. NUL).
+  u8().set([0x68, 0x69, 0x00, 0x78], 500); // "hi\0x"
+  assert.equal(bridge.wasm_user_strncpy(7, 600, 500, 16), 2);
+  assert.deepEqual([...u8().subarray(600, 603)], [0x68, 0x69, 0x00]);
+
+  // strncpy with no NUL within the limit returns `count`.
+  u8().set([0x61, 0x61, 0x61, 0x61], 700); // "aaaa", no NUL
+  assert.equal(bridge.wasm_user_strncpy(7, 800, 700, 3), 3);
+});
+
+// Phase-2 fork (ABI v3): wasm_user_mem_dup mints the child's private Memory at
+// the page count the KERNEL passes (the child mm's user_as size) and registers it
+// under the child pid — minting only, no byte copy, no parent lookup (so a lazy
+// child's __switch_to can mint from any worker).
+test("wasm_user_mem_dup mints the child memory at the given page count", () => {
+  const kernel = new WebAssembly.Memory({ initial: 1 });
+  const userMems = new Map();
+  const minted = [];
+  const mintUserMem = (_pid, pages) => {
+    minted.push(Number(pages));
+    return new WebAssembly.Memory({ initial: Number(pages), maximum: 64, shared: true });
+  };
+  const bridge = makeHostBridge(
+    {
+      get buffer() {
+        return kernel.buffer;
+      },
+    },
+    (pid) => ({ u8: () => new Uint8Array((userMems.get(pid)?.memory ?? kernel).buffer) }),
+    { userMems, mintUserMem },
+  );
+
+  // Parent exec'd: 3-page private memory under pid 10.
+  assert.equal(bridge.wasm_user_mem_create(10, 3), 0);
+  assert.equal(userMems.get(10).memory.buffer.byteLength, 3 * 65536);
+
+  // Fork: child pid 11 minted at 3 pages — NO parent lookup needed.
+  assert.equal(bridge.wasm_user_mem_dup(11, 3), 0);
+  const child = userMems.get(11);
+  assert.ok(child, "child registered under its own pid");
+  assert.equal(child.memory.buffer.byteLength, 3 * 65536, "child sized as requested");
+  assert.notEqual(child.memory, userMems.get(10).memory, "child is a DISTINCT Memory");
+  assert.deepEqual(minted, [3, 3], "minted parent then child, both 3 pages");
+});
+
+// (b) static import scan of the real kernel artifact.
+test("vmlinux.wasm statically imports the host-bridge functions", { skip: skipArtifacts }, () => {
+  const mod = new WebAssembly.Module(readFileSync(vmlinuxPath));
+  const names = new Set(WebAssembly.Module.imports(mod).map((i) => i.name));
+  for (const fn of ["wasm_user_copy_to", "wasm_user_copy_from", "wasm_user_strncpy"]) {
+    assert.ok(names.has(fn), `kernel must import ${fn} (host-bridge ABI v1)`);
+  }
+});
+
+// (c) the existing boot still reaches a shell — zero behavior change.
+test(
+  "guest still boots to a shell prompt with the host-bridge wired",
+  { timeout: 120000, skip: skipArtifacts },
+  async () => {
+    installWebShims();
+    const vfs = MemVfs.from({ Home: {} });
+    const handle = await bootNixSystem({
+      vfs,
+      baseUrl: ARTIFACTS,
+      nix: false, // busybox-only: fast, no /nix closure needed for the smoke
+    });
+    let out = "";
+    handle.console(0).onData((b) => (out += new TextDecoder().decode(b)));
+    const t0 = Date.now();
+    while (Date.now() - t0 < 90000 && !/[#$]\s*$/.test(out.trimEnd())) {
+      if (/panic/i.test(out)) throw new Error("KERNEL_PANIC:\n" + out);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.match(out, /[#$]\s*$/, "expected a shell prompt");
+    handle.console(0).write("echo HOSTBRIDGE_BOOT_OK\n");
+    const t1 = Date.now();
+    while (Date.now() - t1 < 10000 && !/HOSTBRIDGE_BOOT_OK/.test(out)) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.match(out, /HOSTBRIDGE_BOOT_OK/);
+    handle.kill();
+    await terminateAllWorkers();
+  },
+);

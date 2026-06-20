@@ -56,6 +56,16 @@ export function terminateAllWorkers() {
   return Promise.all(promises);
 }
 
+/**
+ * The number of live Web Workers (kernel CPUs + per-task runners). Used by the
+ * fork stress test to assert task workers are reclaimed after their tasks exit
+ * (no per-fork worker leak). A node Worker is removed from `_liveWorkers` only on
+ * terminate(), which the host calls from kill_task when a task is reaped.
+ */
+export function liveWorkerCount() {
+  return _liveWorkers.size;
+}
+
 export function installFetchShim() {
   if (globalThis.__fileFetchInstalled) return;
   const native = globalThis.fetch;

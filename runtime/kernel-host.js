@@ -59,6 +59,77 @@ export const linux = async ({
   /// Dict of tasks.
   const tasks = {};
 
+  /// Phase 2 fork: fork-time memory snapshots for lazily-spawned fork children,
+  /// keyed by child pid (child_pid -> { snapshot, ctlPtr, cloneCallback }). The
+  /// forking worker stages them here (stage_fork_snapshot) because a lazy child's
+  /// create_and_run_task may run in a DIFFERENT worker than the one that forked.
+  const pendingForks = new Map();
+
+  /// CONFIG_WASM_TRACE: location of the kernel's shared-memory trace ringbuffer
+  /// ({ring, head, slots_addr} BSS addresses), published by the CPU-0 worker at
+  /// boot. Read OUT-OF-BAND by dumpWtrace() (below) straight from the shared
+  /// `memory`, independent of console flush / which worker is wedged.
+  let wtrace_info = null;
+
+  // CONFIG_WASM_TRACE event-id → name map (asm/wtrace.h enum wtrace_event),
+  // shared by dumpWtrace() and the WT_DUMP_AT one-shot dumper.
+  const _wtEV = {
+    1: "MMAP_ENTER",
+    2: "MMAP_SEM_GET",
+    3: "MMAP_SEM_HELD",
+    4: "MMAP_SHARE_SCAN",
+    5: "MMAP_SHARE_ITER",
+    6: "MMAP_SHARE_HIT",
+    7: "MMAP_PRIVATE",
+    8: "MMAP_ADDREGION",
+    9: "MMAP_ADDREGION_DONE",
+    10: "MMAP_ZERO",
+    11: "MMAP_SEM_PUT",
+    12: "MMAP_DONE",
+    13: "ADDREG_ENTER",
+    14: "ADDREG_LOOP",
+    15: "ADDREG_BUG",
+    16: "ALLOC_ENTER",
+    17: "ALLOC_FREELIST",
+    18: "ALLOC_GROW",
+    19: "ALLOC_DONE",
+    20: "PUTREG_ENTER",
+    21: "PUTREG_DONE",
+    106: "MMAP_VMA_STORE",
+  };
+  // Read the kernel trace ringbuffer out-of-band from the shared `memory`
+  // (referenced lazily — declared below; only ever called post-boot). Returns
+  // the last `n` records, decoded. [] without CONFIG_WASM_TRACE (wtrace_info
+  // stays null). Exposed via the handle's dumpWtrace().
+  const handleDumpWtrace = (n = 256) => {
+    if (!wtrace_info) return [];
+    const REC = 56; // sizeof(struct wtrace_rec)
+    const dv = new DataView(memory.buffer);
+    const slots = dv.getUint32(wtrace_info.slots_addr, true);
+    const head = dv.getUint32(wtrace_info.head, true); /* unsigned long = 4 bytes on wasm32 */
+    if (!head) return [];
+    const out = [];
+    const start = Math.max(1, head - Math.min(n, slots) + 1);
+    for (let seq = start; seq <= head; seq++) {
+      const idx = (seq - 1) & (slots - 1);
+      const base = wtrace_info.ring + idx * REC;
+      const s0 = Number(dv.getBigUint64(base, true));
+      if (s0 === 0) continue;
+      const ts = Number(dv.getBigUint64(base + 8, true));
+      const pid = dv.getUint32(base + 16, true);
+      const cpu = dv.getUint32(base + 20, true);
+      const event = dv.getUint32(base + 24, true);
+      const a0 = Number(dv.getBigUint64(base + 32, true));
+      const a1 = Number(dv.getBigUint64(base + 40, true));
+      const a2 = Number(dv.getBigUint64(base + 48, true));
+      const s1 = Number(dv.getBigUint64(base, true));
+      if (s1 !== s0) continue;
+      out.push({ seq: s0, ts, pid, cpu, event, a0, a1, a2 });
+    }
+    out.sort((x, y) => x.seq - y.seq);
+    return out;
+  };
+
   /// pc (new exec ABI): the host-side compiled-Module cache (keyed by an opaque
   /// per-inode token) is GONE. binfmt_wasm now places the user binary as a byte
   /// range in the SHARED kernel memory; each task worker compiles it directly
@@ -148,6 +219,82 @@ export const linux = async ({
       // in this special case tell us where it is so that we can register it.
       log("Starting cpu 0 with init_task " + message.init_task);
       tasks[message.init_task] = cpus[0];
+      // CONFIG_WASM_TRACE: remember the trace ringbuffer location for dumpWtrace().
+      if (message.wtrace) wtrace_info = message.wtrace;
+      // WT_DUMP_AT=<ms>: one-shot self-contained dump of the trace ring to a
+      // file at a fixed wall-clock delay, then exit. Runs entirely on the main
+      // thread with direct `memory`+`wtrace_info` access (no test await chain),
+      // so it captures a quiet wedge before V8's shared-Memory external-memory
+      // accounting OOMs a long-lived harness. Diagnostic only (WT_DUMP_AT unset
+      // in normal use).
+      if (typeof process !== "undefined" && process.env && process.env.WT_DUMP_AT) {
+        const fs = require("fs");
+        const delay = Number(process.env.WT_DUMP_AT);
+        const file = process.env.WT_DUMP_FILE || "/tmp/wt-oneshot.txt";
+        const t = setTimeout(() => {
+          // Stream straight to an fd, reading one record at a time (no big
+          // arrays) — at the dump moment the process is near V8's limit from
+          // the workers' shared Memories, so allocate as little as possible.
+          let fd = -1;
+          try {
+            fd = fs.openSync(file, "w");
+            const dv = new DataView(memory.buffer);
+            const slots = dv.getUint32(wtrace_info.slots_addr, true);
+            const head = dv.getUint32(
+              wtrace_info.head,
+              true,
+            ); /* unsigned long = 4 bytes on wasm32 */
+            const REC = 56;
+            const rd = (seq) => {
+              const idx = (seq - 1) & (slots - 1);
+              const b = wtrace_info.ring + idx * REC;
+              return {
+                seq: Number(dv.getBigUint64(b, true)),
+                pid: dv.getUint32(b + 16, true),
+                cpu: dv.getUint32(b + 20, true),
+                ev: dv.getUint32(b + 24, true),
+                a0: Number(dv.getBigUint64(b + 32, true)),
+                a1: Number(dv.getBigUint64(b + 40, true)),
+                a2: Number(dv.getBigUint64(b + 48, true)),
+              };
+            };
+            fs.writeSync(fd, `WT_DUMP_AT=${delay} head=${head} slots=${slots}\n`);
+            // last event per pid (single scan over the live window)
+            const N = Math.min(slots, head);
+            const lastByPid = new Map();
+            for (let seq = head - N + 1; seq <= head; seq++) {
+              if (seq < 1) continue;
+              const r = rd(seq);
+              if (r.seq === seq) lastByPid.set(r.pid, r);
+            }
+            fs.writeSync(fd, "=== last event per pid ===\n");
+            for (const [p, r] of [...lastByPid].sort((a, b) => a[0] - b[0]))
+              fs.writeSync(
+                fd,
+                `pid ${p}: ${_wtEV[r.ev] || r.ev} @${r.seq} a0=0x${(r.a0 >>> 0).toString(16)} a1=0x${(r.a1 >>> 0).toString(16)} a2=0x${(r.a2 >>> 0).toString(16)}\n`,
+              );
+            // tail 250
+            fs.writeSync(fd, "=== tail 250 ===\n");
+            for (let seq = Math.max(1, head - 250 + 1); seq <= head; seq++) {
+              const r = rd(seq);
+              if (r.seq !== seq) continue;
+              fs.writeSync(
+                fd,
+                `${r.seq} p${r.pid}/c${r.cpu} ${_wtEV[r.ev] || r.ev} a0=0x${(r.a0 >>> 0).toString(16)} a1=0x${(r.a1 >>> 0).toString(16)} a2=0x${(r.a2 >>> 0).toString(16)}\n`,
+              );
+            }
+            fs.closeSync(fd);
+            console.error(`[WT_DUMP_AT] wrote ${file} head=${head}`);
+          } catch (e) {
+            try {
+              if (fd >= 0) fs.closeSync(fd);
+            } catch {}
+            console.error("[WT_DUMP_AT] failed", String(e).slice(0, 120));
+          }
+          process.exit(0);
+        }, delay);
+        if (t.unref) t.unref();
+      }
     },
 
     start_secondary: (message) => {
@@ -188,7 +335,34 @@ export const linux = async ({
 
     create_and_run_task: (message) => {
       // ret_from_fork will make sure the task switch finishes.
-      make_task(message.prev_task, message.new_task, message.name, message.user_executable);
+      // Task 2.3: `clone_vm` (if present) carries the parent's private Memory +
+      // owner pid for a CLONE_VM child sharing the parent's address space.
+      // Phase 2: `fork` carries a fork child's fork-time memory snapshot + ctl
+      // pointer. It's attached directly only for a SYNCHRONOUS same-worker spawn;
+      // a LAZY child's create_and_run_task may run in a different worker that
+      // can't see the staging slot, so the forking worker routed the snapshot
+      // here (stage_fork_snapshot, keyed by child pid). Fill it from pendingForks.
+      let fork = message.fork;
+      if (!fork && message.fork_child_pid) {
+        fork = pendingForks.get(message.fork_child_pid) || null;
+        if (fork) pendingForks.delete(message.fork_child_pid);
+      }
+      make_task(
+        message.prev_task,
+        message.new_task,
+        message.name,
+        message.user_executable,
+        message.clone_vm,
+        fork,
+      );
+    },
+
+    // Phase 2 fork: a forking worker routes a lazily-spawned child's fork-time
+    // snapshot here (keyed by child pid) so whichever worker later runs that
+    // child's create_and_run_task can pick it up (cross-worker — see
+    // kernel-worker.js). The snapshot ArrayBuffer was transferred in.
+    stage_fork_snapshot: (message) => {
+      pendingForks.set(message.child_pid, message.fork);
     },
 
     release_task: (message) => {
@@ -231,6 +405,33 @@ export const linux = async ({
       } else {
         log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
       }
+    },
+
+    // Task 2.3: DEAD PATH (kept inert). T2.1 minted a process's private base-0
+    // memory HERE on the main thread and transferred it to the requesting
+    // worker. The T2.3 correction mints the private memory WORKER-LOCAL +
+    // SYNCHRONOUSLY inside wasm_user_mem_create (kernel-worker.js mintUserMem),
+    // because a transferred Memory can never arrive in time (the worker runs
+    // exec → instantiation without yielding) and can't be transferred to a
+    // worker parked in Atomics.wait. R1 never needs main to hold a private
+    // Memory: uaccess + instantiation are in-worker; main-thread host callbacks
+    // touch only the shared KERNEL `memory`. The worker no longer posts
+    // `create_user_mem`, so this handler is unreachable; left inert (harmless if
+    // a stale path ever fired) rather than deleted.
+    create_user_mem: (message, worker) => {
+      // `WebAssembly.Memory` descriptors take PLAIN Numbers for initial/maximum
+      // (even on a wasm64 / "i64" address memory). These page counts originate
+      // from the kernel's i64 `wasm_user_mem_create(pid, init_pages)` arg, so on
+      // a 64-bit arch they may arrive as BigInt — `Number(...)` coerces them; the
+      // old `Ulong(...)` wrapped them back to BigInt on wasm64 (`Ulong === BigInt`
+      // there), which `WebAssembly.Memory` rejects. (T2.1 Minor fix.)
+      const mem = new WebAssembly.Memory({
+        initial: Number(message.init_pages),
+        maximum: Number(message.max_pages),
+        shared: false,
+        address: "i" + arch_bits,
+      });
+      worker.postMessage({ method: "user_mem_ready", pid: message.pid, memory: mem }, [mem]);
     },
 
     // Wayland Phase 4f: the guest refilled the IN avail ring; flush any IN
@@ -320,7 +521,7 @@ export const linux = async ({
    * are brought up, they can run concurrently (and will effectively be managed by the Wasm host OS). While we are not
    * able to suspend them from JS, the host OS will do that.
    */
-  const make_task = (prev_task, new_task, name, user_executable) => {
+  const make_task = (prev_task, new_task, name, user_executable, clone_vm, fork) => {
     // pc (new exec ABI): user_executable is the binary's byte range
     // ({bin_start,bin_end,data_start,table_start}) in the SHARED kernel memory.
     // Pass it straight to the new worker, which compiles it from shared memory.
@@ -329,6 +530,14 @@ export const linux = async ({
       prev_task: prev_task,
       new_task: new_task,
       user_executable: user_executable,
+      // Task 2.3: for a CLONE_VM child, the parent's private Memory + owner pid
+      // (structured-cloned in the init message — shared:true Memory is
+      // cross-worker shareable). The child registers + instantiates against it.
+      clone_vm: clone_vm || null,
+      // Phase 2: for a fork child, its fork-time memory snapshot + asyncify ctl
+      // pointer. The snapshot ArrayBuffer is TRANSFERRED to the child worker (it
+      // is a one-shot fork-time copy; the host no longer needs it).
+      fork: fork || null,
     };
     tasks[new_task] = make_vmlinux_runner(name + " (" + new_task + ")", options);
   };
@@ -381,19 +590,25 @@ export const linux = async ({
       log("[worker messageerror]");
     };
 
-    worker.postMessage({
-      ...options,
-      method: "init",
-      variant: variant,
-      vmlinux: vmlinux,
-      memory: memory,
-      locks: locks,
-      last_task: last_task,
-      runner_name: name,
-      ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
-      virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
-      winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
-    });
+    // Phase 2: transfer a fork child's fork-time snapshot ArrayBuffer (one-shot)
+    // into the child worker rather than structured-cloning it.
+    const initTransfer = options.fork ? [options.fork.snapshot] : [];
+    worker.postMessage(
+      {
+        ...options,
+        method: "init",
+        variant: variant,
+        vmlinux: vmlinux,
+        memory: memory,
+        locks: locks,
+        last_task: last_task,
+        runner_name: name,
+        ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
+        virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
+        winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
+      },
+      initTransfer,
+    );
 
     return {
       worker: worker,
@@ -429,6 +644,13 @@ export const linux = async ({
       Atomics.store(winsizes, vtermno | 0, packed);
     },
 
+    // CONFIG_WASM_TRACE: read the kernel trace ringbuffer out-of-band from the
+    // shared memory. Returns the last `n` records (chronological), decoded. Safe
+    // to call at any time — even while a worker is wedged — because the main
+    // thread holds the same shared `memory` and never blocks. Returns [] when
+    // the kernel was built without CONFIG_WASM_TRACE (wtrace_info stays null).
+    dumpWtrace: (n = 256) => handleDumpWtrace(n),
+
     // Wayland Phase 4f: the SINGLE host→guest delivery path. The main-thread
     // compositor calls this for EVERY server→client event — replies,
     // xdg_surface.configure, wl_pointer/keyboard, frame callbacks, wl_buffer.release,
@@ -451,7 +673,10 @@ export const linux = async ({
         return;
       }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
+      const fdBufs =
+        fds && fds.length
+          ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f)))
+          : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
   };

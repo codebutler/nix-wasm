@@ -9,13 +9,20 @@
 #
 # Compiled against compiler-rt (--rtlib via LIBCC). No other deps — musl is the
 # base of the sysroot.
-{ pkgs, compilerRt }:
+#
+# `forkSeam` (Phase 2, option A): when true, add patch 0008 — real fork() over the
+# asyncify capture_stack seam — and build a SEPARATE `musl-fork` variant. Default
+# false keeps the canonical `musl` derivation BYTE-IDENTICAL (0008 absent), so
+# nix.wasm / busybox / in-guest nix keep the current clone path; only fork-capable
+# programs (built via userspace/asyncify-cc.nix, which links this variant's libc.a
+# first) get the seam. See docs/.../2026-06-20-fork-host-abi-v3.md §0.
+{ pkgs, compilerRt, forkSeam ? false }:
 let
   llvm = pkgs.llvmPackages_21;
   bt = llvm.bintools-unwrapped;
 in
 pkgs.stdenv.mkDerivation {
-  pname = "musl-wasm32-nommu";
+  pname = "musl-wasm32-nommu${pkgs.lib.optionalString forkSeam "-fork"}";
   version = "1.2.5";
 
   # musl 1.2.5 official release tarball (== git tag v1.2.5 = 7fd8de89, which the
@@ -32,7 +39,10 @@ pkgs.stdenv.mkDerivation {
     ../patches/musl/0005-wasm-per-thread-llvm-tls-block.patch
     ../patches/musl/0006-wasm-seed-page-size-before-ctors.patch
     ../patches/musl/0007-fork-clone-exact-syscall-arity.patch
-  ];
+  ] ++ pkgs.lib.optional forkSeam
+    # Phase 2 (musl-fork variant only): replace _Fork's SYS_clone with the
+    # capture_stack asyncify seam. Off for canonical musl (hash unchanged).
+    ../patches/musl/0008-fork-asyncify-seam.patch;
 
   nativeBuildInputs = [ bt ];
   dontStrip = true;

@@ -1,0 +1,269 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 20 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: file-backed mmap bounce + write-back for the private AS
+
+In-guest tooling (wasm-ld, wasm-opt, anything that mmaps files) was broken under
+per-process memory: the kernel can't address a process's private base-0
+WebAssembly.Memory, so the direct pagecache share hands back a kernel address the
+private AS can't reach, and do_mmap_private's kernel_read-into-base writes into
+kernel memory, not the process. Result: every in-guest LINK produced a
+right-sized but ZEROED file (lld's MAP_SHARED output mmap went nowhere).
+
+Route every file-backed mmap from a private-AS process through a new
+do_mmap_wasm_file: allocate a private offset and BOUNCE through a kernel page
+buffer + the host-bridge copy ops — read the file content into the private memory
+on map (wasm_file_bounce_in), and for a writable MAP_SHARED mapping write it back
+to the file on teardown (wasm_file_bounce_out, from delete_vma). The global-tree
+share scan is skipped for private-AS processes (a shared region's address is
+unreachable). Anonymous mmaps keep the existing per-mm allocator path; the R/O
+code image (mapped before user_as_live) is unaffected. This unblocks in-guest
+compilation: cc/cc-fork can now read inputs and write outputs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+---
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 2a6a70fbd..d91eff8b7 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -727,6 +727,14 @@ struct vm_region {
+ 	 * add/delete symmetric by construction.
+ 	 */
+ 	bool		wasm_private : 1;
++	/*
++	 * In-guest tooling: true iff this is a WRITABLE MAP_SHARED file mapping
++	 * served by the per-process private allocator (do_mmap_wasm_file). The
++	 * kernel can't address the private Memory, so writes were bounced into the
++	 * private AS; on teardown (delete_vma) they must be flushed back to the
++	 * file. This is what lets in-guest wasm-ld/wasm-opt outputs reach the fs.
++	 */
++	bool		wasm_writeback : 1;
+ #endif
+ };
+ 
+diff --git a/mm/nommu.c b/mm/nommu.c
+index 296d01251..e28273569 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -45,6 +45,8 @@
+ #include <asm/mmu.h>
+ #include <asm/user_as.h>
+ #include <asm/wtrace.h>
++#include <asm/wasm.h>		/* wasm_user_copy_to/from, wasm_user_memzero */
++#include <linux/fs.h>		/* kernel_read / kernel_write for the file bounce */
+ 
+ /*
+  * Task 2.3 fix: a region is "private" (per-mm base-0 allocator backed, hence
+@@ -57,6 +59,88 @@ static inline bool wasm_region_is_private(const struct vm_region *region)
+ {
+ 	return region->wasm_private;
+ }
++
++/*
++ * In-guest tooling: file-backed mmap into a per-process base-0 private AS.
++ *
++ * The kernel cannot address a process's private WebAssembly.Memory, so neither
++ * the direct pagecache share (which hands back a KERNEL address the private AS
++ * can't reach) nor do_mmap_private's kernel_read-into-base works for a private-AS
++ * file mapping. Instead allocate a private offset and BOUNCE through a kernel
++ * page buffer + the host-bridge copy ops: read the file content into the private
++ * memory on map (wasm_file_bounce_in), and — for a WRITABLE MAP_SHARED mapping —
++ * write it back to the file on teardown (wasm_file_bounce_out, from delete_vma).
++ * This is what lets in-guest wasm-ld/wasm-opt read their inputs and write their
++ * outputs (and any mmap-based file I/O) under per-process memory.
++ */
++static int wasm_file_bounce_in(struct file *file, loff_t foff, int pid,
++			       unsigned long uoff, unsigned long len)
++{
++	char *buf;
++	unsigned long done = 0;
++
++	/* Zero the whole private span first, then overlay the file content (the
++	 * file may be shorter than the mapping — e.g. a fresh ftruncate'd output). */
++	wasm_user_memzero(pid, uoff, len);
++
++	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	while (done < len) {
++		unsigned long want = min_t(unsigned long, len - done, PAGE_SIZE);
++		ssize_t r = kernel_read(file, buf, want, &foff);
++
++		if (r < 0) {
++			kfree(buf);
++			return r;
++		}
++		if (r == 0)
++			break;	/* EOF — the remainder stays zeroed */
++		wasm_user_copy_to(pid, uoff + done, (unsigned long)buf, r);
++		done += r;
++	}
++	kfree(buf);
++	return 0;
++}
++
++static int wasm_file_bounce_out(struct file *file, loff_t foff, int pid,
++				unsigned long uoff, unsigned long len)
++{
++	char *buf;
++	unsigned long done = 0;
++	loff_t isize;
++
++	/*
++	 * Write back only the FILE's bytes, not the page-aligned mapping span.
++	 * do_mmap() rounds the length up to a page before do_mmap_wasm_file sees
++	 * it, but the tool ftruncate'd the file to its exact output size; writing
++	 * the page-padding tail (zeros past the real content) would append garbage
++	 * that corrupts e.g. a wasm module's trailing section. Cap at i_size.
++	 */
++	isize = i_size_read(file_inode(file));
++	if (foff >= isize)
++		return 0;
++	if (foff + (loff_t)len > isize)
++		len = (unsigned long)(isize - foff);
++
++	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	while (done < len) {
++		unsigned long want = min_t(unsigned long, len - done, PAGE_SIZE);
++		ssize_t w;
++
++		wasm_user_copy_from(pid, (unsigned long)buf, uoff + done, want);
++		w = kernel_write(file, buf, want, &foff);
++		if (w < 0) {
++			kfree(buf);
++			return w;
++		}
++		done += want;
++	}
++	kfree(buf);
++	return 0;
++}
+ #else
+ static inline bool wasm_region_is_private(const struct vm_region *region)
+ {
+@@ -687,6 +771,24 @@ static int delete_vma_from_mm(struct vm_area_struct *vma)
+  */
+ static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
+ {
++#ifdef CONFIG_WASM
++	/*
++	 * In-guest tooling: a writable MAP_SHARED file mapping over the private AS
++	 * (do_mmap_wasm_file) buffered its writes in the private Memory; flush them
++	 * back to the file BEFORE we drop the file ref. This is how in-guest
++	 * wasm-ld / wasm-opt outputs reach the fs. Use the OWNING mm's owner pid
++	 * (current->mm is NULL during exit_mmap teardown). vma->vm_start is the
++	 * private offset; the span is vm_end - vm_start.
++	 */
++	if (vma->vm_file && vma->vm_region && vma->vm_region->wasm_writeback) {
++		int pid = mm ? mm->context.user_as_owner_pid : 0;
++
++		if (pid)
++			wasm_file_bounce_out(vma->vm_file,
++				(loff_t)vma->vm_pgoff << PAGE_SHIFT, pid,
++				vma->vm_start, vma->vm_end - vma->vm_start);
++	}
++#endif
+ 	vma_close(vma);
+ 	if (vma->vm_file)
+ 		fput(vma->vm_file);
+@@ -982,6 +1084,57 @@ static int do_mmap_shared_file(struct vm_area_struct *vma)
+ 	return -ENODEV;
+ }
+ 
++#ifdef CONFIG_WASM
++/*
++ * In-guest tooling: a file-backed mmap by a process running a private base-0 AS.
++ * Allocate a private offset, bounce the file content in, and mark a writable
++ * MAP_SHARED mapping for write-back at teardown. Replaces BOTH the direct
++ * pagecache share (kernel address) and do_mmap_private's kernel_read-into-base,
++ * which can't reach the private Memory. See the bounce helpers above.
++ */
++static int do_mmap_wasm_file(struct vm_area_struct *vma,
++			     struct vm_region *region, unsigned long len)
++{
++	unsigned long total, span, uoff;
++	loff_t foff;
++	int pid, ret;
++
++	total = PAGE_ALIGN(len) >> PAGE_SHIFT;
++	span = total << PAGE_SHIFT;
++
++	uoff = wasm_user_as_alloc(current->mm, span);
++	if (!uoff)
++		return -ENOMEM;
++
++	vm_flags_set(vma, VM_MAPPED_COPY);
++	region->vm_flags = vma->vm_flags;
++	region->vm_start = uoff;
++	region->vm_end   = uoff + len;
++	region->vm_top   = uoff + span;
++	vma->vm_start    = uoff;
++	vma->vm_end      = uoff + len;
++	region->wasm_private = true;
++
++	pid = wasm_user_as_owner_pid();
++	foff = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
++	ret = wasm_file_bounce_in(vma->vm_file, foff, pid, uoff, len);
++	if (ret < 0) {
++		wasm_user_as_free_extent(current->mm, uoff, span);
++		region->vm_start = region->vm_end = region->vm_top = 0;
++		vma->vm_start = vma->vm_end = 0;
++		return ret;
++	}
++
++	/* A writable MAP_SHARED file mapping: writes must reach the file. Flush the
++	 * private copy back on teardown (delete_vma). MAP_PRIVATE / read-only maps
++	 * keep the bounced-in copy private — no write-back. */
++	if ((vma->vm_flags & VM_WRITE) && (vma->vm_flags & VM_SHARED))
++		region->wasm_writeback = true;
++
++	return 0;
++}
++#endif
++
+ /*
+  * set up a private mapping or an anonymous shared mapping
+  */
+@@ -1210,7 +1363,17 @@ unsigned long do_mmap(struct file *file,
+ 	 *   these cases, sharing is handled in the driver or filesystem rather
+ 	 *   than here
+ 	 */
+-	if (is_nommu_shared_mapping(vm_flags)) {
++	/*
++	 * In-guest tooling: a private-AS process must NOT share another mapping's
++	 * region — the shared region holds a kernel/other-process address its
++	 * private base-0 Memory can't reach. A regular-file mmap goes through the
++	 * private-AS bounce (do_mmap_wasm_file) instead, so skip the share scan.
++	 * Device/special files (e.g. the virtio-wl shm VFD) keep their driver mmap
++	 * (S_ISREG is false) so their f_op->mmap still runs — do not skip for them.
++	 */
++	if (is_nommu_shared_mapping(vm_flags) &&
++	    !(IS_ENABLED(CONFIG_WASM) && wasm_user_as_active(current->mm) &&
++	      file && S_ISREG(file_inode(file)->i_mode))) {
+ 		struct vm_region *pregion;
+ 		unsigned long pglen, rpglen, pgend, rpgend, start;
+ 
+@@ -1315,6 +1478,21 @@ unsigned long do_mmap(struct file *file,
+ 	 */
+ 	WTRACE(WT_MMAP_PRIVATE, (unsigned long)file, vma->vm_flags,
+ 	       wasm_user_as_active(current->mm));
++#ifdef CONFIG_WASM
++	/*
++	 * In-guest tooling: a regular-file mmap by a private-AS process can use
++	 * neither the direct pagecache share (kernel address) nor do_mmap_private's
++	 * kernel_read-into-base — route it through the private-AS bounce instead
++	 * (read-in now, write-back at teardown for writable MAP_SHARED). Anonymous
++	 * mmaps still take do_mmap_private (the per-mm allocator path). The R/O code
++	 * image is mapped before user_as_live is set, so it is unaffected. Only
++	 * S_ISREG files bounce: device/special files (e.g. the virtio-wl shm VFD)
++	 * must keep their own f_op->mmap, so they fall through to the driver path.
++	 */
++	if (file && wasm_user_as_active(current->mm) && S_ISREG(file_inode(file)->i_mode))
++		ret = do_mmap_wasm_file(vma, region, len);
++	else
++#endif
+ 	if (file && vma->vm_flags & VM_SHARED)
+ 		ret = do_mmap_shared_file(vma);
+ 	else

@@ -9,6 +9,8 @@
 // import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
 import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
+import { makeHostBridge } from "./hostbridge.js";
+import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
@@ -83,12 +85,42 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   let user_executable = null;
   let user_executable_params = null;
 
+  /// Task 2.3 (the flip): the pid whose private memory this worker instantiates
+  /// the user module against. The kernel calls wasm_user_mem_create(pid, …)
+  /// synchronously inside THIS worker during exec (load_wasm_file, before the
+  /// data vm_mmap), so we capture that pid here; user_executable_setup() then
+  /// resolves userMems.get(current_user_pid) for env.memory + the table. All the
+  /// kernel's uaccess/lifecycle bridge calls for the running task pass the same
+  /// task_pid_nr(current) (wasm_current_pid == wasm_exec_pid), so this single
+  /// pid keys the whole registry entry for the task this worker runs.
+  let current_user_pid = null;
+
   /// The user executabe instance, or null. Try using the instance variable in the promise over this one if possible.
   let user_executable_instance = null;
   let user_executable_imports = null;
 
   /// Flag that a clone callback should be called instead of _start().
   let should_call_clone_callback = false;
+
+  /// Phase 2 fork: the env.capture_stack import for THIS worker's user instance
+  /// (the asyncify unwind point), built in user_executable_setup. `fork_return_value`
+  /// is what capture_stack returns on the REWIND side — the child pid in the parent,
+  /// 0 in the child; set by the fork orchestration just before each rewind.
+  let captureStack = null;
+  let fork_return_value = 0;
+  /// Fork-time memory snapshot for a child being created: { snapshot: ArrayBuffer
+  /// (transferable), ctlPtr, cloneCallback }. Staged BEFORE wasm_fork_current so a
+  /// child whose create_and_run_task fires SYNCHRONOUSLY inside that call (same
+  /// worker) consumes it directly. If the child instead spawns LAZILY, its
+  /// create_and_run_task may run in a DIFFERENT worker (when one child schedules
+  /// the next), which can't see this worker-local slot — so the snapshot is routed
+  /// to the HOST main thread (stage_fork_snapshot), keyed by child pid, where any
+  /// worker's create_and_run_task can pick it up.
+  let pending_fork = null;
+  /// Set on a CHILD worker from the init `fork` field: { snapshot, ctlPtr,
+  /// cloneCallback }. user_executable_run overlays the snapshot after instantiation
+  /// then rewinds so fork() returns 0 in the child.
+  let fork_child_state = null;
 
   /// A messenger to synchronize with the main thread, as well as communicate how many bytes were read on the console.
   let console_read_messenger = new Int32Array(new SharedArrayBuffer(4));
@@ -305,8 +337,119 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
   let winsizes = null;
 
+  // host-bridge (WASM_HOSTBRIDGE_ABI = 2): the kernel's copy_to/from_user
+  // and strncpy_from_user now route through the wasm_user_copy_to/_from/_strncpy
+  // host imports instead of an in-image memcpy. Task 1 resolver = the SHARED
+  // kernel buffer for every pid, so this is a pure indirection with no behavior
+  // change (the per-process memory split lands in Task 2 by swapping resolveMem).
+  //
+  // makeHostBridge captures `kernelMemory` once, but reads `kernelMemory.buffer`
+  // on every call — `memory` is assigned in init() (and re-grown over the boot),
+  // so we pass a tiny stand-in whose `.buffer` getter forwards to the live module
+  // -level `memory`, keeping these valid across memory growth. They live INSIDE
+  // the static host_callbacks object (not appended later) so the arch_bits==64
+  // BigInt-wrap loop in init() wraps them like every other callback — on wasm64
+  // their i64 args/results are coerced correctly; on wasm32 it's a no-op.
+  //
+  // Task 2.1 (ABI v2 scaffolding): the resolver becomes PID-KEYED with a SHARED
+  // FALLBACK — `userMems.get(pid)?.memory ?? <shared memory>`. `userMems` stays
+  // empty until the kernel calls wasm_user_mem_create (that's T2.2), so for now
+  // EVERY pid still resolves to the shared `memory`: boot is unchanged. The
+  // memory-lifecycle ops (create/grow/free) + `userMems` registry land here but
+  // are NOT yet wired into user instantiation (the flip is T2.3).
+  /** @type {Map<number, { memory: WebAssembly.Memory, table: WebAssembly.Table | null }>} */
+  const userMems = new Map();
+  // mintUserMem: mint a process's private (non-shared) base-0 memory.
+  //
+  // Task 2.3 correction (supersedes the T2.1 design's "main-thread minting"):
+  // the owning worker mints its OWN private Memory SYNCHRONOUSLY here, with NO
+  // main-thread postMessage/transfer. Two reasons this is correct and required:
+  //
+  //  1. The kernel calls wasm_user_mem_create(pid, …) from C code running
+  //     synchronously inside THIS worker (during exec), then the worker proceeds
+  //     straight to instantiating the user module — it never yields the event
+  //     loop in between. A main-thread mint+transfer can only arrive via a later
+  //     `message` event, which a worker blocked in Atomics.wait (the syscall /
+  //     scheduler wait) can NEVER service. So a transferred Memory could not be
+  //     ready in time for the flip.
+  //  2. A `WebAssembly.Memory` cannot be transferred to a worker that is parked
+  //     in Atomics.wait, and R1 never needs the main thread to hold it: uaccess
+  //     (the host-bridge copy/zero ops) and user-module instantiation both run
+  //     IN-WORKER, and the main-thread host callbacks only ever touch KERNEL
+  //     buffers (the shared `memory`), never a process's private space.
+  //
+  // "Private" = a DISTINCT Memory per process (its own address space), NOT
+  // shared with any other process or the kernel — but it must still be a
+  // `shared: true` WebAssembly.Memory. The guest user modules are compiled with
+  // -matomics / a shared memory import (musl pthreads + Atomics), so a
+  // `shared:false` memory fails instantiation with "mismatch in shared state of
+  // memory" (declared=1, imported=0). `shared:true` only means "usable with
+  // Atomics + growable across threads"; it does NOT make this memory shared with
+  // other processes — each pid gets its own. The kernel's shared `memory` stays
+  // separate (drivers + bridge kbuf); isolation comes from each process getting
+  // a different Memory object here, resolved per-pid via userMems. (Task 4b
+  // CLONE_VM threads will deliberately share the parent pid's entry.)
+  // Grow-only: small initial (data+stack+slack, sized by the kernel). The `maximum`
+  // is the key VA-budget knob: V8 RESERVES the full maximum as virtual address
+  // space the moment a shared:true Memory is created (not lazily on grow), so each
+  // live process costs `maximum` of host VA regardless of how little it commits.
+  // A full NixOS boot has ~12+ concurrent worker processes (8 gettys + login +
+  // shells + nix-env), so a 2 GiB cap reserved ~24+ GiB of VA and OOM'd
+  // RAM-constrained hosts. Default to 0x2000 (512 MiB) — ample for guest processes
+  // (the heaviest validated workloads: an 8 MB pipe, a 4000-line malloc sort, and
+  // nix-env substituting a package, all fit comfortably) while keeping a
+  // many-worker boot within a few GiB of VA. Grow-only, only committed pages cost
+  // RAM. Overridable via the WT_USERMEM_MAX env (raise it for an exceptionally
+  // memory-hungry guest process, or lower it further on a tiny host).
+  const USER_MEM_MAX_PAGES = Number(globalThis.process?.env?.WT_USERMEM_MAX || 0x2000);
+  const mintUserMem = (pid, init_pages) => {
+    return new WebAssembly.Memory({
+      initial: Number(init_pages),
+      maximum: USER_MEM_MAX_PAGES,
+      shared: true,
+      address: "i" + arch_bits,
+    });
+  };
+  const _bridge = makeHostBridge(
+    { get buffer() { return memory.buffer; } },
+    (pid) => {
+      const e = userMems.get(pid);
+      const buf = e ? e.memory.buffer : memory.buffer;
+      return { u8: () => new Uint8Array(buf) };
+    },
+    { userMems, mintUserMem },
+  );
+
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
   const host_callbacks = {
+    // host-bridge uaccess imports (see _bridge above; ABI v1, shared resolver).
+    wasm_user_copy_to: _bridge.wasm_user_copy_to,
+    wasm_user_copy_from: _bridge.wasm_user_copy_from,
+    wasm_user_strncpy: _bridge.wasm_user_strncpy,
+    // Task 2.0: __clear_user / strnlen_user / the auxv memcpy no longer deref a
+    // user pointer directly — clear routes through this memzero op.
+    wasm_user_memzero: _bridge.wasm_user_memzero,
+    // Task 2.3: the memory-lifecycle ops. The kernel (patch 0016, flag
+    // `wasm_user_as`) calls create at exec, grow on allocator overflow, free at
+    // exit_mmap — all with task_pid_nr(current). `create` mints the per-pid
+    // private memory (worker-local, synchronous; see mintUserMem) and registers
+    // it in `userMems`; `user_executable_setup` then instantiates the user
+    // module against userMems.get(current_user_pid).memory. We wrap create to
+    // RECORD that pid for this worker so the flip knows which entry to use.
+    wasm_user_mem_create: (pid, init_pages) => {
+      const rc = _bridge.wasm_user_mem_create(pid, init_pages);
+      if (rc === 0) current_user_pid = Number(pid);
+      return rc;
+    },
+    wasm_user_mem_grow: _bridge.wasm_user_mem_grow,
+    wasm_user_mem_free: _bridge.wasm_user_mem_free,
+    // Phase 2 fork (ABI v3): mint the fork child's private Memory (same size as
+    // the parent's) into THIS worker's registry. The kernel calls this from the
+    // fork copy_thread path (wasm_user_as_fork_dup) during wasm_fork_current,
+    // which runs in this (the forking) worker — so the child entry lands here,
+    // ready for the child's wasm_create_and_run_task to forward it.
+    wasm_user_mem_dup: _bridge.wasm_user_mem_dup,
+
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {
       // New web workers cannot be spawned from within a Worker in most browsers. It can currently not be spawned from
@@ -328,26 +471,90 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       bin_end,
       data_start,
       table_start,
+      mm_owner_pid,
+      fork_parent_pid,
     ) => {
-      // Tell main to create the new task, and then run it for the first time!
-      port.postMessage({
-        method: "create_and_run_task",
-        prev_task: prev_task,
-        new_task: new_task,
-        name: get_cstring(memory, name),
+      // Task 2.3 — CLONE_VM hand-off. busybox's NOMMU spawn is
+      // clone(CLONE_VM|CLONE_VFORK): the child runs in a SEPARATE worker but
+      // shares the PARENT's address space until it exec's (the clone callback
+      // reads its arg from, and reports failure into, the parent's memory).
+      // Under per-process memory, the child worker must therefore instantiate
+      // the duplicated module against the PARENT's private Memory, not a fresh
+      // one. The kernel tells us WHICH task this is via `mm_owner_pid`: nonzero
+      // ⇒ the new task's mm already has a live private memory (a CLONE_VM child
+      // sharing an exec'd mm), and that's the OWNER pid keying it in the registry
+      // (the kernel also reports that owner pid for the child's uaccess, so the
+      // resolver finds the same buffer). 0 ⇒ a FRESH mm — the task will exec and
+      // mint its own memory, so no hand-off. (A data_start heuristic is WRONG
+      // here: every per-process mm shares the same base-0 start_data.) We pass
+      // the parent's private MEMORY (a shared:true Memory is structured-cloneable
+      // across workers). We do NOT (cannot) transfer the parent's TABLE —
+      // WebAssembly.Table is not structured-cloneable — and don't need to: the
+      // child instantiates the SAME module with the same __table_base, so its own
+      // fresh table is populated identically by the module's element segments.
+      // Re-instantiating against the parent's memory is SAFE: __wasm_init_memory
+      // is guarded by an in-memory atomic the parent already set (BSS/data are
+      // NOT re-cleared), and __wasm_apply_data_relocs is idempotent. On the
+      // child's later execvp a fresh wasm_user_mem_create mints its OWN private
+      // memory and supersedes this entry.
+      let clone_vm = null;
+      const owner_pid = mm_owner_pid != null ? Number(mm_owner_pid) : 0;
+      if (owner_pid) {
+        const e = userMems.get(owner_pid);
+        if (e) clone_vm = { owner_pid: owner_pid, memory: e.memory };
+      }
 
-        // For user tasks, there is user code to load first before trying to run
-        // it. pc (new exec ABI): pass the binary's byte range in the SHARED
-        // kernel memory; the spawned worker compiles it from shared memory.
-        user_executable: bin_start
-          ? {
-              bin_start: bin_start,
-              bin_end: bin_end,
-              data_start: data_start,
-              table_start: table_start,
-            }
-          : null,
-      });
+      // Phase 2 fork: nonzero fork_parent_pid ⇒ this child is a non-CLONE_VM fork
+      // of that pid. Its own private Memory was minted under its pid (owner_pid ==
+      // child pid) by wasm_user_mem_dup and is forwarded via `clone_vm` above
+      // (same mechanism, the child's OWN memory rather than a shared parent's).
+      // Attach the fork-time snapshot staged for this child (by THIS worker's
+      // user_executable_run, keyed by child pid) so the child overlays it after
+      // instantiation and asyncify-rewinds the captured fork() stack (returns 0).
+      let fork = null;
+      const transfer = [];
+      const isFork = fork_parent_pid && Number(fork_parent_pid);
+      if (isFork && pending_fork) {
+        // Synchronous spawn in THIS worker: attach the snapshot directly.
+        fork = pending_fork;
+        transfer.push(pending_fork.snapshot);
+        pending_fork = null;
+      }
+      // For a lazy fork child (fork still null here) the host main thread fills
+      // the snapshot from its pendingForks map, keyed by this child's pid.
+
+      // Tell main to create the new task, and then run it for the first time!
+      port.postMessage(
+        {
+          method: "create_and_run_task",
+          prev_task: prev_task,
+          new_task: new_task,
+          name: get_cstring(memory, name),
+
+          // For user tasks, there is user code to load first before trying to run
+          // it. pc (new exec ABI): pass the binary's byte range in the SHARED
+          // kernel memory; the spawned worker compiles it from shared memory.
+          user_executable: bin_start
+            ? {
+                bin_start: bin_start,
+                bin_end: bin_end,
+                data_start: data_start,
+                table_start: table_start,
+              }
+            : null,
+
+          // Task 2.3: CLONE_VM children inherit the parent's private Memory+Table.
+          clone_vm: clone_vm,
+
+          // Phase 2 fork: the fork-time snapshot for a fork child (else null).
+          // `fork` is set only for a SYNCHRONOUS same-worker spawn; for a lazy
+          // child it stays null and the host fills it from pendingForks by
+          // fork_child_pid (the child's own pid, == owner_pid here).
+          fork: fork,
+          fork_child_pid: isFork ? owner_pid : 0,
+        },
+        transfer,
+      );
 
       // Serialize this (old) task.
       return serialize_me();
@@ -619,6 +826,28 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         virtio_queues = new SharedQueues(message.virtio_queues);
       }
 
+      // Task 2.3: a CLONE_VM child shares the parent's address space until it
+      // exec's. The parent handed us its private Memory + owner pid; register it
+      // so this worker instantiates the duplicated module against the PARENT's
+      // memory (the clone callback reads its arg + reports failure THERE) and so
+      // uaccess — which the kernel keys on the parent's OWNER pid for every task
+      // on this mm — resolves the right buffer. On the child's later execvp, a
+      // fresh wasm_user_mem_create supersedes this entry with the child's OWN
+      // private memory and re-points current_user_pid.
+      if (message.clone_vm) {
+        current_user_pid = Number(message.clone_vm.owner_pid);
+        userMems.set(current_user_pid, { memory: message.clone_vm.memory, table: null });
+      }
+
+      // Phase 2 fork: this worker is a fork CHILD. `clone_vm` above already
+      // registered its OWN (duped) private Memory under its pid; `fork` carries
+      // the parent's fork-time memory snapshot + the asyncify control pointer.
+      // user_executable_run overlays the snapshot AFTER instantiation (finding A)
+      // then rewinds the captured fork() stack so fork() returns 0 here.
+      if (message.fork) {
+        fork_child_state = message.fork;
+      }
+
       if (message.user_executable) {
         // We are in a new runner that should duplicate the user executable. Happens when someone calls clone().
         // pc (new exec ABI): the binary lives as a byte range in the SHARED
@@ -713,9 +942,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       const vmlinux_run = () => {
         if (message.runner_type == "primary_cpu") {
           // Notify the main thread about init task so that it knows where it resides in memory.
+          // CONFIG_WASM_TRACE: also publish the shared-memory trace ringbuffer's
+          // location (base/head/slots are exported wasm globals holding their
+          // BSS addresses) so the main thread can read it OUT-OF-BAND, even when
+          // a worker is wedged and the console can't flush. Absent in a build
+          // without CONFIG_WASM_TRACE (the `?.value` guards).
+          const ex = vmlinux_instance.exports;
           port.postMessage({
             method: "start_primary",
-            init_task: vmlinux_instance.exports.init_task.value,
+            init_task: ex.init_task.value,
+            wtrace:
+              ex.wtrace_ring && ex.wtrace_head && ex.wtrace_slots
+                ? {
+                    ring: Number(ex.wtrace_ring.value),
+                    head: Number(ex.wtrace_head.value),
+                    slots_addr: Number(ex.wtrace_slots.value),
+                  }
+                : null,
           });
 
           // Setup the boot command line. We have the luxury to be able to write to it directly. The maximum length is
@@ -798,9 +1041,40 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         const stack_pointer = vmlinux_instance.exports.get_user_stack_pointer();
         const tls_base = vmlinux_instance.exports.get_user_tls_base();
 
+        // Task 2.3 (the flip): instantiate the user module against this process's
+        // OWN private base-0 WebAssembly.Memory, not the shared kernel `memory`.
+        // The kernel called wasm_user_mem_create(pid) during exec, which minted
+        // the per-pid entry into `userMems` and recorded `current_user_pid` (see
+        // the wasm_user_mem_create wrapper). __memory_base stays data_start —
+        // which the per-mm allocator now hands out as a SMALL PRIVATE offset
+        // (>= USER_AS_BASE = 0x10000), guard-page-at-0 reserved (design §1, §4).
+        //
+        // Fallback: if there is no private entry (the `wasm_user_as` flag is off,
+        // or this is a pre-flip / non-exec path), use the shared `memory` — this
+        // preserves the pre-T2.3 behavior so a flag-off build still boots.
+        const userMem =
+          current_user_pid != null ? userMems.get(current_user_pid) : undefined;
+        const env_memory = userMem ? userMem.memory : memory;
+        // The per-instance indirect function table now lives in the registry
+        // entry (so Task 4b CLONE_VM threads can share the parent pid's table).
+        // Create it once per pid and reuse it on re-instantiation.
+        if (userMem && !userMem.table) {
+          userMem.table = new WebAssembly.Table({
+            initial: Math.max(4096, user_executable_params.table_initial || 0),
+            element: "anyfunc",
+          });
+        }
+        const env_table =
+          userMem && userMem.table
+            ? userMem.table
+            : new WebAssembly.Table({
+                initial: Math.max(4096, user_executable_params.table_initial || 0),
+                element: "anyfunc",
+              });
+
         user_executable_imports = {
           env: {
-            memory: memory,
+            memory: env_memory,
             __memory_base: new WebAssembly.Global(
               { value: "i" + arch_bits, mutable: false },
               Ulong(user_executable_params.data_start),
@@ -811,11 +1085,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             ),
             // Sized per-binary from the import section (pc, #139 Gate 0.2) —
             // a table smaller than the binary's declared initial fails
-            // instantiate. 4096 remains the floor for safety.
-            __indirect_function_table: new WebAssembly.Table({
-              initial: Math.max(4096, user_executable_params.table_initial || 0),
-              element: "anyfunc",
-            }),
+            // instantiate. 4096 remains the floor for safety. Registry-owned
+            // (Task 2.3) so CLONE_VM threads share it; see env_table above.
+            __indirect_function_table: env_table,
             __table_base: new WebAssembly.Global(
               { value: "i" + arch_bits, mutable: false },
               Ulong(user_executable_params.table_start),
@@ -851,6 +1123,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               debugger;
               throw WebAssembly.RuntimeError("abort");
             },
+
+            // Phase 2 fork: the asyncify unwind point. musl-fork's fork() calls
+            // capture_stack(&ctl) instead of SYS_clone; this triggers
+            // asyncify_start_unwind on the user instance (NORMAL state) so _start
+            // returns into the fork loop in user_executable_run, and returns the
+            // fork result on the REWIND side (child pid in the parent, 0 in the
+            // child — fork_return_value). Late-bound to user_executable_instance.
+            // Only fork-capable (asyncified) modules import it; others never call
+            // it, so the fast path pays nothing.
+            capture_stack: (captureStack = makeCaptureStack(
+              () => user_executable_instance,
+              () => fork_return_value,
+            )),
 
             // pc additions (#139 Gate 0.1 — C++ programs in-guest):
             // * __cpp_exception — wasm-ld links guest programs with -shared
@@ -977,34 +1262,102 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       };
 
       const user_executable_run = (instance) => {
-        if (should_call_clone_callback) {
-          // We have to reset this state, because if the clone callback calls exec, we have to run _start() instead!
+        // Phase 2 fork: a fork CHILD is born here — it ran ret_from_fork (so the
+        // kernel set should_call_clone_callback), but it must NOT run a clone
+        // callback: it resumes the PARENT's captured fork() stack. Force the
+        // child to re-enter the parent's original entry (which the parent
+        // recorded in fork.cloneCallback) and overlay the fork-time snapshot
+        // AFTER instantiation (finding A — a fresh Instance re-applied the active
+        // data segments, which would clobber a pre-copied image).
+        const childFork = fork_child_state;
+        if (childFork) {
+          fork_child_state = null;
           should_call_clone_callback = false;
+        }
 
-          if (instance.exports.__libc_clone_callback) {
-            instance.exports.__libc_clone_callback();
-            throw new Error(
-              "Wasm function __libc_clone_callback() returned (it should never return)!",
-            );
-          } else {
+        // Pick the entry this run (re)enters. A fork child uses the parent's
+        // recorded entry; otherwise the kernel's should_call_clone_callback flag.
+        const useCloneCallback = childFork ? childFork.cloneCallback : should_call_clone_callback;
+        should_call_clone_callback = false;
+
+        let entry;
+        if (useCloneCallback) {
+          if (!instance.exports.__libc_clone_callback) {
             throw new Error("Wasm function __libc_clone_callback() not defined!");
           }
+          entry = instance.exports.__libc_clone_callback;
         } else {
-          if (instance.exports._start) {
-            // Ideally libc would do this instead of the usual __init_array stuff (e.g. override __libc_start_init in
-            // musl). However, a reference to __wasm_call_ctors becomes a GOT import in -fPIC code, perhaps rightfully
-            // so with the current implementation and use case on LLVM. Anyway, we do it here, slightly early on...
-            if (instance.exports.__wasm_call_ctors) {
-              instance.exports.__wasm_call_ctors();
-            }
-
-            // TLS: somewhat incorrectly contains 0 instead of the TP before exec(). Since we will anyway not care about
-            // its value (__wasm_apply_data_relocs() called would have overwritten it in this case) it does not matter.
-            instance.exports._start();
-            throw new Error("Wasm function _start() returned (it should never return)!");
-          } else {
+          if (!instance.exports._start) {
             throw new Error("Wasm function _start() not defined!");
           }
+          // Ideally libc would do this instead of the usual __init_array stuff (e.g. override __libc_start_init in
+          // musl). However, a reference to __wasm_call_ctors becomes a GOT import in -fPIC code, perhaps rightfully
+          // so with the current implementation and use case on LLVM. Anyway, we do it here, slightly early on...
+          if (instance.exports.__wasm_call_ctors) {
+            instance.exports.__wasm_call_ctors();
+          }
+          entry = instance.exports._start;
+        }
+
+        if (childFork) {
+          // Overlay the parent's fork-time memory verbatim into this child's own
+          // private Memory (instantiated just above), then arm the rewind so the
+          // FIRST entry() call resumes inside fork() and returns 0 (the child).
+          const dst = new Uint8Array(userMems.get(current_user_pid).memory.buffer);
+          dst.set(new Uint8Array(childFork.snapshot));
+          fork_return_value = 0;
+          startRewind(instance, childFork.ctlPtr);
+        }
+
+        // Run loop: entry() "never returns" EXCEPT when a fork() in this instance
+        // unwinds it via asyncify (capture_stack). On such an unwind we drive the
+        // real kernel clone + stage the child's fork-time snapshot, rewind this
+        // (parent) instance so fork() returns the child pid, and re-enter. A
+        // genuine return (state NORMAL) is the legacy "should never return" error.
+        for (;;) {
+          entry();
+
+          if (!captureStack || !isPendingUnwind(instance)) {
+            throw new Error("Wasm user entry returned (it should never return)!");
+          }
+
+          // fork() in this instance unwound back to here. Finish the unwind, then
+          // drive the kernel clone (allocates the child task/pid/mm, dups the AS,
+          // mints the child Memory into our registry, and — via __switch_to —
+          // posts the child's create_and_run_task carrying the snapshot we stage).
+          stopUnwind(instance);
+          const parentMem = userMems.get(current_user_pid).memory;
+          const ctlPtr = captureStack.ctlPtr;
+          // Stage the fork-time snapshot BEFORE driving the clone: the child's
+          // create_and_run_task may fire synchronously inside wasm_fork_current
+          // (cooperative scheduler), and copy_thread does not touch user memory,
+          // so this post-unwind image is the correct fork-time state.
+          pending_fork = {
+            snapshot: new Uint8Array(parentMem.buffer).slice().buffer,
+            ctlPtr: ctlPtr,
+            cloneCallback: useCloneCallback,
+          };
+          // Drive the kernel clone (allocates child task/pid/mm, dups the AS, mints
+          // the child Memory into our registry, posts the child's create_and_run_
+          // task — which consumes pending_fork). Returns the child pid.
+          const child_pid = Number(vmlinux_instance.exports.wasm_fork_current());
+          // If the child spawned SYNCHRONOUSLY, create_and_run_task already
+          // consumed pending_fork (now null). If it is STILL set, the child spawns
+          // LAZILY and its create_and_run_task may run in another worker — route
+          // the snapshot to the HOST main thread keyed by the (now-known) child
+          // pid. On clone failure, drop it.
+          if (pending_fork) {
+            if (child_pid > 0) {
+              port.postMessage(
+                { method: "stage_fork_snapshot", child_pid: child_pid, fork: pending_fork },
+                [pending_fork.snapshot],
+              );
+            }
+            pending_fork = null;
+          }
+          // Parent: fork() returns the child pid (or -errno on clone failure).
+          fork_return_value = child_pid;
+          startRewind(instance, ctlPtr);
         }
       };
 
@@ -1044,6 +1397,21 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     // synchronous SAB reply + the async wayland_in postMessage) onto one async
     // route, fixing both the cursor-not-tracking bug (4e) and the lost steady-state
     // frame callbacks (4f). The worker forwards VQ_IN refills via wayland_in_refill.
+
+    // Task 2.3: DEAD PATH. T2.1 minted a process's private memory on the MAIN
+    // thread and transferred it back here as `user_mem_ready`. The T2.3 design
+    // correction mints the private memory WORKER-LOCAL + SYNCHRONOUSLY (see
+    // mintUserMem) — a transferred Memory could never arrive in time, since the
+    // worker proceeds straight from wasm_user_mem_create to instantiation
+    // without yielding the event loop, and a Memory can't be transferred to a
+    // worker parked in Atomics.wait. The worker no longer posts `create_user_mem`,
+    // so this handler is unreachable; kept inert (idempotent registry write) for
+    // safety rather than removed.
+    user_mem_ready: (message) => {
+      const pid = message.pid;
+      const existing = userMems.get(pid);
+      userMems.set(pid, { memory: message.memory, table: existing ? existing.table : null });
+    },
   };
 
   self.onmessage = (message_event) => {

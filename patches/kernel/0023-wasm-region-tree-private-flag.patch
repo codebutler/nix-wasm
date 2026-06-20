@@ -1,0 +1,250 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 19 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: gate nommu_region_tree ops on a per-region flag, not mm state
+
+Fixes the second full-NixOS getty/login boot deadlock under per-process memory
+(Task 2.3), after the netfs fix (0018). With wasm_user_as ON, two-or-more
+concurrent getty->login->ash execs wedge one task inside do_mmap, holding
+nommu_region_sem, spinning in the cross-process shared-region rbtree scan
+(rb_first/rb_next never returns) -- the global nommu_region_tree is corrupted
+(a cycle on the left spine).
+
+Root cause: patch 0017 gated the global-tree add/delete (and the per-mm vs
+shared free in free_page_series) on wasm_user_as_active(mm) -- the mm's CURRENT
+user_as state. But that state FLIPS during a single exec relative to a region's
+lifetime:
+
+  * binfmt_wasm maps the R/O code image (a file-backed MAP_PRIVATE PROT_READ|
+    PROT_EXEC mapping -> VM_MAYOVERLAY -> is_nommu_shared_mapping) via vm_mmap
+    BEFORE wasm_user_as_init sets user_as_live. So at add time the mm is NOT
+    user_as_active -> the code region is ADDED to the global tree (correct: it
+    is a real shared kernel-pool region other execs of the same binary share).
+  * That same code region is later freed (re-exec / exit teardown) AFTER
+    user_as_live is set -> the delete-side gate sees user_as_active and SKIPS
+    delete_nommu_region. The vm_region is kmem_cache_free'd while its vm_rb node
+    is still linked in the global tree -> dangling freed node. free_page_series
+    likewise mis-routed the code region's kernel pages to the per-mm free-list.
+
+With one getty the orphaned nodes don't (yet) form a cycle and the boot reaches
+an interactive shell; with >=2 concurrent getty chains enough freed-but-linked
+nodes accumulate that rb_first()/rb_next() loops forever on a corrupted spine,
+wedging the task that holds nommu_region_sem -> every other exec blocks on
+down_write -> dead system at 0% CPU. (Localized with the CONFIG_WASM_TRACE
+ringbuffer, patch 0019: the wedged task's last record is MMAP_SHARE_SCAN with no
+following MMAP_SHARE_ITER -> stuck in rb_first, i.e. tree corruption.)
+
+Fix: a region is in the global tree IFF it is a SHARED region, an immutable
+property fixed at allocation -- not a function of the mm's current state. Add a
+per-region wasm_private flag (struct vm_region), set it in do_mmap_private
+exactly where the per-mm base-0 allocator backs the mapping, and gate EVERY
+global-tree add/delete (do_mmap, __put_nommu_region, split_vma, vmi_shrink_vma)
+AND the free_page_series private-vs-shared routing on that flag. Add and delete
+are now symmetric by construction; the code image (wasm_private = false) is
+added once and deleted once, the per-mm private regions (wasm_private = true)
+are never in the tree. split_vma copies the flag via *region = *vma->vm_region.
+The legacy non-wasm path is unchanged (the flag is compiled out without
+CONFIG_WASM; wasm_region_is_private() is then a constant false).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 3cc8ae722..2a6a70fbd 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -713,6 +713,21 @@ struct vm_region {
+ 	int		vm_usage;	/* region usage count (access under nommu_region_sem) */
+ 	bool		vm_icache_flushed : 1; /* true if the icache has been flushed for
+ 						* this region */
++#ifdef CONFIG_WASM
++	/*
++	 * Task 2.3 fix: true iff this region is backed by the per-process base-0
++	 * user-AS allocator (wasm_user_as_alloc), so it was NEVER added to the
++	 * global nommu_region_tree (per-mm base-0 regions can't be cross-process
++	 * shared and would collide on vm_start). Tree add/delete gate on THIS
++	 * per-region flag — not on wasm_user_as_active(mm), which can change
++	 * between a region's add and its free (the R/O code image is mapped and
++	 * tree-added BEFORE user_as_live is set, then freed AFTER, so an mm-state
++	 * gate would add it but skip its delete → a dangling freed node corrupts
++	 * the rbtree). The flag is set at allocation and is immutable, making
++	 * add/delete symmetric by construction.
++	 */
++	bool		wasm_private : 1;
++#endif
+ };
+ 
+ #ifdef CONFIG_USERFAULTFD
+diff --git a/mm/nommu.c b/mm/nommu.c
+index 2d5bc1d12..296d01251 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -45,6 +45,23 @@
+ #include <asm/mmu.h>
+ #include <asm/user_as.h>
+ #include <asm/wtrace.h>
++
++/*
++ * Task 2.3 fix: a region is "private" (per-mm base-0 allocator backed, hence
++ * NEVER in the global nommu_region_tree) iff region->wasm_private was set at
++ * allocation. All tree add/delete sites gate on THIS, not on the mm's current
++ * user_as_active state — see the wasm_private comment in struct vm_region for
++ * why the mm-state gate corrupts the tree.
++ */
++static inline bool wasm_region_is_private(const struct vm_region *region)
++{
++	return region->wasm_private;
++}
++#else
++static inline bool wasm_region_is_private(const struct vm_region *region)
++{
++	return false;
++}
+ #endif
+ #include "internal.h"
+ 
+@@ -522,23 +539,23 @@ static void delete_nommu_region(struct vm_region *region)
+ /*
+  * free a contiguous series of pages
+  */
+-static void free_page_series(struct mm_struct *mm, unsigned long from,
+-			     unsigned long to)
++static void free_page_series(struct mm_struct *mm, bool private,
++			     unsigned long from, unsigned long to)
+ {
+ #ifdef CONFIG_WASM
+ 	/*
+-	 * Task 2 (dark): regions backed by the per-`mm` allocator hold private
+-	 * offsets, not kernel pages — free them back to the OWNING mm's free-list
+-	 * instead of put_page()ing a bogus struct page. Gate on the owning `mm`,
+-	 * NOT current->mm: during process exit, exit_mm() sets current->mm = NULL
+-	 * BEFORE mmput()->exit_mmap() runs the per-VMA teardown, so a current->mm
+-	 * gate would be false here and the private offsets would fall through to
+-	 * virt_to_page()/put_page() on a bogus struct page. The owning mm is
+-	 * threaded down from delete_vma()/exit_mmap()/do_munmap(). On full exit the
+-	 * whole private memory is dropped by wasm_user_mem_free anyway, but the
+-	 * extents must still be returned to THIS mm's list (not leaked / not a UAF).
++	 * Task 2: regions backed by the per-`mm` allocator hold private offsets,
++	 * not kernel pages — free them back to the OWNING mm's free-list instead
++	 * of put_page()ing a bogus struct page. `private` is the freed region's
++	 * immutable wasm_private flag (passed down by every caller), NOT inferred
++	 * from wasm_user_as_active(mm): the R/O code image is a SHARED region whose
++	 * mm IS user_as_active at free time, so an mm-state gate would wrongly route
++	 * its kernel-pool pages to wasm_user_as_free_extent (corrupting the free
++	 * list AND leaking the real pages). The owning `mm` is still threaded down
++	 * (not current->mm: exit_mm() clears current->mm before exit_mmap() runs the
++	 * per-VMA teardown) so the private extent returns to the right free-list.
+ 	 */
+-	if (wasm_user_as_active(mm)) {
++	if (private) {
+ 		if (to > from)
+ 			wasm_user_as_free_extent(mm, from, to - from);
+ 		return;
+@@ -571,11 +588,14 @@ static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 	 * Task 2.3: per-process private regions were never added to the global
+ 	 * nommu_region_tree (see add_nommu_region in do_mmap), so they must not be
+ 	 * deleted from it here, and the tree may legitimately be empty when one is
+-	 * freed — skip the tree ops AND the empty-tree BUG_ON for them. Symmetric
+-	 * with the add-side gate (same wasm_user_as_active(mm) condition; the owning
+-	 * mm stays user_as_live until exit_mmap's destroy runs AFTER region teardown).
++	 * freed — skip the tree ops AND the empty-tree BUG_ON for them. Gate on the
++	 * per-region wasm_private flag (set at allocation, immutable), NOT on the
++	 * owning mm's user_as state: the R/O code image is a SHARED region added to
++	 * the tree before user_as_live is set, then freed after — an mm-state gate
++	 * would skip its delete and leave a dangling freed node, corrupting the tree
++	 * (the multi-getty exec wedge). The flag makes add and delete symmetric.
+ 	 */
+-	bool private_as = wasm_user_as_active(mm);
++	bool private_as = wasm_region_is_private(region);
+ 
+ 	WTRACE(WT_PUTREG_ENTER, (unsigned long)region, private_as,
+ 	       region->vm_usage);
+@@ -592,7 +612,8 @@ static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 		/* IO memory and memory shared directly out of the pagecache
+ 		 * from ramfs/tmpfs mustn't be released here */
+ 		if (region->vm_flags & VM_MAPPED_COPY)
+-			free_page_series(mm, region->vm_start, region->vm_top);
++			free_page_series(mm, private_as, region->vm_start,
++					 region->vm_top);
+ 		kmem_cache_free(vm_region_jar, region);
+ 		WTRACE(WT_PUTREG_DONE, (unsigned long)region, 1, 0);
+ 	} else {
+@@ -1050,6 +1071,14 @@ static int do_mmap_private(struct vm_area_struct *vma,
+ 		vma->vm_start    = uoff;
+ 		vma->vm_end      = uoff + len;
+ 		vma_set_anonymous(vma);
++		/*
++		 * Mark this as a per-process private region: it is NOT in the
++		 * global nommu_region_tree, and its delete must be skipped too —
++		 * gate on this immutable per-region flag, never on the mm's
++		 * current user_as state (which flips between add and free; see
++		 * the wasm_private comment in struct vm_region).
++		 */
++		region->wasm_private = true;
+ 		return 0;
+ 	}
+ #endif
+@@ -1093,8 +1122,9 @@ static int do_mmap_private(struct vm_area_struct *vma,
+ error_free:
+ 	/* Only reached for file-backed mappings (post kernel_read), which the wasm
+ 	 * private path rejects (WARN+ENOSYS above) — so this region is always a
+-	 * shared alloc_pages_exact base; vma->vm_mm is the owner regardless. */
+-	free_page_series(vma->vm_mm, region->vm_start, region->vm_top);
++	 * shared alloc_pages_exact base (private=false); vma->vm_mm is the owner. */
++	free_page_series(vma->vm_mm, wasm_region_is_private(region),
++			 region->vm_start, region->vm_top);
+ 	region->vm_start = vma->vm_start = 0;
+ 	region->vm_end   = vma->vm_end = 0;
+ 	region->vm_top   = 0;
+@@ -1298,10 +1328,17 @@ unsigned long do_mmap(struct file *file,
+ 	 * USER_AS_BASE (0x10000) — adding both to the global tree hits the BUG()
+ 	 * in add_nommu_region() (duplicate vm_start). Private per-mm regions are
+ 	 * never cross-process shareable, so skip the global tree for them (delete
+-	 * is skipped symmetrically in __put_nommu_region). Gated by
+-	 * user_as_active, so the legacy shared NOMMU path is unchanged.
++	 * is skipped symmetrically in __put_nommu_region).
++	 *
++	 * Gate on region->wasm_private (set in do_mmap_private iff the region was
++	 * served by the per-mm allocator), NOT on wasm_user_as_active(current->mm):
++	 * the R/O code image is a SHARED region mapped BEFORE user_as_live is set
++	 * (so it IS added here), but it is then freed AFTER user_as_live is set —
++	 * an mm-state delete-gate would skip its delete, leaving a freed node in
++	 * the tree → rbtree corruption (the multi-getty exec wedge). The per-region
++	 * flag is immutable, so add and delete always agree.
+ 	 */
+-	if (!wasm_user_as_active(current->mm)) {
++	if (!wasm_region_is_private(region)) {
+ 		WTRACE(WT_MMAP_ADDREGION, region->vm_start, region->vm_top, 0);
+ 		add_nommu_region(region);
+ 		WTRACE(WT_MMAP_ADDREGION_DONE, region->vm_start, 0, 0);
+@@ -1503,8 +1540,10 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
+ 	/*
+ 	 * Task 2.3: private per-mm regions aren't in the global tree (see
+ 	 * add_nommu_region in do_mmap) — skip the delete/re-add dance for them.
++	 * Gate on the region flag (immutable; copied to `new`'s region above via
++	 * *region = *vma->vm_region), not the mm state.
+ 	 */
+-	if (!wasm_user_as_active(mm)) {
++	if (!wasm_region_is_private(vma->vm_region)) {
+ 		delete_nommu_region(vma->vm_region);
+ 		if (new_below) {
+ 			vma->vm_region->vm_start = vma->vm_start = addr;
+@@ -1567,8 +1606,9 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
+ 	BUG_ON(region->vm_usage != 1);
+ 
+ 	down_write(&nommu_region_sem);
+-	/* Task 2.3: private per-mm regions aren't in the global tree — skip it. */
+-	if (!wasm_user_as_active(vma->vm_mm)) {
++	/* Task 2.3: private per-mm regions aren't in the global tree — skip it.
++	 * Gate on the region flag (immutable), not the mm state (see do_mmap). */
++	if (!wasm_region_is_private(region)) {
+ 		delete_nommu_region(region);
+ 		if (from > region->vm_start) {
+ 			to = region->vm_top;
+@@ -1589,7 +1629,7 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
+ 
+ 	/* Owning mm = vma->vm_mm (== current->mm on this do_munmap path, but use
+ 	 * the owner explicitly so the wasm private free gates correctly). */
+-	free_page_series(vma->vm_mm, from, to);
++	free_page_series(vma->vm_mm, wasm_region_is_private(region), from, to);
+ 	return 0;
+ }
+ 

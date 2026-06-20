@@ -1,0 +1,888 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: per-`mm` base-0 user-AS allocator + gate (T2.2, dark)
+
+Phase 1 (Task 2.2): add the kernel-side half of per-process memory isolation —
+a per-`mm` base-0 bump/free-list allocator for user mappings plus the
+user-vs-kernel gate — and wire the runtime memory-lifecycle ABI
+(wasm_user_mem_create at exec, wasm_user_mem_free at exit_mmap).
+
+Landed DARK, behind an early-param feature flag (`wasm_user_as`, default OFF):
+
+  * Flag OFF (default): mm->context.user_as_live is never set, so every gate
+    site (do_mmap_private, the anon-zero clear, free_page_series, exit_mmap)
+    takes the LEGACY shared alloc_pages_exact path. wasm_user_mem_create/free
+    never fire. Boot is bit-for-bit the pre-0016 behavior — default boot stays
+    green. The allocator and lifecycle wiring are compiled but inert.
+
+  * Flag ON (`wasm_user_as=1`): exec calls wasm_user_mem_create + sets
+    user_as_live; do_mmap_private routes through the per-mm allocator (returning
+    a SMALL private offset in [USER_AS_BASE=0x10000, user_as_size)); the
+    anon-zero clear routes through wasm_user_memzero; free_page_series frees back
+    to the per-mm free-list (coalescing); exit_mmap drains it and calls
+    wasm_user_mem_free. This is the path T2.3 will make default once user
+    instantiation is flipped to the private memory; until then a flag-on
+    USERSPACE can't actually run (the user module is still instantiated against
+    the SHARED memory, so small private offsets have no backing) — which is
+    EXACTLY why it is flagged off.
+
+The DARK decision / why a flag (not "compute private offsets, return shared
+addresses"): the T2.1 runtime resolver is `userMems.get(pid)?.memory ?? shared`,
+so the instant wasm_user_mem_create registers a per-pid memory, ALL of that
+pid's uaccess (copy_to_user / memzero / strncpy) resolves to the (empty) private
+memory while the process still runs against shared memory — boot breaks. The
+only way to keep default boot green AND exercise create/free + the allocator is
+to gate the whole user-AS path off by default and prove it via a flag-on
+in-kernel self-test, deferring the running-process proof to T2.3. This is design
+escape-hatch (a) (docs/.../2026-06-19-task2-perprocess-memory-design.md §5;
+.superpowers/sdd/task-2.2-report.md). The self-test (late_initcall, flag-on
+only) runs the bump/free-list math on a throwaway mm_context (no runtime memory)
+and prints "WASM_USER_AS_SELFTEST: PASS first=0x..." with the first offset it
+hands out (>= 0x10000), proving the allocator + lifecycle wiring.
+
+Page accounting: the runtime grows the private memory in WASM pages
+(WASM_PAGE_SIZE = 64 KiB), independent of the kernel PAGE_SIZE. Offsets are
+PAGE_SIZE-aligned; the private memory SIZE and the grow delta are tracked in
+WASM pages.
+
+File-backed mmap audit (design §1 / risks §9): the sole file-backed user
+vm_mmap is the CODE image (binfmt_wasm.c), mapped BEFORE user_as_live is set, so
+it stays SHARED and never reaches the private allocator. musl mallocng allocates
+anonymously. No file-backed mapping reaches the private allocator in scope; the
+private-AS branch WARNs-and-fails on a file-backed vma rather than letting
+kernel_read write into a private offset, documenting the invariant. The
+bounce-buffer path is therefore unreachable and intentionally NOT implemented
+(it would be dead code).
+
+Bumps WASM_HOSTBRIDGE_ABI to 2 (matching the runtime) and declares
+wasm_user_mem_create/grow/free in asm/wasm.h beside the 0014/0015 bridge decls.
+
+Free path gates on the OWNING mm, not current->mm: during process exit,
+exit_mm() sets current->mm = NULL BEFORE mmput()->exit_mmap() runs the per-VMA
+teardown (delete_vma -> put_nommu_region -> free_page_series), so a current->mm
+gate would be false there and still-mapped PRIVATE regions (small offsets) would
+fall through to virt_to_page()/put_page() on a bogus struct page. The owning mm
+is threaded down free_page_series(mm, ...) / __put_nommu_region(mm, ...) /
+put_nommu_region(mm, ...), supplied from delete_vma()'s mm arg (exit_mmap and
+do_munmap both have it) and from vma->vm_mm on the do_mmap_private error_free and
+vmi_shrink_vma paths. BOTH free entry points (exit_mmap, do_munmap) now gate on
+the owning mm. The self-test covers the free path heavily (coalesce of adjacent
+extents, the brk-retract `again` reclaim, overflow->grow fail-closed) since the
+review found a Critical there.
+
+diff --git a/arch/wasm/include/asm/mmu.h b/arch/wasm/include/asm/mmu.h
+new file mode 100644
+index 000000000..09d25ae08
+--- /dev/null
++++ b/arch/wasm/include/asm/mmu.h
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * wasm mm_context_t — the NOMMU base (asm-generic/mmu.h) plus the per-process
++ * base-0 user-address-space allocator state (Task 2).
++ *
++ * The generic NOMMU mm_context_t carries only `end_brk`. The wasm per-process
++ * memory split (Task 2) gives each process a distinct base-0 WebAssembly.Memory
++ * and runs a per-`mm` bump/free-list allocator over it; these fields hold that
++ * allocator's state. `user_as_live` is the user-vs-kernel discriminator (set at
++ * exec, only when the `wasm_user_as` early-param is on); when clear, every
++ * allocation path falls back to the legacy shared NOMMU pool, so the default
++ * build is unchanged (landed dark).
++ */
++#ifndef _ASM_WASM_MMU_H
++#define _ASM_WASM_MMU_H
++
++#ifndef __ASSEMBLY__
++
++#include <linux/types.h>
++#include <linux/list.h>
++
++typedef struct {
++	unsigned long		end_brk;	/* generic NOMMU brk clamp */
++
++#ifdef CONFIG_BINFMT_ELF_FDPIC
++	unsigned long		exec_fdpic_loadmap;
++	unsigned long		interp_fdpic_loadmap;
++#endif
++
++	/* Task 2: per-process base-0 user address space (see banner). */
++	unsigned long		user_as_size;	/* private memory size, bytes */
++	unsigned long		user_as_brk;	/* next free bump offset */
++	struct list_head	user_as_free;	/* freed [start,len) extents */
++	bool			user_as_live;	/* set at exec; user/kernel gate */
++} mm_context_t;
++
++#endif /* __ASSEMBLY__ */
++
++/*
++ * Layout within [0, user_as_size): guard page at 0 (NULL traps), then user
++ * mappings from USER_AS_BASE upward. 0x10000 == one wasm page (64 KiB).
++ */
++#define USER_AS_BASE		0x10000UL
++
++#endif /* _ASM_WASM_MMU_H */
+diff --git a/arch/wasm/include/asm/user_as.h b/arch/wasm/include/asm/user_as.h
+new file mode 100644
+index 000000000..7d8b2189b
+--- /dev/null
++++ b/arch/wasm/include/asm/user_as.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Per-`mm` base-0 user-address-space allocator (Task 2) — the kernel half of
++ * per-process memory isolation on the wasm NOMMU port. See arch/wasm/mm/user_as.c.
++ *
++ * Gate: wasm_user_as_active(mm) == (wasm_user_as_enabled && mm && user_as_live).
++ * When false the caller takes the legacy shared NOMMU pool path, so with the
++ * flag off (default) the whole subsystem is inert (landed dark).
++ */
++#ifndef _ASM_WASM_USER_AS_H
++#define _ASM_WASM_USER_AS_H
++
++#include <linux/types.h>
++#include <linux/mm_types.h>
++#include <asm/mmu.h>
++
++/* Runtime feature flag (early_param "wasm_user_as"); default false → dark. */
++extern bool wasm_user_as_enabled;
++
++static inline bool wasm_user_as_active(struct mm_struct *mm)
++{
++	return wasm_user_as_enabled && mm && mm->context.user_as_live;
++}
++
++/*
++ * Initialise the per-`mm` allocator for `mm` with a private space of
++ * `size_bytes` (rounded to wasm pages). Sets user_as_live. Called from exec
++ * after wasm_user_mem_create succeeds. Returns 0 on success.
++ */
++int wasm_user_as_init(struct mm_struct *mm, unsigned long size_bytes);
++
++/*
++ * Allocate `len` bytes (page-rounded) from `mm`'s private space: first-fit the
++ * free-list, else bump from user_as_brk (growing the private memory via
++ * wasm_user_mem_grow on overflow). Returns the base offset (>= USER_AS_BASE), or
++ * 0 on failure.
++ */
++unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len);
++
++/* Free [base, base+len) back to `mm`'s free-list (coalescing). */
++void wasm_user_as_free_extent(struct mm_struct *mm, unsigned long base,
++			      unsigned long len);
++
++/*
++ * Tear down `mm`'s allocator: drain the free-list and call wasm_user_mem_free.
++ * Called from exit_mmap. Safe when never initialised.
++ */
++void wasm_user_as_destroy(struct mm_struct *mm);
++
++/* Zero `n` bytes at private user offset `uaddr` in `mm`'s space (anon/BSS clear). */
++void wasm_user_as_memzero(struct mm_struct *mm, unsigned long uaddr,
++			  unsigned long n);
++
++#endif /* _ASM_WASM_USER_AS_H */
+diff --git a/arch/wasm/include/asm/wasm.h b/arch/wasm/include/asm/wasm.h
+index 690fdb5bc..076dbfcef 100644
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -3,6 +3,15 @@
+ #ifndef _ASM_WASM_WASM_H
+ #define _ASM_WASM_WASM_H
+ 
++/*
++ * Cross-repo host-bridge ABI version. Must match the runtime
++ * (runtime/hostbridge.js WASM_HOSTBRIDGE_ABI). v1 = the uaccess copy ops
++ * (0014/0015). v2 (Task 2) adds the per-process memory-lifecycle ops
++ * (wasm_user_mem_create/grow/free) declared below. Bumped to 2 to match the
++ * runtime that already ships the v2 ops.
++ */
++#define WASM_HOSTBRIDGE_ABI 2
++
+ /* These are symbols imported from the Wasm host. */
+ 
+ extern void wasm_panic(const char *msg);
+@@ -31,6 +40,22 @@ extern long wasm_user_strncpy(int pid, unsigned long dst_kaddr,
+ extern unsigned long wasm_user_memzero(int pid, unsigned long uaddr,
+ 				       unsigned long n);
+ 
++/*
++ * Task 2 (ABI v2) memory-lifecycle imports. Mint / grow / drop a process's
++ * private base-0 WebAssembly.Memory, keyed by pid. The runtime owns the memory;
++ * the kernel's per-`mm` allocator (arch/wasm/mm/user_as.c) hands out offsets.
++ *   create: mint the per-pid {memory,table}; re-exec replaces the prior one.
++ *           Returns 0 on success, <0 on failure.
++ *   grow:   memory.grow(delta_pages) on the per-pid memory (NOT index 0, the
++ *           shared kernel memory). Returns the new page count, or -1 on failure.
++ *   free:   drop the registry entry at exit_mmap teardown.
++ * Declared here (beside the 0014/0015 bridge decls) per the T2.1 review so any
++ * wasm kernel code can reach the lifecycle ABI.
++ */
++extern long          wasm_user_mem_create(int pid, unsigned long init_pages);
++extern unsigned long wasm_user_mem_grow(int pid, unsigned long delta_pages);
++extern void          wasm_user_mem_free(int pid);
++
+ extern void wasm_start_cpu(unsigned int cpu, struct task_struct *idle_task);
+ extern void wasm_stop_cpu(unsigned int cpu);
+ 
+diff --git a/arch/wasm/mm/Makefile b/arch/wasm/mm/Makefile
+index 661744a43..10894e052 100644
+--- a/arch/wasm/mm/Makefile
++++ b/arch/wasm/mm/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+ obj-y += init.o
++obj-y += user_as.o
+diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
+new file mode 100644
+index 000000000..b6b7e0ce9
+--- /dev/null
++++ b/arch/wasm/mm/user_as.c
+@@ -0,0 +1,374 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Per-`mm` base-0 user-address-space allocator (Task 2).
++ *
++ * Each user process gets a distinct base-0 WebAssembly.Memory (runtime-owned,
++ * pid-keyed; minted by wasm_user_mem_create). This file is the kernel-side
++ * bump/free-list allocator that hands out offsets into that private space; the
++ * small offsets it returns flow to the runtime as __memory_base/__stack_pointer
++ * exactly as the shared-pool addresses do today, but index the PRIVATE memory
++ * once T2.3 flips instantiation.
++ *
++ * Landed DARK: gated behind the `wasm_user_as` early-param (default off). With
++ * the flag off, wasm_user_as_active() is false everywhere and mm/nommu.c takes
++ * the legacy shared alloc_pages_exact path → default boot is unchanged. With the
++ * flag on, a boot-time self-test exercises the allocator math (the only proof
++ * possible before T2.3 wires the private memory into instantiation).
++ *
++ * Page accounting: the runtime grows the private memory in WASM pages
++ * (WASM_PAGE_SIZE = 64 KiB), which is independent of the kernel's PAGE_SIZE.
++ * Offsets are PAGE_SIZE-aligned (kernel page granularity); the private memory
++ * SIZE and the grow delta are tracked in WASM pages.
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/slab.h>
++#include <linux/list.h>
++#include <linux/mm.h>
++#include <linux/mm_types.h>
++#include <linux/printk.h>
++#include <linux/sched.h>
++#include <linux/pid.h>
++#include <asm/page.h>
++#include <asm/mmu.h>
++#include <asm/user_as.h>
++#include <asm/wasm.h>
++
++bool wasm_user_as_enabled __ro_after_init;
++
++static int __init wasm_user_as_setup(char *str)
++{
++	if (!str || !strcmp(str, "1") || !strcmp(str, "on") || !strcmp(str, "y"))
++		wasm_user_as_enabled = true;
++	return 0;
++}
++early_param("wasm_user_as", wasm_user_as_setup);
++
++/* A freed extent on mm->context.user_as_free (offsets into the private space). */
++struct user_as_extent {
++	struct list_head list;
++	unsigned long start;	/* offset, page-aligned */
++	unsigned long len;	/* bytes, page-aligned */
++};
++
++static int wasm_user_as_pid(void)
++{
++	struct task_struct *t = current;
++
++	return t ? task_pid_nr(t) : 0;
++}
++
++int wasm_user_as_init(struct mm_struct *mm, unsigned long size_bytes)
++{
++	/* Round the private size up to a whole number of wasm pages. */
++	mm->context.user_as_size = ALIGN(size_bytes, WASM_PAGE_SIZE);
++	mm->context.user_as_brk = USER_AS_BASE;
++	INIT_LIST_HEAD(&mm->context.user_as_free);
++	mm->context.user_as_live = true;
++	return 0;
++}
++
++/*
++ * First-fit the free-list. On an exact-or-larger hit, carve `len` off the FRONT
++ * of the extent (so callers get the lowest offset; the tail stays free).
++ */
++static unsigned long alloc_from_freelist(struct mm_struct *mm, unsigned long len)
++{
++	struct user_as_extent *e;
++
++	list_for_each_entry(e, &mm->context.user_as_free, list) {
++		if (e->len >= len) {
++			unsigned long base = e->start;
++
++			if (e->len == len) {
++				list_del(&e->list);
++				kfree(e);
++			} else {
++				e->start += len;
++				e->len -= len;
++			}
++			return base;
++		}
++	}
++	return 0;
++}
++
++unsigned long wasm_user_as_alloc(struct mm_struct *mm, unsigned long len)
++{
++	unsigned long base, need_end, have, want, delta_pages, grown;
++
++	len = PAGE_ALIGN(len);
++	if (!len)
++		return 0;
++
++	/* Reuse a freed extent first (munmap reuse). */
++	base = alloc_from_freelist(mm, len);
++	if (base)
++		return base;
++
++	/* Else bump from the brk. */
++	base = mm->context.user_as_brk;
++	need_end = base + len;
++	if (need_end < base) /* overflow */
++		return 0;
++
++	/* Grow the private memory if the bump would overflow it. */
++	have = mm->context.user_as_size;
++	if (need_end > have) {
++		want = ALIGN(need_end - have, WASM_PAGE_SIZE);
++		delta_pages = want / WASM_PAGE_SIZE;	/* runtime grows in wasm pages */
++		grown = wasm_user_mem_grow(wasm_user_as_pid(), delta_pages);
++		if (grown == (unsigned long)-1)
++			return 0;
++		mm->context.user_as_size = grown * WASM_PAGE_SIZE;
++		if (need_end > mm->context.user_as_size)
++			return 0;
++	}
++
++	mm->context.user_as_brk = need_end;
++	return base;
++}
++
++/* Coalesce-insert [base,base+len) into the (address-ordered) free-list. */
++void wasm_user_as_free_extent(struct mm_struct *mm, unsigned long base,
++			      unsigned long len)
++{
++	struct user_as_extent *e, *prev = NULL, *ne;
++	unsigned long end;
++
++	len = PAGE_ALIGN(len);
++	if (!len)
++		return;
++	end = base + len;
++
++	/* If it abuts the bump pointer, just retract the brk (never shrink mem). */
++	if (end == mm->context.user_as_brk) {
++		mm->context.user_as_brk = base;
++		/* Pull back any freed extents now adjacent to the new brk. */
++again:
++		list_for_each_entry(e, &mm->context.user_as_free, list) {
++			if (e->start + e->len == mm->context.user_as_brk) {
++				mm->context.user_as_brk = e->start;
++				list_del(&e->list);
++				kfree(e);
++				goto again;
++			}
++		}
++		return;
++	}
++
++	/* Insert in address order, coalescing with neighbours. */
++	list_for_each_entry(e, &mm->context.user_as_free, list) {
++		if (e->start > base)
++			break;
++		prev = e;
++	}
++
++	/* Coalesce with prev (prev.end == base). */
++	if (prev && prev->start + prev->len == base) {
++		prev->len += len;
++		/* Maybe now also abuts the following extent. */
++		if (!list_is_last(&prev->list, &mm->context.user_as_free)) {
++			struct user_as_extent *next = list_next_entry(prev, list);
++
++			if (prev->start + prev->len == next->start) {
++				prev->len += next->len;
++				list_del(&next->list);
++				kfree(next);
++			}
++		}
++		return;
++	}
++
++	ne = kmalloc(sizeof(*ne), GFP_KERNEL);
++	if (!ne) {
++		/* Leak the extent rather than corrupt; grow-only engine tolerates it. */
++		pr_warn("wasm_user_as: free-list OOM, leaking [0x%lx,+0x%lx)\n",
++			base, len);
++		return;
++	}
++	ne->start = base;
++	ne->len = len;
++	if (prev)
++		list_add(&ne->list, &prev->list);
++	else
++		list_add(&ne->list, &mm->context.user_as_free);
++
++	/* Coalesce forward with the following extent (ne.end == next.start). */
++	if (!list_is_last(&ne->list, &mm->context.user_as_free)) {
++		struct user_as_extent *next = list_next_entry(ne, list);
++
++		if (ne->start + ne->len == next->start) {
++			ne->len += next->len;
++			list_del(&next->list);
++			kfree(next);
++		}
++	}
++}
++
++void wasm_user_as_memzero(struct mm_struct *mm, unsigned long uaddr,
++			  unsigned long n)
++{
++	/*
++	 * pid resolved via `current`; the `mm` param is reserved/unused — the
++	 * host-bridge always targets `current`'s address space (registry model R1:
++	 * uaccess only ever targets current). Do NOT assume this zeroes a non-current
++	 * mm's private memory — it does not.
++	 */
++	(void)mm;
++	wasm_user_memzero(wasm_user_as_pid(), uaddr, n);
++}
++
++void wasm_user_as_destroy(struct mm_struct *mm)
++{
++	struct user_as_extent *e, *tmp;
++
++	if (!mm->context.user_as_live)
++		return;
++
++	list_for_each_entry_safe(e, tmp, &mm->context.user_as_free, list) {
++		list_del(&e->list);
++		kfree(e);
++	}
++	mm->context.user_as_live = false;
++	mm->context.user_as_brk = 0;
++	mm->context.user_as_size = 0;
++
++	wasm_user_mem_free(wasm_user_as_pid());
++}
++
++/* Count freed extents currently on the list (self-test helper). */
++static unsigned long selftest_freelist_count(struct mm_struct *mm)
++{
++	struct user_as_extent *e;
++	unsigned long n = 0;
++
++	list_for_each_entry(e, &mm->context.user_as_free, list)
++		n++;
++	return n;
++}
++
++static void selftest_drain(struct mm_struct *mm)
++{
++	struct user_as_extent *e, *tmp;
++
++	list_for_each_entry_safe(e, tmp, &mm->context.user_as_free, list) {
++		list_del(&e->list);
++		kfree(e);
++	}
++}
++
++/*
++ * Boot-time self-test (flag-on only): exercises the bump/free-list math on a
++ * throwaway mm_context with no runtime memory. Proves the allocator hands out
++ * offsets in [USER_AS_BASE, size), first-fit reuse, ADJACENT-extent coalescing,
++ * the brk-retract reclaim (`again` loop), and the overflow→grow path (which
++ * fails closed here since the fake mm has no runtime memory) — the honest
++ * dark-mode verification (a running process over private memory is T2.3). The
++ * free path got the most scrutiny because the T2.2 review found a Critical
++ * there, so it is the most heavily covered below.
++ */
++static int __init wasm_user_as_selftest(void)
++{
++	struct mm_struct fake = {};
++	unsigned long a, b, c, d, first;
++
++	if (!wasm_user_as_enabled)
++		return 0;
++
++	fake.context.user_as_size = 64UL << 20; /* 64 MiB pretend space */
++	fake.context.user_as_brk = USER_AS_BASE;
++	INIT_LIST_HEAD(&fake.context.user_as_free);
++	fake.context.user_as_live = true;
++
++	/* 1. Bump: monotonic offsets in [USER_AS_BASE, size). */
++	a = wasm_user_as_alloc(&fake, PAGE_SIZE);		/* [A,   1pg] */
++	first = a;
++	b = wasm_user_as_alloc(&fake, 2 * PAGE_SIZE);		/* [B,   2pg] */
++	c = wasm_user_as_alloc(&fake, PAGE_SIZE);		/* [C,   1pg] */
++	d = wasm_user_as_alloc(&fake, PAGE_SIZE);		/* [D,   1pg] */
++	if (a < USER_AS_BASE || b != a + PAGE_SIZE ||
++	    c != b + 2 * PAGE_SIZE || d != c + PAGE_SIZE ||
++	    d >= fake.context.user_as_size) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL bump a=0x%lx b=0x%lx c=0x%lx d=0x%lx\n",
++		       a, b, c, d);
++		goto fail;
++	}
++
++	/* 2. First-fit reuse: free B, re-alloc same size → must reuse B. */
++	wasm_user_as_free_extent(&fake, b, 2 * PAGE_SIZE);
++	if (wasm_user_as_alloc(&fake, 2 * PAGE_SIZE) != b) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL first-fit reuse\n");
++		goto fail;
++	}
++
++	/* 3. Adjacent-extent COALESCE (self-contained): A..D 1pg each; free B then C
++	 *    (B.end == C.start, neither abuts brk). They must merge into ONE
++	 *    free-list entry spanning [B, 2pg) which a 2pg alloc then reuses at B. */
++	selftest_drain(&fake);
++	fake.context.user_as_brk = USER_AS_BASE;
++	a = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	b = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	c = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	d = wasm_user_as_alloc(&fake, PAGE_SIZE);	/* keeps B,C off the brk */
++	wasm_user_as_free_extent(&fake, b, PAGE_SIZE);
++	wasm_user_as_free_extent(&fake, c, PAGE_SIZE);
++	if (selftest_freelist_count(&fake) != 1) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL coalesce count=%lu\n",
++		       selftest_freelist_count(&fake));
++		goto fail;
++	}
++	if (wasm_user_as_alloc(&fake, 2 * PAGE_SIZE) != b) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL coalesced reuse\n");
++		goto fail;
++	}
++	(void)a;
++	(void)d;
++
++	/* 4. brk-retract reclaim (`again` loop): alloc A..D, free C first (lands on
++	 *    the free-list, NOT abutting brk), then free D (abuts brk → brk retracts
++	 *    to C.end, and the `again` loop must then find the freed C extent now
++	 *    adjacent to the retracted brk and reclaim it too). Result: free-list
++	 *    empty and brk == C. */
++	selftest_drain(&fake);
++	fake.context.user_as_brk = USER_AS_BASE;
++	a = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	b = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	c = wasm_user_as_alloc(&fake, PAGE_SIZE);
++	d = wasm_user_as_alloc(&fake, PAGE_SIZE);	/* brk == d + 1pg */
++	wasm_user_as_free_extent(&fake, c, PAGE_SIZE);	/* not abutting brk → on list */
++	if (selftest_freelist_count(&fake) != 1) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL pre-retract list=%lu\n",
++		       selftest_freelist_count(&fake));
++		goto fail;
++	}
++	wasm_user_as_free_extent(&fake, d, PAGE_SIZE);	/* abuts brk → retract + reclaim C */
++	if (selftest_freelist_count(&fake) != 0 ||
++	    fake.context.user_as_brk != c) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL brk-retract brk=0x%lx free=%lu (c=0x%lx)\n",
++		       fake.context.user_as_brk, selftest_freelist_count(&fake), c);
++		goto fail;
++	}
++	(void)a;
++	(void)b;
++
++	/* 5. Overflow → grow: shrink the pretend size so the next bump overflows.
++	 *    With no runtime memory, wasm_user_mem_grow returns -1, so the alloc
++	 *    MUST fail closed (return 0) rather than hand out an out-of-range offset.
++	 *    (A SUCCESSFUL grow needs a real per-pid memory → proven in T2.3.) */
++	fake.context.user_as_size = fake.context.user_as_brk; /* no slack left */
++	if (wasm_user_as_alloc(&fake, PAGE_SIZE) != 0) {
++		pr_err("WASM_USER_AS_SELFTEST: FAIL overflow not rejected\n");
++		goto fail;
++	}
++
++	selftest_drain(&fake);
++	pr_info("WASM_USER_AS_SELFTEST: PASS first=0x%lx\n", first);
++	return 0;
++
++fail:
++	selftest_drain(&fake);
++	return 0;
++}
++late_initcall(wasm_user_as_selftest);
+diff --git a/fs/binfmt_wasm.c b/fs/binfmt_wasm.c
+index 950a4b5ad..cb01b809b 100644
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -19,6 +19,20 @@
+ #include <linux/init.h>
+ #include <linux/uaccess.h>
+ #include <linux/vmalloc.h>
++#ifdef CONFIG_WASM
++/* Task 2: per-process base-0 memory lifecycle (create at exec) + the allocator. */
++#include <linux/pid.h>
++#include <asm/mmu.h>
++#include <asm/wasm.h>
++#include <asm/user_as.h>
++
++static inline int wasm_exec_pid(void)
++{
++	struct task_struct *t = current;
++
++	return t ? task_pid_nr(t) : 0;
++}
++#endif
+ 
+ /*
+  * User stack (shares this region with brk; musl mallocng uses mmap not brk, so
+@@ -354,6 +368,35 @@ static int load_wasm_file(struct linux_binprm *bprm, unsigned long extra_stack)
+ 		goto out_unmap;
+ 	}
+ 
++#ifdef CONFIG_WASM
++	/*
++	 * Task 2 (dark): mint this process's private base-0 memory and arm the
++	 * per-`mm` allocator BEFORE the data/stack anonymous vm_mmaps below, so
++	 * those (and runtime mmaps later) come out of the private space. The CODE
++	 * vm_mmap above (file-backed) ran while user_as_live was still 0, so it
++	 * stays in the SHARED pool — the code image is never linear-addressable
++	 * anyway (the runtime compiles it from shared memory). Flagged off by
++	 * default (wasm_user_as_enabled), so this whole block is inert in the
++	 * default build (landed dark; the instantiation flip is T2.3).
++	 */
++	if (wasm_user_as_enabled) {
++		/* Budget: cover data + stack + 16 MiB slack; grow-only past this. */
++		unsigned long init_bytes = USER_AS_BASE + data_size +
++			PAGE_ALIGN(WASM_STACK_SIZE + extra_stack) + (16UL << 20);
++		unsigned long init_pages =
++			ALIGN(init_bytes, WASM_PAGE_SIZE) / WASM_PAGE_SIZE;
++
++		if (wasm_user_mem_create(wasm_exec_pid(), init_pages) < 0) {
++			pr_err("wasm_user_as: create failed\n");
++			ret = -ENOMEM;
++			goto out_unmap;
++		}
++		wasm_user_as_init(current->mm, init_pages * WASM_PAGE_SIZE);
++		pr_info("wasm_user_as: create pid=%d pages=%lu\n",
++			wasm_exec_pid(), init_pages);
++	}
++#endif
++
+ 	/*
+ 	 * MAP_ANMONYMOUS clears the data (and bss). In Wasm, the runtime
+ 	 * manages bss inside the data area. The runtime may rely on the data
+diff --git a/mm/nommu.c b/mm/nommu.c
+index c3a23b082..96dc68194 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -40,6 +40,11 @@
+ #include <asm/tlb.h>
+ #include <asm/tlbflush.h>
+ #include <asm/mmu_context.h>
++#ifdef CONFIG_WASM
++/* Task 2: per-`mm` base-0 user address space allocator + the user/kernel gate. */
++#include <asm/mmu.h>
++#include <asm/user_as.h>
++#endif
+ #include "internal.h"
+ 
+ unsigned long highest_memmap_pfn;
+@@ -511,8 +516,28 @@ static void delete_nommu_region(struct vm_region *region)
+ /*
+  * free a contiguous series of pages
+  */
+-static void free_page_series(unsigned long from, unsigned long to)
++static void free_page_series(struct mm_struct *mm, unsigned long from,
++			     unsigned long to)
+ {
++#ifdef CONFIG_WASM
++	/*
++	 * Task 2 (dark): regions backed by the per-`mm` allocator hold private
++	 * offsets, not kernel pages — free them back to the OWNING mm's free-list
++	 * instead of put_page()ing a bogus struct page. Gate on the owning `mm`,
++	 * NOT current->mm: during process exit, exit_mm() sets current->mm = NULL
++	 * BEFORE mmput()->exit_mmap() runs the per-VMA teardown, so a current->mm
++	 * gate would be false here and the private offsets would fall through to
++	 * virt_to_page()/put_page() on a bogus struct page. The owning mm is
++	 * threaded down from delete_vma()/exit_mmap()/do_munmap(). On full exit the
++	 * whole private memory is dropped by wasm_user_mem_free anyway, but the
++	 * extents must still be returned to THIS mm's list (not leaked / not a UAF).
++	 */
++	if (wasm_user_as_active(mm)) {
++		if (to > from)
++			wasm_user_as_free_extent(mm, from, to - from);
++		return;
++	}
++#endif
+ 	for (; from < to; from += PAGE_SIZE) {
+ 		struct page *page = virt_to_page((void *)from);
+ 
+@@ -527,7 +552,13 @@ static void free_page_series(unsigned long from, unsigned long to)
+  * - the region may not have been added to the tree yet, in which case vm_top
+  *   will equal vm_start
+  */
+-static void __put_nommu_region(struct vm_region *region)
++/*
++ * @mm is the OWNING mm of the region being freed (threaded down so the wasm
++ * per-`mm` free path in free_page_series() gates on the owning mm, not
++ * current->mm — see the banner there). It may be NULL for regions with no wasm
++ * private backing (the shared path ignores it).
++ */
++static void __put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ 	__releases(nommu_region_sem)
+ {
+ 	BUG_ON(!nommu_region_tree.rb_node);
+@@ -543,7 +574,7 @@ static void __put_nommu_region(struct vm_region *region)
+ 		/* IO memory and memory shared directly out of the pagecache
+ 		 * from ramfs/tmpfs mustn't be released here */
+ 		if (region->vm_flags & VM_MAPPED_COPY)
+-			free_page_series(region->vm_start, region->vm_top);
++			free_page_series(mm, region->vm_start, region->vm_top);
+ 		kmem_cache_free(vm_region_jar, region);
+ 	} else {
+ 		up_write(&nommu_region_sem);
+@@ -551,12 +582,12 @@ static void __put_nommu_region(struct vm_region *region)
+ }
+ 
+ /*
+- * release a reference to a region
++ * release a reference to a region. @mm = the owning mm (see __put_nommu_region).
+  */
+-static void put_nommu_region(struct vm_region *region)
++static void put_nommu_region(struct mm_struct *mm, struct vm_region *region)
+ {
+ 	down_write(&nommu_region_sem);
+-	__put_nommu_region(region);
++	__put_nommu_region(mm, region);
+ }
+ 
+ static void setup_vma_to_mm(struct vm_area_struct *vma, struct mm_struct *mm)
+@@ -618,7 +649,9 @@ static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
+ 	vma_close(vma);
+ 	if (vma->vm_file)
+ 		fput(vma->vm_file);
+-	put_nommu_region(vma->vm_region);
++	/* @mm is the owning mm — threaded to free_page_series so the wasm private
++	 * free path gates on it, not current->mm (NULL during exit teardown). */
++	put_nommu_region(mm, vma->vm_region);
+ 	vm_area_free(vma);
+ }
+ 
+@@ -956,6 +989,51 @@ static int do_mmap_private(struct vm_area_struct *vma,
+ 	if (sysctl_nr_trim_pages && total - point >= sysctl_nr_trim_pages)
+ 		total = point;
+ 
++#ifdef CONFIG_WASM
++	/*
++	 * Task 2 (dark): when this mm runs a private base-0 user address space,
++	 * back the mapping out of the per-`mm` allocator instead of the shared
++	 * NOMMU pool. `region->vm_start` becomes a SMALL private offset (>=
++	 * USER_AS_BASE), not a kernel pool pointer. Gated by user_as_live (set at
++	 * exec only when the wasm_user_as flag is on), so the default build takes
++	 * the alloc_pages_exact path below unchanged.
++	 */
++	if (wasm_user_as_active(current->mm)) {
++		unsigned long uoff;
++
++		/*
++		 * File-backed mmap audit (design §1): the only file-backed user
++		 * mapping is the code image, mapped before user_as_live is set, so
++		 * it never reaches here. A file-backed mapping with a private
++		 * target would need a kernel bounce buffer (kernel_read below can't
++		 * write into a private offset); fail loud rather than scribble on
++		 * the kernel. (The bounce path is dead code in scope, so unbuilt.)
++		 */
++		if (WARN_ON_ONCE(vma->vm_file))
++			return -ENOSYS;
++
++		/*
++		 * Reserve the WHOLE region span (total pages, matching the
++		 * alloc_pages_exact path), so the eventual free_page_series ->
++		 * wasm_user_as_free_extent returns exactly what was reserved
++		 * (vm_top - vm_start). vm_end is the requested-length boundary.
++		 */
++		uoff = wasm_user_as_alloc(current->mm, total << PAGE_SHIFT);
++		if (!uoff)
++			goto enomem;
++
++		vm_flags_set(vma, VM_MAPPED_COPY);
++		region->vm_flags = vma->vm_flags;
++		region->vm_start = uoff;
++		region->vm_end   = uoff + len;
++		region->vm_top   = uoff + (total << PAGE_SHIFT);
++		vma->vm_start    = uoff;
++		vma->vm_end      = uoff + len;
++		vma_set_anonymous(vma);
++		return 0;
++	}
++#endif
++
+ 	base = alloc_pages_exact(total << PAGE_SHIFT, GFP_KERNEL);
+ 	if (!base)
+ 		goto enomem;
+@@ -993,7 +1071,10 @@ static int do_mmap_private(struct vm_area_struct *vma,
+ 	return 0;
+ 
+ error_free:
+-	free_page_series(region->vm_start, region->vm_top);
++	/* Only reached for file-backed mappings (post kernel_read), which the wasm
++	 * private path rejects (WARN+ENOSYS above) — so this region is always a
++	 * shared alloc_pages_exact base; vma->vm_mm is the owner regardless. */
++	free_page_series(vma->vm_mm, region->vm_start, region->vm_top);
+ 	region->vm_start = vma->vm_start = 0;
+ 	region->vm_end   = vma->vm_end = 0;
+ 	region->vm_top   = 0;
+@@ -1183,9 +1264,21 @@ unsigned long do_mmap(struct file *file,
+ 	/* clear anonymous mappings that don't ask for uninitialized data */
+ 	if (!vma->vm_file &&
+ 	    (!IS_ENABLED(CONFIG_MMAP_ALLOW_UNINITIALIZED) ||
+-	     !(flags & MAP_UNINITIALIZED)))
++	     !(flags & MAP_UNINITIALIZED))) {
++#ifdef CONFIG_WASM
++		/*
++		 * Task 2 (dark): a private-AS region holds a private offset, not a
++		 * kernel pointer — zero it through the host-bridge (wasm_user_memzero)
++		 * instead of memset()ing a bogus kernel address. Gated by user_as_live.
++		 */
++		if (wasm_user_as_active(current->mm))
++			wasm_user_as_memzero(current->mm, region->vm_start,
++					     region->vm_end - region->vm_start);
++		else
++#endif
+ 		memset((void *)region->vm_start, 0,
+ 		       region->vm_end - region->vm_start);
++	}
+ 
+ 	/* okay... we have a mapping; now we have to register it */
+ 	result = vma->vm_start;
+@@ -1414,7 +1507,9 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
+ 	add_nommu_region(region);
+ 	up_write(&nommu_region_sem);
+ 
+-	free_page_series(from, to);
++	/* Owning mm = vma->vm_mm (== current->mm on this do_munmap path, but use
++	 * the owner explicitly so the wasm private free gates correctly). */
++	free_page_series(vma->vm_mm, from, to);
+ 	return 0;
+ }
+ 
+@@ -1527,6 +1622,17 @@ void exit_mmap(struct mm_struct *mm)
+ 	}
+ 	__mt_destroy(&mm->mm_mt);
+ 	mmap_write_unlock(mm);
++
++#ifdef CONFIG_WASM
++	/*
++	 * Task 2 (dark): after the VMAs are torn down (their regions freed back to
++	 * the per-`mm` free-list via free_page_series above), drain the free-list
++	 * and drop the runtime's per-pid private memory (wasm_user_mem_free). Gated
++	 * by user_as_live, so a no-op in the default build.
++	 */
++	if (wasm_user_as_enabled && mm->context.user_as_live)
++		wasm_user_as_destroy(mm);
++#endif
+ }
+ 
+ /*

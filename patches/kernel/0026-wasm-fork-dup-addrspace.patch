@@ -1,0 +1,342 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 20 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: Phase 2 -- non-CLONE_VM fork() address-space dup (ABI v3)
+
+Make a real non-CLONE_VM fork() work on the NOMMU wasm port. On NOMMU dup_mm()
+memcpy's the parent mm_context but dup_mmap() copies no VMAs, so a stock fork
+child has the parent's allocator scalars with an aliased free-list head and the
+parent's owner pid. copy_thread() detects a fork (not CLONE_VM, parent runs a
+private base-0 address space, child got a distinct mm), re-inits the child
+free-list head + deep-copies the parent's freed extents (wasm_user_as_fork_dup),
+and records the PARENT pid in user_as_fork_parent. The child's OWN pid is not yet
+allocated in copy_thread (task_pid_nr(p) would read back as the parent's), so the
+owner pid + the child Memory mint are deferred to the child's first __switch_to
+(wasm_user_as_fork_finish), where the pid is final; it sets the owner pid and
+mints the child's private Memory via the new wasm_user_mem_dup host import (the
+runtime copies the bytes in the child worker AFTER instantiation -- a fresh
+Instance re-applies active data segments). __switch_to reports fork_parent_pid to
+the runtime (new wasm_create_and_run_task param) so the child worker duplicates
+the AS and asyncify-rewinds the captured fork() stack instead of _start()-ing.
+
+wasm_fork_current() is a new host->kernel export the runtime drives after the
+user fork() stack has unwound; it is an ordinary kernel_clone(SIGCHLD, no
+CLONE_VM) for current. Bumps WASM_HOSTBRIDGE_ABI to 3 (matches runtime/hostbridge.js).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+diff --git a/arch/wasm/include/asm/entry.h b/arch/wasm/include/asm/entry.h
+index e6b0a5037..b393ce299 100644
+--- a/arch/wasm/include/asm/entry.h
++++ b/arch/wasm/include/asm/entry.h
+@@ -26,4 +26,12 @@ __visible unsigned long wasm_raised_irqs_ptr(int cpu);
+ 
+ __visible void raise_exception(void);
+ 
++/*
++ * Phase 2 fork: host → kernel export. The runtime calls this on the forking
++ * task's worker after the user fork() stack has unwound, to allocate the child
++ * task/pid/mm (kernel_clone, SIGCHLD, no CLONE_VM). __visible so --export-all
++ * keeps it through gc-sections (like wasm_raised_irqs_ptr). Returns the child pid.
++ */
++__visible int wasm_fork_current(void);
++
+ #endif /* _ASM_WASM_ENTRY_H */
+diff --git a/arch/wasm/include/asm/mmu.h b/arch/wasm/include/asm/mmu.h
+index b91655808..64f990d69 100644
+--- a/arch/wasm/include/asm/mmu.h
++++ b/arch/wasm/include/asm/mmu.h
+@@ -43,6 +43,14 @@ typedef struct {
+ 	 * (shared-fallback) memory. See wasm_user_as_pid() and the runtime flip.
+ 	 */
+ 	int			user_as_owner_pid;
++	/*
++	 * Phase 2 fork: set by copy_thread() on a non-CLONE_VM fork child to the
++	 * PARENT's pid (0 otherwise). __switch_to() reports it to the runtime so the
++	 * child worker duplicates the parent address space and asyncify-rewinds the
++	 * captured fork() stack instead of _start()-ing a fresh image. Read once at
++	 * the child's first run.
++	 */
++	int			user_as_fork_parent;
+ } mm_context_t;
+ 
+ #endif /* __ASSEMBLY__ */
+diff --git a/arch/wasm/include/asm/user_as.h b/arch/wasm/include/asm/user_as.h
+index 6d40d18e2..9b90b3ef9 100644
+--- a/arch/wasm/include/asm/user_as.h
++++ b/arch/wasm/include/asm/user_as.h
+@@ -71,4 +71,21 @@ void wasm_user_as_destroy(struct mm_struct *mm);
+ void wasm_user_as_memzero(struct mm_struct *mm, unsigned long uaddr,
+ 			  unsigned long n);
+ 
++/*
++ * Phase 2 fork: turn `child` (a fresh non-CLONE_VM dup of `parent` — dup_mm()
++ * already memcpy'd the mm_context scalars) into an INDEPENDENT private address
++ * space. Re-inits the child free-list head (dup_mm aliased it to the parent's
++ * extents) and deep-copies the parent's freed extents. Keeps size/brk/live from
++ * the memcpy. Called from copy_thread() (child pid not yet allocated). Returns 0
++ * or -ENOMEM. Caller guards on wasm_user_as_active(parent) && child != parent.
++ */
++int wasm_user_as_fork_dup(struct mm_struct *child, struct mm_struct *parent);
++
++/*
++ * Phase 2 fork: finish the dup at the child's FIRST run (__switch_to), when its
++ * pid is final: record the child owner pid and mint its private Memory (sized
++ * from the child mm's user_as size) via wasm_user_mem_dup. Returns 0 or -ENOMEM.
++ */
++int wasm_user_as_fork_finish(struct mm_struct *mm, int child_pid);
++
+ #endif /* _ASM_WASM_USER_AS_H */
+diff --git a/arch/wasm/include/asm/wasm.h b/arch/wasm/include/asm/wasm.h
+index befd83c79..f0daa4ec5 100644
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -7,10 +7,11 @@
+  * Cross-repo host-bridge ABI version. Must match the runtime
+  * (runtime/hostbridge.js WASM_HOSTBRIDGE_ABI). v1 = the uaccess copy ops
+  * (0014/0015). v2 (Task 2) adds the per-process memory-lifecycle ops
+- * (wasm_user_mem_create/grow/free) declared below. Bumped to 2 to match the
+- * runtime that already ships the v2 ops.
++ * (wasm_user_mem_create/grow/free) declared below. v3 (Phase 2 fork) adds
++ * wasm_user_mem_dup + the fork_parent_pid channel on wasm_create_and_run_task
++ * + the wasm_fork_current export. Bumped to 3 to match the runtime.
+  */
+-#define WASM_HOSTBRIDGE_ABI 2
++#define WASM_HOSTBRIDGE_ABI 3
+ 
+ /* These are symbols imported from the Wasm host. */
+ 
+@@ -56,6 +57,18 @@ extern long          wasm_user_mem_create(int pid, unsigned long init_pages);
+ extern unsigned long wasm_user_mem_grow(int pid, unsigned long delta_pages);
+ extern void          wasm_user_mem_free(int pid);
+ 
++/*
++ * Phase 2 fork (ABI v3): mint the fork child `child_pid`'s private base-0
++ * WebAssembly.Memory with the SAME page count as `parent_pid`'s, registered
++ * under child_pid. MINTS ONLY — the verbatim byte copy is the runtime's job,
++ * done in the child worker after it instantiates (a fresh Instance re-applies
++ * active data segments, which would clobber a pre-copied .bss). Takes the SIZE
++ * (not the parent pid) so the mint needs no parent registry lookup — it runs in
++ * __switch_to, possibly in a worker without the parent's Memory entry. Returns 0
++ * on success, <0 on failure.
++ */
++extern long          wasm_user_mem_dup(int child_pid, unsigned long init_pages);
++
+ extern void wasm_start_cpu(unsigned int cpu, struct task_struct *idle_task);
+ extern void wasm_stop_cpu(unsigned int cpu);
+ 
+@@ -66,11 +79,17 @@ extern void wasm_stop_cpu(unsigned int cpu);
+  * worker that pid's private Memory. 0 = a fresh mm (the task will exec and mint
+  * its own). Only meaningful with the wasm_user_as allocator on.
+  */
++/*
++ * `fork_parent_pid` (Phase 2): nonzero ⇒ this new task is a non-CLONE_VM fork
++ * child of that pid. The runtime duplicates the parent's address space into the
++ * child and asyncify-rewinds the captured fork() stack (so fork() returns 0 in
++ * the child) instead of _start()-ing a fresh image. 0 = exec / CLONE_VM / kthread.
++ */
+ extern struct task_struct *wasm_create_and_run_task(
+ 	struct task_struct *prev_task, struct task_struct *new_task,
+ 	const char *name, unsigned long bin_start, unsigned long bin_end,
+ 	unsigned long data_start, unsigned long table_start,
+-	int mm_owner_pid);
++	int mm_owner_pid, int fork_parent_pid);
+ extern void wasm_release_task(struct task_struct *dead_task);
+ extern struct task_struct *wasm_serialize_tasks(struct task_struct *prev_task,
+ 	struct task_struct *next_task);
+diff --git a/arch/wasm/kernel/process.c b/arch/wasm/kernel/process.c
+index 9b9e66610..1b7c16125 100644
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -4,11 +4,14 @@
+ #include <linux/ptrace.h>
+ #include <linux/sched.h>
+ #include <linux/sched/debug.h>
++#include <linux/sched/task.h>		/* Phase 2: kernel_clone(), kernel_clone_args */
+ #include <linux/sched/task_stack.h>
++#include <linux/signal.h>		/* Phase 2: SIGCHLD */
+ #include <linux/printk.h>
+ #include <asm/cpuflags.h>
+ #include <asm/entry.h>
+ #include <asm/wasm.h>
++#include <asm/user_as.h>		/* Phase 2: wasm_user_as_active/_fork_dup */
+ 
+ static cpumask_t user_cpus = CPU_MASK_NONE;
+ 
+@@ -56,6 +59,7 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 	unsigned long bin_end = 0U;
+ 	unsigned long data_start = 0U;
+ 	int mm_owner_pid = 0;	/* Task 2.3: see wasm_create_and_run_task */
++	int fork_parent_pid = 0;	/* Phase 2: 0 = not a fork (see below) */
+ 
+ 	if (task_thread_info(next_task)->flags & _TIF_NEVER_RUN) {
+ 		task_thread_info(next_task)->flags &= ~_TIF_NEVER_RUN;
+@@ -76,6 +80,21 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 			 * mm's private Memory instead of a fresh one. A fresh task
+ 			 * (mm not yet live) gets 0 and mints its own at exec.
+ 			 */
++			/*
++			 * Phase 2 fork: copy_thread set user_as_fork_parent on a
++			 * non-CLONE_VM fork child (the parent pid). This is the child's
++			 * FIRST run and its pid is now final, so finish the dup here:
++			 * record the child owner pid + mint its private Memory (sized to
++			 * the parent's) BEFORE wasm_create_and_run_task forwards it. Then
++			 * report fork_parent_pid so the runtime duplicates the parent AS
++			 * and asyncify-rewinds the captured fork() stack instead of
++			 * _start()-ing a fresh image.
++			 */
++			fork_parent_pid = next_task->mm->context.user_as_fork_parent;
++			if (fork_parent_pid)
++				wasm_user_as_fork_finish(next_task->mm,
++					task_pid_nr(next_task));
++
+ 			if (next_task->mm->context.user_as_live)
+ 				mm_owner_pid =
+ 					next_task->mm->context.user_as_owner_pid;
+@@ -83,7 +102,8 @@ __switch_to(struct task_struct *prev_task, struct task_struct *next_task)
+ 
+ 		/* This is called instead of serialize the first time. */
+ 		last_task = wasm_create_and_run_task(prev_task, next_task, name,
+-			bin_start, bin_end, data_start, 0U, mm_owner_pid);
++			bin_start, bin_end, data_start, 0U, mm_owner_pid,
++			fork_parent_pid);
+ 	} else {
+ 		last_task = wasm_serialize_tasks(prev_task, next_task);
+ 	}
+@@ -212,9 +232,68 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
+ 		current->mm->end_data = 0;
+ 	}
+ 
++	/*
++	 * Phase 2 fork: a non-CLONE_VM clone from a user task that runs a private
++	 * base-0 address space is a real fork() — the child needs a DUPLICATE of
++	 * the parent's private memory. On NOMMU, dup_mm() memcpy'd the parent
++	 * mm_context verbatim (carrying user_as_size/brk/live) but left two things
++	 * wrong for a separate address space, and dup_mmap() copied no VMAs; fix the
++	 * allocator state and mint the child's private Memory here (the verbatim
++	 * BYTE copy is the runtime's job — finding A defers it to the child worker).
++	 *
++	 * Guard: only when (a) NOT CLONE_VM (a thread shares the mm — handled by the
++	 * owner-pid path, not here), (b) the parent's mm has a live private AS, and
++	 * (c) the child got a distinct mm (it did: !CLONE_VM ⇒ dup_mm). kthreads
++	 * (no mm) and the flag-off default fall through untouched.
++	 */
++	if (!(args->flags & CLONE_VM) && wasm_user_as_active(current->mm) &&
++	    p->mm && p->mm != current->mm) {
++		int rc = wasm_user_as_fork_dup(p->mm, current->mm);
++		if (rc)
++			return rc;
++		/*
++		 * Record the PARENT pid (valid now; the child's own pid is not yet
++		 * allocated in copy_thread — it would read back as the parent's). The
++		 * child owner pid + Memory mint happen at the child's first __switch_to
++		 * (wasm_user_as_fork_finish), where its pid is final. Nonzero here also
++		 * tells __switch_to this is a fork child.
++		 */
++		p->mm->context.user_as_fork_parent = task_pid_nr(current);
++		/*
++		 * Resume in USER mode. A normal clone copies the parent's pt_regs
++		 * cpuflags as saved by SYSCALL ENTRY (user mode, to be restored on
++		 * exit). fork() here is driven host-side (wasm_fork_current), bypassing
++		 * syscall entry, so the parent's saved cpuflags may be stale/kernel —
++		 * which would trip "Syscall called when in kernel mode" on the child's
++		 * first syscall after the asyncify rewind. The child resumes user code,
++		 * so force the user-task default explicitly.
++		 */
++		child_pt_regs->cpuflags = CPUFLAGS_USER_TASK_DEFAULT;
++	}
++
+ 	return user_task_set_affinity(p);
+ }
+ 
++/*
++ * Phase 2 fork: host → kernel export (auto-exported by --export-all). The
++ * runtime calls this on the FORKING task's worker AFTER the user instance has
++ * unwound its fork() stack (asyncify), to allocate the child task/pid/mm. It is
++ * an ordinary kernel_clone() for `current` with SIGCHLD and no CLONE_VM, so
++ * copy_thread() (above) runs the fork mm-dup. Returns the child pid (or -errno).
++ * The child task spawns LAZILY via the normal __switch_to → wasm_create_and_run_
++ * task path; the runtime's fork-time memory snapshot (taken before this returns)
++ * decouples the byte copy from when the child actually runs, so no special
++ * scheduler drive is needed here.
++ */
++__visible int wasm_fork_current(void)
++{
++	struct kernel_clone_args args = {
++		.exit_signal = SIGCHLD,
++	};
++
++	return kernel_clone(&args);
++}
++
+ /*
+  * Set up a thread for executing a new program.
+  */
+diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
+index b0d66b5a1..ff74d48db 100644
+--- a/arch/wasm/mm/user_as.c
++++ b/arch/wasm/mm/user_as.c
+@@ -95,6 +95,65 @@ int wasm_user_as_init(struct mm_struct *mm, unsigned long size_bytes)
+ 	return 0;
+ }
+ 
++int wasm_user_as_fork_dup(struct mm_struct *child, struct mm_struct *parent)
++{
++	struct user_as_extent *e, *tmp;
++
++	/*
++	 * dup_mm() memcpy'd parent->context into child->context, so the scalars
++	 * (user_as_size, user_as_brk, user_as_live) are already correct for a
++	 * verbatim address-space copy. But child->context.user_as_free is a memcpy
++	 * of the parent's list_head, so its prev/next still point at the PARENT's
++	 * extent nodes — drained as-is at the child's exit_mmap that would kfree the
++	 * parent's nodes (UAF / double-free). Re-init the head, then DEEP-COPY each
++	 * parent extent so the child reuses the same freed offsets independently.
++	 *
++	 * The owner pid + the child Memory MINT are NOT done here: this runs in
++	 * copy_thread(), BEFORE the child's pid is allocated (task_pid_nr(p) would
++	 * return the PARENT's pid). They are done in __switch_to() (the child's first
++	 * run), where the child pid is final — see wasm_user_as_fork_finish().
++	 */
++	INIT_LIST_HEAD(&child->context.user_as_free);
++	list_for_each_entry(e, &parent->context.user_as_free, list) {
++		struct user_as_extent *ne = kmalloc(sizeof(*ne), GFP_KERNEL);
++
++		if (!ne)
++			goto nomem;
++		ne->start = e->start;
++		ne->len = e->len;
++		list_add_tail(&ne->list, &child->context.user_as_free);
++	}
++	return 0;
++
++nomem:
++	list_for_each_entry_safe(e, tmp, &child->context.user_as_free, list) {
++		list_del(&e->list);
++		kfree(e);
++	}
++	return -ENOMEM;
++}
++
++int wasm_user_as_fork_finish(struct mm_struct *mm, int child_pid)
++{
++	/*
++	 * Called from __switch_to() the first time a fork child runs, when its pid
++	 * is final. The child owns a DISTINCT private Memory: record the owner pid
++	 * (so its uaccess resolves the child entry, not the parent's) and mint that
++	 * Memory at the child mm's user_as SIZE — which dup_mm() memcpy'd from the
++	 * parent, and which the runtime's verbatim snapshot fills. We pass the SIZE
++	 * (not the parent pid): __switch_to may run in a worker that does NOT hold
++	 * the parent's Memory entry (when one fork child schedules the next), so the
++	 * mint must not need a parent lookup. The byte copy happens in the child
++	 * worker AFTER instantiation (finding A).
++	 */
++	unsigned long pages = mm->context.user_as_size / WASM_PAGE_SIZE;
++
++	mm->context.user_as_owner_pid = child_pid;
++	if (wasm_user_mem_dup(child_pid, pages) < 0)
++		return -ENOMEM;
++	return 0;
++}
++
+ /*
+  * First-fit the free-list. On an exact-or-larger hit, carve `len` off the FRONT
+  * of the extent (so callers get the lowest offset; the tail stays free).

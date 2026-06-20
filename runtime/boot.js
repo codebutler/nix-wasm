@@ -43,8 +43,16 @@ export const HVC_CONSOLES = 8;
 // slab page (the captured wild pid->numbers[].ns). Fixed by patches/0005 (16K
 // stacks) + CONFIG_SCHED_STACK_END_CHECK (a future overflow BUGs loudly at the
 // culprit instead of corrupting silently). Repro: scripts/linux-demo/stress8.mjs.
+// Task 2.3: `wasm_user_as` turns ON the per-mm base-0 user-address-space
+// allocator (kernel patch 0016, early_param). With it set, exec mints each
+// process's private WebAssembly.Memory (wasm_user_mem_create) and routes
+// data/stack/mmap through the per-mm allocator → small private offsets, and the
+// runtime instantiates the user module against that private memory (the flip).
+// Default OFF in the kernel; we enable it here so every boot gets per-process
+// isolation. Boot log shows `WASM_USER_AS_SELFTEST: PASS` + `wasm_user_as:
+// create pid=…` markers when active.
 const DEFAULT_CMDLINE =
-  "maxcpus=1 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0";
+  "maxcpus=1 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0 wasm_user_as";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -68,6 +76,7 @@ const dec = new TextDecoder();
  * @returns {Promise<{
  *   consoleCount: number,
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
+ *   dumpWtrace(n?: number): unknown[],
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   kill(): void,
  * }>}
@@ -203,6 +212,12 @@ export async function bootLinux(opts) {
           backlog.set(vt, []);
         },
       };
+    },
+
+    /** CONFIG_WASM_TRACE: read the kernel's shared-memory trace ringbuffer
+     *  out-of-band (last `n` records). [] without CONFIG_WASM_TRACE. */
+    dumpWtrace(n) {
+      return os.dumpWtrace ? os.dumpWtrace(n) : [];
     },
 
     /**

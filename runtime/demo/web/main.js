@@ -37,10 +37,14 @@ async function boot() {
   const vfs = MemVfs.from({ Home: {} });
   // Artifacts served from the same origin as this page.
   const baseUrl = new URL("./artifacts/", document.baseURI).href;
+  // `?nonix` boots busybox-only (no /nix overlay) — a fast boot for smoke tests
+  // that only need the initramfs (e.g. the fork acceptance programs). Default is
+  // the full nix system.
+  const nix = !new URLSearchParams(location.search).has("nonix");
   const handle = await bootNixSystem({
     vfs,
     baseUrl,
-    nix: true,
+    nix,
     wayland: {
       sendOut: async (clientId, buffer, fds) => {
         const c = await compositorPromise;

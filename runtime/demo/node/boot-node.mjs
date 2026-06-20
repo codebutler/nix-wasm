@@ -24,10 +24,18 @@ export async function bootNode(opts = {}) {
 
   const transcripts = new Map();
   const tapped = new Set();
+  // Bound each transcript so a wedged guest's console flood (e.g. respawning
+  // gettys printing forever) can't OOM the main-thread JS heap during a long
+  // diagnostic run. Keep the tail (where the prompt / probe output lives).
+  const CAP = 1 << 20; // 1 MiB tail per console
   const tap = (n) => {
     if (tapped.has(n)) return;
     transcripts.set(n, "");
-    handle.console(n).onData((bytes) => transcripts.set(n, transcripts.get(n) + dec.decode(bytes)));
+    handle.console(n).onData((bytes) => {
+      let s = transcripts.get(n) + dec.decode(bytes);
+      if (s.length > CAP) s = s.slice(s.length - CAP);
+      transcripts.set(n, s);
+    });
     tapped.add(n);
   };
 
@@ -61,6 +69,9 @@ export async function bootNode(opts = {}) {
         await sleep(500);
       }
       return false;
+    },
+    dumpWtrace(n) {
+      return handle.dumpWtrace ? handle.dumpWtrace(n) : [];
     },
     kill() {
       handle.kill(); // stops the 9P Atomics.waitAsync loop
