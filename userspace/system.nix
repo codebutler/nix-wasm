@@ -75,6 +75,9 @@ let
           mkdir -p $out/share/terminfo/x
           cp ${pkgs.ncurses}/share/terminfo/x/xterm-256color $out/share/terminfo/x/
         '';
+        # DejaVu Sans + a minimal fonts.conf + a prebuilt fc-cache baked at
+        # build time (native fontconfig; the guest can't cheaply scan at runtime).
+        guestFonts = import ./fonts.nix { inherit pkgs; };
         # autologin: getty's `-l` execs this instead of /bin/login (single-user
         # guest, passwordless root). Shipped as a PROFILE package so it resolves
         # at /run/current-system/sw/bin/autologin (no FHS copy). Shebang /bin/sh
@@ -93,6 +96,7 @@ let
           busybox         # patched wasm busybox: init, hush (guest shell), coreutils + getty/login/syslogd applets
           terminfoMin     # terminfo for the one supported terminal
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
+          guestFonts      # DejaVu Sans + fonts.conf + prebuilt fc-cache (M2 text stack)
         ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -105,8 +109,15 @@ let
         # Link ncurses' terminfo DB into the profile and point ncurses at it, so
         # curses apps (sl, …) find xterm-256color. system.path's default
         # pathsToLink does NOT include /share/terminfo, so add it explicitly.
-        environment.pathsToLink = [ "/share/terminfo" ];
+        # Also link /share/fonts so DejaVu lands at
+        # /run/current-system/sw/share/fonts (the guest path in fonts.conf).
+        environment.pathsToLink = [ "/share/terminfo" "/share/fonts" ];
         environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
+        # fontconfig: point at the baked-in conf + cache so FcInit resolves
+        # "DejaVu Sans" without a runtime rescan.
+        environment.etc."fonts/fonts.conf".source = "${guestFonts}/etc/fonts/fonts.conf";
+        environment.variables.FONTCONFIG_FILE = "/etc/fonts/fonts.conf";
+        environment.variables.FONTCONFIG_PATH = "/etc/fonts";
 
         users.mutableUsers = false;
         users.users.root = {
