@@ -1,0 +1,30 @@
+userspace/wl-input-probe.c
+  s_791cc0179de687::t_3a017400b7bc2e 75-80
+  s_791cc0179de687::t_2c1bf1edea60df 1-54,60-74,81-90,95-239
+  s_791cc0179de687::t_f0c0df1c440544 91-94
+  s_791cc0179de687::t_056ac6d6dfa99f 55-59
+userspace/wl-input-probe.nix
+  s_791cc0179de687::t_383c3eae25877f 1-44
+flake.nix
+  s_791cc0179de687::t_14510cc8ad42a5 232
+  s_791cc0179de687::t_a4cf211e035443 342-345
+  s_791cc0179de687::t_b5c5437e95b169 140-148
+docs/superpowers/notes/m0-input-probe.md
+  s_791cc0179de687::t_a1abcc561753d0 1-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "979f1bca5e2ca418faf1859b9a321bd9942113e1",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}
