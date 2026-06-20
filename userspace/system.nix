@@ -78,6 +78,10 @@ let
         # DejaVu Sans + a minimal fonts.conf + a fontconfig cache built at build
         # time; keyed to the build path so fontconfig rescans once on first FcInit.
         guestFonts = import ./fonts.nix { inherit pkgs; };
+        # Compiled GSettings schemas (org.gtk.Settings.*) + hicolor icon theme.
+        # GTK aborts without the compiled schemas; schemas are compiled with the
+        # NATIVE glib-compile-schemas (pkgs.buildPackages.glib). See gtk-assets.nix.
+        gtkAssets = import ./gtk-assets.nix { inherit pkgs cross; };
         # autologin: getty's `-l` execs this instead of /bin/login (single-user
         # guest, passwordless root). Shipped as a PROFILE package so it resolves
         # at /run/current-system/sw/bin/autologin (no FHS copy). Shebang /bin/sh
@@ -97,6 +101,7 @@ let
           terminfoMin     # terminfo for the one supported terminal
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
           guestFonts      # DejaVu Sans + fonts.conf + prebuilt fc-cache (M2 text stack)
+          gtkAssets       # compiled GSettings schemas + hicolor icon theme (M3b)
         ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -111,13 +116,25 @@ let
         # pathsToLink does NOT include /share/terminfo, so add it explicitly.
         # Also link /share/fonts so DejaVu lands at
         # /run/current-system/sw/share/fonts (the guest path in fonts.conf).
-        environment.pathsToLink = [ "/share/terminfo" "/share/fonts" ];
+        # /share/terminfo + /share/fonts are M2; /share/glib-2.0/schemas and
+        # /share/icons are M3b (GTK GSettings schemas + hicolor icon theme).
+        environment.pathsToLink = [
+          "/share/terminfo"
+          "/share/fonts"
+          "/share/glib-2.0/schemas"
+          "/share/icons"
+        ];
         environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
         # fontconfig: point at the baked-in conf + cache so FcInit resolves
         # "DejaVu Sans" without a runtime rescan.
         environment.etc."fonts/fonts.conf".source = "${guestFonts}/etc/fonts/fonts.conf";
         environment.variables.FONTCONFIG_FILE = "/etc/fonts/fonts.conf";
         environment.variables.FONTCONFIG_PATH = "/etc/fonts";
+        # GTK GSettings: point at the compiled schemas in the system profile so
+        # GLib finds org.gtk.Settings.* without a runtime rescan or XDG lookup.
+        environment.variables.GSETTINGS_SCHEMA_DIR = "/run/current-system/sw/share/glib-2.0/schemas";
+        # XDG_DATA_DIRS: icons + schemas live under the system profile's share/.
+        environment.variables.XDG_DATA_DIRS = "/run/current-system/sw/share";
 
         users.mutableUsers = false;
         users.users.root = {
