@@ -53,7 +53,7 @@ static unsigned render_text(cairo_surface_t *surf) {
   FT_Library ftlib;
   if (FT_Init_FreeType(&ftlib)) { free(fontfile); return 0; }
   FT_Face face;
-  if (FT_New_Face(ftlib, fontfile, 0, &face)) { free(fontfile); return 0; }
+  if (FT_New_Face(ftlib, fontfile, 0, &face)) { FT_Done_FreeType(ftlib); free(fontfile); return 0; }
   FT_Set_Pixel_Sizes(face, 0, 32);
 
   hb_font_t *hbfont = hb_ft_font_create(face, NULL);

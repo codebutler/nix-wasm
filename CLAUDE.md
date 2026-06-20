@@ -287,6 +287,20 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   i32/ptr dispatch AND GObject signal marshallers with double/int64 args); aborts
   loud past the (K,M) bounds or on struct args/varargs/closures — never a silent
   mis-call. Bump K/M in gen-trampolines.py to extend coverage if needed.
+- **M2 text stack** (`deps-overlay.nix` / `userspace/fonts.nix`): **harfbuzz** is
+  forced glib-free (`glib=null` + `-Dglib=disabled -Dgobject=disabled`) — nixpkgs
+  enables hb-glib by default, which drags the whole glib cross-build into M2 (glib
+  + pango are M3); also drop the `devdoc` output (`outputs=["out" "dev"]`) since
+  `-Ddocs=disabled` means the gtk-doc devdoc dir is never created and the builder
+  errors on the missing output. **cairo** is rebuilt with freetype+fontconfig
+  backends strictly additive: un-null freetype/fontconfig + flip the meson flags to
+  `enabled`; glib/x11/png/lzo stay off; weston-flowers (image-surface-only) is the
+  regression gate. **Guest font lives in the Nix system profile** (`userspace/
+  fonts.nix` + `system.nix` bake DejaVu + `/etc/fonts/fonts.conf` +
+  `FONTCONFIG_FILE`): the wl-text/M2 smoke MUST boot `nix:true` (served `/nix`
+  closure) — a busybox-only boot has no font config and fontconfig `FcInit` fails.
+  Rebuild `.#wasm-store-manifest` after any `fonts.nix`/`system.nix` change so
+  the new store path is included in the served `store.json`.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable

@@ -1,7 +1,9 @@
 # userspace/fonts.nix — the guest font + fontconfig bundle (M2 text stack).
-# A self-contained /etc/fonts/fonts.conf + DejaVu font dir + a PREBUILT fontconfig
-# cache, so in-guest FcInit()/FcFontMatch resolves "DejaVu Sans" without scanning.
-# fc-cache runs with the NATIVE fontconfig at build time (the guest can't).
+# A self-contained /etc/fonts/fonts.conf + DejaVu font dir + a fontconfig cache
+# built at build time (native fontconfig; the guest can't run fc-cache). Because
+# the cache is keyed to the build path (not the guest's
+# /run/current-system/sw/share/fonts), fontconfig rescans once on first in-guest
+# FcInit — fine for a single font dir.
 { pkgs }:
 let
   fontDir = "${pkgs.dejavu_fonts}/share/fonts/truetype";

@@ -75,8 +75,8 @@ let
           mkdir -p $out/share/terminfo/x
           cp ${pkgs.ncurses}/share/terminfo/x/xterm-256color $out/share/terminfo/x/
         '';
-        # DejaVu Sans + a minimal fonts.conf + a prebuilt fc-cache baked at
-        # build time (native fontconfig; the guest can't cheaply scan at runtime).
+        # DejaVu Sans + a minimal fonts.conf + a fontconfig cache built at build
+        # time; keyed to the build path so fontconfig rescans once on first FcInit.
         guestFonts = import ./fonts.nix { inherit pkgs; };
         # autologin: getty's `-l` execs this instead of /bin/login (single-user
         # guest, passwordless root). Shipped as a PROFILE package so it resolves
