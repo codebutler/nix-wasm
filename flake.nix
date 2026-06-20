@@ -137,6 +137,15 @@
         libffi = cross.libffi;
       };
 
+      # M0 (galculator): wl-input-probe — wl_seat/pointer/keyboard event logger.
+      # Manual proof that browser input reaches a guest client through Greenfield.
+      wlInputProbe = import ./userspace/wl-input-probe.nix {
+        inherit cross;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+      };
+
       # Wayland Phase 2 (4b): weston-flowers — the REAL upstream weston demo
       # client, cross-built from a minimal cairo-toytoolkit subset (flower.c +
       # window.c + shared/*). The first cairo-backed Wayland client on the stack.
@@ -220,7 +229,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -329,6 +338,10 @@
         # Wayland Phase 4f: wl-anim — self-animating frame-callback client →
         # $out/bin/wl-anim. Proves the steady-state render loop self-sustains.
         wl-anim = wlAnim;
+
+        # M0 (galculator): wl-input-probe — wl_seat/pointer/keyboard event logger →
+        # $out/bin/wl-input-probe. Manual proof that browser input reaches the guest.
+        wl-input-probe = wlInputProbe;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
