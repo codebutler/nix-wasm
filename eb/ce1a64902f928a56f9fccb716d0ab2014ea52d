@@ -1,0 +1,30 @@
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_358ddba8ba95c1 105-120
+  s_d2c9c080387123::t_22013bed41ec88 1122-1134
+  s_d2c9c080387123::t_24127073cbc579 442-447
+  s_d2c9c080387123::t_a31c4b23ecbcc7 837-845
+  s_d2c9c080387123::t_fe8c89159397be 13
+  s_d2c9c080387123::t_76ee4a21b103ac 471
+  s_d2c9c080387123::t_26a0df372ca9cb 1208-1217,1219,1221-1228,1231,1233,1236-1288
+  s_d2c9c080387123::t_8d43e8f0db94fd 503-523,525-552
+runtime/kernel-host.js
+  s_d2c9c080387123::t_02ca54d90a38c4 334-335,342
+  s_d2c9c080387123::t_036729a1fa06a1 502,515-518
+  s_d2c9c080387123::t_da2d73e0e4d775 77,571-589
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "ebce1a64902f928a56f9fccb716d0ab2014ea52d",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
