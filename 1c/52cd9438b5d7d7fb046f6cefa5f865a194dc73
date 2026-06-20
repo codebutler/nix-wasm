@@ -1,0 +1,26 @@
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_def678174b12c8 382-394
+runtime/node/smoke.mjs
+  s_d2c9c080387123::t_9405954dd0772e 21-32,34-35
+docs/superpowers/specs/2026-06-18-mmu-fork-design.md
+  s_d2c9c080387123::t_e46582ab7bc835 185-204
+runtime/node/phase1-acceptance.mjs
+  s_d2c9c080387123::t_795d4c5686706d 25-29,34-37,40-42
+  s_d2c9c080387123::t_bb634a3f3f0284 1-24,30-33,38-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1c52cd9438b5d7d7fb046f6cefa5f865a194dc73",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}
