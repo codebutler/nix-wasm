@@ -1,0 +1,32 @@
+deps-overlay.nix
+  s_791cc0179de687::t_e045af29f3f6b2 734-742
+runtime/node/galculator-smoke.mjs
+  s_791cc0179de687::t_38c29b395bd370 1-7,26-27
+CLAUDE.md
+  s_791cc0179de687::t_677e7fcaa93dc5 142-145
+  s_791cc0179de687::t_aca9862b25e93f 389-393,395-398,407-419
+userspace/system.nix
+  s_791cc0179de687::t_b678d7d5233e48 130-131
+  s_791cc0179de687::t_db50de7680aa5b 105-108
+patches/galculator/0001-add-selftest.patch
+  s_791cc0179de687::t_9a9579fc3cdc79 1-3,7-53,55-59,61-66,68-73,75-97,105,111-112
+  s_791cc0179de687::t_6f7b377a9363b8 4-6,54,60,67,74,98-104,106-110,113-118
+docs/superpowers/notes/m4-galculator-visual.md
+  s_791cc0179de687::t_a7573508d1c63c 5-17,21-28,30-38,40,42-52,54,56-59,74,81,84-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "6ae505923c26a4c0da413b8217c23637396ec0e2",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
