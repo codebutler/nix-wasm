@@ -289,6 +289,28 @@ in
     }))
     prev.llhttp;
 
+  # --- libjpeg-turbo: no SIMD (and skip the broken simdcoverage target) -------
+  # gdk-pixbuf's built-in JPEG loader (and libtiff/libwebp downstream) need
+  # libjpeg. wasm32 has no SIMD asm backend, so libjpeg-turbo's simd/CMakeLists
+  # hits its `simd_fail` no-SIMD branch — which is meant to fall back to the
+  # portable C path. But that branch does `set(WITH_SIMD 0 PARENT_SCOPE)`, which
+  # does NOT update WITH_SIMD in simd/CMakeLists' own scope, so the later
+  # `if(WITH_SIMD AND ENABLE_STATIC) add_executable(simdcoverage ...)` guard
+  # still sees WITH_SIMD=1 and adds the `simdcoverage` coverage *test* executable
+  # — which references all the `jsimd_can_*` entry points that the no-SIMD build
+  # never compiles → wasm-ld "undefined symbol" and the whole build fails at 97%
+  # (the actual libjpeg.a / libturbojpeg.a already linked fine before it). We set
+  # `-DWITH_SIMD=0` explicitly so the no-SIMD C path is taken cleanly and the
+  # simdcoverage target is never added. `doInstallCheck = false`: the test suite
+  # runs target (wasm) binaries, which can't execute on the aarch64 build host.
+  # isWasm-guarded so native libjpeg-turbo (SIMD) is untouched.
+  libjpeg = whenWasm
+    (p: p.overrideAttrs (o: {
+      cmakeFlags = (o.cmakeFlags or [ ]) ++ [ "-DWITH_SIMD=0" ];
+      doInstallCheck = false;
+    }))
+    prev.libjpeg;
+
   # zlib errno fix: zlib 1.3.2 gates `#include <errno.h>` behind NO_STRERROR;
   # errno.h IS in the sysroot and the gz code uses errno regardless → force-
   # include it. (static comes from isStatic: zlib `shared = !isStatic`.)
@@ -351,6 +373,85 @@ in
       outputs = [ "out" "dev" ];
     }))
     prev.cairo;
+
+  # --- libepoxy: GL dispatch with NO GL provider (M3b) ------------------------
+  # GTK3 hard-links libepoxy even on the cairo software-render path, but its GL
+  # entry points are resolved lazily (epoxy builds the dispatch table on first
+  # GL call) and are NEVER called when GTK renders through cairo. So we want only
+  # epoxy's dispatch *symbols* for GTK to link against — no actual GL/EGL/GLX/X11
+  # provider. nixpkgs defaults `x11Support = !isDarwin` (= true on our isLinux
+  # host), which turns on egl+glx+x11 and drags libGL (libglvnd) + libx11 +
+  # libxext — none of which cross-cleanly or are wanted here. Setting
+  # `x11Support = false` flips the meson flags to `-Degl=no -Dglx=no -Dx11=false`
+  # (see libepoxy/package.nix) and drops the libGL/libx11 propagated inputs.
+  # epoxy still compiles its full dispatch core (the GL function-pointer tables),
+  # so libepoxy.a still resolves every symbol GTK references. isWasm-guarded.
+  libepoxy = whenWasm
+    (p: p.override { x11Support = false; })
+    prev.libepoxy;
+
+  # --- at-spi2-core / atk: ATK API only, no AT-SPI D-Bus bridge (M3b) ---------
+  # GTK3 links the ATK accessibility *API* (libatk-1.0), but the AT-SPI2 D-Bus
+  # bridge (atspi/registryd/atk-adaptor/the bus launcher) is a runtime a11y
+  # service we don't need and can't bring up: it pulls dbus, X11 (libXtst/libXi/
+  # libXfixes), audit, and gsettings-desktop-schemas — none of which we want in
+  # the NOMMU wasm closure (and dbus is a runtime daemon, meaningless on the
+  # single-process guest). at-spi2-core 2.60 ships an `atk_only` build mode that
+  # compiles ONLY `subdir('atk')` (libatk-1.0, deps = glib+gobject — both already
+  # cross-built in M3a) and skips the dbus dep, the x11 deps, every atspi/bus/
+  # adaptor subdir, and the introspection/docs (see at-spi2-core meson.build:
+  # `if not get_option('atk_only')` guards all of them). That gives GTK exactly
+  # the libatk-1.0 API it links, with NO dbus/X11 in the closure. We drop the
+  # now-unused buildInputs (libx11/libxtst/libxi/libxext — libxml2 is KEPT: meson
+  # requires libxml-2.0 unconditionally even in atk_only mode), the dbus +
+  # gsettings propagated inputs, and the dbus-daemon/bus-launcher mesonFlags +
+  # postFixup (the at-spi-bus-launcher binary isn't built in atk_only mode, so
+  # wrapping it would fail). It's marked "(UNSUPPORTED)" upstream only because a
+  # full desktop wants the bridge — for a GTK app rendered without a11y it's the
+  # correct, minimal ATK. isWasm-guarded so native at-spi2-core is untouched.
+  at-spi2-core = whenWasm
+    (p: (p.override {
+      dbus = null;
+      libx11 = null;
+      libxtst = null;
+      libxi = null;
+      libxext = null;
+      gsettings-desktop-schemas = null;
+    }).overrideAttrs (o:
+      let
+        # libxml2 is NOT dropped: at-spi2-core's top-level meson.build requires
+        # libxml-2.0 (+ gmodule-2.0, part of glib) UNCONDITIONALLY — even in
+        # atk_only mode (the `if not atk_only` guard only wraps dbus/dlopen, not
+        # the libxml/gmodule deps). The libatk-1.0 lib itself links only
+        # glib+gobject, but meson still needs libxml2 present to configure.
+        drop = builtins.filter
+          (i: !builtins.elem (i.pname or "")
+            [ "dbus" "libX11" "libXtst" "libXi" "libXext"
+              "gsettings-desktop-schemas" "systemd-minimal-libs" "systemd" ]);
+      in
+      {
+        buildInputs = drop (o.buildInputs or [ ]);
+        propagatedBuildInputs = drop (o.propagatedBuildInputs or [ ]);
+        # We REPLACE nixpkgs' mesonFlags (they hard-code dbus_daemon/dbus_broker
+        # paths + the gtk2_atk_adaptor toggle, all meaningless in atk_only mode).
+        # But the static-library build comes from `-Ddefault_library=static`,
+        # which the makeStatic platform adapter injects into the ORIGINAL
+        # mesonFlags — so we must re-add it here, else `library()` in atk/
+        # meson.build emits a `.so` (default_both_libraries) instead of
+        # libatk-1.0.a. (Same default_library/default_both_libraries pair the
+        # other static meson packages get.)
+        mesonFlags = [
+          "-Datk_only=true"
+          "-Dintrospection=disabled"
+          "-Dx11=disabled"
+          "-Ddocs=false"
+          "-Ddefault_library=static"
+          "-Ddefault_both_libraries=static"
+        ];
+        # atk_only doesn't build the bus launcher; nixpkgs' postFixup wraps it.
+        postFixup = "";
+      }))
+    prev.at-spi2-core;
 
   # --- kernel UAPI headers: use OUR wasm headers, not stock Linux ------------
   # The cross stdenv/musl pull nixpkgs' stock linuxHeaders (linux-6.18.7) and run
