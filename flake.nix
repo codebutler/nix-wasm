@@ -109,6 +109,14 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # Phase 1 (per-process memory) Task 2.4: the cross-process isolation probe
+      # (acceptance B1). Two guest binaries (/bin/isoa, /bin/isob) that prove a
+      # process cannot read another's private memory. See isolation-probe.nix.
+      wasmIsolationProbe = import ./userspace/isolation-probe.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
       # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
       # the Phase 1 deliverable. Links the cross libwayland-client and runs the
       # canonical wl_display_connect → get_registry → roundtrip → enumerate
@@ -213,7 +221,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes westonFlowers ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes westonFlowers wasmIsolationProbe ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -335,6 +343,10 @@
 
         # Wayland Phase 1 (1c M3): the AF_UNIX test client for waylandproxyd.
         wlclient = wasmWlClient;
+
+        # Phase 1 (per-process memory) Task 2.4: cross-process isolation probe
+        # (/bin/isoa + /bin/isob) — acceptance B1.
+        isolation-probe = wasmIsolationProbe;
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;

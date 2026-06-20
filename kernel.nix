@@ -103,6 +103,14 @@ pkgs.stdenv.mkDerivation {
     # from a kworker that can't be scheduled when the single CPU is wedged on
     # those folios — the full-NixOS getty/login exec-storm deadlock. CONFIG_WASM
     # guarded; every other arch keeps the upstream async-offload behavior.
+    # Task 2.4: symmetric `wasm_user_as: free pid=N` teardown marker (pairs with
+    # the 0016 create marker) so the per-process memory registry balance is
+    # observable. Opt-in behind its OWN early-param `wasm_user_as_freelog`
+    # (default OFF) — NOT just the wasm_user_as flag — because this line fires at
+    # every process exit and would otherwise interleave into pipeline output; so
+    # both the canonical flag-OFF boot AND a default flag-ON boot stay byte-for-
+    # byte unchanged. Only the Task 2.4 teardown test passes the freelog param.
+    ./patches/kernel/0021-wasm-user-as-free-marker.patch
   ];
 
   nativeBuildInputs = [

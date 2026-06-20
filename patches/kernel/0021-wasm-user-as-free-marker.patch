@@ -1,0 +1,74 @@
+wasm: opt-in `wasm_user_as: free pid=N` teardown marker (Task 2.4)
+
+Phase 1 (per-process memory) Task 2.4 (teardown / no-leak). Patch 0016 prints
+`wasm_user_as: create pid=N pages=…` each time the per-mm allocator mints a
+process's private memory at exec. There was no symmetric marker at the free site,
+so the runtime's `userMems` registry balance (every create matched by a free at
+exit_mmap) could not be observed from the guest console.
+
+Add a `wasm_user_as: free pid=N` pr_info in wasm_user_as_destroy, right where it
+calls wasm_user_mem_free() — the exact host-bridge op that does
+`userMems.delete(pid)`. The pid is captured BEFORE the free so it reflects the
+owning mm's pid (wasm_user_as_pid(mm), Task 2.3); `pid` is declared with the
+function's other locals (-Wdeclaration-after-statement clean).
+
+The marker is OPT-IN behind a SECOND early-param `wasm_user_as_freelog` (default
+OFF), NOT just gated by `wasm_user_as`. Reason: this line fires at EVERY process
+exit, so on a flag-on boot it would interleave into pipeline output — landing
+between a command's stdout and its `echo $?` marker — and break tests that assert
+output/exit-status adjacency (e.g. task2.3's `\n4000\s*\r?\nSORT-0`). Keeping it
+off by default leaves both the canonical flag-OFF boot AND the default flag-ON
+boot console byte-for-byte unchanged; only a boot that explicitly passes
+`wasm_user_as_freelog` (the Task 2.4 teardown test) emits it.
+
+See runtime/node/task2.4-teardown.test.mjs (boots with `wasm_user_as_freelog`,
+asserts create==free balance across a spawn/exit storm) and patches 0016/0017
+(the create marker + owner-pid resolver).
+
+diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
+--- a/arch/wasm/mm/user_as.c
++++ b/arch/wasm/mm/user_as.c
+@@ -46,6 +46,23 @@ static int __init wasm_user_as_setup(char *str)
+ }
+ early_param("wasm_user_as", wasm_user_as_setup);
+
++/*
++ * Opt-in console marker for the allocator FREE path (Task 2.4 teardown test).
++ * OFF by default so a flag-on boot's console is byte-for-byte unchanged — the
++ * per-exit `free pid=N` line would otherwise interleave into pipeline output and
++ * break tests that match command output against `$?` adjacency. The teardown
++ * test boots with `wasm_user_as_freelog` to observe create/free balance.
++ */
++bool wasm_user_as_freelog __ro_after_init;
++
++static int __init wasm_user_as_freelog_setup(char *str)
++{
++	if (!str || !strcmp(str, "1") || !strcmp(str, "on") || !strcmp(str, "y"))
++		wasm_user_as_freelog = true;
++	return 0;
++}
++early_param("wasm_user_as_freelog", wasm_user_as_freelog_setup);
++
+ /* A freed extent on mm->context.user_as_free (offsets into the private space). */
+ struct user_as_extent {
+ 	struct list_head list;
+@@ -237,6 +254,7 @@ void wasm_user_as_destroy(struct mm_struct *mm)
+ void wasm_user_as_destroy(struct mm_struct *mm)
+ {
+ 	struct user_as_extent *e, *tmp;
++	int pid;
+
+ 	if (!mm->context.user_as_live)
+ 		return;
+@@ -249,7 +267,10 @@ void wasm_user_as_destroy(struct mm_struct *mm)
+ 	mm->context.user_as_brk = 0;
+ 	mm->context.user_as_size = 0;
+
+-	wasm_user_mem_free(wasm_user_as_pid(mm));
++	pid = wasm_user_as_pid(mm);
++	wasm_user_mem_free(pid);
++	if (wasm_user_as_freelog)
++		pr_info("wasm_user_as: free pid=%d\n", pid);
+ }
+
+ /* Count freed extents currently on the list (self-test helper). */
