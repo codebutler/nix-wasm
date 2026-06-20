@@ -1,0 +1,21 @@
+docs/superpowers/plans/2026-06-20-galculator-m0-m1-input-libffi.md
+  s_791cc0179de687::t_4fb07020cac383 524
+  s_791cc0179de687::t_34754ce4392204 592-595
+  s_791cc0179de687::t_3e7cc7b48efea7 39-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e0113bb01314cd2050d12ab25f29a883efaba391",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
