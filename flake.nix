@@ -138,6 +138,17 @@
         src = wl-eyes;
       };
 
+      # Wayland Phase 4f: wl-anim — a minimal SELF-ANIMATING client (wl_shm +
+      # xdg-shell + a frame-callback loop). Proves the steady-state render cycle
+      # self-sustains on host self-wake alone (weston-flowers is static and
+      # can't). Baked into the initramfs as /bin/wl-anim. See userspace/wl-anim.*.
+      wlAnim = import ./userspace/wl-anim.nix {
+        inherit cross;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+      };
+
       # Wayland Phase 2 (4b): weston-flowers — the REAL upstream weston demo
       # client, cross-built from a minimal cairo-toytoolkit subset (flower.c +
       # window.c + shared/*). The first cairo-backed Wayland client on the stack.
@@ -221,7 +232,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes westonFlowers wasmIsolationProbe ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wasmIsolationProbe ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -358,6 +369,10 @@
         # Wayland Phase 2 (4b): weston-flowers — real upstream weston demo
         # (cairo toytoolkit) cross-built to wasm → $out/bin/weston-flowers.
         weston-flowers = westonFlowers;
+
+        # Wayland Phase 4f: wl-anim — self-animating frame-callback client →
+        # $out/bin/wl-anim. Proves the steady-state render loop self-sustains.
+        wl-anim = wlAnim;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

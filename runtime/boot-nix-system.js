@@ -19,7 +19,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   cmdline?: string,
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
- *   wayland?: { onOut: (clientId:number, buffer:Uint8Array, fds:Uint8Array[], replyTo:(b:Uint8Array)=>void)=>void },  // Phase 2: worker→main Greenfield bridge
+ *   wayland?: { sendOut: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void, onClose?: (clientId:number)=>void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
  * }} opts
  * @returns {ReturnType<import('./boot.js').bootLinux>}
  */

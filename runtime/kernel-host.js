@@ -16,6 +16,13 @@
 // blocks the top-level module-worker script served through the SW's
 // reconstructed COEP response (net::ERR_BLOCKED_BY_RESPONSE → opaque ErrorEvent).
 import { createModuleWorker } from "./make-worker.js";
+// Wayland (idle wake): the main thread injects unsolicited server→client events
+// into the guest's virtio_wl IN vring itself (the worker is parked in
+// arch_cpu_idle's wait64 and can't service a postMessage). It reuses the worker's
+// device model over the shared queue-layout SAB so vring + avail-cursor state stay
+// consistent across the two writers. See wayland_push_in below + kernel patch 0014.
+import { SharedQueues } from "./virtio/shared-queues.js";
+import { WlDevice } from "./virtio/wl-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -32,15 +39,12 @@ export const linux = async ({
   ninep_ring,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
-  // Wayland Phase 2 (2b inversion): optional host hook for the worker→main
-  // Greenfield bridge. `onOut(clientId, buffer, fds)` is called when a guest
-  // VFD_SEND posts wayland bytes out of the worker (which is BLOCKED on the
-  // wayland SAB channel awaiting the reply); the host feeds them into the
-  // main-thread compositor and writes the reply back over that SAB channel.
+  // Wayland Phase 4f: optional host hook for the worker→main Greenfield bridge.
+  // `sendOut(clientId, buffer, fds)` is called FIRE-AND-FORGET when a guest
+  // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
+  // main-thread compositor and the response returns asynchronously over the IN
+  // queue via wayland_push_in (no SAB reply channel).
   wayland,
-  // Wayland Phase 2 (2b): the SAB channel { ctrl, bytes } threaded into every
-  // worker so the blocking onOut round-trip works from any task worker.
-  wayland_channel,
   // pc: accepted for caller API stability but now a no-op — the new exec ABI
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
@@ -135,8 +139,59 @@ export const linux = async ({
     Atomics.store(locks._memory, locks[lock], 0);
   };
 
+  // Wayland (idle wake): host-side virtio_wl IN-injector. An unsolicited
+  // server→client event (cursor motion, frame callback) arriving while the guest
+  // is FULLY IDLE can't be delivered through the worker — its Worker is parked in
+  // arch_cpu_idle()'s memory.atomic.wait64 and never runs JS to service a
+  // postMessage (the 2c/4e finding). So the MAIN thread injects directly: a
+  // host-side WlDevice over the SAME cross-worker queue-layout SAB (so the IN
+  // vring + its avail cursor stay consistent with the worker's instance) whose
+  // raiseInterrupt replicates the kernel's raise_interrupt() on shared memory —
+  // OR the irq bit into raised_irqs[0] + memory.atomic.notify on it, waking the
+  // parked wait64. The worker publishes raised_irqs[0]'s address post-boot
+  // (wayland_irq_addr); patch 0014 exports wasm_raised_irqs_ptr() for it.
+  //
+  // Concurrency: the worker only touches the IN vring when IT has replies to push
+  // (during a guest SEND), and the compositor routes events to the SAB reply path
+  // (not push_in) while a SEND is in flight — so host and worker are not concurrent
+  // IN-vring writers in practice. An idle guest's wake is the LAST step here, after
+  // the vring write, so the guest can't kick before the buffer is published.
+  const VW_DEV_WL = 0;
+  const VIRTIO_WASM_IRQ_BASE = 8; // matches drivers/virtio/virtio_wasm.c + kernel-worker
+  const hostWlQueues = new SharedQueues(virtio_queues);
+  let wlRaisedIrqsAddr = null; // byte offset of raised_irqs[0].counter (8-byte aligned)
+  let hostWlDevice = null;
+  const raiseHostWlIrq = (_cpu, irq) => {
+    if (wlRaisedIrqsAddr == null) return;
+    // Re-view each time: memory.grow() detaches the prior ArrayBuffer.
+    const i32 = new Int32Array(memory.buffer);
+    const word = wlRaisedIrqsAddr >>> 2; // counter at offset 0; irq (8) < 32 → low word
+    Atomics.or(i32, word, 1 << irq);
+    Atomics.notify(i32, word, 1);
+  };
+  const hostWl = () => {
+    if (!hostWlDevice && wlRaisedIrqsAddr != null) {
+      hostWlDevice = new WlDevice({
+        dev: VW_DEV_WL,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_WL,
+        memory,
+        raiseInterrupt: raiseHostWlIrq,
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues,
+        log,
+      });
+    }
+    return hostWlDevice;
+  };
+
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
+    // Wayland (idle wake): the worker hands us raised_irqs[0]'s address once,
+    // post-boot, so raiseHostWlIrq can wake the parked idle CPU directly.
+    wayland_irq_addr: (message) => {
+      wlRaisedIrqsAddr = message.addr >>> 0;
+      log(`[wayland] host idle-wake armed: raised_irqs[0] @0x${wlRaisedIrqsAddr.toString(16)}`);
+    },
     start_primary: (message) => {
       // CPU 0 has init_task which sits in static storage. After booting it becomes CPU 0's idle task. The runner will
       // in this special case tell us where it is so that we can register it.
@@ -280,25 +335,20 @@ export const linux = async ({
       }
     },
 
-    // Wayland Phase 2 (2b inversion): a guest VFD_SEND's wayland bytes posted
-    // out of a task worker (which is now blocked on the wayland SAB channel
-    // awaiting the reply). Re-view the shm fds over the SHARED memory and hand
-    // it to the host bridge → main-thread Greenfield. The bridge (wired in
-    // boot.js) writes the compositor's reply back over the SAB channel + notifies
-    // the blocked worker — this thread does NOT post back to the worker.
+    // Wayland Phase 4f: a guest VFD_SEND's wayland bytes posted out of a task
+    // worker, FIRE-AND-FORGET (the worker does not block — it already wrote the
+    // SEND's synchronous OUT ack). Re-view the shm fds over the SHARED memory and
+    // hand them to the host bridge → main-thread Greenfield. Greenfield's
+    // server→client response comes back asynchronously over the IN queue via
+    // wayland_push_in (host-side WlDevice + self-wake), NOT as a reply here.
     wayland_out: (message, _worker) => {
       const clientId = message.clientId >>> 0;
       const fds = (message.fds || []).map(
         (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
       );
-      if (wayland && typeof wayland.onOut === "function") {
-        // onOut is ASYNC (it drains Greenfield's deferred flush queue before
-        // settling the SAB). The worker is blocked in Atomics.wait, so awaiting
-        // here lets the main thread run those microtasks; the worker wakes when
-        // onOut settles the channel. No await on the handler itself is needed —
-        // the promise self-settles the SAB.
-        Promise.resolve(wayland.onOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
-          log("[wayland] onOut rejected: " + (e && e.stack ? e.stack : e)),
+      if (wayland && typeof wayland.sendOut === "function") {
+        Promise.resolve(wayland.sendOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
+          log("[wayland] sendOut rejected: " + (e && e.stack ? e.stack : e)),
         );
       } else {
         log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
@@ -330,6 +380,25 @@ export const linux = async ({
         address: "i" + arch_bits,
       });
       worker.postMessage({ method: "user_mem_ready", pid: message.pid, memory: mem }, [mem]);
+    },
+
+    // Wayland Phase 4f: the guest refilled the IN avail ring; flush any IN
+    // messages the host deferred for lack of a free inbuf. The VQ_IN kick lands
+    // on the worker, which forwards it here (the host owns the IN vring).
+    wayland_in_refill: (_message) => {
+      hostWl()?.flushIn();
+    },
+
+    // Wayland: the guest closed a ctx vfd (its Wayland client exited) — forward to
+    // the host bridge so the compositor can tear down the matching server-side
+    // client immediately (close its window, stop pumping events to a dead ctx).
+    wayland_close: (message) => {
+      const clientId = message.clientId >>> 0;
+      if (wayland && typeof wayland.onClose === "function") {
+        Promise.resolve(wayland.onClose(clientId)).catch((e) =>
+          log("[wayland] onClose rejected: " + (e && e.stack ? e.stack : e)),
+        );
+      }
     },
 
     console_read: (message, worker) => {
@@ -476,7 +545,6 @@ export const linux = async ({
       runner_name: name,
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
-      wayland_channel: wayland_channel, // Wayland 2b: sync OUT round-trip SAB
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
     });
 
@@ -521,21 +589,30 @@ export const linux = async ({
     // the kernel was built without CONFIG_WASM_TRACE (wtrace_info stays null).
     dumpWtrace: (n = 256) => handleDumpWtrace(n),
 
-    // Wayland Phase 2 (2c): deliver an UNSOLICITED server→client event from the
-    // main-thread compositor to the guest. Posts to cpu 0's worker (which owns the
-    // virtio_wl device + the live wasm instance); the worker injects it into the
-    // IN vring + raises the IRQ (see kernel-worker `wayland_in`). Used for events
-    // Greenfield flushes outside a guest SEND's synchronous round-trip
-    // (xdg_surface.configure, frame callbacks, wl_buffer.release, …).
-    wayland_push_in: (clientId, bytes) => {
+    // Wayland Phase 4f: the SINGLE host→guest delivery path. The main-thread
+    // compositor calls this for EVERY server→client event — replies,
+    // xdg_surface.configure, wl_pointer/keyboard, frame callbacks, wl_buffer.release,
+    // and server→client fds (the wl_keyboard keymap, passed in `fds`).
+    //
+    // Injected DIRECTLY on this (main) thread, NOT posted to the worker: when the
+    // guest is idle its Worker is parked in arch_cpu_idle's wait64 and never
+    // dequeues a postMessage (the 4e finding). The host WlDevice writes the IN
+    // vring over the shared queue SAB and raiseHostWlIrq wakes the parked CPU —
+    // this is also why no synchronous SAB reply is needed for SENDs (4f). injectIn
+    // no-ops cleanly (logs "deferred") if the IN queue isn't set up yet
+    // (pre-handshake) or the wake addr hasn't been published yet.
+    // @param {number} clientId  ctx vfd_id
+    // @param {Uint8Array} bytes  wire bytes
+    // @param {Uint8Array[]} [fds]  server→client fd payloads (keymap)
+    wayland_push_in: (clientId, bytes, fds) => {
+      const dev = hostWl();
+      if (!dev) {
+        log("[wayland] push_in dropped: host idle-wake not armed yet");
+        return;
+      }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      cpus[0]?.worker?.postMessage(
-        {
-          method: "wayland_in",
-          clientId: clientId >>> 0,
-          buffer: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
-        },
-      );
+      const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
+      dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
   };
 };
