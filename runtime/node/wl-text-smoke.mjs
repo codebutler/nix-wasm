@@ -25,7 +25,10 @@ try {
   }
   if (!reached) throw new Error("no prompt");
   s.send("/bin/wl-text --selftest\n");
-  pass = await s.waitForOutput(/WL-TEXT-SELFTEST: glyphs=[1-9][0-9]* nonzero_px=[1-9][0-9]* OK/, 30000);
+  pass = await s.waitForOutput(
+    /WL-TEXT-SELFTEST: glyphs=[1-9][0-9]* nonzero_px=[1-9][0-9]* OK/,
+    30000,
+  );
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-2000));
   s.kill();
