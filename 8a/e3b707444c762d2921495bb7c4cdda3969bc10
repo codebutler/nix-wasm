@@ -1,0 +1,30 @@
+userspace/waylandproxyd.c
+  s_2759e1f8dbb051::t_a8c27ef3c5daa9 120-169
+  s_2759e1f8dbb051::t_82feb15abf11bb 323-324
+  s_2759e1f8dbb051::t_ba65e5b4c37cee 400
+userspace/wl-anim.nix
+  s_2759e1f8dbb051::t_b8799f50ccc08f 6
+  s_2759e1f8dbb051::t_f194ee8ebbd1a0 1-5,7-47
+flake.nix
+  s_2759e1f8dbb051::t_36e39281c63f38 223
+  s_2759e1f8dbb051::t_a1bc404a8f9b30 329-332
+  s_2759e1f8dbb051::t_232b0002f7a948 129-139
+userspace/wl-anim.c
+  s_2759e1f8dbb051::t_8ce1d595c22ac9 1-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "8ae3b707444c762d2921495bb7c4cdda3969bc10",
+  "prompts": {},
+  "sessions": {
+    "s_2759e1f8dbb051": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8228b50b-0db4-4cce-bcbf-adbba2856d3b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
