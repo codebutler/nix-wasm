@@ -1,0 +1,20 @@
+CLAUDE.md
+  s_791cc0179de687::t_c54e0dc5a2676c 128-133
+  s_791cc0179de687::t_bbaa0d84d454fc 342-346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "daa6ed8fc5dd049250b0ab89a04a79d84c7680fa",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
