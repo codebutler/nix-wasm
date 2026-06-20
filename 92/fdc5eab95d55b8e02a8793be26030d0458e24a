@@ -1,0 +1,22 @@
+docs/superpowers/specs/2026-06-20-galculator-on-wasm-design.md
+  s_791cc0179de687::t_968f7a345ac8ad 269-275
+CLAUDE.md
+  s_791cc0179de687::t_05ad6f4b7a14f3 142-145
+  s_791cc0179de687::t_4df20323aba48a 385-403
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "92fdc5eab95d55b8e02a8793be26030d0458e24a",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
