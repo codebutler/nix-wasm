@@ -166,6 +166,18 @@
         zlib = cross.zlib;
       };
 
+      # M3a (galculator): pango-text — the pango-layout render proof (the GTK text
+      # path). PangoLayout on a pangocairo context → cairo image surface, asserting
+      # non-white pixels (--selftest). Exercises pango→fontconfig→cairo-ft end-to-end
+      # and shares the gobject --fpcast-emu seam. See userspace/pango-text.*.
+      pangoText = import ./userspace/pango-text.nix {
+        inherit cross;
+        pango = cross.pango; cairo = cross.cairo; glib = cross.glib;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pcre2 = cross.pcre2; zlib = cross.zlib;
+        libffi = cross.libffi; pixman = cross.pixman;
+      };
+
       # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
       # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
       # (--selftest) asserts on stdout — the M2 integration gate. Default mode
@@ -261,7 +273,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -386,6 +398,10 @@
         # M3a (galculator): glib-selftest — gobject + the M1 libffi double-marshaller
         # proof → $out/bin/glib-selftest.
         glib-selftest = glibSelftest;
+
+        # M3a (galculator): pango-text — pango-layout → cairo image surface render
+        # proof (--selftest is the headless CI gate) → $out/bin/pango-text.
+        pango-text = pangoText;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
