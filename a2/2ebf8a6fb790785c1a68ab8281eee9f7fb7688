@@ -1,0 +1,23 @@
+userspace/system.nix
+  s_791cc0179de687::t_9160ecfb978c20 78-80
+  s_791cc0179de687::t_b9a7ab4f432fcc 112-114,116-120
+  s_791cc0179de687::t_cfba814103dd6b 99
+userspace/fonts.nix
+  s_791cc0179de687::t_2a24e89542d852 1-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "a22ebf8a6fb790785c1a68ab8281eee9f7fb7688",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
