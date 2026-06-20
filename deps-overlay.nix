@@ -105,15 +105,24 @@ in
   # non-emscripten ABI (FFI_WASM32, "raw") and picks it as FFI_DEFAULT_ABI when
   # __EMSCRIPTEN__ is unset — it just never implemented it. We drop in that
   # implementation: ffi_call dispatched through statically-typed call_indirect
-  # trampolines (the only way to make an indirect call on wasm) over all-i32
-  # argument lists with scalar returns — complete & correct for libwayland's
-  # protocol dispatch and any int/pointer C ABI; fails loud on what the raw wasm
-  # ABI genuinely can't express (64-bit/float/struct args, varargs, closures).
-  # See patches/libffi/wasm32-raw-ffi.c for the full rationale.
+  # trampolines (the only way to make an indirect call on wasm). wasm requires
+  # each indirect call's signature to be statically known, so the set of callable
+  # signatures is enumerated at BUILD time by patches/libffi/gen-trampolines.py
+  # (run in postPatch below, emitting src/wasm/wasm-ffi-trampolines.inc which
+  # ffi.c #include's). The generator covers all-i32 argument lists up to K=24
+  # plus up to MAX_NON_I32 (=2) by-value f32/f64/i64 arguments per call within
+  # K=10 — so the backend now handles int/pointer C ABIs AND the common float/
+  # double/long-long-by-value cases (cairo/pango doubles, libwayland's i32/ptr
+  # dispatch) with scalar returns. It still fails LOUD ("argument signature
+  # outside generated bounds") past those (K, M) bounds, and on what the raw wasm
+  # ABI genuinely can't express (struct args, varargs, closures) — never a silent
+  # mis-call. See patches/libffi/wasm32-raw-ffi.c for the full rationale.
   libffi = whenWasm
     (p: p.overrideAttrs (o: {
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.python3 ];
       postPatch = (o.postPatch or "") + ''
         cp ${./patches/libffi/wasm32-raw-ffi.c} src/wasm/ffi.c
+        python3 ${./patches/libffi/gen-trampolines.py} > src/wasm/wasm-ffi-trampolines.inc
       '';
     }))
     prev.libffi;

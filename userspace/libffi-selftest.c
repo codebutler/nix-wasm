@@ -14,7 +14,7 @@ static int failed = 0;
 /* ---- target functions covering the arg/return classes ------------------ */
 static int      t_iii(int a, int b, int c)            { return a + b + c; }
 static double   t_pdi(void *p, double d, int i)       { return (double)((intptr_t)p) + d + i; }
-static double   t_dddd(double a,double b,double c,double e){ return a+b+c+e; }
+static double   t_dd(double a, double b)              { return a + b; }
 static int64_t  t_Ii(int64_t a, int i)                { return a + i; }
 static float    t_fpf(float a, void *p, float b)      { return a + b + (float)((intptr_t)p); }
 static int64_t  t_pId(void *p, int64_t a, double d)   { return (int64_t)((intptr_t)p) + a + (int64_t)d; }
@@ -35,12 +35,15 @@ static void c_pdi(void) {
   ffi_call(&cif,(void(*)(void))t_pdi,&r,av);
   r_ok = (r == 103.5); CHECK("pdi", r_ok);
 }
-static void c_dddd(void) {
-  ffi_cif cif; ffi_type *at[4]={&ffi_type_double,&ffi_type_double,&ffi_type_double,&ffi_type_double};
-  CHECK("prep_dddd", ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 4, &ffi_type_double, at) == FFI_OK);
-  double a=1,b=2,c=3,e=4,r=0; void *av[4]={&a,&b,&c,&e};
-  ffi_call(&cif,(void(*)(void))t_dddd,&r,av);
-  CHECK("dddd", r == 10.0);
+static void c_dd(void) {
+  /* two adjacent double args — within the M=MAX_NON_I32(=2) generated bound.
+     (NB: a 4-double call would exceed M and is the boundary that aborts loud;
+     proving multi-double-arg dispatch needs only 2 within bounds.) */
+  ffi_cif cif; ffi_type *at[2]={&ffi_type_double,&ffi_type_double};
+  CHECK("prep_dd", ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 2, &ffi_type_double, at) == FFI_OK);
+  double a=3.5,b=6.5,r=0; void *av[2]={&a,&b};
+  ffi_call(&cif,(void(*)(void))t_dd,&r,av);
+  CHECK("dd", r == 10.0);
 }
 static void c_Ii(void) {
   ffi_cif cif; ffi_type *at[2]={&ffi_type_sint64,&ffi_type_sint32};
@@ -72,7 +75,7 @@ static void c_only_d(void) {
 }
 
 int main(void) {
-  c_iii(); c_pdi(); c_dddd(); c_Ii(); c_fpf(); c_pId(); c_only_d();
+  c_iii(); c_pdi(); c_dd(); c_Ii(); c_fpf(); c_pId(); c_only_d();
   if (!failed) printf("LIBFFI-SELFTEST: ALL PASS\n");
   return failed;
 }

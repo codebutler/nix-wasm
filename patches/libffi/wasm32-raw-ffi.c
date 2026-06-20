@@ -62,7 +62,8 @@ typedef uint32_t u32;
 static void wasm_ffi_unsupported(const char *what)
 {
   fprintf(stderr, "libffi(wasm32-raw): unsupported %s — this backend handles "
-                  "scalar (i32) arguments only; see wasm32-raw-ffi.c\n", what);
+                  "i32/i64/f32/f64 scalar by-value arguments within the generated "
+                  "(K,M) bounds only; see wasm32-raw-ffi.c\n", what);
   abort();
 }
 
