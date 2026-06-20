@@ -153,6 +153,18 @@
         libffi = cross.libffi;
       };
 
+      # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
+      # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
+      # (--selftest) asserts on stdout — the M2 integration gate. Default mode
+      # blits the same render into a wl_shm window. See userspace/wl-text.*.
+      wlText = import ./userspace/wl-text.nix {
+        inherit cross;
+        cairo = cross.cairo; fontconfig = cross.fontconfig; harfbuzz = cross.harfbuzz;
+        freetype = cross.freetype; pixman = cross.pixman; zlib = cross.zlib;
+        wayland = cross.wayland; wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+      };
+
       # Wayland Phase 2 (4b): weston-flowers — the REAL upstream weston demo
       # client, cross-built from a minimal cairo-toytoolkit subset (flower.c +
       # window.c + shared/*). The first cairo-backed Wayland client on the stack.
@@ -236,7 +248,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -353,6 +365,10 @@
         # M1 (galculator): libffi-selftest — in-guest unit test for the raw wasm
         # FFI backend's f32/f64/i64 by-value argument support → $out/bin/libffi-selftest.
         libffi-selftest = libffiSelftest;
+
+        # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
+        # $out/bin/wl-text (--selftest is the headless CI gate).
+        wl-text = wlText;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
