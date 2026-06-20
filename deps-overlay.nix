@@ -127,6 +127,22 @@ in
     }))
     prev.libffi;
 
+  # --- harfbuzz: glib-free for the M2 text stack ------------------------------
+  # nixpkgs harfbuzz enables the glib integration (hb-glib) by default, which would
+  # drag the entire glib cross-build into the M2 text layer. M2 only needs core
+  # harfbuzz shaping (hb_shape over an hb_ft_font), which is glib-independent — so
+  # disable glib here. glib + pango (which DO need glib) are M3. isWasm-guarded so
+  # native harfbuzz is untouched.
+  harfbuzz = whenWasm
+    (p: (p.override { glib = null; }).overrideAttrs (o: {
+      mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dglib=disabled" "-Dgobject=disabled" "-Dtests=disabled" "-Ddocs=disabled" ];
+      # nixpkgs harfbuzz has a `devdoc` output populated by gtk-doc; with docs
+      # disabled that dir is never created → the builder errors out on the missing
+      # output. Drop devdoc — we only need the lib + headers.
+      outputs = [ "out" "dev" ];
+    }))
+    prev.harfbuzz;
+
   # boost: strip the b2 `architecture=`/`binary-format=` target metadata —
   # nixpkgs derives them from the platform (cpu.family="wasm", execFormat="wasm"),
   # but Boost.Build rejects "wasm" ("not a known value of feature <architecture>").
