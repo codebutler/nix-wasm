@@ -876,15 +876,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             __dlsym_time64: () => 0,
             __cxa_thread_atexit_impl: () => 0,
 
-            // __lsan_enable / __lsan_ignore_object — glib's LeakSanitizer hooks,
-            // declared weak-undefined and called behind a `&sym != NULL` guard
-            // (glib/glib-private.h). wasm-ld -shared turns a weak-undefined
-            // FUNCTION into BOTH a `GOT.func.<sym>` address import (resolved to 0
-            // below → the guard is false) AND a callable `env.<sym>` function
-            // import that must exist for the module to instantiate even though
-            // the guard means it's never actually called. Provide no-op stubs so
-            // instantiation succeeds; the NULL GOT address keeps the lsan path
-            // disabled, which is the correct answer with no LeakSanitizer linked.
+            // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's
+            // LeakSanitizer hooks, declared weak-undefined and called behind a
+            // `&sym != NULL` guard (glib/glib-private.h). wasm-ld -shared turns a
+            // weak-undefined FUNCTION into BOTH a `GOT.func.<sym>` address import
+            // (resolved to 0 below → the guard is false) AND a callable
+            // `env.<sym>` function import that must exist for the module to
+            // instantiate even though the guard means it's never actually called.
+            // Provide no-op stubs so instantiation succeeds; the NULL GOT address
+            // keeps the lsan path disabled, which is the correct answer with no
+            // LeakSanitizer linked. (__lsan_disable surfaced with M3b GTK: the
+            // 14.6MB libgtk references the full disable/enable bracket pair, not
+            // just glib's enable/ignore_object — same weak-undef mechanism.)
+            __lsan_disable: () => {},
             __lsan_enable: () => {},
             __lsan_ignore_object: () => {},
           },

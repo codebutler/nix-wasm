@@ -178,6 +178,21 @@
         libffi = cross.libffi; pixman = cross.pixman;
       };
 
+      # M3b (galculator): gtk-hello — the GTK3 hello-window proof. gtk_init +
+      # GtkWindow + GtkLabel. --selftest is the headless CI gate (init + widget tree,
+      # compositor-independent); default maps a real wayland window for the manual
+      # browser check. gtk is gobject → fn-pointer casts, so the linked binary goes
+      # through the SHARED --fpcast-emu seam. See userspace/gtk-hello.*.
+      gtkHello = import ./userspace/gtk-hello.nix {
+        inherit cross;
+        gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pixman = cross.pixman; wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols; libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
       # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
       # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
       # (--selftest) asserts on stdout — the M2 integration gate. Default mode
@@ -273,7 +288,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -402,6 +417,10 @@
         # M3a (galculator): pango-text — pango-layout → cairo image surface render
         # proof (--selftest is the headless CI gate) → $out/bin/pango-text.
         pango-text = pangoText;
+
+        # M3b (galculator): gtk-hello — the GTK3 hello-window proof. --selftest is the
+        # headless CI gate (gtk_init + GtkWindow + GtkLabel widget tree) → $out/bin/gtk-hello.
+        gtk-hello = gtkHello;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

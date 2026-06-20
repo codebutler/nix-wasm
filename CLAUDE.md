@@ -134,6 +134,11 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/glib-smoke.mjs
 # M3a pango layout (pango_cairo_show_layout → fontconfig → cairo-ft): boot → render selftest.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/pango-smoke.mjs
 
+# M3b GTK3 (gtk_init + GtkWindow/GtkLabel widget tree, gobject through fpcast seam):
+# boot full nix system → gtk-hello --selftest (headless gate; visual window is a
+# MANUAL browser check — docs/superpowers/notes/m3b-gtk-visual.md).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/gtk-smoke.mjs
+
 # Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
@@ -327,13 +332,16 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   4-arg `sys_wasm32_futex` wrapper forwarding `sys_futex(uaddr,op,val,utime,NULL,0)`
   (FUTEX_WAIT/WAKE ignore uaddr2/val3), overriding `__NR_futex_time64` — mirrors the
   `sys_wasm32_*` pattern. Rebuilds only vmlinux.
-- **glib `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
+- **glib/GTK `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
   wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
   `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is
   absent even though the function is never called (its `GOT.func` address resolves to 0
   → the call guard is false). The `GOT.func`/`GOT.mem` Proxy is scoped to those two
   import namespaces ONLY — it can't touch `env.*` or the internal `GOT.func.internal.*`
-  defined globals (those carry real function-pointer relocs and are untouched).
+  defined globals (those carry real function-pointer relocs and are untouched). **M3b
+  GTK adds `__lsan_disable`** — the 14.6MB libgtk references the full disable/enable
+  bracket pair (not just glib's enable/ignore_object); same weak-undef mechanism, same
+  no-op `env` stub. (kernel-worker.js host edits need a `pc` sync — `runtime/sync-to-pc.sh`.)
 - **gobject class_init trap = wasm strict-`call_indirect` SIGNATURE cast, NOT a reloc
   bug** (third instance of this theme, with libffi/M1 + futex): glib casts
   `g_object_do_class_init` (1-arg) to the 2-arg `GClassInitFunc` and calls it through
@@ -350,6 +358,26 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   post-link. **pango** cross-builds clean with NO override (stock nixpkgs, once glib +
   the M2 text stack exist) and the same seam covers its gobject casts — proven by
   `pango-text` (`pango_cairo_show_layout` → fontconfig → cairo-ft).
+- **M3b GTK3 cross-build** (`deps-overlay.nix` gtk3 override): **wayland-only** —
+  force `x11Support`/`cupsSupport`/`vulkanSupport`/`broadwaySupport`/`trackerSupport`
+  off and `wayland` on (the heavies — cups, avahi, X11/xorg, vulkan-loader — don't
+  cross to NOMMU wasm and aren't needed); GObject-introspection off (no typelib
+  consumer on the guest). **gdk-pixbuf** uses its **built-in loaders** (no
+  `loaders.cache`/runtime dlopen — NOMMU can't dlopen modules); **libepoxy** builds
+  with **no GL/EGL/GLX** (`-Degl=no -Dglx=no -Dx11=false`, EGL headers absent — GTK's
+  wayland backend uses the cairo software path, no GL); **atk** ships with **no a11y
+  bridge** (no at-spi/dbus). GTK needs the **baked GSettings schemas** — Task 3 compiles
+  `org.gtk.Settings.*` with NATIVE `glib-compile-schemas` into `gtk-assets` and points
+  `GSETTINGS_SCHEMA_DIR` at them (`system.nix`); without them GLib aborts at
+  `gtk_settings`. **`gtk-hello`** is the proof, built through the shared **fpcast-emu
+  seam** (gtk is gobject-heavy → fn-pointer casts; the 14.6MB libgtk has many). The
+  `--selftest` gate is **compositor-independent**: the node harness has only a minimal
+  `wl` registry (no compositor), so `gtk_init_check` returns FALSE (no GdkDisplay) and
+  GTK *instance* construction (`gtk_window_new`) aborts ("Can't create a
+  GtkStyleContext without a display connection"). The gate instead `g_type_class_ref`s
+  `GTK_TYPE_WINDOW`/`GTK_TYPE_LABEL` (runs each class_init through the fpcast seam,
+  display-free) and asserts `g_type_from_name` + `gtk_get_major_version()==3`. The full
+  window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
