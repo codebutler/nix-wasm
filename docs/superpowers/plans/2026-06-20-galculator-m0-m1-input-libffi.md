@@ -276,7 +276,7 @@ note is the M0 deliverable.
 
 ```bash
 git add userspace/wl-input-probe.c userspace/wl-input-probe.nix flake.nix docs/superpowers/notes/m0-input-probe.md
-git commit -m "M0: wl_seat input probe + browser-verified input result"
+git commit -m "M0: wl_seat input probe (browser verification pending)"
 ```
 
 ---
