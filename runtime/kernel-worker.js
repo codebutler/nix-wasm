@@ -269,6 +269,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           // The guest refilled the IN avail ring; the host owns IN delivery, so
           // tell it to flush anything it deferred for lack of a free inbuf.
           onInRefill: () => port.postMessage({ method: "wayland_in_refill", dev: id }),
+          // The guest closed a ctx vfd (its Wayland client exited) — let the host
+          // tear down the matching server-side client now.
+          onClose: (clientId) =>
+            port.postMessage({ method: "wayland_close", dev: id, clientId: clientId >>> 0 }),
         };
         d = new WlDevice(common);
         // Wayland (idle wake): hand the main thread the address of raised_irqs[0]
