@@ -1,0 +1,35 @@
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_aafbed8614ae61 514-517
+  s_d2c9c080387123::t_46779df999a944 111-117
+  s_d2c9c080387123::t_06261a5748fa15 1269-1280,1282-1284
+userspace/fork-returns-twice.c
+  s_d2c9c080387123::t_fb0404e6069da2 1,3-8,10-15,19,27,29-30,34,37-41
+flake.nix
+  s_d2c9c080387123::t_322245a3ad0415 268
+  s_d2c9c080387123::t_f00fa0d489967b 138,143-150
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_3198dbdd63226a 15-16
+  s_d2c9c080387123::t_eb43508576f990 18
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_59934d3bd42ec9 1-95
+userspace/asyncify-cc.nix
+  s_d2c9c080387123::t_e0a8ceafe1f875 76-77
+  s_d2c9c080387123::t_7fcebf2b7c02da 24-32,35,40-42
+  s_d2c9c080387123::t_9d8750391934ec 58-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d3da1844170c527aabeeb1d36f468bc390899fdf",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
