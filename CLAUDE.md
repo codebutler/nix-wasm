@@ -122,6 +122,9 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs [--no-nix]
 # libffi raw-backend unit test (f32/f64/i64 by-value args): boot → run selftest.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/libffi-smoke.mjs
 
+# M2 text stack (fontconfig→freetype→harfbuzz→cairo-ft): boot full nix system → render selftest.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/wl-text-smoke.mjs
+
 # Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
