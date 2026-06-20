@@ -139,6 +139,10 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/pango-smoke.mjs
 # MANUAL browser check — docs/superpowers/notes/m3b-gtk-visual.md).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/gtk-smoke.mjs
 
+# M4 galculator (GTK3 calculator: reaches GTK init in-guest, no wasm trap; visual
+# click-7x6=42 is a MANUAL browser check — docs/superpowers/notes/m4-galculator-visual.md).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/galculator-smoke.mjs
+
 # Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
@@ -378,6 +382,25 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   `GTK_TYPE_WINDOW`/`GTK_TYPE_LABEL` (runs each class_init through the fpcast seam,
   display-free) and asserts `g_type_from_name` + `gtk_get_major_version()==3`. The full
   window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
+- **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
+  2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
+  `isWasm`-guarded nixpkgs override that applies the shared `--fpcast-emu` post-link
+  pass in `postFixup` (gobject casts). No GSettings schema (galculator uses
+  `~/.config/galculator/galculator.conf`). `.ui` files ride the served `/nix` closure
+  as filesystem data (`$out/share/galculator/ui/`). Two build fixes required: (1)
+  **graphite2 .la file** — cmake emits `library_names=libgraphite2.so` on a static
+  build (no `.so` produced); downstream libtool-based autotools (galculator) try to
+  link the nonexistent `.so`. Fix: `postInstall` sed rewrites the `.la` to clear
+  `library_names` and set `old_library=libgraphite2.a`. (2) **autopoint xz PATH** —
+  `autoreconfHook` runs `autopoint` (inside `autoconf`) which decompresses
+  `archive.dir.tar.xz` with a bare `xz` call; with `strictDeps=false` (needed for
+  `AM_GLIB_GNU_GETTEXT` m4 macro lookup) the cross `xz` wasm binary shadows the
+  native one. Fix: `preAutoreconf` creates `$TMPDIR/native-xz-bin/xz` symlink →
+  native `xz`, prepended to PATH. **Headless start behavior**: galculator prints
+  `GModule-CRITICAL: g_module_symbol: assertion 'module != NULL' failed` (benign —
+  static wasm has no dlopen; GLib probes for a GTK IM module and fails gracefully)
+  + `Gtk-WARNING: cannot open display` — no wasm trap. Smoke gate: REACHED_GTK
+  match + !TRAP. The full click-to-42 compute is a MANUAL browser check (PENDING).
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable

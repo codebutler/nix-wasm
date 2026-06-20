@@ -266,6 +266,13 @@ A scripted smoke test in the spirit of `runtime/node/smoke.mjs`:
 
 If keyboard input landed in M0, add a secondary check: type `7*6=` → `42`.
 
+> **Implementation note (2026-06-20):** The automated gate in the node harness is
+> "galculator starts in-guest without a wasm trap" (galculator reaches GTK init,
+> confirmed by `Gtk-WARNING: cannot open display`). The node harness has no compositor
+> so click input and window mapping cannot be automated there. The **click `7 × 6 = 42`
+> headline acceptance** is a MANUAL browser check via pc/Greenfield (see
+> `docs/superpowers/notes/m4-galculator-visual.md` — PENDING).
+
 ---
 
 ## Risk register
