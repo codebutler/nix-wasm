@@ -18,22 +18,31 @@ const check = (ok, label, extra = "") => {
 const s = await bootNode({ vfs });
 
 try {
-  // Robust shell-readiness: don't rely on an end-anchored prompt match — under
-  // per-process memory (wasm_user_as, the default cmdline) the kernel's
-  // `wasm_user_as: create/free` printk markers trail the prompt on the console,
-  // so the tail is rarely a bare `#`. Wait for the ash shell banner (autologin
-  // done), then round-trip a sentinel whose EVALUATED output (SMOKE_42_READY)
-  // differs from its command echo (`echo SMOKE_$((40+2))_READY`) — proving a live
-  // shell that evaluates arithmetic, independent of prompt-tail noise.
-  await s.waitForOutput(/built-in shell \(ash\)|dropping to a shell/, 180000);
-  if (/panic/i.test(s.snapshot())) {
-    console.log("[smoke] INCONCLUSIVE — kernel panic on boot; re-run");
-    s.kill();
-    process.exit(2);
+  // Robust shell-readiness with NO dependency on any banner string or an
+  // end-anchored prompt match (under per-process memory the kernel's
+  // `wasm_user_as: create/free` printk markers trail the prompt, so the tail is
+  // rarely a bare `#`). Poll: send a sentinel whose EVALUATED output
+  // (SMOKE_42_READY) is distinct from its command echo (`echo
+  // SMOKE_$((40+2))_READY`), until a live shell evaluates the arithmetic. Input
+  // typed before the autologin shell is ready is buffered by the tty and runs
+  // once it starts; resending tolerates any input dropped during early boot. The
+  // nix userspace autologins to root (no username/password prompt), so the
+  // sentinel can never be consumed as a login.
+  let reached = false;
+  const readyDeadline = Date.now() + 180000;
+  while (Date.now() < readyDeadline) {
+    if (/panic/i.test(s.snapshot())) {
+      console.log("[smoke] INCONCLUSIVE — kernel panic on boot; re-run");
+      s.kill();
+      process.exit(2);
+    }
+    s.send("echo SMOKE_$((40+2))_READY\n");
+    if (await s.waitForOutput(/SMOKE_42_READY/, 5000)) {
+      reached = true;
+      break;
+    }
   }
-  s.send("echo SMOKE_$((40+2))_READY\n");
-  const reached = await s.waitForOutput(/SMOKE_42_READY/, 60000);
-  check(reached, "shell prompt reached");
+  check(reached, "shell prompt reached (sentinel round-trip)");
   check(/9pnet: Installing 9P2000 support/.test(s.snapshot()), "9P core registered");
 
   // read path

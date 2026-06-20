@@ -8,9 +8,14 @@ exit_mmap) could not be observed from the guest console.
 
 Add a `wasm_user_as: free pid=N` pr_info in wasm_user_as_destroy, right where it
 calls wasm_user_mem_free() — the exact host-bridge op that does
-`userMems.delete(pid)`. The pid is captured BEFORE the free so it reflects the
-owning mm's pid (wasm_user_as_pid(mm), Task 2.3); `pid` is declared with the
-function's other locals (-Wdeclaration-after-statement clean).
+`userMems.delete(pid)`. The pid is read DIRECTLY from
+`mm->context.user_as_owner_pid` (the authoritative owner recorded at exec), NOT
+via wasm_user_as_pid(mm): by this point wasm_user_as_destroy has already cleared
+`user_as_live`, so wasm_user_as_pid(mm) would fall back to `current` and mis-key
+the free of a non-owner teardown (e.g. exec replacing an old mm). Reading
+user_as_owner_pid is flag-independent and always frees the correct process's
+entry. `pid` is declared with the function's other locals
+(-Wdeclaration-after-statement clean).
 
 The marker is OPT-IN behind a SECOND early-param `wasm_user_as_freelog` (default
 OFF), NOT just gated by `wasm_user_as`. Reason: this line fires at EVERY process
@@ -65,7 +70,7 @@ diff --git a/arch/wasm/mm/user_as.c b/arch/wasm/mm/user_as.c
  	mm->context.user_as_size = 0;
 
 -	wasm_user_mem_free(wasm_user_as_pid(mm));
-+	pid = wasm_user_as_pid(mm);
++	pid = mm->context.user_as_owner_pid;
 +	wasm_user_mem_free(pid);
 +	if (wasm_user_as_freelog)
 +		pr_info("wasm_user_as: free pid=%d\n", pid);
