@@ -1,0 +1,31 @@
+runtime/node/pango-smoke.mjs
+  s_791cc0179de687::t_5e41980135c6eb 1-28
+userspace/pango-text.nix
+  s_791cc0179de687::t_8ef0ee77162251 1-34
+userspace/fpcast-emu.nix
+  s_791cc0179de687::t_9eac2906ecc3f4 1-57
+userspace/pango-text.c
+  s_791cc0179de687::t_1ae15f1ddeeb94 1-56
+flake.nix
+  s_791cc0179de687::t_eeb431f7440c48 169-180
+  s_791cc0179de687::t_ee08e2281e3016 276
+  s_791cc0179de687::t_a2ab9ede990f73 402-405
+userspace/glib-selftest.nix
+  s_791cc0179de687::t_e1bdd01819411a 3-5,10,19-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c818bc3a9647898a9d9dee62b619f67b3c966c4d",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
