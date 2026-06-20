@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-06-20-galculator-m3a-glib-pango.md
+  s_791cc0179de687::t_ebc9a41480b2e5 1-518
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "ad7b731bf1ec04f74a362f5abdcda38284242392",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
