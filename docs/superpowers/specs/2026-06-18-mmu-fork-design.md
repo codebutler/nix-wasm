@@ -182,10 +182,26 @@ For the full treatment (gate sites, exec/grow/teardown sequencing, the inversion
 rationale, and file:line citations) see the refined design doc. Task 2 in the
 implementation plan is re-decomposed into T2.0–T2.5 to match.
 
-### Acceptance for Phase 1
-- Existing userspace boots and runs over per-process memories.
-- **Isolation probe:** process B cannot read or corrupt process A's memory.
-- clone-with-fn spawn (`posix_spawn`/`vfork`+exec) still works (regression guard).
+### Acceptance for Phase 1 — ✅ MET (2026-06-20)
+- ✅ Existing userspace boots and runs over per-process memories. Busybox boots to
+  a shell (`task2.3`); the full NixOS userspace boots interactively (8-getty →
+  autologin) and the end-to-end nix-system acceptance — 9P read / write / `ls` and
+  `nix-env -iA sl` substituting `sl-5.05` from the binary cache — all pass over
+  per-process memory (`runtime/node/smoke.mjs`, Phase A + Phase B).
+- ✅ **Isolation probe (B1):** process B cannot read process A's memory — verified
+  by `runtime/node/task2.4-isolation.test.mjs` (A reports a runtime absolute
+  address; B reads its OWN private bytes there → ISOLATION PASS; would LEAK under a
+  single shared Memory). Teardown/no-leak: `task2.4-teardown.test.mjs`.
+- ✅ clone-with-fn spawn (`posix_spawn`/`vfork`+exec) still works (B2 regression
+  guard): `runtime/node/task2.5-fastpath.test.mjs`.
+
+Substrate fixes landed for Phase 1: per-`mm` base-0 allocator + host-bridge uaccess
+(patches 0014–0017, 0020); netfs inline read collection (0018); a per-process
+Memory `maximum` of 512 MiB (V8 reserves the full max as VA — `kernel-worker.js`);
+and **forced buffered v9fs I/O on wasm** (patch 0022) — unbuffered/direct I/O pins
+user pages (`iov_iter_extract_pages`), impossible across distinct per-process
+`WebAssembly.Memory` objects, so 9P writes are routed through the bridged
+`copy_from_user` instead.
 
 ## 6. Phase 2 — true `fork()` via the double-return seam
 

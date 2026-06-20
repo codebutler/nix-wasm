@@ -379,12 +379,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // separate (drivers + bridge kbuf); isolation comes from each process getting
   // a different Memory object here, resolved per-pid via userMems. (Task 4b
   // CLONE_VM threads will deliberately share the parent pid's entry.)
-  // Grow-only: small initial (data+stack+slack, sized by the kernel), generous max.
-  // 2 GiB cap; grow-only, only committed pages cost. Overridable via the
-  // WT_USERMEM_MAX env (diagnostics only — V8 reserves the full max as virtual
-  // address space for a shared:true Memory, so a headless many-worker boot on a
-  // RAM-constrained host can lower it to fit; unset in normal use → 0x8000).
-  const USER_MEM_MAX_PAGES = Number(globalThis.process?.env?.WT_USERMEM_MAX || 0x8000);
+  // Grow-only: small initial (data+stack+slack, sized by the kernel). The `maximum`
+  // is the key VA-budget knob: V8 RESERVES the full maximum as virtual address
+  // space the moment a shared:true Memory is created (not lazily on grow), so each
+  // live process costs `maximum` of host VA regardless of how little it commits.
+  // A full NixOS boot has ~12+ concurrent worker processes (8 gettys + login +
+  // shells + nix-env), so a 2 GiB cap reserved ~24+ GiB of VA and OOM'd
+  // RAM-constrained hosts. Default to 0x2000 (512 MiB) — ample for guest processes
+  // (the heaviest validated workloads: an 8 MB pipe, a 4000-line malloc sort, and
+  // nix-env substituting a package, all fit comfortably) while keeping a
+  // many-worker boot within a few GiB of VA. Grow-only, only committed pages cost
+  // RAM. Overridable via the WT_USERMEM_MAX env (raise it for an exceptionally
+  // memory-hungry guest process, or lower it further on a tiny host).
+  const USER_MEM_MAX_PAGES = Number(globalThis.process?.env?.WT_USERMEM_MAX || 0x2000);
   const mintUserMem = (pid, init_pages) => {
     return new WebAssembly.Memory({
       initial: Number(init_pages),
