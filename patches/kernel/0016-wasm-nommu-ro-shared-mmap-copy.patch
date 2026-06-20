@@ -1,0 +1,48 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 20 Jun 2026 00:00:00 -0400
+Subject: [PATCH] wasm: !MMU read-only MAP_SHARED file mmap falls back to a private copy
+
+On !MMU a MAP_SHARED file mapping needs a directly-addressable backing
+(NOMMU_MAP_DIRECT, i.e. the file provides ->get_unmapped_area) or
+validate_mmap_request() rejects it with -ENODEV. Filesystems that can only
+be copied into memory (9p — including the served Nix store — romfs, ...)
+report NOMMU_MAP_COPY only, so even a read-only MAP_SHARED mmap of a file on
+them fails.
+
+But a read-only shared mapping has nothing to share-write: it is
+semantically identical to MAP_PRIVATE. Downgrade such mappings to
+MAP_PRIVATE when the backing cannot be mapped directly, so they are
+satisfied by a private copy of the file (do_mmap_private) instead of
+failing. This makes read-only mmap() of files work as on a normal system —
+needed by libxkbcommon, which mmap()s the XKB rules files with
+(PROT_READ, MAP_SHARED) and whose failure aborted GTK keymap creation
+("Couldn't read rules file ...: No such device" -> "Failed to create XKB
+keymap"); SQLite's mmap, fontconfig, etc. benefit equally. Mirrors how
+anonymous MAP_SHARED is mapped to MAP_PRIVATE on !MMU (there is no fork()).
+
+Shared writable mappings (PROT_WRITE) and directly-mappable backings
+(e.g. chardevs with ->get_unmapped_area) are unaffected.
+---
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -1028,6 +1028,20 @@
+ 
+ 	*populate = 0;
+ 
++	/*
++	 * !MMU: a read-only MAP_SHARED file mapping has nothing to share-write,
++	 * so it is semantically identical to MAP_PRIVATE. When the backing cannot
++	 * be mapped directly (no ->get_unmapped_area, e.g. 9p / the served Nix
++	 * store), satisfy it with a private copy of the file instead of failing
++	 * validate_mmap_request() with -ENODEV. This makes read-only mmap() of
++	 * files work as on a normal system (libxkbcommon XKB rules, SQLite mmap,
++	 * fontconfig, ...). Mirrors how anonymous MAP_SHARED is mapped to
++	 * MAP_PRIVATE on !MMU (there is no fork()).
++	 */
++	if (file && (flags & MAP_TYPE) == MAP_SHARED && !(prot & PROT_WRITE) &&
++	    !file->f_op->get_unmapped_area)
++		flags = (flags & ~MAP_TYPE) | MAP_PRIVATE;
++
+ 	/* decide whether we should attempt the mapping, and if so what sort of
+ 	 * mapping */
+ 	ret = validate_mmap_request(file, addr, len, prot, flags, pgoff,
