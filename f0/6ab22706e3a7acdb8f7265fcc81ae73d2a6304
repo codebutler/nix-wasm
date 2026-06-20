@@ -1,0 +1,25 @@
+CLAUDE.md
+  s_791cc0179de687::t_8ad6bab937c513 290-303
+userspace/fonts.nix
+  s_791cc0179de687::t_ac36315efe81dc 2-6
+userspace/wl-text.c
+  s_791cc0179de687::t_a759270b879fdf 56
+userspace/system.nix
+  s_791cc0179de687::t_20127423b9c73a 78-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f06ab22706e3a7acdb8f7265fcc81ae73d2a6304",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
