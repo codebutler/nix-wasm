@@ -1,0 +1,22 @@
+CLAUDE.md
+  s_791cc0179de687::t_7e2832238acf72 278-286
+patches/libffi/wasm32-raw-ffi.c
+  s_791cc0179de687::t_d2b5249fc256f4 22-46
+  s_791cc0179de687::t_56af4792edbe2f 118-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d46739c3b0b49f275b201b4267e143ac21440c14",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
