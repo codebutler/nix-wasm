@@ -875,7 +875,59 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             //   revisit if in-guest tools start leaking per-thread state.
             __dlsym_time64: () => 0,
             __cxa_thread_atexit_impl: () => 0,
+
+            // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's
+            // LeakSanitizer hooks, declared weak-undefined and called behind a
+            // `&sym != NULL` guard (glib/glib-private.h). wasm-ld -shared turns a
+            // weak-undefined FUNCTION into BOTH a `GOT.func.<sym>` address import
+            // (resolved to 0 below → the guard is false) AND a callable
+            // `env.<sym>` function import that must exist for the module to
+            // instantiate even though the guard means it's never actually called.
+            // Provide no-op stubs so instantiation succeeds; the NULL GOT address
+            // keeps the lsan path disabled, which is the correct answer with no
+            // LeakSanitizer linked. (__lsan_disable surfaced with M3b GTK: the
+            // 14.6MB libgtk references the full disable/enable bracket pair, not
+            // just glib's enable/ignore_object — same weak-undef mechanism.)
+            __lsan_disable: () => {},
+            __lsan_enable: () => {},
+            __lsan_ignore_object: () => {},
           },
+
+          // GOT.func / GOT.mem — wasm-ld emits a `GOT.func.<sym>` (or
+          // `GOT.mem.<sym>`) mutable-global import whenever a -shared (dylink)
+          // module takes the *address* of a WEAK-UNDEFINED function (or data)
+          // symbol: code under a dynamic linker expects the loader to patch the
+          // global with the symbol's resolved table-index / data-address. A
+          // genuinely-absent weak symbol has address 0 (NULL) — exactly what the
+          // referencing C code's `&sym != NULL` guard tests for. We don't have a
+          // dynamic linker; the static-link answer is NULL. So resolve every
+          // GOT.func/GOT.mem request to a fresh i{arch_bits} global of 0.
+          //
+          // First triggered by glib (M3a): glib's slice allocator references
+          // `__lsan_enable`/`__lsan_ignore_object` as weak-undefined (its
+          // LeakSanitizer integration), gated behind `sym != NULL`. With no
+          // LeakSanitizer linked the addresses are NULL → the guard is false →
+          // the lsan path is skipped, which is correct. Shared across the whole
+          // glib/GTK stack (and any future weak-undefined-address consumer);
+          // mirrors the env.* weak-undefined-function stubs above.
+          "GOT.func": new Proxy(
+            {},
+            {
+              get: (_target, prop) =>
+                typeof prop === "string"
+                  ? new WebAssembly.Global({ value: "i" + arch_bits, mutable: true }, Ulong(0))
+                  : undefined,
+            },
+          ),
+          "GOT.mem": new Proxy(
+            {},
+            {
+              get: (_target, prop) =>
+                typeof prop === "string"
+                  ? new WebAssembly.Global({ value: "i" + arch_bits, mutable: true }, Ulong(0))
+                  : undefined,
+            },
+          ),
         };
 
         // Instantiate a user Wasm Module. This will implicitly run __wasm_init_memory, which will effectively:

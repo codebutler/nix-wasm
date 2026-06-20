@@ -56,6 +56,18 @@ pkgs.stdenv.mkDerivation {
     # directly on shared memory from the main thread — the owning Worker is parked
     # in arch_cpu_idle()'s wait64 and can't run JS to service an unsolicited event.
     ./patches/kernel/0014-wasm-export-raised-irqs-ptr.patch
+    # futex_time64 (422) is the generic 6-arg sys_futex, but userspace invokes it
+    # with 4 args (glib's g_cond/g_mutex via g_futex_simple, FUTEX_WAIT/WAKE) →
+    # the strictly-typed wasm call_indirect traps on the arity mismatch. A 4-arg
+    # sys_wasm32_futex trampoline (mirroring the sys_wasm32_* u64-split overrides)
+    # forwards to sys_futex with the requeue args zeroed. Unblocks glib (M3a/GTK).
+    ./patches/kernel/0015-wasm-futex-time64-4arg-trampoline.patch
+    # !MMU: a read-only MAP_SHARED file mmap (e.g. libxkbcommon's XKB rules,
+    # SQLite mmap, fontconfig) has nothing to share-write, so satisfy it with a
+    # private copy when the backing (9p / the served Nix store) can't be mapped
+    # directly, instead of failing with -ENODEV. File mmap then works like a
+    # normal system — the correct shared fix, NOT a per-package workaround.
+    ./patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
   ];
 
   nativeBuildInputs = [

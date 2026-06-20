@@ -119,7 +119,7 @@ Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) are
 at them via:
 
 - `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI.
-- A symlink `web/artifacts → /path/to/artifacts` for the browser demo.
+- A symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo.
 
 For local dev without a fresh `nix build`, both default to pc's vendored set
 (`vendor/linux-wasm/` in a pc checkout).
@@ -135,14 +135,14 @@ bun run test        # 79 tests across 7 files — ninep/, nix-closure-store, nix
 
 ```sh
 cd runtime
-node --test node/   # boot tests via node:test
+node --test demo/node/   # boot tests via node:test
 ```
 
 ### Full-nix smoke test
 
 ```sh
 cd runtime
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/smoke.mjs
 # Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run)
 ```
 
@@ -153,7 +153,7 @@ Boots a full nix system, exercises 8 checks (prompt, 9P read/write/ls,
 
 ```sh
 cd runtime
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/attach.mjs
 # --no-nix flag = busybox-only boot (faster, skips /nix overlay)
 # Ctrl-] to detach and quit
 ```
@@ -162,8 +162,8 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs
 
 ```sh
 cd runtime
-ln -sfn /path/to/artifacts web/artifacts
-node web/serve.mjs [port]   # default port 8090
+ln -sfn /path/to/artifacts demo/web/artifacts
+node demo/web/serve.mjs [port]   # default port 8090
 # open http://localhost:8090/web/
 ```
 
@@ -171,8 +171,8 @@ Headless Playwright smoke (asserts `WEB_OK` appears in the terminal):
 
 ```sh
 cd runtime
-ln -sfn /path/to/artifacts web/artifacts
-node web/smoke.mjs
+ln -sfn /path/to/artifacts demo/web/artifacts
+node demo/web/smoke.mjs
 ```
 
 ## CI gates (all four must pass)
@@ -188,7 +188,7 @@ bun run typecheck       # tsc
 Auto-fix shortcuts: `bun run format` (formatting), `bun run lint:fix` (lint).
 
 Note: `node/` and `web/` are tooling/demo — excluded from tsc (`jsconfig.json`).
-`web/vendor/ghostty` is vendored and excluded from all three static gates.
+`demo/web/vendor/ghostty` is vendored and excluded from all three static gates.
 
 ## Syncing to pc
 

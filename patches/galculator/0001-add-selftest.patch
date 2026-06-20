@@ -1,0 +1,118 @@
+--- a/src/main.c	2026-06-20 11:00:03.585008104 -0400
++++ b/src/main.c	2026-06-20 11:00:03.586409778 -0400
+@@ -149,6 +149,101 @@
+ }
+ #endif
+ 
++/* --- galculator --selftest: compositor-independent CI gate -----------------
++   The cross GTK3 is wayland-only and the node harness has no compositor, so a
++   GdkDisplay cannot be opened — which means GtkBuilder CANNOT instantiate the
++   widgets in a .ui (GtkWindow/GtkToggleButton construction needs a display and
++   aborts fatally: "Can't create a GtkStyleContext without a display
++   connection"). So the selftest proves galculator's real assets + GTK machinery
++   WITHOUT instantiating widgets, exactly like the M3b gtk-hello gate:
++
++     1. Load the REAL .ui files from PACKAGE_UI_DIR (the same MAIN_GLADE_FILE /
++        BASIC_GLADE_FILE paths galculator opens at startup) off disk, and parse
++        them with GLib's GMarkup XML parser (display-free), asserting the real
++        widget objects are present: GtkWindow "main_window" (main_frame.ui) and
++        GtkToggleButton "button_7" (basic_buttons_gtk3.ui). This proves the .ui
++        data rode the served /nix closure to PACKAGE_UI_DIR and is well-formed.
++     2. Run the GTK widget classes through their gobject class_init via
++        g_type_class_ref (display-free) — the same fpcast-emu'd function-pointer
++        casts galculator exercises — and confirm the types resolve.
++
++   Prints `GALCULATOR-SELFTEST: ... OK`, returns 0/1. Called before gtk_init. */
++
++typedef struct {
++	const char	*want_class;	/* required object class= */
++	const char	*want_id;	/* required object id= */
++	gboolean	found;
++} galc_ui_scan;
++
++static void galc_ui_start_element (GMarkupParseContext *ctx, const char *name,
++	const char **attr_names, const char **attr_vals, gpointer user, GError **err)
++{
++	galc_ui_scan	*scan = user;
++	const char	*cls = NULL, *id = NULL;
++	int		 i;
++	(void) ctx; (void) err;
++	if (strcmp (name, "object") != 0)
++		return;
++	for (i = 0; attr_names[i] != NULL; i++) {
++		if (strcmp (attr_names[i], "class") == 0) cls = attr_vals[i];
++		else if (strcmp (attr_names[i], "id") == 0) id = attr_vals[i];
++	}
++	if (cls != NULL && id != NULL &&
++	    strcmp (cls, scan->want_class) == 0 && strcmp (id, scan->want_id) == 0)
++		scan->found = TRUE;
++}
++
++/* Parse a real .ui (GtkBuilder XML) and assert it defines <object class=.. id=..>.
++   Uses GLib's GMarkup parser (display-free) — does NOT instantiate the widget. */
++static int galc_ui_has_object (const char *path, const char *cls, const char *id)
++{
++	GMarkupParser	 parser = { galc_ui_start_element, NULL, NULL, NULL, NULL };
++	galc_ui_scan	 scan = { cls, id, FALSE };
++	GMarkupParseContext *ctx;
++	char		*data = NULL;
++	gsize		 len = 0;
++	GError		*err = NULL;
++
++	if (!g_file_get_contents (path, &data, &len, &err)) {
++		fprintf (stderr, "galculator selftest: cannot read %s: %s\n",
++			path, err ? err->message : "unknown");
++		g_clear_error (&err);
++		return 0;
++	}
++	ctx = g_markup_parse_context_new (&parser, 0, &scan, NULL);
++	if (!g_markup_parse_context_parse (ctx, data, len, &err) ||
++	    !g_markup_parse_context_end_parse (ctx, &err)) {
++		fprintf (stderr, "galculator selftest: parse error in %s: %s\n",
++			path, err ? err->message : "unknown");
++		g_clear_error (&err);
++	}
++	g_markup_parse_context_free (ctx);
++	g_free (data);
++	return scan.found ? 1 : 0;
++}
++
++static int galculator_run_selftest (void)
++{
++	int	win_ok, btn_ok, types_ok, ok;
++
++	/* The real assets galculator loads at startup, via GTK XML parse (no display). */
++	win_ok = galc_ui_has_object (MAIN_GLADE_FILE,  "GtkWindow",       "main_window");
++	btn_ok = galc_ui_has_object (BASIC_GLADE_FILE, "GtkToggleButton", "button_7");
++
++	/* Run the GTK widget classes' gobject class_init (the fpcast-emu'd casts),
++	   display-free — same machinery galculator's widget tree depends on. */
++	g_type_class_ref (GTK_TYPE_WINDOW);
++	g_type_class_ref (GTK_TYPE_TOGGLE_BUTTON);
++	types_ok = (g_type_from_name ("GtkWindow") != 0) &&
++	           (g_type_from_name ("GtkToggleButton") != 0);
++
++	ok = win_ok && btn_ok && types_ok;
++	printf ("GALCULATOR-SELFTEST: main_window=%d button_7=%d gtk_types=%d %s\n",
++		win_ok, btn_ok, types_ok, ok ? "OK" : "FAIL");
++	fflush (stdout);
++	return ok ? 0 : 1;
++}
++
+ int main (int argc, char *argv[])
+ {
+     char		*config_file_name;
+@@ -157,7 +252,12 @@
+ #ifdef WITH_HILDON
+ 	HildonProgram   *hildon_program;
+ #endif
+-	
++
++	/* --selftest: compositor-independent gate. Parses the real .ui files and
++	   runs the GTK widget gobject class machinery BEFORE gtk_init (no display). */
++	if (argc > 1 && strcmp (argv[1], "--selftest") == 0)
++		return galculator_run_selftest ();
++
+ 	/*
+ 	 * gtk_init runs (among other things) setlocale (LC_ALL, ""). Therefore we
+ 	 * have to/can deal with i18n only from this point.

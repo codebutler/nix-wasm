@@ -19,31 +19,36 @@
    synthesise a wasm function of the right signature at runtime. Without a JS
    host the set of callable signatures must be enumerated at COMPILE time.
 
-   So this backend enumerates the signatures that the raw wasm32 C ABI collapses
-   to: on wasm32 (ILP32) every `int`/`unsigned`/`enum`/pointer/`wl_fixed_t`
-   argument lowers to a single wasm `i32`, and the common scalar returns are
-   void / i32 / i64 / f32 / f64. ffi_call therefore dispatches on (return-class,
-   argument-count) through statically-typed trampolines — one `call_indirect`
-   type per arity. This is complete and correct for any C function whose every
-   parameter is an int/unsigned/enum/pointer (return void/int/pointer/long
-   long/float/double) — which covers libwayland's protocol dispatch exactly
-   (connection.c builds cifs of ffi_type_{sint,uint}32/pointer args returning
-   ffi_type_void) and a large fraction of real C ABIs besides. It is a SHARED
-   crossSystem fix, not a wayland-private one.
+   This backend enumerates those signatures via a BUILD-TIME generator
+   (patches/libffi/gen-trampolines.py) that emits src/wasm/wasm-ffi-trampolines.inc,
+   which this file #include's. ffi_call computes a key over the full per-argument
+   wasm value-type vector (i32 / i64 / f32 / f64) and dispatches through the
+   generated table — one statically-typed call_indirect trampoline per unique
+   signature. The generator is bounded by two parameters:
+     K = 24 (max argument count for all-i32 calls) / K = 10 (max args for mixed
+         calls containing any i64/f32/f64 argument);
+     M = 2  (max number of non-i32 wasm value types per call).
+   Together these yield ~8375 trampolines and cover:
+     • int/unsigned/enum/pointer arguments (all collapse to wasm i32) up to 24
+       args — covers libwayland's protocol dispatch (ffi_type_{sint,uint}32/
+       pointer returning ffi_type_void) and most C APIs;
+     • by-value i64/f32/f64 scalar ARGUMENTS within the (K=10, M=2) bounds —
+       covers cairo/pango doubles, GObject signal marshallers (double/int64 args),
+       and the common float/double-by-value C ABI cases;
+     • all scalar RETURNS (void / i32 / i64 / f32 / f64) regardless of bounds.
+   It is a SHARED crossSystem fix, not a wayland-private one.
 
-   What the raw wasm ABI genuinely cannot express, this backend refuses LOUDLY
-   (abort with a diagnostic / FFI_BAD_ABI) rather than silently mis-call:
-     - a by-value 64-bit / float / double / struct / complex ARGUMENT (the
-       caller-side wasm value type then differs from i32, so a fixed i32^N
-       trampoline would be the wrong call_indirect signature);
+   What this backend refuses LOUDLY (abort/"argument signature outside generated
+   bounds" / FFI_BAD_ABI) rather than silently mis-call:
+     - by-value struct / complex ARGUMENTS (the raw wasm ABI can't express them);
+     - by-value i64/f32/f64 ARGUMENTS that exceed the (K=10, M=2) bounds (e.g.
+       a call with 3 or more non-i32 args) — bump gen-trampolines.py's K/M to
+       widen the table if a new signal shape needs more;
      - variadic calls (wasm passes varargs through a hidden buffer pointer — a
        different convention than fixed params);
      - closures (ffi_prep_closure_loc): they require creating a NEW callable
        wasm function at runtime, which needs host/JS support this platform does
        not have. This matches ffitarget.h's own "closures (not implemented!)".
-
-   Scalar by-value 64-bit/float/double RETURNS are supported (the return type is
-   part of each trampoline's static signature); only such ARGUMENTS are not.
    ----------------------------------------------------------------------- */
 
 #include <ffi.h>
@@ -62,7 +67,8 @@ typedef uint32_t u32;
 static void wasm_ffi_unsupported(const char *what)
 {
   fprintf(stderr, "libffi(wasm32-raw): unsupported %s — this backend handles "
-                  "scalar (i32) arguments only; see wasm32-raw-ffi.c\n", what);
+                  "i32/i64/f32/f64 scalar by-value arguments within the generated "
+                  "(K,M) bounds only; see wasm32-raw-ffi.c\n", what);
   abort();
 }
 
@@ -109,142 +115,59 @@ static u32 load_i32_arg(ffi_type *t, void *p)
     case FFI_TYPE_SINT8:  return (u32)(int32_t)*(int8_t *)p;
     case FFI_TYPE_UINT16: return (u32)*(uint16_t *)p;
     case FFI_TYPE_SINT16: return (u32)(int32_t)*(int16_t *)p;
-    /* 64-bit / float / double / struct as a by-value ARGUMENT cannot ride the
-       i32 trampoline — the caller-side wasm value type would differ. */
+    /* load_i32_arg handles only the i32-class arguments above; i64/f32/f64
+       by-value args are loaded by the generated trampolines via their own
+       typed accessors in wasm-ffi-trampolines.inc, not this path. */
     default:
       wasm_ffi_unsupported("by-value argument type");
       return 0; /* unreachable */
   }
 }
 
-/* ---- the trampolines: one static call_indirect signature per arity -------- */
+/* ---- arg/return class helpers and key-based dispatch ---------------------- */
 
-/* Parameter-type lists (N copies of u32) and argument lists (a[0..N-1]). */
-#define P0  void
-#define P1  u32
-#define P2  P1,u32
-#define P3  P2,u32
-#define P4  P3,u32
-#define P5  P4,u32
-#define P6  P5,u32
-#define P7  P6,u32
-#define P8  P7,u32
-#define P9  P8,u32
-#define P10 P9,u32
-#define P11 P10,u32
-#define P12 P11,u32
-#define P13 P12,u32
-#define P14 P13,u32
-#define P15 P14,u32
-#define P16 P15,u32
-#define P17 P16,u32
-#define P18 P17,u32
-#define P19 P18,u32
-#define P20 P19,u32
-#define P21 P20,u32
-#define P22 P21,u32
-#define P23 P22,u32
-#define P24 P23,u32
-
-#define A0
-#define A1  a[0]
-#define A2  A1,a[1]
-#define A3  A2,a[2]
-#define A4  A3,a[3]
-#define A5  A4,a[4]
-#define A6  A5,a[5]
-#define A7  A6,a[6]
-#define A8  A7,a[7]
-#define A9  A8,a[8]
-#define A10 A9,a[9]
-#define A11 A10,a[10]
-#define A12 A11,a[11]
-#define A13 A12,a[12]
-#define A14 A13,a[13]
-#define A15 A14,a[14]
-#define A16 A15,a[15]
-#define A17 A16,a[16]
-#define A18 A17,a[17]
-#define A19 A18,a[18]
-#define A20 A19,a[19]
-#define A21 A20,a[20]
-#define A22 A21,a[21]
-#define A23 A22,a[22]
-#define A24 A23,a[23]
-
-/* For a given return type RT and result-receiving statement RECV, expand the
-   full arity switch. RECV is applied to the call expression. */
-#define CASE(N, RT, RECV) case N: RECV( ((RT (*)(P##N))fn)(A##N) ); break;
-
-#define DISPATCH(RT, RECV)                                              \
-  switch (n) {                                                          \
-    CASE(0,  RT, RECV) CASE(1,  RT, RECV) CASE(2,  RT, RECV)            \
-    CASE(3,  RT, RECV) CASE(4,  RT, RECV) CASE(5,  RT, RECV)            \
-    CASE(6,  RT, RECV) CASE(7,  RT, RECV) CASE(8,  RT, RECV)            \
-    CASE(9,  RT, RECV) CASE(10, RT, RECV) CASE(11, RT, RECV)            \
-    CASE(12, RT, RECV) CASE(13, RT, RECV) CASE(14, RT, RECV)           \
-    CASE(15, RT, RECV) CASE(16, RT, RECV) CASE(17, RT, RECV)           \
-    CASE(18, RT, RECV) CASE(19, RT, RECV) CASE(20, RT, RECV)           \
-    CASE(21, RT, RECV) CASE(22, RT, RECV) CASE(23, RT, RECV)           \
-    CASE(24, RT, RECV)                                                  \
-    default: wasm_ffi_unsupported("argument count"); break;            \
-  }
-
-void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue)
-{
-  unsigned n = cif->nargs;
-  u32 a[WASM_FFI_MAX_ARGS];
-
-  for (unsigned i = 0; i < n; i++)
-    a[i] = load_i32_arg(cif->arg_types[i], avalue[i]);
-
-  switch (cif->rtype->type) {
-    case FFI_TYPE_VOID: {
-      #define RECV_VOID(call) call
-      DISPATCH(void, RECV_VOID)
-      #undef RECV_VOID
-      break;
-    }
-    case FFI_TYPE_INT:
-    case FFI_TYPE_UINT8:  case FFI_TYPE_SINT8:
+/* arg wasm value-class: 0=i32, 1=i64, 2=f32, 3=f64. Aborts on what the raw ABI
+   can't pass by value (struct/complex/long double). */
+static unsigned arg_class(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_INT: case FFI_TYPE_UINT8: case FFI_TYPE_SINT8:
     case FFI_TYPE_UINT16: case FFI_TYPE_SINT16:
-    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32:
-    case FFI_TYPE_POINTER: {
-      u32 r = 0;
-      #define RECV_U32(call) r = (u32)(call)
-      DISPATCH(u32, RECV_U32)
-      #undef RECV_U32
-      /* libffi widens sub-word integer returns to ffi_arg. */
-      if (rvalue) *(ffi_arg *)rvalue = (ffi_arg)r;
-      break;
-    }
-    case FFI_TYPE_UINT64:
-    case FFI_TYPE_SINT64: {
-      uint64_t r = 0;
-      #define RECV_U64(call) r = (uint64_t)(call)
-      DISPATCH(uint64_t, RECV_U64)
-      #undef RECV_U64
-      if (rvalue) *(uint64_t *)rvalue = r;
-      break;
-    }
-    case FFI_TYPE_FLOAT: {
-      float r = 0;
-      #define RECV_F32(call) r = (call)
-      DISPATCH(float, RECV_F32)
-      #undef RECV_F32
-      if (rvalue) *(float *)rvalue = r;
-      break;
-    }
-    case FFI_TYPE_DOUBLE: {
-      double r = 0;
-      #define RECV_F64(call) r = (call)
-      DISPATCH(double, RECV_F64)
-      #undef RECV_F64
-      if (rvalue) *(double *)rvalue = r;
-      break;
-    }
+    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32: case FFI_TYPE_POINTER:
+      return 0;
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64: return 1;
+    case FFI_TYPE_FLOAT:  return 2;
+    case FFI_TYPE_DOUBLE: return 3;
+    default: wasm_ffi_unsupported("by-value argument type"); return 0;
+  }
+}
+
+/* return wasm value-class: 0=void,1=u32,2=i64,3=f32,4=f64. */
+static unsigned ret_class(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_VOID: return 0;
+    case FFI_TYPE_INT: case FFI_TYPE_UINT8: case FFI_TYPE_SINT8:
+    case FFI_TYPE_UINT16: case FFI_TYPE_SINT16:
+    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32: case FFI_TYPE_POINTER:
+      return 1;
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64: return 2;
+    case FFI_TYPE_FLOAT:  return 3;
+    case FFI_TYPE_DOUBLE: return 4;
+    default: wasm_ffi_unsupported("return type"); return 0;
+  }
+}
+
+void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue) {
+  ffi_type **at = cif->arg_types;
+  void **av = avalue;
+  unsigned n = cif->nargs;
+  uint64_t key = ((uint64_t)ret_class(cif->rtype) << 40) | ((uint64_t)n << 32);
+  for (unsigned i = 0; i < n; i++)
+    key |= (uint64_t)arg_class(at[i]) << (2 * i);
+
+  switch (key) {
+    #include "wasm-ffi-trampolines.inc"
     default:
-      wasm_ffi_unsupported("return type");
+      wasm_ffi_unsupported("argument signature outside generated bounds");
   }
 }
 

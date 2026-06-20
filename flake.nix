@@ -137,6 +137,74 @@
         libffi = cross.libffi;
       };
 
+      # M0 (galculator): wl-input-probe — wl_seat/pointer/keyboard event logger.
+      # Manual proof that browser input reaches a guest client through Greenfield.
+      wlInputProbe = import ./userspace/wl-input-probe.nix {
+        inherit cross;
+        wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+      };
+
+      # M1 (galculator): libffi-selftest — in-guest unit test for the raw wasm
+      # FFI backend's f32/f64/i64 by-value argument support.
+      libffiSelftest = import ./userspace/libffi-selftest.nix {
+        inherit cross;
+        libffi = cross.libffi;
+      };
+
+      # M3a (galculator): glib-selftest — in-guest gobject proof. Round-trips a
+      # GObject and emits a `double` signal through gobject's GENERIC (libffi)
+      # marshaller (g_cclosure_marshal_generic → ffi_call) — the first real exercise
+      # of the M1 raw wasm FFI backend's f64 path under gobject. See
+      # userspace/glib-selftest.*.
+      glibSelftest = import ./userspace/glib-selftest.nix {
+        inherit cross;
+        glib = cross.glib;
+        libffi = cross.libffi;
+        pcre2 = cross.pcre2;
+        zlib = cross.zlib;
+      };
+
+      # M3a (galculator): pango-text — the pango-layout render proof (the GTK text
+      # path). PangoLayout on a pangocairo context → cairo image surface, asserting
+      # non-white pixels (--selftest). Exercises pango→fontconfig→cairo-ft end-to-end
+      # and shares the gobject --fpcast-emu seam. See userspace/pango-text.*.
+      pangoText = import ./userspace/pango-text.nix {
+        inherit cross;
+        pango = cross.pango; cairo = cross.cairo; glib = cross.glib;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pcre2 = cross.pcre2; zlib = cross.zlib;
+        libffi = cross.libffi; pixman = cross.pixman;
+      };
+
+      # M3b (galculator): gtk-hello — the GTK3 hello-window proof. gtk_init +
+      # GtkWindow + GtkLabel. --selftest is the headless CI gate (init + widget tree,
+      # compositor-independent); default maps a real wayland window for the manual
+      # browser check. gtk is gobject → fn-pointer casts, so the linked binary goes
+      # through the SHARED --fpcast-emu seam. See userspace/gtk-hello.*.
+      gtkHello = import ./userspace/gtk-hello.nix {
+        inherit cross;
+        gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pixman = cross.pixman; wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols; libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
+      # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
+      # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
+      # (--selftest) asserts on stdout — the M2 integration gate. Default mode
+      # blits the same render into a wl_shm window. See userspace/wl-text.*.
+      wlText = import ./userspace/wl-text.nix {
+        inherit cross;
+        cairo = cross.cairo; fontconfig = cross.fontconfig; harfbuzz = cross.harfbuzz;
+        freetype = cross.freetype; pixman = cross.pixman; zlib = cross.zlib;
+        wayland = cross.wayland; wayland-protocols = cross.wayland-protocols;
+        libffi = cross.libffi;
+      };
+
       # Wayland Phase 2 (4b): weston-flowers — the REAL upstream weston demo
       # client, cross-built from a minimal cairo-toytoolkit subset (flower.c +
       # window.c + shared/*). The first cairo-backed Wayland client on the stack.
@@ -220,7 +288,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -329,6 +397,36 @@
         # Wayland Phase 4f: wl-anim — self-animating frame-callback client →
         # $out/bin/wl-anim. Proves the steady-state render loop self-sustains.
         wl-anim = wlAnim;
+
+        # M0 (galculator): wl-input-probe — wl_seat/pointer/keyboard event logger →
+        # $out/bin/wl-input-probe. Manual proof that browser input reaches the guest.
+        wl-input-probe = wlInputProbe;
+
+        # M1 (galculator): libffi-selftest — in-guest unit test for the raw wasm
+        # FFI backend's f32/f64/i64 by-value argument support → $out/bin/libffi-selftest.
+        libffi-selftest = libffiSelftest;
+
+        # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
+        # $out/bin/wl-text (--selftest is the headless CI gate).
+        wl-text = wlText;
+
+        # M3a (galculator): glib-selftest — gobject + the M1 libffi double-marshaller
+        # proof → $out/bin/glib-selftest.
+        glib-selftest = glibSelftest;
+
+        # M3a (galculator): pango-text — pango-layout → cairo image surface render
+        # proof (--selftest is the headless CI gate) → $out/bin/pango-text.
+        pango-text = pangoText;
+
+        # M3b (galculator): gtk-hello — the GTK3 hello-window proof. --selftest is the
+        # headless CI gate (gtk_init + GtkWindow + GtkLabel widget tree) → $out/bin/gtk-hello.
+        gtk-hello = gtkHello;
+
+        # M4: galculator — the headline GTK3 calculator. fpcast-emu post-link seam
+        # applied (same gobject indirect-call fix as gtkHello/pangoText). Baked into
+        # the initramfs as /bin/galculator; its $out/share/galculator/ui/*.ui ride the
+        # served /nix closure.
+        galculator = cross.galculator;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

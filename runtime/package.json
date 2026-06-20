@@ -5,7 +5,7 @@
   "description": "JS runtime that boots the linux-wasm guest (kernel host + 9P server + Nix store wiring) in Node and the browser.",
   "license": "GPL-2.0",
   "bin": {
-    "linux-wasm-attach": "./node/attach.mjs"
+    "linux-wasm-attach": "./demo/node/attach.mjs"
   },
   "type": "module",
   "scripts": {
@@ -15,7 +15,11 @@
     "format": "oxfmt --write --threads=1 . && oxfmt --write --threads=1 .",
     "format:check": "oxfmt --check --threads=1 .",
     "test": "bun test ./ninep/*.test.js ./nix-closure-store.test.js ./nix-store.test.js",
-    "test:node": "node --test node/"
+    "test:node": "node --test demo/node/",
+    "artifacts": "bash scripts/build-artifacts.sh",
+    "serve": "node demo/web/serve.mjs",
+    "demo": "bun run artifacts && node demo/web/serve.mjs",
+    "smoke:web": "node demo/web/smoke.mjs"
   },
   "devDependencies": {
     "oxfmt": "0.52.0",

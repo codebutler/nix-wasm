@@ -14,11 +14,14 @@ let
   # on (the pc terminal is Ghostty/xterm-compatible; busybox's bare default
   # vt102 is wrong). -L local line, -i skip issue, -n skip login-name prompt,
   # -l <prog> exec autologin instead of /bin/login. baud 0 = keep line speed.
-  consoleLines = lib.concatMapStringsSep "\n"
+  # One getty->autologin->ash chain per hvc console, as a list of inittab lines.
+  consoleLines = lib.map
     (i: "hvc${toString i}::respawn:${sw}/getty -L -i -n -l ${sw}/autologin 0 hvc${toString i} xterm-256color")
     (lib.range 0 (nrConsoles - 1));
+  syslogLine = "::respawn:${sw}/sh -c '${sw}/syslogd -n -O /var/log/messages -s 16 -b 1; sleep 5'";
+  # Build the inittab by explicit newline-join — do NOT use a `''` block: it strips
+  # only the COMMON leading indent, so a single misaligned line keeps its leading
+  # space and busybox then reads the tty id as whitespace ("can't open /dev/  ").
 in
-pkgs.writeText "inittab" ''
-  ::respawn:${sw}/sh -c '${sw}/syslogd -n -O /var/log/messages -s 16 -b 1; sleep 5'
-  ${consoleLines}
-''
+pkgs.writeText "inittab"
+  (lib.concatStringsSep "\n" ([ syslogLine ] ++ consoleLines) + "\n")

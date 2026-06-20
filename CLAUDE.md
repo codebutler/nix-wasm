@@ -6,10 +6,13 @@ current state and hard-won learnings — read it before doing anything.
 
 ## PRIME DIRECTIVE (non-negotiable)
 
-**DO THINGS CORRECTLY. No shortcuts. No hacks. No stubs.** Every artifact is a
-reproducible Nix derivation. The OLD approach (hand-written shell scripts +
-fake-lib stubs) has been deleted — it lives in git history; the Nix derivations
-are the only build path.
+**ALWAYS DO THINGS MAXIMALLY CORRECT. NO SHORTCUTS. No hacks. No stubs.** There is
+no "good enough for now," no tactical workaround, no deferred-correctness. If two
+paths exist, take the one that is *correct in general*, not the one that is merely
+sufficient for the task in front of you — even when it is harder, slower, or larger.
+Every artifact is a reproducible Nix derivation. The OLD approach (hand-written
+shell scripts + fake-lib stubs) has been deleted — it lives in git history; the Nix
+derivations are the only build path.
 
 Hard-won corollaries (each was a real mistake; don't repeat them):
 
@@ -91,12 +94,15 @@ sudo -E nix build .#nix-wasm --print-out-paths               # the goal
 
 nix-wasm now both *builds* the guest and *runs* it. The `runtime/` package
 (kernel host + 9P server + Nix store wiring) runs in Node and the browser; pc
-vendors it via `runtime/sync-to-pc.sh`.
+vendors it via `runtime/sync-to-pc.sh`. **Any change to a runtime engine file
+(e.g. `kernel-worker.js` — the loader gained glib `GOT.func`/`__lsan_*` stubs in
+M3a) requires re-running `runtime/sync-to-pc.sh <pc-checkout>`, or pc boots a stale
+engine that fails to instantiate glib/GTK binaries.**
 
 Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
 from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
-symlink `web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
+symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
 fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
 
 Run these from the **runtime/** directory:
@@ -106,20 +112,43 @@ Run these from the **runtime/** directory:
 bun run test
 
 # Node integration tests:
-node --test node/
+node --test demo/node/
 
 # Full nix-system smoke: boot → 9P read/write/ls → nix-env -iA sl.
 # Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/smoke.mjs
 
 # Interactive guest root shell (Ctrl-] to quit).
 # --no-nix = fast busybox-only boot when you don't need the /nix overlay.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node node/attach.mjs [--no-nix]
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/attach.mjs [--no-nix]
 
-# Browser demo (serves runtime/web/ with COOP/COEP for SharedArrayBuffer):
-ln -sfn /path/to/artifacts web/artifacts && node web/serve.mjs [port]
+# libffi raw-backend unit test (f32/f64/i64 by-value args): boot → run selftest.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/libffi-smoke.mjs
+
+# M2 text stack (fontconfig→freetype→harfbuzz→cairo-ft): boot full nix system → render selftest.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/wl-text-smoke.mjs
+
+# M3a glib/gobject (+ libffi double marshaller): boot full nix system → gobject selftest.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/glib-smoke.mjs
+
+# M3a pango layout (pango_cairo_show_layout → fontconfig → cairo-ft): boot → render selftest.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/pango-smoke.mjs
+
+# M3b GTK3 (gtk_init + GtkWindow/GtkLabel widget tree, gobject through fpcast seam):
+# boot full nix system → gtk-hello --selftest (headless gate; visual window is a
+# MANUAL browser check — docs/superpowers/notes/m3b-gtk-visual.md).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-smoke.mjs
+
+# M4 galculator (GTK3 calculator: --selftest parses the real .ui files from
+# PACKAGE_UI_DIR + runs the GTK widget gobject classes through the fpcast seam,
+# display-free; visual click-7x6=42 is a MANUAL browser check —
+# docs/superpowers/notes/m4-galculator-visual.md).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.mjs
+
+# Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
+ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
-node web/smoke.mjs
+node demo/web/smoke.mjs
 ```
 
 `makeConsoleSession` wraps a boot handle's console with session conveniences:
@@ -134,14 +163,14 @@ bun run format:check  # oxfmt
 bun run typecheck     # tsc
 ```
 
-`node/` and `web/` are tooling/demo (tsc-excluded); `web/vendor/ghostty` is
+`demo/node/` and `demo/web/` are tooling/demo (tsc-excluded); `demo/web/vendor/ghostty` is
 vendored (excluded from all three static gates).
 
 ## Current state
 
 **It works end-to-end** (2026-06-17). `nix build .#nix-wasm` builds the wasm Nix;
 the dep closure (`cross.*`), the kernel, and the curated guest userspace all build
-reproducibly. In the runtime harness (`runtime/node/smoke.mjs`) the
+reproducibly. In the runtime harness (`runtime/demo/node/smoke.mjs`) the
 Nix-built userspace boots — served-closure `/nix` overlay → busybox-init → getty →
 autologin → root shell — and **`nix-env -iA sl` substitutes `sl` from the binary
 cache and renders it** (Phase A + B both PASS). Every wasm fix is a SHARED
@@ -269,6 +298,125 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **crt `int main`**: a weak 2-arg crt `main` wrapper (`musl.nix`) so all of
   `int main(void)` / `(int,char**)` link — else autoconf's "C compiler cannot
   create executables" aborts every autoconf dep.
+- **libffi raw wasm backend** (`deps-overlay.nix` / `patches/libffi/`): the
+  upstream `src/wasm/ffi.c` is emscripten-only; we drop in `wasm32-raw-ffi.c`
+  which dispatches `ffi_call` through a build-time generated trampoline table
+  (`gen-trampolines.py`, ~8375 entries) keyed on the per-arg wasm value-type
+  vector (i32/i64/f32/f64). Supports i32/i64/f32/f64 by-value scalar arguments
+  up to K=24 all-i32 / K=10 mixed, M=2 non-i32 per call (covers libwayland's
+  i32/ptr dispatch AND GObject signal marshallers with double/int64 args); aborts
+  loud past the (K,M) bounds or on struct args/varargs/closures — never a silent
+  mis-call. Bump K/M in gen-trampolines.py to extend coverage if needed.
+- **M2 text stack** (`deps-overlay.nix` / `userspace/fonts.nix`): **harfbuzz** is
+  forced glib-free (`glib=null` + `-Dglib=disabled -Dgobject=disabled`) — nixpkgs
+  enables hb-glib by default, which drags the whole glib cross-build into M2 (glib
+  + pango are M3); also drop the `devdoc` output (`outputs=["out" "dev"]`) since
+  `-Ddocs=disabled` means the gtk-doc devdoc dir is never created and the builder
+  errors on the missing output. **cairo** is rebuilt with freetype+fontconfig
+  backends strictly additive: un-null freetype/fontconfig + flip the meson flags to
+  `enabled`; glib/x11/png/lzo stay off; weston-flowers (image-surface-only) is the
+  regression gate. **Guest font lives in the Nix system profile** (`userspace/
+  fonts.nix` + `system.nix` bake DejaVu + `/etc/fonts/fonts.conf` +
+  `FONTCONFIG_FILE`): the wl-text/M2 smoke MUST boot `nix:true` (served `/nix`
+  closure) — a busybox-only boot has no font config and fontconfig `FcInit` fails.
+  Rebuild `.#wasm-store-manifest` after any `fonts.nix`/`system.nix` change so
+  the new store path is included in the served `store.json`.
+- **M3a glib/gobject** (`deps-overlay.nix` glib override): disable
+  `selinux`/`libmount`/`sysprof`/`man-pages`/`dtrace`/`documentation` + `tests`
+  (nixpkgs glib drags libselinux/libsepol + util-linux/libmount + libsysprof-capture
+  — none cross to NOMMU wasm, none needed). `util-linuxMinimal` can't be `null`ed
+  (an `isLinux` assert) → filter it out of build/propagated inputs post-override;
+  drop **target** `gnum4` (m4 won't cross — gnulib `stackvma.c` has no wasm path; the
+  guest never uses glib's m4 macros); drop the `devdoc` output (like harfbuzz). gio
+  modules build **into libgio** (the NOMMU guest can't dlopen). Codegen tools
+  (glib-genmarshal/compile-schemas/…) come from native `buildPackages` via meson cross.
+- **futex_time64 arity** (`patches/kernel/0015`): `__NR_futex_time64` (422) maps to the
+  6-arg `sys_futex`, but **glib's raw `syscall()`** (`g_futex_simple`) calls it with
+  **4** args (`uaddr,op,val,utime`) for FUTEX_WAIT/WAKE → strict wasm `call_indirect`
+  on the 6-arg handler traps. (musl pads its OWN futex calls to 6, so musl pthread —
+  used by nix.wasm/busybox — is unaffected; only glib's raw 4-arg call traps.) Fix = a
+  4-arg `sys_wasm32_futex` wrapper forwarding `sys_futex(uaddr,op,val,utime,NULL,0)`
+  (FUTEX_WAIT/WAKE ignore uaddr2/val3), overriding `__NR_futex_time64` — mirrors the
+  `sys_wasm32_*` pattern. Rebuilds only vmlinux.
+- **glib/GTK `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
+  wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
+  `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is
+  absent even though the function is never called (its `GOT.func` address resolves to 0
+  → the call guard is false). The `GOT.func`/`GOT.mem` Proxy is scoped to those two
+  import namespaces ONLY — it can't touch `env.*` or the internal `GOT.func.internal.*`
+  defined globals (those carry real function-pointer relocs and are untouched). **M3b
+  GTK adds `__lsan_disable`** — the 14.6MB libgtk references the full disable/enable
+  bracket pair (not just glib's enable/ignore_object); same weak-undef mechanism, same
+  no-op `env` stub. (kernel-worker.js host edits need a `pc` sync — `runtime/sync-to-pc.sh`.)
+- **gobject class_init trap = wasm strict-`call_indirect` SIGNATURE cast, NOT a reloc
+  bug** (third instance of this theme, with libffi/M1 + futex): glib casts
+  `g_object_do_class_init` (1-arg) to the 2-arg `GClassInitFunc` and calls it through
+  that type; strict wasm traps, and LLVM-21's opaque pointers leave no IR bitcast for
+  `WebAssemblyFixFunctionBitcasts` (no clang/wasm-ld flag). Fix = a **binaryen post-link
+  pass** `wasm-opt -pa max-func-params@128 --fpcast-emu` (emscripten's
+  `EMULATE_FUNCTION_POINTER_CASTS` equivalent; `max-func-params@128` because the 18
+  default is too narrow). Apply it **per-binary** to each glib/GTK-linking executable
+  (a shared seam) — NOT globally in the cc-wrapper, which would rewrite the calling
+  convention of EVERY guest binary (nix.wasm, busybox, the libffi backend). No-op for
+  the libffi raw `ffi_call` path (that `call_indirect` already has the right arity).
+  The seam lives in **`userspace/fpcast-emu.nix`** (`{ binaryen, shellFn }`); glib/GTK
+  binaries add `fpcast.binaryen` to `nativeBuildInputs` and run `fpcast_emu in out`
+  post-link. **pango** cross-builds clean with NO override (stock nixpkgs, once glib +
+  the M2 text stack exist) and the same seam covers its gobject casts — proven by
+  `pango-text` (`pango_cairo_show_layout` → fontconfig → cairo-ft).
+- **M3b GTK3 cross-build** (`deps-overlay.nix` gtk3 override): **wayland-only** —
+  force `x11Support`/`cupsSupport`/`vulkanSupport`/`broadwaySupport`/`trackerSupport`
+  off and `wayland` on (the heavies — cups, avahi, X11/xorg, vulkan-loader — don't
+  cross to NOMMU wasm and aren't needed); GObject-introspection off (no typelib
+  consumer on the guest). **gdk-pixbuf** uses its **built-in loaders** (no
+  `loaders.cache`/runtime dlopen — NOMMU can't dlopen modules); **libepoxy** builds
+  with **no GL/EGL/GLX** (`-Degl=no -Dglx=no -Dx11=false`, EGL headers absent — GTK's
+  wayland backend uses the cairo software path, no GL); **atk** ships with **no a11y
+  bridge** (no at-spi/dbus). GTK needs the **baked GSettings schemas** — Task 3 compiles
+  `org.gtk.Settings.*` with NATIVE `glib-compile-schemas` into `gtk-assets` and points
+  `GSETTINGS_SCHEMA_DIR` at them (`system.nix`); without them GLib aborts at
+  `gtk_settings`. **`gtk-hello`** is the proof, built through the shared **fpcast-emu
+  seam** (gtk is gobject-heavy → fn-pointer casts; the 14.6MB libgtk has many). The
+  `--selftest` gate is **compositor-independent**: the node harness has only a minimal
+  `wl` registry (no compositor), so `gtk_init_check` returns FALSE (no GdkDisplay) and
+  GTK *instance* construction (`gtk_window_new`) aborts ("Can't create a
+  GtkStyleContext without a display connection"). The gate instead `g_type_class_ref`s
+  `GTK_TYPE_WINDOW`/`GTK_TYPE_LABEL` (runs each class_init through the fpcast seam,
+  display-free) and asserts `g_type_from_name` + `gtk_get_major_version()==3`. The full
+  window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
+- **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
+  2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
+  `isWasm`-guarded nixpkgs override (NOT a from-scratch `userspace/galculator.nix` —
+  reuses nixpkgs' own recipe + its three patches, corollary 1) that applies the
+  shared `--fpcast-emu` post-link pass in `postFixup` (gobject casts) and **appends a
+  `--selftest` source patch** (`patches/galculator/0001-add-selftest.patch`) to
+  nixpkgs' patch list. No GSettings schema (galculator uses
+  `~/.config/galculator/galculator.conf`). `.ui` files ride the served `/nix` closure
+  as filesystem data (`$out/share/galculator/ui/`), loaded at runtime from the
+  hardcoded `PACKAGE_UI_DIR` — so galculator must be in `environment.systemPackages`
+  (`userspace/system.nix`), NOT just the initramfs `extraBins`, or only the binary
+  reaches the guest and the `.ui` files are absent. Two build fixes required: (1)
+  **graphite2 .la file** — cmake emits `library_names=libgraphite2.so` on a static
+  build (no `.so` produced); downstream libtool-based autotools (galculator) try to
+  link the nonexistent `.so`. Fix: `postInstall` sed rewrites the `.la` to clear
+  `library_names` and set `old_library=libgraphite2.a`. (2) **autopoint xz PATH** —
+  `autoreconfHook` runs `autopoint` (inside `autoconf`) which decompresses
+  `archive.dir.tar.xz` with a bare `xz` call; with `strictDeps=false` (needed for
+  `AM_GLIB_GNU_GETTEXT` m4 macro lookup) the cross `xz` wasm binary shadows the
+  native one. Fix: `preAutoreconf` creates `$TMPDIR/native-xz-bin/xz` symlink →
+  native `xz`, prepended to PATH. **`--selftest` is the headless gate**: it must be
+  **display-free** — the cross GTK3 is wayland-only and the node harness has no
+  compositor, so `GtkBuilder` CANNOT instantiate the `.ui` widgets (GtkWindow
+  construction needs a GdkDisplay → fatal `Gtk-ERROR: Can't create a GtkStyleContext
+  without a display connection`). Like the M3b `gtk-hello` gate, the selftest instead
+  parses the real `.ui` files (`MAIN_GLADE_FILE` = `main_frame.ui`,
+  `BASIC_GLADE_FILE` = `basic_buttons_gtk3.ui`) with GLib's GMarkup XML parser —
+  asserting `GtkWindow "main_window"` + `GtkToggleButton "button_7"` — and
+  `g_type_class_ref`s those widget classes (display-free gobject class_init through
+  the fpcast seam), printing `GALCULATOR-SELFTEST: main_window=1 button_7=1
+  gtk_types=1 OK`. Gate: `node demo/node/galculator-smoke.mjs` matches
+  `/GALCULATOR-SELFTEST: .* OK/`. The full click-to-42 compute is a MANUAL browser
+  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`).
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
