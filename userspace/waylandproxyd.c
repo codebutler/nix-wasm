@@ -117,6 +117,57 @@ static const char *runtime_dir(void)
 }
 
 /*
+ * Optional wire-protocol trace (set WL_WIRE_TRACE=1). The proxy normally moves
+ * bytes opaquely, but to debug the steady-state animation cycle (weston-flowers
+ * stalls after a burst) we need to SEE the obj/opcode conversation in both
+ * directions: client→host commits/attach/frame, host→client frame-done +
+ * wl_buffer.release. A buffer is a Wayland wire message stream: each message is
+ * [u32 object_id][u32 (size<<16)|opcode][args…] with size INCLUDING the 8-byte
+ * header and 32-bit aligned. We walk the buffer and dump each message's header
+ * plus its first two arg words (enough to read done(time) / new_id / buffer id).
+ */
+static int wire_trace_enabled(void)
+{
+	static int v = -1;
+	if (v < 0) {
+		const char *e = getenv("WL_WIRE_TRACE");
+		v = (e && *e && *e != '0') ? 1 : 0;
+	}
+	return v;
+}
+
+static void wire_dump(const char *dir, int ctx, const uint8_t *buf, size_t len)
+{
+	if (!wire_trace_enabled())
+		return;
+	size_t off = 0;
+	int n = 0;
+	while (off + 8 <= len) {
+		uint32_t obj, w2;
+		memcpy(&obj, buf + off, 4);
+		memcpy(&w2, buf + off + 4, 4);
+		uint32_t size = w2 >> 16;
+		uint32_t op = w2 & 0xffff;
+		if (size < 8 || (size & 3) || off + size > len) {
+			printf("WIRE %s ctx=%d off=%zu MALFORMED obj=%u size=%u (tail %zuB)\n",
+			       dir, ctx, off, obj, size, len - off);
+			break;
+		}
+		uint32_t a0 = 0, a1 = 0;
+		if (size >= 12)
+			memcpy(&a0, buf + off + 8, 4);
+		if (size >= 16)
+			memcpy(&a1, buf + off + 12, 4);
+		printf("WIRE %s ctx=%d obj=%u op=%u size=%u a0=%u a1=%u\n", dir, ctx, obj, op, size, a0, a1);
+		off += size;
+		n++;
+	}
+	if (n > 1 || off != len)
+		printf("WIRE %s ctx=%d (%d msgs, %zu/%zuB consumed)\n", dir, ctx, n, off, len);
+	fflush(stdout);
+}
+
+/*
  * Receive up to WIRE_BUF bytes + up to MAX_FDS fds from a client AF_UNIX socket.
  * Returns byte count (>0), 0 on EOF, -1 on error/would-block (errno set).
  * Out: data[], *fds (caller array of MAX_FDS), *nfds.
@@ -269,6 +320,8 @@ static int splice_client_to_host(int wl0, struct client_state *cl)
 	if (n < 0)
 		return (errno == EAGAIN || errno == EWOULDBLOCK) ? 1 : -1;
 
+	wire_dump("c->h", cl->ctx, data, (size_t)n);
+
 	/*
 	 * Refresh every live shm pool before forwarding this message. The client
 	 * paints into its tmpfs mapping then sends a commit; mirroring here means the
@@ -344,6 +397,7 @@ static int splice_host_to_client(struct client_state *cl)
 	}
 
 	if (txn.hdr.len > 0 || nfds > 0) {
+		wire_dump("h->c", ctx, txn.payload, txn.hdr.len);
 		if (client_send(client, txn.payload, txn.hdr.len, fds, nfds) < 0)
 			fprintf(stderr, "waylandproxyd: client_send failed errno=%d\n", errno);
 		else {
