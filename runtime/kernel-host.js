@@ -240,6 +240,18 @@ export const linux = async ({
       hostWl()?.flushIn();
     },
 
+    // Wayland: the guest closed a ctx vfd (its Wayland client exited) — forward to
+    // the host bridge so the compositor can tear down the matching server-side
+    // client immediately (close its window, stop pumping events to a dead ctx).
+    wayland_close: (message) => {
+      const clientId = message.clientId >>> 0;
+      if (wayland && typeof wayland.onClose === "function") {
+        Promise.resolve(wayland.onClose(clientId)).catch((e) =>
+          log("[wayland] onClose rejected: " + (e && e.stack ? e.stack : e)),
+        );
+      }
+    },
+
     console_read: (message, worker) => {
       const memory_u8 = new Uint8Array(memory.buffer);
       const vt = message.vtermno | 0;

@@ -485,6 +485,12 @@ export class WlDevice extends VirtioWasmDevice {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         this.contexts.delete(vfdId);
         this.log(`[virtio-wl] CLOSE vfd_id=${vfdId} -> RESP_OK`);
+        // Tell the host bridge the guest closed this ctx — e.g. waylandproxyd
+        // closing a client's virtwl ctx after that Wayland client exited. The
+        // compositor uses it to tear down the matching server-side client now,
+        // instead of leaking it (and pumping events to a dead ctx) until a
+        // timeout. Fire-and-forget; harmless when no bridge is wired.
+        this._bridge?.onClose?.(vfdId);
         return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
       }
       case VIRTIO_WL_CMD_VFD_SEND: {

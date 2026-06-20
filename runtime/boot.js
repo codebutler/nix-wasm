@@ -63,7 +63,7 @@ const dec = new TextDecoder();
  *   nixStore?: any,                   // a read-only /nix store VFS (createNixClosureStore); registered as the `nix` 9P export — carries the whole userspace + toolchain closure
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
- *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget)
+ *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
@@ -145,7 +145,7 @@ export async function bootLinux(opts) {
   // (the client never blocks on its own request), and the self-wake IN path can
   // wake a parked guest, so the old synchronous round-trip is gone (it dropped
   // steady-state frame callbacks — see wl-device.js / kernel-worker.js).
-  /** @type {{ sendOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void } | undefined} */
+  /** @type {{ sendOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void, onClose?: (clientId:number)=>void } | undefined} */
   const wayland = opts.wayland;
   let waylandPushIn = null; // os.wayland_push_in: the single async host→guest path
 
