@@ -117,134 +117,50 @@ static u32 load_i32_arg(ffi_type *t, void *p)
   }
 }
 
-/* ---- the trampolines: one static call_indirect signature per arity -------- */
+/* ---- arg/return class helpers and key-based dispatch ---------------------- */
 
-/* Parameter-type lists (N copies of u32) and argument lists (a[0..N-1]). */
-#define P0  void
-#define P1  u32
-#define P2  P1,u32
-#define P3  P2,u32
-#define P4  P3,u32
-#define P5  P4,u32
-#define P6  P5,u32
-#define P7  P6,u32
-#define P8  P7,u32
-#define P9  P8,u32
-#define P10 P9,u32
-#define P11 P10,u32
-#define P12 P11,u32
-#define P13 P12,u32
-#define P14 P13,u32
-#define P15 P14,u32
-#define P16 P15,u32
-#define P17 P16,u32
-#define P18 P17,u32
-#define P19 P18,u32
-#define P20 P19,u32
-#define P21 P20,u32
-#define P22 P21,u32
-#define P23 P22,u32
-#define P24 P23,u32
-
-#define A0
-#define A1  a[0]
-#define A2  A1,a[1]
-#define A3  A2,a[2]
-#define A4  A3,a[3]
-#define A5  A4,a[4]
-#define A6  A5,a[5]
-#define A7  A6,a[6]
-#define A8  A7,a[7]
-#define A9  A8,a[8]
-#define A10 A9,a[9]
-#define A11 A10,a[10]
-#define A12 A11,a[11]
-#define A13 A12,a[12]
-#define A14 A13,a[13]
-#define A15 A14,a[14]
-#define A16 A15,a[15]
-#define A17 A16,a[16]
-#define A18 A17,a[17]
-#define A19 A18,a[18]
-#define A20 A19,a[19]
-#define A21 A20,a[20]
-#define A22 A21,a[21]
-#define A23 A22,a[22]
-#define A24 A23,a[23]
-
-/* For a given return type RT and result-receiving statement RECV, expand the
-   full arity switch. RECV is applied to the call expression. */
-#define CASE(N, RT, RECV) case N: RECV( ((RT (*)(P##N))fn)(A##N) ); break;
-
-#define DISPATCH(RT, RECV)                                              \
-  switch (n) {                                                          \
-    CASE(0,  RT, RECV) CASE(1,  RT, RECV) CASE(2,  RT, RECV)            \
-    CASE(3,  RT, RECV) CASE(4,  RT, RECV) CASE(5,  RT, RECV)            \
-    CASE(6,  RT, RECV) CASE(7,  RT, RECV) CASE(8,  RT, RECV)            \
-    CASE(9,  RT, RECV) CASE(10, RT, RECV) CASE(11, RT, RECV)            \
-    CASE(12, RT, RECV) CASE(13, RT, RECV) CASE(14, RT, RECV)           \
-    CASE(15, RT, RECV) CASE(16, RT, RECV) CASE(17, RT, RECV)           \
-    CASE(18, RT, RECV) CASE(19, RT, RECV) CASE(20, RT, RECV)           \
-    CASE(21, RT, RECV) CASE(22, RT, RECV) CASE(23, RT, RECV)           \
-    CASE(24, RT, RECV)                                                  \
-    default: wasm_ffi_unsupported("argument count"); break;            \
-  }
-
-void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue)
-{
-  unsigned n = cif->nargs;
-  u32 a[WASM_FFI_MAX_ARGS];
-
-  for (unsigned i = 0; i < n; i++)
-    a[i] = load_i32_arg(cif->arg_types[i], avalue[i]);
-
-  switch (cif->rtype->type) {
-    case FFI_TYPE_VOID: {
-      #define RECV_VOID(call) call
-      DISPATCH(void, RECV_VOID)
-      #undef RECV_VOID
-      break;
-    }
-    case FFI_TYPE_INT:
-    case FFI_TYPE_UINT8:  case FFI_TYPE_SINT8:
+/* arg wasm value-class: 0=i32, 1=i64, 2=f32, 3=f64. Aborts on what the raw ABI
+   can't pass by value (struct/complex/long double). */
+static unsigned arg_class(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_INT: case FFI_TYPE_UINT8: case FFI_TYPE_SINT8:
     case FFI_TYPE_UINT16: case FFI_TYPE_SINT16:
-    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32:
-    case FFI_TYPE_POINTER: {
-      u32 r = 0;
-      #define RECV_U32(call) r = (u32)(call)
-      DISPATCH(u32, RECV_U32)
-      #undef RECV_U32
-      /* libffi widens sub-word integer returns to ffi_arg. */
-      if (rvalue) *(ffi_arg *)rvalue = (ffi_arg)r;
-      break;
-    }
-    case FFI_TYPE_UINT64:
-    case FFI_TYPE_SINT64: {
-      uint64_t r = 0;
-      #define RECV_U64(call) r = (uint64_t)(call)
-      DISPATCH(uint64_t, RECV_U64)
-      #undef RECV_U64
-      if (rvalue) *(uint64_t *)rvalue = r;
-      break;
-    }
-    case FFI_TYPE_FLOAT: {
-      float r = 0;
-      #define RECV_F32(call) r = (call)
-      DISPATCH(float, RECV_F32)
-      #undef RECV_F32
-      if (rvalue) *(float *)rvalue = r;
-      break;
-    }
-    case FFI_TYPE_DOUBLE: {
-      double r = 0;
-      #define RECV_F64(call) r = (call)
-      DISPATCH(double, RECV_F64)
-      #undef RECV_F64
-      if (rvalue) *(double *)rvalue = r;
-      break;
-    }
+    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32: case FFI_TYPE_POINTER:
+      return 0;
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64: return 1;
+    case FFI_TYPE_FLOAT:  return 2;
+    case FFI_TYPE_DOUBLE: return 3;
+    default: wasm_ffi_unsupported("by-value argument type"); return 0;
+  }
+}
+
+/* return wasm value-class: 0=void,1=u32,2=i64,3=f32,4=f64. */
+static unsigned ret_class(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_VOID: return 0;
+    case FFI_TYPE_INT: case FFI_TYPE_UINT8: case FFI_TYPE_SINT8:
+    case FFI_TYPE_UINT16: case FFI_TYPE_SINT16:
+    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32: case FFI_TYPE_POINTER:
+      return 1;
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64: return 2;
+    case FFI_TYPE_FLOAT:  return 3;
+    case FFI_TYPE_DOUBLE: return 4;
+    default: wasm_ffi_unsupported("return type"); return 0;
+  }
+}
+
+void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue) {
+  ffi_type **at = cif->arg_types;
+  void **av = avalue;
+  unsigned n = cif->nargs;
+  uint64_t key = ((uint64_t)ret_class(cif->rtype) << 40) | ((uint64_t)n << 32);
+  for (unsigned i = 0; i < n; i++)
+    key |= (uint64_t)arg_class(at[i]) << (2 * i);
+
+  switch (key) {
+    #include "wasm-ffi-trampolines.inc"
     default:
-      wasm_ffi_unsupported("return type");
+      wasm_ffi_unsupported("argument signature outside generated bounds");
   }
 }
 
