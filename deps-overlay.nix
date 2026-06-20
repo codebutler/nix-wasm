@@ -247,30 +247,28 @@ in
     }))
     prev.zlib;
 
-  # --- cairo: minimal image-surface build for the Wayland toolkit path -------
-  # Wayland Phase 2 (4b M1): cairo cross-built to wasm32 for stock cairo+wl_shm
-  # clients (weston-flowers). We only need the IMAGE surface (backed by pixman,
-  # which we already cross-build) + zlib; everything else cairo can pull in does
-  # not cross / isn't needed for a vector-graphics wl_shm client:
-  #   - x11Support defaults TRUE in nixpkgs → drags libxext/libxrender/libxcb
-  #     (X11 surfaces). Null those + the override flag → no X cross builds.
+  # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
+  # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the
+  # freetype + fontconfig font backends — required for the text rendering stack
+  # (harfbuzz → pango → GTK3). weston-flowers (image-surface-only client) still
+  # builds unchanged; the font backends are strictly additive.
+  # Still OFF (glib-free / no X):
+  #   - x11Support: drags libxext/libxrender/libxcb (X11 surfaces). Off.
   #   - gobjectSupport (glib): glib won't cross cleanly and the C API doesn't
   #     need the gobject wrapper. Off.
-  #   - freetype/fontconfig: the font stack. weston-flowers draws vectors only
-  #     (no text), so disable both — keeps the dep tree to pixman+zlib.
   #   - gtk_doc=true is set UNCONDITIONALLY in nixpkgs (needs gtk-doc/docbook,
   #     a native doc toolchain that's pointless here) → force -Dgtk_doc=false.
-  #   - libpng: the PNG image-surface helper. Not needed for an in-memory wl_shm
-  #     buffer; disable to avoid the extra cross build.
-  # Result: an image-surface-only libcairo.a linking just pixman + zlib + libm.
+  #   - libpng: the PNG image-surface helper. Not needed; disable.
+  #   - lzo: cairo-script surface compression; not needed. Off.
+  # Result: libcairo.a with CAIRO_HAS_IMAGE_SURFACE + CAIRO_HAS_FT_FONT +
+  # CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 + fontconfig.
   cairo = whenWasm
     (p: (p.override {
       x11Support = false;
       gobjectSupport = false;
       # Null the optional inputs so meson's auto-detection can't pick them up
       # from the sysroot even with the feature flags off.
-      freetype = null;
-      fontconfig = null;
+      # freetype + fontconfig are intentionally left as real cross deps (M2).
       libpng = null;
       glib = null;
       libxext = null;
@@ -286,17 +284,16 @@ in
         "-Dxlib=disabled"
         "-Dglib=disabled"
         "-Dtests=disabled"
-        "-Dfreetype=disabled"
-        "-Dfontconfig=disabled"
+        "-Dfreetype=enabled"
+        "-Dfontconfig=enabled"
         "-Dpng=disabled"
         "-Dzlib=enabled"
-        # lzo backs the cairo-script surface's compression; not needed for an
-        # in-memory image surface, and we nulled the input above.
+        # lzo backs the cairo-script surface's compression; not needed here,
+        # and we nulled the input above.
         "-Dlzo=disabled"
       ];
       # nixpkgs' postInstall rewrites cairo.pc to add freetype include dirs;
-      # with freetype nulled that reference is dead — drop the whole step.
-      postInstall = "";
+      # freetype is now a real input so let the default postInstall run.
       # devdoc output is empty without gtk-doc; keep only out + dev.
       outputs = [ "out" "dev" ];
     }))
