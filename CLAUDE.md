@@ -6,10 +6,13 @@ current state and hard-won learnings — read it before doing anything.
 
 ## PRIME DIRECTIVE (non-negotiable)
 
-**DO THINGS CORRECTLY. No shortcuts. No hacks. No stubs.** Every artifact is a
-reproducible Nix derivation. The OLD approach (hand-written shell scripts +
-fake-lib stubs) has been deleted — it lives in git history; the Nix derivations
-are the only build path.
+**ALWAYS DO THINGS MAXIMALLY CORRECT. NO SHORTCUTS. No hacks. No stubs.** There is
+no "good enough for now," no tactical workaround, no deferred-correctness. If two
+paths exist, take the one that is *correct in general*, not the one that is merely
+sufficient for the task in front of you — even when it is harder, slower, or larger.
+Every artifact is a reproducible Nix derivation. The OLD approach (hand-written
+shell scripts + fake-lib stubs) has been deleted — it lives in git history; the Nix
+derivations are the only build path.
 
 Hard-won corollaries (each was a real mistake; don't repeat them):
 
