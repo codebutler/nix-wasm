@@ -1,0 +1,52 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: export wasm_raised_irqs_ptr for host-side idle wake (pc Wayland)
+
+Lets the JS host deliver a virtio used-buffer interrupt to an IDLE guest by
+OR-ing the irq bit into raised_irqs[cpu] + memory.atomic.notify on it from the
+main thread, instead of routing through the parked Worker. arch_cpu_idle()
+wait64()s on that word; the host replicates raise_interrupt() without entering
+the guest. Auto-exported by --export-all; __visible survives gc-sections.
+
+diff --git a/arch/wasm/include/asm/entry.h b/arch/wasm/include/asm/entry.h
+index 5e2d36b3..e6b0a503 100644
+--- a/arch/wasm/include/asm/entry.h
++++ b/arch/wasm/include/asm/entry.h
+@@ -22,6 +22,8 @@ __ret_from_fork(struct task_struct *prev_task, struct task_struct *next_task);
+ 
+ __visible void raise_interrupt(int cpu, int irq_nr);
+ 
++__visible unsigned long wasm_raised_irqs_ptr(int cpu);
++
+ __visible void raise_exception(void);
+ 
+ #endif /* _ASM_WASM_ENTRY_H */
+diff --git a/arch/wasm/kernel/smp.c b/arch/wasm/kernel/smp.c
+index 55d24e6f..cba12610 100644
+--- a/arch/wasm/kernel/smp.c
++++ b/arch/wasm/kernel/smp.c
+@@ -116,6 +116,25 @@ __visible void raise_interrupt(int cpu, int irq_nr)
+ 		(unsigned int *)&raised_irqs_ptr->counter, 1U);
+ }
+ 
++/*
++ * Host-side idle wake (pc Wayland). Return the address of a CPU's raised_irqs
++ * word so the JS host can deliver a virtio used-buffer interrupt to an IDLE
++ * guest WITHOUT entering the guest. arch_cpu_idle() does
++ * __builtin_wasm_memory_atomic_wait64(&raised_irqs[cpu].counter, ...); when the
++ * guest is fully idle the owning Worker is parked inside that wait64 and cannot
++ * run JS, so an unsolicited host event (e.g. a Wayland pointer motion) cannot be
++ * delivered via the worker. Instead the main thread replicates raise_interrupt()
++ * directly on shared memory: OR the irq bit into this word + memory.atomic.notify
++ * on it. counter is at offset 0 of the atomic64_t, so the returned address IS the
++ * word to OR/notify. Like raise_interrupt(), this touches only per_cpu_ptr() and
++ * is safe to call independent of any CPU/task. CPU 0 is the sole online CPU under
++ * maxcpus=1, so the host always asks for cpu 0.
++ */
++__visible unsigned long wasm_raised_irqs_ptr(int cpu)
++{
++	return (unsigned long)per_cpu_ptr(&raised_irqs, cpu);
++}
++
+ static void send_ipi_message(int cpu, enum ipi_type ipi)
+ {
+ 	atomic_t *raised_ipis_ptr = per_cpu_ptr(&raised_ipis, cpu);
