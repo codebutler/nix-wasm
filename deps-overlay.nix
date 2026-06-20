@@ -30,6 +30,35 @@ let
   # clang accepts, and add the builtins→libgcc.a alias the gcc-compat runtime needs.
   # `overrideScope` lets internal refs (clangNoLibcxx, clangUseLLVM, …) pick up the
   # fixed derivations without a second round of overriding.
+  # Khronos EGL + KHR API headers (header-only, no provider). libepoxy built with
+  # `-Degl=yes` (needed so GTK3's wayland backend's unconditional
+  # `#include <epoxy/egl.h>` resolves) generates a dispatch header that
+  # `#include "EGL/eglplatform.h"`, which in turn pulls `KHR/khrplatform.h`. The
+  # canonical source of those is the Khronos EGL-Registry; nixpkgs only ships them
+  # via libglvnd/mesa, neither of which cross-builds to wasm (libglvnd needs
+  # shared libs; mesa is a GL provider we don't want). These are pure API headers
+  # (typedefs + entry-point decls), no code — exactly what epoxy's compile-time
+  # dispatch generation needs. The wayland-platform branch of eglplatform.h pulls
+  # `wayland-egl-backend.h`, already provided by the `wayland` cross dep. Pinned
+  # by commit hash for reproducibility.
+  khronosEglHeaders = prev.stdenvNoCC.mkDerivation {
+    pname = "khronos-egl-headers";
+    version = "2024-12-unstable-3d7796b";
+    src = prev.fetchFromGitHub {
+      owner = "KhronosGroup";
+      repo = "EGL-Registry";
+      rev = "3d7796b3721d93976b6bfe536aa97bbc4bce8667";
+      hash = "sha256-csSV8Yp0p0UIrodbX5793uO5iZMjQfy+0D2wPif2+Fw=";
+    };
+    dontConfigure = true;
+    dontBuild = true;
+    installPhase = ''
+      mkdir -p $out/include/EGL $out/include/KHR
+      cp api/EGL/egl.h api/EGL/eglext.h api/EGL/eglplatform.h $out/include/EGL/
+      cp api/KHR/khrplatform.h $out/include/KHR/
+    '';
+  };
+
   fixCompilerRt = lp: lp.overrideScope (lf: lprev:
     let
       fixCR = drv: drv.overrideAttrs (o: {
@@ -327,25 +356,28 @@ in
   # freetype + fontconfig font backends — required for the text rendering stack
   # (harfbuzz → pango → GTK3). weston-flowers (image-surface-only client) still
   # builds unchanged; the font backends are strictly additive.
-  # Still OFF (glib-free / no X):
+  # ON (M3b update): gobjectSupport — GTK3 hard-requires `cairo-gobject` (cairo's
+  # GObject type wrappers); meson aborts "Dependency cairo-gobject not found"
+  # without it. M2 had it OFF ("glib won't cross cleanly") but M3a cross-built
+  # glib, so the wrapper now builds. Enabling it adds libcairo-gobject.a +
+  # cairo-gobject.pc; glib is a real cross input again.
+  # Still OFF (no X):
   #   - x11Support: drags libxext/libxrender/libxcb (X11 surfaces). Off.
-  #   - gobjectSupport (glib): glib won't cross cleanly and the C API doesn't
-  #     need the gobject wrapper. Off.
   #   - gtk_doc=true is set UNCONDITIONALLY in nixpkgs (needs gtk-doc/docbook,
   #     a native doc toolchain that's pointless here) → force -Dgtk_doc=false.
   #   - libpng: the PNG image-surface helper. Not needed; disable.
   #   - lzo: cairo-script surface compression; not needed. Off.
-  # Result: libcairo.a with CAIRO_HAS_IMAGE_SURFACE + CAIRO_HAS_FT_FONT +
-  # CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 + fontconfig.
+  # Result: libcairo.a + libcairo-gobject.a with CAIRO_HAS_IMAGE_SURFACE +
+  # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 +
+  # fontconfig; cairo-gobject.pc present for GTK3.
   cairo = whenWasm
     (p: (p.override {
       x11Support = false;
-      gobjectSupport = false;
+      gobjectSupport = true;
       # Null the optional inputs so meson's auto-detection can't pick them up
       # from the sysroot even with the feature flags off.
-      # freetype + fontconfig are intentionally left as real cross deps (M2).
+      # freetype + fontconfig + glib (gobjectSupport) are real cross deps.
       libpng = null;
-      glib = null;
       libxext = null;
       libxrender = null;
       libxcb = null;
@@ -357,7 +389,7 @@ in
         "-Dgtk_doc=false"
         "-Dxcb=disabled"
         "-Dxlib=disabled"
-        "-Dglib=disabled"
+        "-Dglib=enabled"
         "-Dtests=disabled"
         "-Dfreetype=enabled"
         "-Dfontconfig=enabled"
@@ -374,20 +406,55 @@ in
     }))
     prev.cairo;
 
-  # --- libepoxy: GL dispatch with NO GL provider (M3b) ------------------------
-  # GTK3 hard-links libepoxy even on the cairo software-render path, but its GL
+  # --- libepoxy: GL + EGL dispatch, but NO GLX/X11 provider (M3b) -------------
+  # GTK3 hard-links libepoxy even on the cairo software-render path, and its GL
   # entry points are resolved lazily (epoxy builds the dispatch table on first
-  # GL call) and are NEVER called when GTK renders through cairo. So we want only
-  # epoxy's dispatch *symbols* for GTK to link against — no actual GL/EGL/GLX/X11
-  # provider. nixpkgs defaults `x11Support = !isDarwin` (= true on our isLinux
-  # host), which turns on egl+glx+x11 and drags libGL (libglvnd) + libx11 +
-  # libxext — none of which cross-cleanly or are wanted here. Setting
-  # `x11Support = false` flips the meson flags to `-Degl=no -Dglx=no -Dx11=false`
-  # (see libepoxy/package.nix) and drops the libGL/libx11 propagated inputs.
-  # epoxy still compiles its full dispatch core (the GL function-pointer tables),
-  # so libepoxy.a still resolves every symbol GTK references. isWasm-guarded.
+  # GL call) — NEVER called when GTK renders through cairo. But GTK's WAYLAND
+  # backend `#include <epoxy/egl.h>` UNCONDITIONALLY (gdkdisplay-wayland.h), so
+  # epoxy MUST be built with EGL support or that header is absent → gtk3 fails to
+  # compile. nixpkgs ties egl+glx+x11 together under one `x11Support` arg, so we
+  # can't use the arg alone: we need egl=yes but glx/x11=no.
+  #
+  # `x11Support = false` first drops the libGL (libglvnd → libx11/libxext) and
+  # libx11 propagated inputs and gives `-Degl=no -Dglx=no -Dx11=false`. We then
+  # APPEND to mesonFlags to flip ONLY egl back on: `-Degl=yes` (append, not replace,
+  # so makeStatic's `-Ddefault_library=static` survives — see the inline note below).
+  # epoxy's EGL dispatch is self-contained — it generates the EGL entry-point
+  # tables from its bundled Khronos registry (no external libEGL needed at build
+  # time, resolved lazily at runtime exactly like GL), so `epoxy/egl.h` is emitted
+  # and GTK compiles, with NO X11/GLX/libGL in the closure. isWasm-guarded.
+  # The Khronos EGL/KHR headers are added as a buildInput (so epoxy's own
+  # `EGL/eglplatform.h` include resolves) AND propagated (so every downstream
+  # consumer that `#include <epoxy/egl.h>` — i.e. GTK3's wayland backend — also
+  # gets `EGL/eglplatform.h` + `KHR/khrplatform.h` on its include path).
+  # `-DEGL_NO_PLATFORM_SPECIFIC_TYPES`: eglplatform.h selects EGLNativeWindowType /
+  # EGLNativePixmapType / EGLNativeDisplayType by platform macro (USE_X11,
+  # WL_EGL_PLATFORM, __unix__, …). Our wasm `-unknown` triple matches NONE, so
+  # those types are left undefined and epoxy's generated egl dispatch won't
+  # compile. EGL_NO_PLATFORM_SPECIFIC_TYPES forces the portable `void *` typedefs
+  # — correct here since GTK renders through cairo and NEVER calls EGL/GL, so the
+  # concrete native-window type is immaterial; it only has to be defined and
+  # consistent. The SAME define is added to gtk3 below (GTK re-evaluates
+  # eglplatform.h when it `#include <epoxy/egl.h>`, so both TUs must agree).
   libepoxy = whenWasm
-    (p: p.override { x11Support = false; })
+    (p: (p.override { x11Support = false; }).overrideAttrs (o: {
+      # APPEND (don't replace) — the makeStatic platform adapter injects
+      # `-Ddefault_library=static` into the ORIGINAL mesonFlags; replacing them
+      # would drop it and epoxy would emit a `.so` (then linking GTK against
+      # libepoxy.so hits the wasm `__musl_tp` general-dynamic-TLS reloc).
+      mesonFlags = (o.mesonFlags or [ ]) ++ [
+        "-Degl=yes"
+        "-Dglx=no"
+        "-Dx11=false"
+        "-Dtests=false"
+      ];
+      buildInputs = (o.buildInputs or [ ]) ++ [ khronosEglHeaders ];
+      propagatedBuildInputs = (o.propagatedBuildInputs or [ ]) ++ [ khronosEglHeaders ];
+      env = (o.env or { }) // {
+        NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
+          + " -DEGL_NO_PLATFORM_SPECIFIC_TYPES";
+      };
+    }))
     prev.libepoxy;
 
   # --- at-spi2-core / atk: ATK API only, no AT-SPI D-Bus bridge (M3b) ---------
@@ -452,6 +519,135 @@ in
         postFixup = "";
       }))
     prev.at-spi2-core;
+
+  # --- gtk3: the toolkit itself, WAYLAND-ONLY (M3b Task 2) --------------------
+  # The heaviest single build of the GTK effort. nixpkgs' gtk3 defaults turn on
+  # X11 + CUPS printing + Xinerama + Tracker search + introspection because the
+  # wasm32 hostPlatform is `isLinux`. A dry-run confirmed those defaults drag
+  # libx11 (x11 backend), cups + avahi (the CUPS print backend), and the GIR
+  # toolchain into the closure — none of which exist or are wanted on the NOMMU
+  # wasm guest, which renders through the cairo software surface to a single
+  # Wayland frame (no X, no print server, no D-Bus a11y bridge). We flip every
+  # one off at the ROOT and keep ONLY the wayland backend. Every disabled feature
+  # is one galculator never touches (a calculator has no print dialog, no X11
+  # display, no introspection consumer). isWasm-guarded so native gtk3 is stock.
+  #
+  # override args (the `?`-defaulted feature toggles, all defaulting to `isLinux`
+  # = true on wasm, so we must explicitly pass false):
+  #   x11Support=false      -> drops the x11 gdk backend + ALL the libx* / libice /
+  #                            libsm propagated inputs and the gdk-x11 .pc files.
+  #                            Also flips the `(libepoxy.override { inherit x11Support; })`
+  #                            buildInput to the no-GL/no-X epoxy (matches our
+  #                            libepoxy override).
+  #   cupsSupport=false     -> drops the cups propagatedBuildInput (cups → avahi).
+  #   xineramaSupport=false -> drops libxinerama (an X-only multi-monitor ext).
+  #   trackerSupport=false  -> drops tinysparql (the Tracker3 filechooser search;
+  #                            a desktop-search daemon, meaningless on the guest).
+  #   withIntrospection=false / compileSchemas=false -> no GIR / no schema compile
+  #                            (both already default off on cross since the wasm
+  #                            host can't be emulated, but we pin them for clarity
+  #                            and to keep the GIR toolchain out of nativeBuildInputs).
+  # waylandSupport stays true (its default). We additionally NULL the x11/cups
+  # inputs so meson's pkg-config auto-detection can't pick them up from a stray
+  # sysroot entry even with the feature flags off (same defensive nulling cairo
+  # and at-spi2-core use).
+  #
+  # mesonFlags: the package's own mesonFlags are derived from the toggles above,
+  # but several optional features have NO override arg and default ON via
+  # meson_options.txt auto-detection — we must name them explicitly:
+  #   -Dwayland_backend=true -Dx11_backend=false -Dbroadway_backend=false
+  #   -Dxinerama=no            (combo, not boolean — the X Xinerama ext)
+  #   -Dprint_backends=        (empty = NO print backends. GTK's print backends are
+  #                            ALL dlopen `shared_module()` .so plugins — the NOMMU
+  #                            static guest can't dlopen, and linking a wasm `.so`
+  #                            hits the `__musl_tp` general-dynamic-TLS reloc. GTK
+  #                            normally forces the `file` backend on unix, so we
+  #                            patch out that mandatory-`file` error in postPatch
+  #                            (below). The GtkPrintOperation *API* is still compiled
+  #                            INTO libgtk-3.a; only the runtime backend modules are
+  #                            dropped — fine: a calculator never prints, and the
+  #                            modules would be un-loadable dlopen objects anyway.)
+  #   -Dcolord=no              (combo; colord is a CUPS-printing colour-management dep)
+  #   -Dcloudproviders=false -Dtracker3=false -Dprofiler=false
+  #   -Dintrospection=false -Dgtk_doc=false -Dman=false
+  #   -Ddemos=false -Dexamples=false -Dtests=false -Dinstalled_tests=false
+  #   -Dbuiltin_immodules=all  -> compile EVERY input module (incl. "simple")
+  #                               straight INTO libgtk-3.a instead of as dlopen-ed
+  #                               .so modules. The static NOMMU guest can't dlopen,
+  #                               so built-in is mandatory; "all" is the safe
+  #                               superset (the simple/ime modules are tiny C).
+  gtk3 = whenWasm
+    (p: (p.override {
+      x11Support = false;
+      cupsSupport = false;
+      xineramaSupport = false;
+      trackerSupport = false;
+      withIntrospection = false;
+      compileSchemas = false;
+      # Null the now-unused X11/CUPS inputs so meson can't auto-detect them.
+      cups = null;
+      # libGL (libglvnd) is a waylandSupport-propagated RUNTIME dep, but it
+      # propagates libx11 + libxext + xorgproto — the ONLY remaining X11 leak in
+      # the wayland-only closure. GTK's wayland backend never `dependency('gl')`s
+      # libGL directly: it gets GL *dispatch* from epoxy (already linked) and the
+      # `wayland-egl` interface from the `wayland` package (libwayland-egl), not
+      # from libglvnd. GL is never actually called on the cairo software-render
+      # guest. So nulling libGL is correct and removes libx11/libxext entirely.
+      libGL = null;
+      libxrender = null;
+      libxrandr = null;
+      libxi = null;
+      libxinerama = null;
+      libxfixes = null;
+      libxdamage = null;
+      libxcursor = null;
+      libxcomposite = null;
+      libsm = null;
+      libice = null;
+      tinysparql = null;
+    }).overrideAttrs (o: {
+      # Match libepoxy's EGL platform-type choice (see the libepoxy override):
+      # GTK re-parses eglplatform.h via `#include <epoxy/egl.h>` in the wayland
+      # backend, so it needs the same `void *` EGLNative*Type typedefs.
+      env = (o.env or { }) // {
+        NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
+          + " -DEGL_NO_PLATFORM_SPECIFIC_TYPES";
+      };
+      # Neutralise GTK's "the 'file' print backend must be enabled" hard error so
+      # `-Dprint_backends=` (empty) builds ZERO dlopen print modules (see the
+      # print_backends comment above). Appended to nixpkgs' own postPatch.
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace modules/printbackends/meson.build \
+          --replace-fail "error('\'file\' print backed needs to be enabled')" \
+            "message('file print backend disabled (no dlopen on the static wasm guest)')"
+      '';
+      # Drop nixpkgs' postFixup: it `wrapProgram`s the gtk3-demo / widget-factory
+      # binaries with XDG_DATA_DIRS, but those are wasm32 modules (the gtk-demo
+      # subdir still installs its binary even with -Ddemos=false) — not host
+      # executables, so wrapProgram aborts "not an executable file". The demos are
+      # irrelevant to the library deliverable and can't run on the build host.
+      postFixup = "";
+      mesonFlags = (o.mesonFlags or [ ]) ++ [
+        "-Dwayland_backend=true"
+        "-Dx11_backend=false"
+        "-Dbroadway_backend=false"
+        "-Dxinerama=no"
+        "-Dprint_backends="
+        "-Dcolord=no"
+        "-Dcloudproviders=false"
+        "-Dtracker3=false"
+        "-Dprofiler=false"
+        "-Dintrospection=false"
+        "-Dgtk_doc=false"
+        "-Dman=false"
+        "-Ddemos=false"
+        "-Dexamples=false"
+        "-Dtests=false"
+        "-Dinstalled_tests=false"
+        "-Dbuiltin_immodules=all"
+      ];
+    }))
+    prev.gtk3;
 
   # --- kernel UAPI headers: use OUR wasm headers, not stock Linux ------------
   # The cross stdenv/musl pull nixpkgs' stock linuxHeaders (linux-6.18.7) and run
