@@ -1,0 +1,25 @@
+userspace/libffi-selftest.c
+  s_791cc0179de687::t_987d551c8b70f2 78
+  s_791cc0179de687::t_d5358f80398803 17
+  s_791cc0179de687::t_bc5538459e340b 38-46
+deps-overlay.nix
+  s_791cc0179de687::t_42a0c625ca2e5a 108-119,122,125
+patches/libffi/wasm32-raw-ffi.c
+  s_791cc0179de687::t_99c78bf63e3086 65-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "69dd181723ed677d24e04f4ac5e2f516a42b4c7a",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
