@@ -288,7 +288,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -421,6 +421,12 @@
         # M3b (galculator): gtk-hello — the GTK3 hello-window proof. --selftest is the
         # headless CI gate (gtk_init + GtkWindow + GtkLabel widget tree) → $out/bin/gtk-hello.
         gtk-hello = gtkHello;
+
+        # M4: galculator — the headline GTK3 calculator. fpcast-emu post-link seam
+        # applied (same gobject indirect-call fix as gtkHello/pangoText). Baked into
+        # the initramfs as /bin/galculator; its $out/share/galculator/ui/*.ui ride the
+        # served /nix closure.
+        galculator = cross.galculator;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

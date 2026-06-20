@@ -698,6 +698,66 @@ in
   llvmPackages_21 = if isWasm then fixCompilerRt prev.llvmPackages_21 else prev.llvmPackages_21;
   llvmPackages    = if isWasm then fixCompilerRt prev.llvmPackages_21 else prev.llvmPackages;
 
+  # --- graphite2: fix the broken cmake-generated .la file for static builds ---
+  # graphite2 uses cmake which emits a libtool .la file with `old_library=''`
+  # (empty) and `library_names=libgraphite2.so ...`. On a static-only build
+  # (isStatic=true) only libgraphite2.a is produced; the .so name in .la makes
+  # downstream libtool-based builds (galculator autotools) try to link
+  # libgraphite2.so → "no such file". Fix: rewrite .la to reference the .a.
+  graphite2 = whenWasm
+    (p: p.overrideAttrs (o: {
+      postInstall = (o.postInstall or "") + ''
+        la=$out/lib/libgraphite2.la
+        if [ -f "$la" ]; then
+          # Fix cmake-generated .la for static-only build: clear library_names
+          # (no .so built) and set old_library to the actual .a archive.
+          sed -i \
+            -e "s|^old_library=.*|old_library='libgraphite2.a'|" \
+            -e "s|^library_names=.*|library_names=|" \
+            -e "s|^dlname=.*|dlname=|" \
+            "$la"
+        fi
+      '';
+    }))
+    prev.graphite2;
+
+  # --- galculator: the headline GTK3 app (M4) ---------------------------------
+  # galculator is gobject/GTK → its binary has the same C function-pointer casts
+  # every GTK binary does (e.g. GObject class_init), which strict wasm call_indirect
+  # rejects. Apply the binaryen --fpcast-emu post-link pass (the shared seam, see
+  # userspace/fpcast-emu.nix + the M3a/M3b learnings) to the installed binary. GTK is
+  # C (no -fwasm-exceptions) so the base feature set suffices. isWasm-guarded so
+  # native galculator is untouched.
+  galculator = whenWasm
+    (p: p.overrideAttrs (o: {
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.binaryen ];
+      # `autopoint` (inside autoreconfHook) decompresses archive.dir.tar.xz with
+      # a bare `xz` shell call. With strictDeps=false (galculator requires it for
+      # the AM_GLIB_GNU_GETTEXT m4 macro) the cross buildInputs leak into PATH, so
+      # the wasm32 xz binary (non-executable on the aarch64 build host) shadows
+      # any native xz. Fix: prepend a tiny native-xz shim to PATH in preAutoreconf
+      # so autopoint's bare `xz` call always finds the native host binary — without
+      # adding buildPackages.xz as a dep (which would leak liblzma into cross links).
+      preAutoreconf = (o.preAutoreconf or "") + ''
+        mkdir -p "$TMPDIR/native-xz-bin"
+        ln -sf ${final.buildPackages.xz}/bin/xz "$TMPDIR/native-xz-bin/xz"
+        export PATH="$TMPDIR/native-xz-bin:$PATH"
+      '';
+      postFixup = (o.postFixup or "") + ''
+        if [ -f "$out/bin/galculator" ]; then
+          wasm-opt \
+            --enable-threads --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue \
+            -pa max-func-params@128 --fpcast-emu \
+            "$out/bin/galculator" -o "$out/bin/galculator.fpcast"
+          mv "$out/bin/galculator.fpcast" "$out/bin/galculator"
+          chmod +x "$out/bin/galculator"
+        fi
+      '';
+    }))
+    prev.galculator;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):
