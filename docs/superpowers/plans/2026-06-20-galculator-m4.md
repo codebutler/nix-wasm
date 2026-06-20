@@ -1,5 +1,20 @@
 # M4: galculator on wasm32-nommu Implementation Plan
 
+> **RECONCILIATION (shipped 2026-06-20, commit `6ae5059`):** the implementation used
+> the **synthesis** approach, NOT the custom `userspace/galculator.nix` derivation
+> this doc describes below. galculator is packaged via an **`isWasm`-guarded override
+> of the nixpkgs galculator** (`deps-overlay.nix`) — reusing nixpkgs' recipe + its 3
+> patches (PRIME DIRECTIVE corollary 1: never fork a package-private recipe) — with the
+> `--selftest` source patch **appended** (`patches/galculator/0001-add-selftest.patch`)
+> and the fpcast-emu pass applied in `postFixup`. The `--selftest` design below
+> (`gtk_builder_add_from_file`) had to change: that call **instantiates** widgets and
+> **aborts headless** (`Can't create GtkStyleContext without a display`), so the shipped
+> selftest is display-free — it GMarkup-XML-parses the real `.ui` files asserting the
+> real widget IDs (`main_window`, `button_7`) exist + `g_type_class_ref`s the widget
+> classes through the fpcast seam (same lesson as the M3b gtk-hello gate). The widget
+> IDs, the `.ui` paths, the systemPackages wiring, and the `nix:true` smoke are as
+> below. Read this banner as the source of truth; the body is the original intent.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cross-build galculator 2.1.4 to wasm32-nommu, bake it into the guest initramfs, and prove it initializes in-guest via a `--selftest` headless gate; the click-to-42 visual check is a MANUAL browser check (no compositor in the node harness).

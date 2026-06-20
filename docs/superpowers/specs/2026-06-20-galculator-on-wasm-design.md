@@ -266,12 +266,19 @@ A scripted smoke test in the spirit of `runtime/node/smoke.mjs`:
 
 If keyboard input landed in M0, add a secondary check: type `7*6=` → `42`.
 
-> **Implementation note (2026-06-20):** The automated gate in the node harness is
-> "galculator starts in-guest without a wasm trap" (galculator reaches GTK init,
-> confirmed by `Gtk-WARNING: cannot open display`). The node harness has no compositor
-> so click input and window mapping cannot be automated there. The **click `7 × 6 = 42`
-> headline acceptance** is a MANUAL browser check via pc/Greenfield (see
-> `docs/superpowers/notes/m4-galculator-visual.md` — PENDING).
+> **Implementation note (2026-06-20, shipped commit `6ae5059`):** The automated gate
+> in the node harness is galculator's `--selftest` (a source patch to `main.c`, run
+> before `gtk_init`): it GMarkup-XML-parses galculator's real `.ui` files
+> (`main_frame.ui`, `basic_buttons_gtk3.ui`) from `PACKAGE_UI_DIR`, asserts the real
+> widget IDs (`main_window`, `button_7`) are present, and `g_type_class_ref`s the
+> widget classes through the fpcast-emu seam — display-free (`gtk_builder_add_from_file`
+> would instantiate widgets and abort with no display). It prints
+> `GALCULATOR-SELFTEST: main_window=1 button_7=1 gtk_types=1 OK`, gated by
+> `runtime/node/galculator-smoke.mjs` (nix:true). galculator is packaged via an
+> `isWasm`-guarded **override** of nixpkgs galculator + this patch (corollary 1, no
+> fork). The node harness has no compositor, so window mapping + click input cannot be
+> automated; the **click `7 × 6 = 42` headline acceptance** is a MANUAL browser check
+> via pc/Greenfield (see `docs/superpowers/notes/m4-galculator-visual.md` — PENDING).
 
 ---
 

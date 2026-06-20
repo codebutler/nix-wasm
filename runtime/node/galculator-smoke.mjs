@@ -1,8 +1,9 @@
 // galculator-smoke.mjs — boots (nix:true) and runs /bin/galculator --selftest
 // in-guest. The M4 galculator proof: before gtk_init (no compositor needed), it
-// loads the real .ui files from PACKAGE_UI_DIR via gtk_builder_add_from_file and
-// asserts GtkWindow "main_window" (main_frame.ui) + GtkToggleButton "button_7"
-// (basic_buttons_gtk3.ui) exist in the parsed widget tree, printing
+// loads the real .ui files from PACKAGE_UI_DIR and parses them with GLib's GMarkup
+// XML parser (display-free — gtk_builder_add_from_file would instantiate widgets and
+// abort with no display), asserting GtkWindow "main_window" (main_frame.ui) +
+// GtkToggleButton "button_7" (basic_buttons_gtk3.ui) exist, printing
 // `GALCULATOR-SELFTEST: ... OK`. gobject statics run through the fpcast-emu seam.
 // The click-7×6=42 compute is a MANUAL browser check; see
 // docs/superpowers/notes/m4-galculator-visual.md. Exit 0 pass / 1 fail / 2 inconclusive.
