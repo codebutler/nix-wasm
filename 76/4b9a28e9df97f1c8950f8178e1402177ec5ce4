@@ -1,0 +1,27 @@
+flake.nix
+  s_791cc0179de687::t_097e156c089b0e 149-155
+  s_791cc0179de687::t_6bc7b6d389daf9 353-356
+  s_791cc0179de687::t_78a80b62bd4052 239
+runtime/node/libffi-smoke.mjs
+  s_791cc0179de687::t_1a7da962e2f987 1-27
+userspace/libffi-selftest.nix
+  s_791cc0179de687::t_6bd024221fb2fe 1-24
+userspace/libffi-selftest.c
+  s_791cc0179de687::t_7341297e743478 1-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "764b9a28e9df97f1c8950f8178e1402177ec5ce4",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
