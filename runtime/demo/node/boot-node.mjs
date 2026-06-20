@@ -1,8 +1,8 @@
 // boot-node.mjs — boot the linux-wasm guest to a shell from Node, returning a
 // session with raw consoles + an expect API (send/waitForOutput/waitForPrompt).
 import { terminateAllWorkers } from "./web-shims.mjs";
-import { bootNixSystem } from "../index.js";
-import { MemVfs } from "../ninep/mem-vfs.js";
+import { bootNixSystem } from "../../index.js";
+import { MemVfs } from "../../ninep/mem-vfs.js";
 
 // Artifacts: default to the env var, else the repo-relative web/artifacts dir.
 // CI sets LINUX_WASM_ARTIFACTS to the `nix build` output dir.

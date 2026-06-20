@@ -12,8 +12,8 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { installWebShims, terminateAllWorkers } from "./web-shims.mjs";
-import { bootNixSystem } from "../index.js";
-import { MemVfs } from "../ninep/mem-vfs.js";
+import { bootNixSystem } from "../../index.js";
+import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const ARTIFACTS =
   process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;

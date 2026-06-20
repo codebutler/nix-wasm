@@ -3,7 +3,7 @@
 //   prompt → 9P read → write/overwrite/append → ls → nix-env -iA sl.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";
-import { MemVfs } from "../ninep/mem-vfs.js";
+import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const vfs = MemVfs.from({
   Home: { "pc-9p-proof.txt": "written by pc's vfs.write\n" },

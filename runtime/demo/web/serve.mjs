@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = fileURLToPath(new URL("../", import.meta.url)); // runtime/ root
+const ROOT = fileURLToPath(new URL("../../", import.meta.url)); // runtime/ root
 const PORT = Number(process.argv[2] || 8090);
 const TYPES = {
   ".html": "text/html",
@@ -23,7 +23,7 @@ createServer(async (req, res) => {
   let p = normalize(decodeURIComponent(url.pathname));
   // Redirect bare root or directory paths to their index.html.
   if (p === "/" || p === "" || p.endsWith("/")) {
-    p = (p === "/" || p === "" ? "/web/" : p) + "index.html";
+    p = (p === "/" || p === "" ? "/demo/web/" : p) + "index.html";
   }
   const file = ROOT + p.replace(/^\/+/, "");
   try {
@@ -42,4 +42,4 @@ createServer(async (req, res) => {
     });
     res.end("not found");
   }
-}).listen(PORT, () => console.log(`linux-wasm demo: http://localhost:${PORT}/web/`));
+}).listen(PORT, () => console.log(`linux-wasm demo: http://localhost:${PORT}/demo/web/`));

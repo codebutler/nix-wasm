@@ -8,7 +8,7 @@
 //   ln -sfn /path/to/nix-wasm/.artifacts runtime/web/artifacts
 // The four required files: vmlinux.wasm, initramfs.cpio.gz, store.json, nix-cache/
 import { init, Terminal, FitAddon } from "./vendor/ghostty/ghostty.mjs";
-import { bootNixSystem, MemVfs } from "../index.js";
+import { bootNixSystem, MemVfs } from "../../index.js";
 import { getWaylandCompositor } from "./wayland-compositor.js";
 
 const status = document.getElementById("status");
