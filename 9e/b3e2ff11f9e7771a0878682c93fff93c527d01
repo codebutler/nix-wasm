@@ -1,0 +1,23 @@
+deps-overlay.nix
+  s_791cc0179de687::t_611e51a2eca385 422-426,429
+  s_791cc0179de687::t_e0fa1d054ada05 292-313
+  s_791cc0179de687::t_35a674038b7ba0 405-406
+  s_791cc0179de687::t_56049dc37c76f4 377-404,407-421,427-428,430-434,443-447,450-455
+  s_791cc0179de687::t_63f9033df4cc71 435-442,448-449
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "9eb3e2ff11f9e7771a0878682c93fff93c527d01",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}
