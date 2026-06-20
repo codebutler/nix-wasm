@@ -1,0 +1,23 @@
+runtime/node/web-shims.mjs
+  s_d2c9c080387123::t_fb4d3a5d304547 59-68
+userspace/fork-stress.c
+  s_d2c9c080387123::t_43e5150397de47 1-42
+runtime/node/phase2-stress.mjs
+  s_d2c9c080387123::t_6c27e4aa359699 1-113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c235130a3d40f32afc4b073ebc1eec68534994ea",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
