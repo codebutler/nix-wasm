@@ -94,7 +94,10 @@ sudo -E nix build .#nix-wasm --print-out-paths               # the goal
 
 nix-wasm now both *builds* the guest and *runs* it. The `runtime/` package
 (kernel host + 9P server + Nix store wiring) runs in Node and the browser; pc
-vendors it via `runtime/sync-to-pc.sh`.
+vendors it via `runtime/sync-to-pc.sh`. **Any change to a runtime engine file
+(e.g. `kernel-worker.js` — the loader gained glib `GOT.func`/`__lsan_*` stubs in
+M3a) requires re-running `runtime/sync-to-pc.sh <pc-checkout>`, or pc boots a stale
+engine that fails to instantiate glib/GTK binaries.**
 
 Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
 from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). Point
@@ -317,10 +320,13 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   modules build **into libgio** (the NOMMU guest can't dlopen). Codegen tools
   (glib-genmarshal/compile-schemas/…) come from native `buildPackages` via meson cross.
 - **futex_time64 arity** (`patches/kernel/0015`): `__NR_futex_time64` (422) maps to the
-  6-arg `sys_futex`, but musl/glib call it with **4** args → strict wasm
-  `call_indirect` on the 6-arg handler traps. Fix = a 4-arg `sys_wasm32_futex` wrapper
-  forwarding `sys_futex(uaddr,op,val,utime,NULL,0)` (FUTEX_WAIT/WAKE ignore uaddr2/val3),
-  overriding `__NR_futex_time64` — mirrors the `sys_wasm32_*` pattern. Rebuilds only vmlinux.
+  6-arg `sys_futex`, but **glib's raw `syscall()`** (`g_futex_simple`) calls it with
+  **4** args (`uaddr,op,val,utime`) for FUTEX_WAIT/WAKE → strict wasm `call_indirect`
+  on the 6-arg handler traps. (musl pads its OWN futex calls to 6, so musl pthread —
+  used by nix.wasm/busybox — is unaffected; only glib's raw 4-arg call traps.) Fix = a
+  4-arg `sys_wasm32_futex` wrapper forwarding `sys_futex(uaddr,op,val,utime,NULL,0)`
+  (FUTEX_WAIT/WAKE ignore uaddr2/val3), overriding `__NR_futex_time64` — mirrors the
+  `sys_wasm32_*` pattern. Rebuilds only vmlinux.
 - **glib `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
   wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
   `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is

@@ -2,9 +2,11 @@ From: nix-wasm <eric@codebutler.com>
 Date: Fri, 20 Jun 2026 00:00:00 -0400
 Subject: [PATCH] wasm: 4-arg futex_time64 trampoline (call_indirect arity)
 
-__NR_futex_time64 (422) maps to the generic 6-arg sys_futex, but userspace
-(musl's syscall(), and glib's g_futex_simple → g_cond/g_mutex) invokes it with
-only 4 args (uaddr, op, val, utime) for FUTEX_WAIT/WAKE. The wasm syscall
+__NR_futex_time64 (422) maps to the generic 6-arg sys_futex, but glib's raw
+syscall() (g_futex_simple → g_cond/g_mutex) invokes it with only 4 args
+(uaddr, op, val, utime) for FUTEX_WAIT/WAKE. (musl pads its own futex calls to
+6 args, so musl pthread — used by nix.wasm/busybox — is unaffected; only glib's
+raw 4-arg call traps.) The wasm syscall
 trampoline (__wasm_syscall_4) dispatches through a strictly-typed
 call_indirect, so a 4-arg call landing on the 6-arg sys_futex traps with
 "null function or function signature mismatch" — killing any futex user

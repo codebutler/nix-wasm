@@ -44,6 +44,10 @@ in
 
   # A shell function `fpcast_emu <in.wasm> <out.wasm>` running the exact pass.
   # Sourced into a buildPhase via `${fpcast.shellFn}`.
+  # NOTE: the --enable-* set matches what pure-C cross binaries (glib/pango) contain.
+  # A future C++/`-fwasm-exceptions` GTK binary that needs this seam must also add
+  # `--enable-exception-handling` (and `--enable-tail-call` if used), else wasm-opt
+  # errors on the un-enabled feature present in the binary.
   shellFn = ''
     fpcast_emu() {
       wasm-opt \
