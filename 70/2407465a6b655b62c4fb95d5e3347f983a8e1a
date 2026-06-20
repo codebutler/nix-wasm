@@ -1,0 +1,23 @@
+userspace/fork-pipe.c
+  s_d2c9c080387123::t_844f3f39dcd531 1-40
+userspace/fork-exec.c
+  s_d2c9c080387123::t_c5e86e0a619a8b 1-26
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_e91b5561746672 95-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "702407465a6b655b62c4fb95d5e3347f983a8e1a",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
