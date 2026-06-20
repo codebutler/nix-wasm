@@ -1,0 +1,26 @@
+userspace/fork-in-thread.c
+  s_d2c9c080387123::t_ad6a51a4d47187 1-50
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_96375160fa62f8 160
+  s_d2c9c080387123::t_7fd0cf877030f3 68-79
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_b56616b32e7b5a 20,23-35
+flake.nix
+  s_d2c9c080387123::t_fcce3e0849d2e4 165-170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "46b79c24a485281b0d5916a01997ce9e3d1eb708",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
