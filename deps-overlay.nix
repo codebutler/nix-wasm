@@ -143,6 +143,59 @@ in
     }))
     prev.harfbuzz;
 
+  # --- glib: cross-build for the GTK stack (M3a) ------------------------------
+  # nixpkgs glib drags libselinux/libsepol, util-linux (libmount) and
+  # libsysprof-capture — none cross-compile to NOMMU wasm and none are needed for a
+  # GTK app. Disable them + tests/man/dtrace. gio's loadable modules build INTO
+  # libgio on the static build (the NOMMU guest can't dlopen). The build-time
+  # codegen tools (glib-genmarshal/compile-schemas/…) come from native
+  # buildPackages via meson cross. libffi is the M1 raw backend (gobject's generic
+  # marshaller → ffi_call). isWasm-guarded so native glib is untouched.
+  # NOTE: this nixpkgs' glib has no `selinuxSupport`/`mountSupport` toggles — the
+  # un-crossable deps are added as raw buildInputs (libselinux + util-linuxMinimal
+  # on isLinux, libsysprof-capture on !isFreeBSD). `libselinux`/`libsysprof-capture`
+  # can be nulled via package args, but `util-linuxMinimal` is guarded by an
+  # `isLinux -> util-linuxMinimal != null` assert (our wasm host IS isLinux), so we
+  # keep it at its default to pass the assert and instead REMOVE it (and libselinux
+  # / libsysprof-capture, defensively) from the realised buildInputs in
+  # overrideAttrs. The meson `-D…=disabled` flags are the load-bearing fix that
+  # stops glib from compiling/linking against any of them. `-Ddocumentation=false`
+  # drops the unconditional gi-docgen doc build (a native-only doc toolchain).
+  # We also drop the TARGET `gnum4` (a glib buildInput only so glib installs m4
+  # macros "for other apps to use" on the guest) — m4 doesn't cross-compile to
+  # wasm (gnulib's stackvma.c stack-overflow probe has no wasm code path) and the
+  # static NOMMU guest never consumes glib's m4 macros. The native build-time m4
+  # (under nativeBuildInputs, from buildPackages) is untouched.
+  glib = whenWasm
+    (p: (p.override {
+      libselinux = null;
+      libsysprof-capture = null;
+    }).overrideAttrs (o:
+      let
+        dropMount = builtins.filter
+          (i: !builtins.elem (i.pname or "")
+            [ "util-linux-minimal" "util-linux" "libselinux" "libsysprof-capture" "gnum4" "m4" ]);
+      in
+      {
+        buildInputs = dropMount (o.buildInputs or [ ]);
+        propagatedBuildInputs = dropMount (o.propagatedBuildInputs or [ ]);
+        # With `-Ddocumentation=false` the `devdoc` output (gtk-doc/gi-docgen HTML)
+        # is never produced → the builder errors on the missing output. Drop it; the
+        # guest only needs the libs + headers (same pattern as the harfbuzz override).
+        outputs = builtins.filter (x: x != "devdoc") (o.outputs or [ "out" ]);
+        mesonFlags = (o.mesonFlags or [ ]) ++ [
+          "-Dselinux=disabled"
+          "-Dlibmount=disabled"
+          "-Dsysprof=disabled"
+          "-Dman-pages=disabled"
+          "-Ddtrace=disabled"
+          "-Ddocumentation=false"
+          "-Dtests=false"
+          "-Dnls=enabled"
+        ];
+      }))
+    prev.glib;
+
   # boost: strip the b2 `architecture=`/`binary-format=` target metadata —
   # nixpkgs derives them from the platform (cpu.family="wasm", execFormat="wasm"),
   # but Boost.Build rejects "wasm" ("not a known value of feature <architecture>").

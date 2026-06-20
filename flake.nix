@@ -153,6 +153,19 @@
         libffi = cross.libffi;
       };
 
+      # M3a (galculator): glib-selftest — in-guest gobject proof. Round-trips a
+      # GObject and emits a `double` signal through gobject's GENERIC (libffi)
+      # marshaller (g_cclosure_marshal_generic → ffi_call) — the first real exercise
+      # of the M1 raw wasm FFI backend's f64 path under gobject. See
+      # userspace/glib-selftest.*.
+      glibSelftest = import ./userspace/glib-selftest.nix {
+        inherit cross;
+        glib = cross.glib;
+        libffi = cross.libffi;
+        pcre2 = cross.pcre2;
+        zlib = cross.zlib;
+      };
+
       # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
       # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
       # (--selftest) asserts on stdout — the M2 integration gate. Default mode
@@ -248,7 +261,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -369,6 +382,10 @@
         # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
         # $out/bin/wl-text (--selftest is the headless CI gate).
         wl-text = wlText;
+
+        # M3a (galculator): glib-selftest — gobject + the M1 libffi double-marshaller
+        # proof → $out/bin/glib-selftest.
+        glib-selftest = glibSelftest;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

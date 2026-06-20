@@ -1,0 +1,68 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Fri, 20 Jun 2026 00:00:00 -0400
+Subject: [PATCH] wasm: 4-arg futex_time64 trampoline (call_indirect arity)
+
+__NR_futex_time64 (422) maps to the generic 6-arg sys_futex, but userspace
+(musl's syscall(), and glib's g_futex_simple → g_cond/g_mutex) invokes it with
+only 4 args (uaddr, op, val, utime) for FUTEX_WAIT/WAKE. The wasm syscall
+trampoline (__wasm_syscall_4) dispatches through a strictly-typed
+call_indirect, so a 4-arg call landing on the 6-arg sys_futex traps with
+"null function or function signature mismatch" — killing any futex user
+(observed: glib's GType bootstrap calling g_cond_broadcast during the first
+g_object_new). Add a 4-arg sys_wasm32_futex wrapper (mirroring the existing
+sys_wasm32_* u64-split overrides) that forwards to sys_futex with the requeue
+args (uaddr2, val3) zeroed — correct for WAIT/WAKE, which ignore them — and
+override __NR_futex_time64 to it in the syscall table.
+--- a/arch/wasm/include/asm/syscalls_wasm32.h	2026-06-20 03:33:21.221143796 -0400
++++ b/arch/wasm/include/asm/syscalls_wasm32.h	2026-06-20 03:33:34.791224508 -0400
+@@ -34,6 +34,18 @@
+ 					   sc_arg_u64(nbytes),
+ 					   unsigned int flags);
+ 
++/*
++ * futex_time64 (__NR_futex_time64, 422) maps to the generic 6-arg sys_futex,
++ * but userspace (musl's syscall(), glib's g_futex_simple) invokes it with only
++ * 4 args (uaddr, op, val, utime) for FUTEX_WAIT/WAKE. On wasm the kernel's
++ * syscall trampoline (__wasm_syscall_4) dispatches through a strictly-typed
++ * call_indirect, so a 4-arg call landing on the 6-arg sys_futex traps with a
++ * function-signature mismatch. Provide a 4-arg wrapper that forwards to
++ * sys_futex with uaddr2=NULL, val3=0 (correct for WAIT/WAKE, which ignore them).
++ */
++asmlinkage long sys_wasm32_futex(u32 __user *uaddr, int op, u32 val,
++				 const struct __kernel_timespec __user *utime);
++
+ #endif
+ 
+ #endif /* _ASM_WASM_SYSCALLS_WASM32_H */
+--- a/arch/wasm/kernel/sys_wasm32.c	2026-06-20 03:33:21.240143909 -0400
++++ b/arch/wasm/kernel/sys_wasm32.c	2026-06-20 03:34:01.811385699 -0400
+@@ -52,3 +52,17 @@
+ 	return ksys_sync_file_range(fd, sc_arg_u64_glue(offset),
+ 				    sc_arg_u64_glue(nbytes), flags);
+ }
++
++/*
++ * 4-arg futex_time64 trampoline (see syscalls_wasm32.h). userspace calls
++ * syscall(__NR_futex_time64, uaddr, op, val, utime) — only 4 args — for
++ * FUTEX_WAIT/WAKE, but the generic handler is the 6-arg sys_futex. wasm's
++ * strictly-typed call_indirect would trap on the arity mismatch, so dispatch
++ * lands here (the syscall_table override) and forwards the missing requeue
++ * args (uaddr2, val3) as zeros, which WAIT/WAKE ignore.
++ */
++SYSCALL_DEFINE4(wasm32_futex, u32 __user *, uaddr, int, op, u32, val,
++		const struct __kernel_timespec __user *, utime)
++{
++	return sys_futex(uaddr, op, val, utime, NULL, 0);
++}
+--- a/arch/wasm/kernel/syscall_table.c	2026-06-20 03:33:21.261144034 -0400
++++ b/arch/wasm/kernel/syscall_table.c	2026-06-20 03:34:18.615486255 -0400
+@@ -22,5 +22,9 @@
+ 	__SYSCALL(__NR_fadvise64_64, sys_wasm32_fadvise64_64)
+ 	__SYSCALL(__NR_fallocate, sys_wasm32_fallocate)
+ 	__SYSCALL(__NR_sync_file_range, sys_wasm32_sync_file_range)
++	/* 4-arg futex_time64 trampoline — userspace calls it with 4 args but the
++	 * generic handler is 6-arg sys_futex; wasm call_indirect needs the arity to
++	 * match. See sys_wasm32_futex(). */
++	__SYSCALL(__NR_futex_time64, sys_wasm32_futex)
+ #endif
+ };
