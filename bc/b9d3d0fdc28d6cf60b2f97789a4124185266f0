@@ -1,0 +1,42 @@
+runtime/node/glib-smoke.mjs
+  s_791cc0179de687::t_95831c849daa93 1-27
+userspace/glib-selftest.nix
+  s_791cc0179de687::t_d590de01357d53 1-24
+runtime/kernel-worker.js
+  s_791cc0179de687::t_d151759db06a1e 878-889
+  s_791cc0179de687::t_4a2d1d092cb2ab 891-911,916-920,925-926
+  s_791cc0179de687::t_750c21bee8d6fd 912-915,921-924
+patches/kernel/0015-wasm-futex-time64-4arg-trampoline.patch
+  s_791cc0179de687::t_e62f14fe3668e9 1-68
+kernel.nix
+  s_791cc0179de687::t_2e252d8569c4cd 59-64
+flake.nix
+  s_791cc0179de687::t_37b4a83221f250 386-389
+  s_791cc0179de687::t_3aed0ce5e67989 156-168
+  s_791cc0179de687::t_715d608af8fec7 264
+userspace/glib-selftest.c
+  s_791cc0179de687::t_077c073c65a2ea 1-38
+deps-overlay.nix
+  s_791cc0179de687::t_7ff982730cf9b9 154-163
+  s_791cc0179de687::t_ff11853c9a88cb 187-196
+  s_791cc0179de687::t_f5e35d5b68419d 182-185
+  s_791cc0179de687::t_0187c87c33a078 164-168,177
+  s_791cc0179de687::t_b0620d74751006 173-176,178-181,186
+  s_791cc0179de687::t_ab22f36b23cf37 146-153,169-172,197-198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "bcb9d3d0fdc28d6cf60b2f97789a4124185266f0",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
