@@ -275,6 +275,15 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **crt `int main`**: a weak 2-arg crt `main` wrapper (`musl.nix`) so all of
   `int main(void)` / `(int,char**)` link — else autoconf's "C compiler cannot
   create executables" aborts every autoconf dep.
+- **libffi raw wasm backend** (`deps-overlay.nix` / `patches/libffi/`): the
+  upstream `src/wasm/ffi.c` is emscripten-only; we drop in `wasm32-raw-ffi.c`
+  which dispatches `ffi_call` through a build-time generated trampoline table
+  (`gen-trampolines.py`, ~8375 entries) keyed on the per-arg wasm value-type
+  vector (i32/i64/f32/f64). Supports i32/i64/f32/f64 by-value scalar arguments
+  up to K=24 all-i32 / K=10 mixed, M=2 non-i32 per call (covers libwayland's
+  i32/ptr dispatch AND GObject signal marshallers with double/int64 args); aborts
+  loud past the (K,M) bounds or on struct args/varargs/closures — never a silent
+  mis-call. Bump K/M in gen-trampolines.py to extend coverage if needed.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable

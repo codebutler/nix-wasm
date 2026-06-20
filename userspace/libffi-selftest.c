@@ -4,7 +4,6 @@
 #include <ffi.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 
 static int failed = 0;
 #define CHECK(name, cond) do { \

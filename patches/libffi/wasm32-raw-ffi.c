@@ -19,31 +19,36 @@
    synthesise a wasm function of the right signature at runtime. Without a JS
    host the set of callable signatures must be enumerated at COMPILE time.
 
-   So this backend enumerates the signatures that the raw wasm32 C ABI collapses
-   to: on wasm32 (ILP32) every `int`/`unsigned`/`enum`/pointer/`wl_fixed_t`
-   argument lowers to a single wasm `i32`, and the common scalar returns are
-   void / i32 / i64 / f32 / f64. ffi_call therefore dispatches on (return-class,
-   argument-count) through statically-typed trampolines — one `call_indirect`
-   type per arity. This is complete and correct for any C function whose every
-   parameter is an int/unsigned/enum/pointer (return void/int/pointer/long
-   long/float/double) — which covers libwayland's protocol dispatch exactly
-   (connection.c builds cifs of ffi_type_{sint,uint}32/pointer args returning
-   ffi_type_void) and a large fraction of real C ABIs besides. It is a SHARED
-   crossSystem fix, not a wayland-private one.
+   This backend enumerates those signatures via a BUILD-TIME generator
+   (patches/libffi/gen-trampolines.py) that emits src/wasm/wasm-ffi-trampolines.inc,
+   which this file #include's. ffi_call computes a key over the full per-argument
+   wasm value-type vector (i32 / i64 / f32 / f64) and dispatches through the
+   generated table — one statically-typed call_indirect trampoline per unique
+   signature. The generator is bounded by two parameters:
+     K = 24 (max argument count for all-i32 calls) / K = 10 (max args for mixed
+         calls containing any i64/f32/f64 argument);
+     M = 2  (max number of non-i32 wasm value types per call).
+   Together these yield ~8375 trampolines and cover:
+     • int/unsigned/enum/pointer arguments (all collapse to wasm i32) up to 24
+       args — covers libwayland's protocol dispatch (ffi_type_{sint,uint}32/
+       pointer returning ffi_type_void) and most C APIs;
+     • by-value i64/f32/f64 scalar ARGUMENTS within the (K=10, M=2) bounds —
+       covers cairo/pango doubles, GObject signal marshallers (double/int64 args),
+       and the common float/double-by-value C ABI cases;
+     • all scalar RETURNS (void / i32 / i64 / f32 / f64) regardless of bounds.
+   It is a SHARED crossSystem fix, not a wayland-private one.
 
-   What the raw wasm ABI genuinely cannot express, this backend refuses LOUDLY
-   (abort with a diagnostic / FFI_BAD_ABI) rather than silently mis-call:
-     - a by-value 64-bit / float / double / struct / complex ARGUMENT (the
-       caller-side wasm value type then differs from i32, so a fixed i32^N
-       trampoline would be the wrong call_indirect signature);
+   What this backend refuses LOUDLY (abort/"argument signature outside generated
+   bounds" / FFI_BAD_ABI) rather than silently mis-call:
+     - by-value struct / complex ARGUMENTS (the raw wasm ABI can't express them);
+     - by-value i64/f32/f64 ARGUMENTS that exceed the (K=10, M=2) bounds (e.g.
+       a call with 3 or more non-i32 args) — bump gen-trampolines.py's K/M to
+       widen the table if a new signal shape needs more;
      - variadic calls (wasm passes varargs through a hidden buffer pointer — a
        different convention than fixed params);
      - closures (ffi_prep_closure_loc): they require creating a NEW callable
        wasm function at runtime, which needs host/JS support this platform does
        not have. This matches ffitarget.h's own "closures (not implemented!)".
-
-   Scalar by-value 64-bit/float/double RETURNS are supported (the return type is
-   part of each trampoline's static signature); only such ARGUMENTS are not.
    ----------------------------------------------------------------------- */
 
 #include <ffi.h>
@@ -110,8 +115,9 @@ static u32 load_i32_arg(ffi_type *t, void *p)
     case FFI_TYPE_SINT8:  return (u32)(int32_t)*(int8_t *)p;
     case FFI_TYPE_UINT16: return (u32)*(uint16_t *)p;
     case FFI_TYPE_SINT16: return (u32)(int32_t)*(int16_t *)p;
-    /* 64-bit / float / double / struct as a by-value ARGUMENT cannot ride the
-       i32 trampoline — the caller-side wasm value type would differ. */
+    /* load_i32_arg handles only the i32-class arguments above; i64/f32/f64
+       by-value args are loaded by the generated trampolines via their own
+       typed accessors in wasm-ffi-trampolines.inc, not this path. */
     default:
       wasm_ffi_unsupported("by-value argument type");
       return 0; /* unreachable */
