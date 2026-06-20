@@ -1,0 +1,29 @@
+runtime/node/asyncify-link.test.mjs
+  s_d2c9c080387123::t_97ba8d5c8f584b 1-47
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_883d536d6a8dd8 13
+  s_d2c9c080387123::t_8a6b309fd10520 54-66
+userspace/asyncify-cc.nix
+  s_d2c9c080387123::t_4016a5ced5b0d3 1-59
+userspace/fork-smoke.c
+  s_d2c9c080387123::t_1c9e34ad280fda 1-19
+flake.nix
+  s_d2c9c080387123::t_6ea2742f20f265 375-378
+  s_d2c9c080387123::t_1051878415cfc5 120-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3be73ff6a2f6a56189dff3594334af9190c282ff",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
