@@ -1,0 +1,26 @@
+userspace/system.nix
+  s_791cc0179de687::t_43c57f06fbb3c4 81-84
+  s_791cc0179de687::t_08be3b22d29098 119-126
+  s_791cc0179de687::t_89d30c69388767 104
+  s_791cc0179de687::t_1cad0b2fc3b13f 133-137
+userspace/gtk-assets.nix
+  s_791cc0179de687::t_5c7ae25346d610 3-4,7,9-10,12,21,23
+  s_791cc0179de687::t_3f7018eea3207f 33-35
+  s_791cc0179de687::t_b41b73cb376ae7 1-2,5-6,8,11,13-20,22,24-32,36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "dab40021744a8fc8f1b1f2fa630218861dfdcf17",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
