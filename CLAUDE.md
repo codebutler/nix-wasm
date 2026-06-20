@@ -301,6 +301,38 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   closure) — a busybox-only boot has no font config and fontconfig `FcInit` fails.
   Rebuild `.#wasm-store-manifest` after any `fonts.nix`/`system.nix` change so
   the new store path is included in the served `store.json`.
+- **M3a glib/gobject** (`deps-overlay.nix` glib override): disable
+  `selinux`/`libmount`/`sysprof`/`man-pages`/`dtrace`/`documentation` + `tests`
+  (nixpkgs glib drags libselinux/libsepol + util-linux/libmount + libsysprof-capture
+  — none cross to NOMMU wasm, none needed). `util-linuxMinimal` can't be `null`ed
+  (an `isLinux` assert) → filter it out of build/propagated inputs post-override;
+  drop **target** `gnum4` (m4 won't cross — gnulib `stackvma.c` has no wasm path; the
+  guest never uses glib's m4 macros); drop the `devdoc` output (like harfbuzz). gio
+  modules build **into libgio** (the NOMMU guest can't dlopen). Codegen tools
+  (glib-genmarshal/compile-schemas/…) come from native `buildPackages` via meson cross.
+- **futex_time64 arity** (`patches/kernel/0015`): `__NR_futex_time64` (422) maps to the
+  6-arg `sys_futex`, but musl/glib call it with **4** args → strict wasm
+  `call_indirect` on the 6-arg handler traps. Fix = a 4-arg `sys_wasm32_futex` wrapper
+  forwarding `sys_futex(uaddr,op,val,utime,NULL,0)` (FUTEX_WAIT/WAKE ignore uaddr2/val3),
+  overriding `__NR_futex_time64` — mirrors the `sys_wasm32_*` pattern. Rebuilds only vmlinux.
+- **glib `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
+  wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
+  `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is
+  absent even though the function is never called (its `GOT.func` address resolves to 0
+  → the call guard is false). The `GOT.func`/`GOT.mem` Proxy is scoped to those two
+  import namespaces ONLY — it can't touch `env.*` or the internal `GOT.func.internal.*`
+  defined globals (those carry real function-pointer relocs and are untouched).
+- **gobject class_init trap = wasm strict-`call_indirect` SIGNATURE cast, NOT a reloc
+  bug** (third instance of this theme, with libffi/M1 + futex): glib casts
+  `g_object_do_class_init` (1-arg) to the 2-arg `GClassInitFunc` and calls it through
+  that type; strict wasm traps, and LLVM-21's opaque pointers leave no IR bitcast for
+  `WebAssemblyFixFunctionBitcasts` (no clang/wasm-ld flag). Fix = a **binaryen post-link
+  pass** `wasm-opt -pa max-func-params@128 --fpcast-emu` (emscripten's
+  `EMULATE_FUNCTION_POINTER_CASTS` equivalent; `max-func-params@128` because the 18
+  default is too narrow). Apply it **per-binary** to each glib/GTK-linking executable
+  (a shared seam) — NOT globally in the cc-wrapper, which would rewrite the calling
+  convention of EVERY guest binary (nix.wasm, busybox, the libffi backend). No-op for
+  the libffi raw `ffi_call` path (that `call_indirect` already has the right arity).
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
