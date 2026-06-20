@@ -1,0 +1,24 @@
+toolchain/guest-cc-fork.nix
+  s_d2c9c080387123::t_434b303b8dd73d 89-90
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_446c897d70e8ca 44-57
+  s_d2c9c080387123::t_d76366efafd6c5 21-22
+kernel.nix
+  s_d2c9c080387123::t_694bca777ae714 136-140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c7001017a5573bbccab763a40fb3af83f88f2636",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
