@@ -23,6 +23,7 @@ import { createModuleWorker } from "./make-worker.js";
 // consistent across the two writers. See wayland_push_in below + kernel patch 0014.
 import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
+import { NetDevice } from "./virtio/net-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -135,6 +136,47 @@ export const linux = async ({
     return hostWlDevice;
   };
 
+  // virtio-net (guest networking): a MAIN-thread NetDevice mirrors the worker's,
+  // driving the RX queue (host→guest). It reuses the wl idle-wake machinery —
+  // the same raised_irqs[0] address (wlRaisedIrqsAddr, armed by wayland_irq_addr)
+  // and raiseHostWlIrq — so writing an inbound frame to the RX vring wakes a
+  // parked idle CPU directly, without postMessaging a worker that can't run JS.
+  // It shares hostWlQueues (the cross-worker queue-layout SAB) so the RX vring +
+  // its avail cursor stay consistent with the worker's instance. dev=2, irq=10.
+  const VW_DEV_NET = 2;
+  let hostNetDevice = null;
+  const hostNet = () => {
+    if (!hostNetDevice && wlRaisedIrqsAddr != null) {
+      hostNetDevice = new NetDevice({
+        dev: VW_DEV_NET,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_NET,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues,
+        log,
+        mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02],
+      });
+    }
+    return hostNetDevice;
+  };
+
+  // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
+  // frame as { method: "net_out", frame } and we enqueue it here.
+  let netController = null;
+  const netReadable = new ReadableStream({
+    start: (c) => {
+      netController = c;
+    },
+  });
+  // handle.net.writable: inbound ethernet frames. Each write is delivered to the
+  // guest via the main-thread NetDevice's RX vring (pushRx).
+  const netWritable = new WritableStream({
+    write: (frame) => {
+      hostNet()?.pushRx(frame instanceof Uint8Array ? frame : new Uint8Array(frame));
+    },
+  });
+
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
     // Wayland (idle wake): the worker hands us raised_irqs[0]'s address once,
@@ -238,6 +280,13 @@ export const linux = async ({
     // on the worker, which forwards it here (the host owns the IN vring).
     wayland_in_refill: (_message) => {
       hostWl()?.flushIn();
+    },
+
+    // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on
+    // handle.net.readable for the pc-side tap. `frame` is a transferred
+    // ArrayBuffer (the worker posted it with a transfer list).
+    net_out: (message) => {
+      netController?.enqueue(new Uint8Array(message.frame));
     },
 
     // Wayland: the guest closed a ctx vfd (its Wayland client exited) — forward to
@@ -453,6 +502,15 @@ export const linux = async ({
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
+    },
+
+    // virtio-net guest networking. `readable` emits guest-egress ethernet
+    // frames; writing a frame to `writable` injects it into the guest's RX vring.
+    // `setLinkUp(up)` flips the reported VIRTIO_NET_S_LINK_UP config bit.
+    net: {
+      readable: netReadable,
+      writable: netWritable,
+      setLinkUp: (up) => hostNet()?.setLinkUp(up),
     },
   };
 };

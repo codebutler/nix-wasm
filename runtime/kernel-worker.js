@@ -11,6 +11,7 @@ import { Ring } from "./ninep/ring.js";
 import { makeWasm9pRequest } from "./ninep/host-call.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
+import { NetDevice } from "./virtio/net-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -224,6 +225,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VIRTIO_WASM_IRQ_BASE = 8;
   const VW_DEV_WL = 0;
   const VW_DEV_ECHO = 1;
+  const VW_DEV_NET = 2;
 
   /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
   const virtio_devices = new Map();
@@ -293,7 +295,22 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           log("[virtio-wl] wasm_raised_irqs_ptr failed: " + e);
         }
       } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
-      else {
+      else if (id === VW_DEV_NET) {
+        // virtio-net: this worker owns the TX queue (guest egress). Each frame
+        // the guest transmits is posted FIRE-AND-FORGET to the main thread,
+        // which enqueues it on handle.net.readable. RX (host→guest) is driven
+        // by the MAIN-thread NetDevice (kernel-host hostNet()) over the same
+        // shared queue-layout SAB + raised_irqs self-wake, so a parked idle CPU
+        // is woken without this worker servicing a postMessage (the wl pattern).
+        const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
+        net.setFrameSink((frame) => {
+          port.postMessage(
+            { method: "net_out", dev: id, frame: frame.buffer },
+            [frame.buffer],
+          );
+        });
+        d = net;
+      } else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;
       }
