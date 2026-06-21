@@ -164,6 +164,7 @@ export const linux = async ({
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
+  let netLinkUp = false;
   const netReadable = new ReadableStream({
     start: (c) => {
       netController = c;
@@ -286,7 +287,16 @@ export const linux = async ({
     // handle.net.readable for the pc-side tap. `frame` is a transferred
     // ArrayBuffer (the worker posted it with a transfer list).
     net_out: (message) => {
-      netController?.enqueue(new Uint8Array(message.frame));
+      // Gate: only forward guest-egress frames once the link is up AND a reader
+      // is keeping up (desiredSize > 0). Before a tap attaches, frames would
+      // buffer unbounded; after close/error, enqueue would throw in this handler.
+      if (!netLinkUp || netController == null) return;
+      if (!(netController.desiredSize > 0)) return; // backpressure / no reader: drop
+      try {
+        netController.enqueue(new Uint8Array(message.frame));
+      } catch {
+        // controller closed or errored — drop the frame rather than throw here
+      }
     },
 
     // Wayland: the guest closed a ctx vfd (its Wayland client exited) — forward to
@@ -510,7 +520,10 @@ export const linux = async ({
     net: {
       readable: netReadable,
       writable: netWritable,
-      setLinkUp: (up) => hostNet()?.setLinkUp(up),
+      setLinkUp: (up) => {
+        netLinkUp = !!up;
+        hostNet()?.setLinkUp(up);
+      },
     },
   };
 };
