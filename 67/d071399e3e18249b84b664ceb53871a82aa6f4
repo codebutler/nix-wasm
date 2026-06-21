@@ -1,0 +1,23 @@
+userspace/initramfs.nix
+  s_8dd181a5441a15::t_aa772a46724868 36-41
+runtime/demo/node/dhcp-spike.mjs
+  s_8dd181a5441a15::t_5d9594c7466d45 73-75
+  s_8dd181a5441a15::t_2676258030a04f 128-130
+  s_8dd181a5441a15::t_39e73d06fdce5a 28-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "67d071399e3e18249b84b664ceb53871a82aa6f4",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
