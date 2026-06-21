@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md
+  s_73dab31ed0204e::t_156fc99cde154b 115-121
+  s_73dab31ed0204e::t_ba7d63a436c143 173-183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2c770b7e4b4d98229f95aa85cbd3b7363ce47adf",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
