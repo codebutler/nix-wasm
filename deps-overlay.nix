@@ -112,6 +112,20 @@ in
 
   # --- per-package NON-static cross fixes -------------------------------------
 
+  # pkg-config 0.29.2 bundles an old glib (~2.40 era) via --with-internal-glib.
+  # That bundled glib's gspawn.c, gtestutils.c, and gbacktrace.c reference fork().
+  # The nixpkgs `pkg-config` attr is a thin wrapper; the actual compiled package is
+  # `pkg-config-unwrapped`. Override that so the patch applies to the C compilation.
+  # (pkg-config is a build tool consumed by meson/autoconf cross probes; it never
+  # spawns subprocesses at runtime — the fork path is dead code here.)
+  "pkg-config-unwrapped" = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [
+        ./patches/pkg-config/0001-bundled-glib-no-fork-wasm-nommu.patch
+      ];
+    }))
+    prev."pkg-config-unwrapped";
+
   # openssl: undo the wrapper's forced -D_GNU_SOURCE. openssl's o_str.c picks the
   # GNU strerror_r prototype (returns char*) when _GNU_SOURCE is defined, but musl
   # ALWAYS provides POSIX strerror_r (returns int) → the GNU branch assigns
@@ -265,6 +279,18 @@ in
           "-Dtests=false"
           "-Dnls=enabled"
         ];
+        # wasm NOMMU has no fork/vfork.  Force glib's existing posix_spawn path
+        # (GNOME/glib MR !95, !1968) to be the ONLY spawn mechanism.  The patch:
+        #   - forces POSIX_SPAWN_AVAILABLE on __wasm__
+        #   - extends do_posix_spawn() with working_directory + close_descriptors
+        #   - handles the fork-fallback conditions (intermediate_child, search_path_from_envp)
+        #     via the extended posix_spawn call; child_setup fails loudly
+        #   - retries ENOEXEC scripts via posix_spawn("/bin/sh", argv...)
+        #   - compiles out the entire fork()/exec() block so no fork symbol is emitted
+        #   - compiles out g_test_trap_fork()'s fork body (deprecated, never used on guest)
+        patches = (o.patches or [ ]) ++ [
+          ./patches/glib/0001-posix-spawn-only-wasm-nommu.patch
+        ];
       }))
     prev.glib;
 
@@ -393,6 +419,50 @@ in
       };
     }))
     prev.zlib;
+
+  # --- pixman: disable tests (test code references fork, not in library itself) --
+  # pixman's meson.build builds tests/fence-image-self-test which calls fork().
+  # The library itself has no fork reference; only the test binary does.
+  # Disable tests so the cross build doesn't attempt to link them.
+  pixman = whenWasm
+    (p: p.overrideAttrs (o: {
+      mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dtests=disabled" ];
+    }))
+    prev.pixman;
+
+  # --- wayland: disable tests (test runner calls fork; library itself is clean) --
+  # wayland 1.25.0 tests/test-runner.c calls fork() to isolate each test process.
+  # The wayland libraries (libwayland-client, -server, -util) have no fork reference.
+  # withTests=false passes -Dtests=false to meson, skipping the test executables.
+  wayland = whenWasm
+    (p: p.override { withTests = false; })
+    prev.wayland;
+
+  # --- libxkbcommon: disable tests (test binaries call fork; library is clean) ---
+  # libxkbcommon 1.13.1 test/ binaries call fork() to isolate each test. meson
+  # builds them unconditionally as part of ninja all (no -Dtests option exists).
+  # Use postPatch with python to remove all test() / benchmark() / executable()
+  # calls whose target names start with "test-" or "bench-" and their associated
+  # libxkbcommon_test_internal / fuzz- executables.  Leave has_merge_modes_tests
+  # defined (used by summary()) but set to false so the condition is vacuous.
+  # The library itself (libxkbcommon.a / libxkbregistry.a) has no fork references.
+  libxkbcommon = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        # Remove test+bench stanzas from meson.build: lines from
+        # 'm_dep = cc.find_library' through the blank line just before
+        # '# Documentation.', replacing with has_merge_modes_tests=false
+        # (that variable is referenced by the summary() block that follows).
+        # Tests call fork() which is absent in wasm NOMMU musl.
+        sed -n '1p' meson.build > /dev/null  # sanity check sed works
+        start_line=$(grep -n "^m_dep = cc\.find_library" meson.build | head -1 | cut -d: -f1)
+        end_line=$(grep -n "^# Documentation\." meson.build | head -1 | cut -d: -f1)
+        end_line=$((end_line - 1))
+        sed -i "$((start_line)),$((end_line))d" meson.build
+        sed -i "$((start_line - 1))a\\# wasm: test/bench disabled (fork absent in NOMMU musl)\nhas_merge_modes_tests = false\n" meson.build
+      '';
+    }))
+    prev.libxkbcommon;
 
   # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
   # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the

@@ -31,6 +31,11 @@ cross.stdenv.mkDerivation {
   patches = [
     ../patches/busybox/0001-wasm-arch-and-clone-spawn.patch
     ../patches/busybox/0004-libbb-spawn-clone.patch
+    # wasm: xfork() uses fork() which is absent in wasm musl even when BB_MMU=1
+    # (ash.nix uses allnoconfig without CONFIG_NOMMU=y, so BB_MMU stays 1 so that
+    # ash can be compiled — ash depends on !NOMMU in Kconfig — but fork() is still
+    # absent on wasm; guard xfork() with !defined(__wasm__) to match musl's reality).
+    ../patches/busybox/0007-xfork-no-fork-wasm.patch
     # ash forkshell stack (pc vendor/busybox/wasi-compat, busybox-w32 lineage):
     ../patches/busybox/ash/0001-ash-cb-spawn.patch
     ../patches/busybox/ash/0002-ash-m3-m4.patch
