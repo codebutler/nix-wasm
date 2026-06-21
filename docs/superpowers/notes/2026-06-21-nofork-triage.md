@@ -137,14 +137,38 @@ not a fork fix).
 - **`nofork-linkcheck` spike** — `fork=ABSENT`, `spawn=LINKED` (contract verified)
 - **engine unit tests** (`bun run test`) — 79/79 pass
 
-## Smoke result
+### 4. ncurses (`test/` demo programs, e.g. `test/ditto.c`) — RESOLVED (surfaced after glib fixed)
 
-BLOCKED on **glib** (item 3): `wasm-initramfs` pulls the GTK demo stack via
-`extraBins`, and glib's `g_spawn`/`g_test_trap_fork` use real `fork()`. nix-wasm
-and busybox/ash now build, but the initramfs artifact (and thus the full boot
-smoke) cannot assemble until glib's fork sites are ported to clone-with-fn (the
-genuine Task-3 NOMMU spawn work), or the GTK extraBins are scoped out for a
-smoke-only initramfs.
+**Error:**
+```
+wasm-ld: error: ../objects/ditto.o: undefined symbol: fork
+```
+(building dir `/build/ncurses-6.6/test`; cascades ncurses → terminfo-xterm-256color
+→ system-path → wasm-system → wasm-store-manifest)
+
+**Root cause:** ncurses' default `make all` descends into its `test/` directory and
+builds the demo programs. `ditto.c` is a multi-terminal demo that calls `fork()`
+(several other demos do too). Those demos are NEVER installed (the install targets
+are `install.{libs,progs,includes,data,man}` — none touch `test/`) and never run on
+the guest. They only linked under the old runtime-abort-stub model because `fork`
+was a linkable symbol that SIGILL'd at runtime; with the symbol removed they fail at
+LINK. The ncurses **library** (libncursesw) and **progs** (tic/tput/…) the guest
+actually uses do NOT call fork.
+
+**FIX APPLIED** (`deps-overlay.nix`, wasm-guarded ncurses override): set
+`buildFlags = [ "libs" "progs" ]` so `make` builds only the targets that get
+installed, skipping the unused fork-using `test/` demos. Library + programs
+unaffected; native ncurses still builds its full `all`.
+
+## Smoke result — PASS (2026-06-21)
+
+Full boot smoke is **GREEN** end-to-end (`node demo/node/smoke.mjs`, exit 0):
+boot → 9P read/write/overwrite/append/ls → `nix-env -iA sl` substitutes `sl` from
+the committed binary cache and renders. The clean-NOMMU spawn changes (fork/vfork
+removed at link level, glib ported to `posix_spawn`, ncurses test-demos skipped)
+do **not** regress the boot path. Artifacts: kernel/initramfs/store-manifest from
+`nix build`; the `sl` package cache is the committed pc-vendored
+`nix-cache/` fixture (wired into `.artifacts/nix-cache`).
 
 ## What NOT to do
 

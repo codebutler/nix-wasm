@@ -182,6 +182,23 @@ in
     }))
     prev.pcre2;
 
+  # ncurses: clean-NOMMU spawn contract — ncurses' default `make all` descends into
+  # its `test/` directory and builds the demo programs (ditto.c is a multi-terminal
+  # demo that calls fork(); several others do too). Those demos are NEVER installed
+  # (the install targets are install.{libs,progs,includes,data,man} — none touch
+  # test/) and never run on the guest. They only linked on the old runtime-abort-stub
+  # model because `fork` was a linkable symbol that SIGILL'd at runtime; with the
+  # symbol removed from musl they fail at LINK ("undefined symbol: fork"). Build only
+  # the targets that are actually installed (`libs progs` → libncursesw + tic/tput/…),
+  # so the unused fork-using demos are not built. The library and programs the guest
+  # consumes (terminfo via tic, libncursesw) are unaffected. Wasm-guarded → native
+  # ncurses still builds its full `all` (test demos included).
+  ncurses = whenWasm
+    (p: p.overrideAttrs (o: {
+      buildFlags = (o.buildFlags or [ ]) ++ [ "libs" "progs" ];
+    }))
+    prev.ncurses;
+
   # --- libffi: replace the emscripten-JS wasm backend with a raw one ----------
   # libffi 3.5 auto-selects src/wasm/ffi.c for any wasm32 host, but that file is
   # written entirely in EM_JS — it implements ffi_call/closures as JavaScript the
