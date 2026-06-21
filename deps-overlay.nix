@@ -117,13 +117,56 @@ in
   # ALWAYS provides POSIX strerror_r (returns int) → the GNU branch assigns
   # int→char* and clang errors (-Wint-conversion). -U lets openssl take its POSIX
   # branch on musl. (static linking comes from isStatic.)
+  #
+  # `no-apps`: clean-NOMMU spawn contract — the `openssl` CLI binary (apps/openssl)
+  # is the ONLY openssl artifact that calls fork() (speed.c parallel benchmark
+  # workers + apps/http_server.c); libssl/libcrypto do NOT. wasm musl ships no
+  # fork() (return-twice is unimplementable on the NOMMU clone-with-fn model), so
+  # apps/openssl fails to LINK ("undefined symbol: fork"). The cross-compiled wasm
+  # openssl CLI would never run on the host and the guest only consumes the
+  # libraries (curl/libgit2 → nix.wasm), so skip building it. Wasm-guarded → native
+  # openssl still builds its CLI.
+  #
+  # With `no-apps` there is no `$out/bin/openssl`, so nixpkgs' stock `postInstall`
+  # (which `mv $out/bin → $bin/bin` then `makeWrapper $bin/bin/openssl … c_rehash`)
+  # dies wrapping the absent CLI. Replace it with a CLI-free postInstall: drop the
+  # static `.a` only if shared libs exist (they don't here), provide an empty $bin,
+  # split $dev, and prune the perl-dependent etc/ssl/misc + empty cert dirs — i.e.
+  # the same library-only result minus every openssl-CLI step.
   openssl = whenWasm
     (p: p.overrideAttrs (o: {
+      configureFlags = (o.configureFlags or [ ]) ++ [ "no-apps" ];
       env = (o.env or { }) // {
         NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "") + " -U_GNU_SOURCE";
       };
+      postInstall = ''
+        if [ -n "$(echo $out/lib/*.so $out/lib/*.dylib $out/lib/*.dll 2>/dev/null)" ]; then
+          rm -f "$out/lib/"*.a
+        fi
+        etc=$out
+        mkdir -p $bin
+        # no-apps → no $out/bin (no openssl CLI, no c_rehash wrapper to make)
+        mkdir $dev
+        mv $out/include $dev/
+        rm -rf $etc/etc/ssl/misc
+        rmdir $etc/etc/ssl/{certs,private} 2>/dev/null || true
+      '';
     }))
     prev.openssl;
+
+  # pcre2: clean-NOMMU spawn contract — the `pcre2grep` CLI tool calls fork() for
+  # its `--exec`/callout-fork feature (pcre2grep.c, guarded by
+  # SUPPORT_PCRE2GREP_CALLOUT_FORK). The libpcre2 LIBRARY (the only thing libgit2 →
+  # nix.wasm consumes) does NOT. wasm musl ships no fork(), so pcre2grep fails to
+  # LINK ("undefined symbol: fork"). `--disable-pcre2grep-callout-fork` drops the
+  # fork-based callout from pcre2grep — the tool still builds (and is unused on the
+  # guest), the library is unaffected. Wasm-guarded → native pcre2 keeps the
+  # feature.
+  pcre2 = whenWasm
+    (p: p.overrideAttrs (o: {
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-pcre2grep-callout-fork" ];
+    }))
+    prev.pcre2;
 
   # --- libffi: replace the emscripten-JS wasm backend with a raw one ----------
   # libffi 3.5 auto-selects src/wasm/ffi.c for any wasm32 host, but that file is

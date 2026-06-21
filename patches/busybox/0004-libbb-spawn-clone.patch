@@ -7,6 +7,40 @@ are the shared helpers many applets funnel through (spawn_and_wait, xspawn,
 bb_daemonize_or_rexec); timeout has its own watcher vfork on top. vfork can't
 work on wasm (a fresh instance can't resume the parent mid-function).
 
+Also neuter libbb's xvfork_parent_waits_and_exits() under !BB_MMU. It is a
+genuine vfork-return-twice API (parent waits+exits, the child continues IN the
+caller) that clone-with-a-fn cannot express, and its only callers — nsenter and
+unshare — are disabled on the wasm guest. Stock libbb always defines it (it
+lives in the always-linked xfuncs_printf.o), so under the clean-NOMMU contract
+(wasm musl has no vfork symbol) it left an unresolved `vfork` at static-link
+time even though --gc-sections keeps that TU for its other xfuncs. Compile its
+body to a loud abort on !BB_MMU so no vfork reference remains; it is unreachable
+(no enabled applet calls it).
+
+--- a/libbb/xfuncs_printf.c
++++ b/libbb/xfuncs_printf.c
+@@ -698,6 +698,12 @@
+
+ void FAST_FUNC xvfork_parent_waits_and_exits(void)
+ {
++#if !BB_MMU
++	/* wasm NOMMU: this is a vfork-return-twice API (no clone-with-fn
++	 * equivalent). Its only callers (nsenter/unshare) are disabled here, so
++	 * it is unreachable — abort loudly rather than reference the absent vfork. */
++	bb_simple_error_msg_and_die("xvfork_parent_waits_and_exits: unsupported on NOMMU");
++#else
+ 	pid_t pid;
+
+ 	fflush_all();
+@@ -710,6 +716,7 @@
+ 		_exit(WEXITSTATUS(exit_status));
+ 	}
+ 	/* Child continues */
++#endif
+ }
+
+ // Useful when we do know that pid is valid, and we just want to wait
+
 --- a/libbb/vfork_daemon_rexec.c
 +++ b/libbb/vfork_daemon_rexec.c
 @@ -16,6 +16,7 @@
