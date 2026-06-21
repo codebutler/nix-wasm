@@ -53,6 +53,31 @@ pkgs.writeText "init" ''
     mkdir -p /nix/store
   fi
 
+  # Auto-configure networking via DHCP before handing off to init, so BOTH the
+  # nix-system path (exec "$sys/init") and the busybox-only path (exec /bin/sh)
+  # come up networked. The host (pc tcpip.js) runs a DHCP server on the bridge
+  # gateway 10.0.2.1/24; udhcpc gets us a 10.0.2.x lease and runs the lease
+  # script (/usr/share/udhcpc/default.script) to set the address/route/DNS.
+  #
+  # NOMMU caveats (proven by the Task 2.5 node spike — see docs/2026-06-21-
+  # guest-dhcp-spike.md). udhcpc's DHCP protocol AND its lease-script exec work
+  # fine on this wasm NOMMU guest — the script runs via libbb spawn() ->
+  # clone-with-a-fn (patch 0004). Two things DON'T work and we route around them:
+  #   1. udhcpc's OWN `-b` daemonize (bb_daemonize_or_rexec) silently dies — with
+  #      -b it never even sends a DISCOVER. So we use `-f` (stay foreground).
+  #   2. Backgrounding udhcpc directly from THIS init with `&` and then
+  #      `exec`-ing the next stage races the just-forked job away (no udhcpc in
+  #      the process table afterwards). Wrapping the launch in `sh -c '... &'`
+  #      detaches it into its own shell that fully spawns udhcpc before this init
+  #      continues to the exec handoff — that survives and acquires the lease.
+  # Flags: -f (foreground, no self-daemonize), -t 0 (retry DISCOVER forever — the
+  # host DHCP server may not be up yet at boot), -A 2 (short inter-round wait).
+  # No -q: udhcpc stays resident so it re-runs the lease script on renew. Guarded
+  # on the NIC existing so a no-net kernel still boots.
+  if [ -e /sys/class/net/eth0 ]; then
+    sh -c 'ip link set eth0 up 2>/dev/null; udhcpc -i eth0 -f -t 0 -A 2 >/dev/null 2>&1 &'
+  fi
+
   # Resolve + activate the system, then hand off to init. The whole toolchain
   # (nix + multi-call entry points, clang, wasm-ld, cc, make) is now part of the
   # activated system profile (/run/current-system/sw/bin, on PATH via /etc/profile)

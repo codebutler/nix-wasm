@@ -14,6 +14,55 @@
 # `extraBins`: extra guest derivations whose $out/bin/* are copied into /bin
 # (Phase 1 1b ships the /dev/wl0 self-test binary, wltest, this way).
 { pkgs, busybox, init, extraBins ? [ ] }:
+let
+  # busybox udhcpc lease script. udhcpc execs this (via libbb spawn(),
+  # clone-with-a-fn on NOMMU — see patches/busybox/0004) on each lease event,
+  # passing the action as $1 and the lease params as env vars ($ip/$subnet/
+  # $router/$dns/$interface). We apply them with `ip`/`ifconfig` (both busybox
+  # applets, present in the guest set). Kept minimal: bring the iface up with no
+  # address on `deconfig`; flush + add the address/route + write resolv.conf on
+  # `bound`/`renew`.
+  udhcpcScript = pkgs.writeText "udhcpc-default.script" ''
+    #!/bin/sh
+    # Address tcpip.js's DHCP server gives us; configure eth0 from the lease.
+    RESOLV=/etc/resolv.conf
+
+    case "$1" in
+      deconfig)
+        ip link set "$interface" up 2>/dev/null
+        ip addr flush dev "$interface" 2>/dev/null
+        ;;
+
+      renew|bound)
+        ip link set "$interface" up 2>/dev/null
+        # Replace any prior address (renew may change it). ifconfig takes the
+        # dotted netmask udhcpc hands us directly, avoiding mask->prefix math.
+        ip addr flush dev "$interface" 2>/dev/null
+        if [ -n "$subnet" ]; then
+          ifconfig "$interface" "$ip" netmask "$subnet" up
+        else
+          ifconfig "$interface" "$ip" up
+        fi
+
+        if [ -n "$router" ]; then
+          # Clear stale default(s), then install the lease's gateway.
+          while ip route del default 2>/dev/null; do :; done
+          for r in $router; do
+            ip route add default via "$r" dev "$interface" 2>/dev/null
+          done
+        fi
+
+        # Rewrite resolv.conf from the lease's DNS servers.
+        : > "$RESOLV" 2>/dev/null
+        [ -n "$domain" ] && echo "search $domain" >> "$RESOLV"
+        for d in $dns; do
+          echo "nameserver $d" >> "$RESOLV"
+        done
+        ;;
+    esac
+    exit 0
+  '';
+in
 pkgs.runCommand "wasm-initramfs"
   {
     nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
@@ -39,6 +88,13 @@ pkgs.runCommand "wasm-initramfs"
     # the generated /init (entrypoint; kernel cmdline init=/init).
     cp ${init} "$root/init"
     chmod +x "$root/init"
+
+    # busybox udhcpc lease script (run at every DHCP event by the udhcpc the
+    # /init launches at boot). Default path udhcpc looks for is
+    # /usr/share/udhcpc/default.script; must be executable.
+    mkdir -p "$root/usr/share/udhcpc" "$root/etc"
+    cp ${udhcpcScript} "$root/usr/share/udhcpc/default.script"
+    chmod +x "$root/usr/share/udhcpc/default.script"
 
     # mktemp -d creates the root 0700; an initramfs / must be traversable.
     chmod 0755 "$root"
