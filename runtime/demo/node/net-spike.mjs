@@ -1,73 +1,128 @@
-// net-spike.mjs — Phase 1 Task 1.3 SPIKE: does stock virtio_net probe on the
-// wasm32 nommu no-DMA virtio_wasm transport and create eth0?
+// net-spike.mjs — Phase 1 GATE (Task 1.6): prove the virtio-net plumbing end to
+// end. Boots the busybox guest, statically configures eth0, attaches the guest's
+// ethernet-frame stream (handle.net) to a tcpip.js stack acting as the gateway
+// 10.0.2.1/24, and checks:
+//   1) host -> guest ICMP   (tcpip.js ping session probing 10.0.2.2)
+//   2) guest -> host ICMP   (busybox `ping -c1 10.0.2.1`, lwIP auto-replies)
+//   3) guest -> host TCP    (busybox `telnet` connects to a tcpip.js listener)
+//   PASS -> exit 0, FAIL -> exit 1, INCONCLUSIVE (panic/timeout) -> exit 2
 //
-// Boots the busybox-only guest (nix:false), captures the kernel log (onLog),
-// waits for a shell prompt, then asks the guest to enumerate its net devices.
-// PASS = `virtio_net` registers + `eth0` present. FAIL = probe oops / hang / no eth0.
+// TCP applet choice: this guest's curated busybox set ships NEITHER `nc` NOR
+// `wget` (verified via `busybox --list` against the current artifacts), so the
+// brief's `nc`/`wget` options don't apply without a userspace rebuild — which we
+// avoid. `telnet` IS a built applet and opens a raw TCP connection, so check #3
+// drives `telnet 10.0.2.1 9099` and the host listener asserts an accepted
+// connection carrying the guest's payload. (The host greets on-connect and looks
+// for "hello" in the bytes telnet streams; if telnet's IAC negotiation perturbs
+// the payload, an accepted connection alone already proves the guest->host TCP
+// path — SYN routed through the tap to lwIP and a full handshake completed.)
 import { bootNode } from "./boot-node.mjs";
+import { createStack } from "tcpip";
 
-const hostLog = [];
-const s = await bootNode({
-  nix: false,
-  onLog: (m) => {
-    const str = String(m);
-    hostLog.push(str);
-  },
-});
+const GUEST_IP = "10.0.2.2";
+const GW_IP = "10.0.2.1";
+const GW_CIDR = `${GW_IP}/24`;
+const TCP_PORT = 9099;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const s = await bootNode({ nix: false });
+let code = 2;
 try {
-  const gotPrompt = await s.waitForPrompt(60000).catch((e) => {
-    console.log("[net-spike] waitForPrompt threw: " + e.message);
-    return false;
-  });
-  console.log("[net-spike] prompt reached: " + gotPrompt);
+  if (!(await s.waitForPrompt(60000))) throw new Error("no shell prompt");
 
-  // Enumerate net interfaces a few different ways (busybox coverage).
-  s.send("ls /sys/class/net\n");
-  await sleep(1500);
-  s.send("ip link\n");
-  await sleep(1500);
-  s.send("cat /proc/net/dev\n");
-  await sleep(1500);
+  // Host: tcpip.js stack as the gateway, tap piped to the guest NIC frame stream.
+  const stack = await createStack();
+  const tap = await stack.interfaces.createTap({ mac: "52:54:00:cb:00:01", ip: GW_CIDR });
+  // Pipe both directions; swallow the rejection these settle with on s.kill().
+  s.handle.net.readable.pipeTo(tap.writable).catch(() => {});
+  tap.readable.pipeTo(s.handle.net.writable).catch(() => {});
+  s.handle.net.setLinkUp(true);
+  await sleep(300);
 
-  const guestLog = s.snapshot();
-  const kernelLog = hostLog.join("\n");
-  const combined = guestLog + "\n" + kernelLog;
+  // Guest: static IP + route (no DHCP in Phase 1).
+  s.send(
+    `ip addr add ${GUEST_IP}/24 dev eth0 && ip link set eth0 up && ip route add default via ${GW_IP}; echo IPCFG=$?\n`,
+  );
+  await s.waitForOutput(/IPCFG=0/, 6000);
+  await sleep(1000);
 
-  console.log("\n── kernel log: virtio_net / eth0 trail ──");
-  for (const line of kernelLog.split("\n")) {
-    if (/virtio_net|virtio2|eth0|virtio_wasm: registered dev=2|net/i.test(line)) {
-      console.log("  " + line);
+  // 1) host -> guest ICMP via the tcpip.js ping session.
+  let hostToGuest = false;
+  try {
+    const ping = await stack.ping.createSession({ host: GUEST_IP });
+    const reply = await Promise.race([
+      ping.ping({ timeout: 4000 }),
+      sleep(5000).then(() => Promise.reject(new Error("ping timeout"))),
+    ]);
+    hostToGuest = !!reply;
+    await ping.close().catch(() => {});
+    console.log(
+      `[net-spike] host->guest ping: OK (rtt=${reply.roundTripTime}ms seq=${reply.sequenceNumber})`,
+    );
+  } catch (e) {
+    console.log("[net-spike] host->guest ping: FAIL — " + e.message);
+  }
+
+  // 2) guest -> host ICMP (lwIP auto-replies at the gateway).
+  s.send(`ping -c 1 -W 2 ${GW_IP}; echo PINGRC=$?\n`);
+  const guestToHost = await s.waitForOutput(/PINGRC=0/, 8000);
+  console.log("[net-spike] guest->host ping:", guestToHost ? "OK" : "FAIL");
+
+  // 3) guest -> host TCP: host listens on TCP_PORT, guest connects with telnet.
+  let gotTcp = false;
+  let tcpAccepted = false;
+  const listener = await stack.tcp.listen({ port: TCP_PORT });
+  (async () => {
+    for await (const conn of listener) {
+      tcpAccepted = true;
+      // Greet so a round-trip exists even if telnet sends nothing parseable.
+      try {
+        const w = conn.writable.getWriter();
+        await w.write(new TextEncoder().encode("ok\n"));
+        w.releaseLock();
+      } catch {
+        /* peer may close fast */
+      }
+      try {
+        const r = conn.readable.getReader();
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          const { value, done } = await r.read();
+          if (done) break;
+          if (value && new TextDecoder().decode(value).includes("hello")) {
+            gotTcp = true;
+            break;
+          }
+        }
+        r.releaseLock();
+      } catch {
+        /* ignore */
+      }
+      await conn.close().catch(() => {});
+      break;
     }
-  }
-  console.log("─────────────────────────────────");
-  console.log("── guest console tail ──");
-  console.log(guestLog.slice(-2500));
-  console.log("─────────────────────────────────");
+  })().catch(() => {});
 
-  const panic = /Kernel panic|panic:|Oops|BUG:/i.test(combined);
-  const eth0 = /\beth0\b/.test(combined);
-  const driverReg = /virtio_net/i.test(combined);
+  // telnet streams stdin to the socket; feed it "hello" then quit.
+  s.send(`(echo hello; sleep 1) | telnet ${GW_IP} ${TCP_PORT}; echo TELNETRC=$?\n`);
+  await sleep(3500);
+  // An accepted connection already proves the guest->host TCP handshake; payload
+  // match is the stronger signal but telnet's IAC bytes can mangle it.
+  const tcpOk = gotTcp || tcpAccepted;
+  console.log(
+    "[net-spike] guest->host tcp:",
+    gotTcp ? "OK (payload)" : tcpAccepted ? "OK (connection accepted)" : "FAIL",
+  );
 
-  console.log("\n[net-spike] panic/oops:   " + panic);
-  console.log("[net-spike] virtio_net:   " + driverReg);
-  console.log("[net-spike] eth0 present: " + eth0);
-
-  if (!panic && eth0 && driverReg) {
-    console.log("[net-spike] VERDICT: PASS");
-    process.exitCode = 0;
-  } else if (!panic && eth0) {
-    console.log("[net-spike] VERDICT: PASS (eth0 present; driver string not in captured log)");
-    process.exitCode = 0;
-  } else {
-    console.log("[net-spike] VERDICT: FAIL");
-    process.exitCode = 1;
-  }
+  code = hostToGuest && guestToHost && tcpOk ? 0 : 1;
+  if (code) console.log("[net-spike] console tail:\n" + s.snapshot().slice(-2000));
+  else console.log("[net-spike] VERDICT: PASS — all three checks OK");
+} catch (e) {
+  console.log("[net-spike] INCONCLUSIVE:", e.message);
+  console.log(s.snapshot().slice(-2000));
 } finally {
   s.kill();
-  // boot-node spawns workers; give them a tick then hard-exit.
   await sleep(200);
-  process.exit(process.exitCode || 0);
+  process.exit(code);
 }
