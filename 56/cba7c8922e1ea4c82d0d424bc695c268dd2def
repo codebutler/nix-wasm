@@ -1,0 +1,19 @@
+docs/superpowers/notes/2026-06-21-nofork-triage.md
+  s_73dab31ed0204e::t_b45b334b47612f 1-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "56cba7c8922e1ea4c82d0d424bc695c268dd2def",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
