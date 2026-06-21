@@ -291,7 +291,7 @@ export const linux = async ({
       // is keeping up (desiredSize > 0). Before a tap attaches, frames would
       // buffer unbounded; after close/error, enqueue would throw in this handler.
       if (!netLinkUp || netController == null) return;
-      if (!(netController.desiredSize > 0)) return; // backpressure / no reader: drop
+      if (!(netController.desiredSize > 0)) return; // queue full — drop rather than buffer unbounded
       try {
         netController.enqueue(new Uint8Array(message.frame));
       } catch {

@@ -29,6 +29,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const s = await bootNode({ nix: false });
 let code = 2;
 try {
+  // 60s (up from the brief's 45s) — cold boot is slow on this host.
   if (!(await s.waitForPrompt(60000))) throw new Error("no shell prompt");
 
   // Host: tcpip.js stack as the gateway, tap piped to the guest NIC frame stream.
@@ -38,7 +39,7 @@ try {
   s.handle.net.readable.pipeTo(tap.writable).catch(() => {});
   tap.readable.pipeTo(s.handle.net.writable).catch(() => {});
   s.handle.net.setLinkUp(true);
-  await sleep(300);
+  await sleep(300); // let the link + ARP settle before configuring the guest
 
   // Guest: static IP + route (no DHCP in Phase 1).
   s.send(
@@ -114,6 +115,8 @@ try {
     "[net-spike] guest->host tcp:",
     gotTcp ? "OK (payload)" : tcpAccepted ? "OK (connection accepted)" : "FAIL",
   );
+  // tcpip@0.4.0's TcpListener has no close()/cancel() in its .d.ts (it's only an
+  // async-iterable) — nothing to close; the listener is dropped at process.exit.
 
   code = hostToGuest && guestToHost && tcpOk ? 0 : 1;
   if (code) console.log("[net-spike] console tail:\n" + s.snapshot().slice(-2000));
