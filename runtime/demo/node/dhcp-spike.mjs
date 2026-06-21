@@ -25,9 +25,15 @@
 // own tcpip.wasm beside it, so it runs headless here.
 import { bootNode } from "./boot-node.mjs";
 
-const TCPIP =
-  process.env.PC_TCPIP_BUNDLE ||
-  "file:///home/vbvntv/Code/pc-worktrees/guest-networking/vendor/tcpip/tcpip.mjs";
+// nix-wasm's `tcpip` dep (0.4.0) predates the DHCP server, so the spike imports
+// pc's vendored tcpip bundle (createStack + createDhcp in one build) by URL. No
+// developer-local default: pass it explicitly so this runs anywhere.
+const TCPIP = process.env.PC_TCPIP_BUNDLE;
+if (!TCPIP) {
+  throw new Error(
+    "set PC_TCPIP_BUNDLE to a node-loadable tcpip bundle (file:// URL to a build exporting createStack + createDhcp)",
+  );
+}
 const { createStack, createDhcp } = await import(TCPIP);
 
 const GW_IP = "10.0.2.1";
@@ -64,8 +70,9 @@ try {
   });
   console.log(`[dhcp-spike] DHCP server up on ${GW_IP} (pool ${LEASE_START}-${LEASE_END})`);
 
-  // The baked /init already launched `udhcpc -i eth0 -f -q -t 0 -A 2 &` (shell-
-  // backgrounded foreground udhcpc — see bootstrap.nix for the NOMMU rationale).
+  // The baked /init already launched `sh -c 'ip link set eth0 up; udhcpc -i eth0
+  // -f -t 0 -A 2 &'` (shell-backgrounded foreground udhcpc, no -q so it stays
+  // resident for renewals — see bootstrap.nix for the NOMMU rationale).
   // With -t 0 it retries DISCOVER forever, so even if the server came up after
   // boot it will eventually get a lease. Poll BOTH the server-side lease map and
   // the guest's `ip addr` each round, giving udhcpc time to DISCOVER/REQUEST/ACK
@@ -118,6 +125,9 @@ try {
   console.log(s.snapshot().slice(-2500));
 } finally {
   console.log("[dhcp-spike] artifacts:", ARTIFACTS || "(default)");
+  // Neither tcpip's stack nor @tcpip/dhcp's DhcpServer expose a close/stop in
+  // their public API (DhcpServer is just { leases, listen() }); both are dropped
+  // at process.exit below. Only the guest needs an explicit teardown.
   s.kill();
   await sleep(200);
   process.exit(code);

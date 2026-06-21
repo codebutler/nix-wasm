@@ -33,6 +33,12 @@ let
         ip addr flush dev "$interface" 2>/dev/null
         ;;
 
+      nak)
+        # Server rejected our REQUEST (lease no longer valid) — drop the stale
+        # address; udhcpc falls back to DISCOVER.
+        ip addr flush dev "$interface" 2>/dev/null
+        ;;
+
       renew|bound)
         ip link set "$interface" up 2>/dev/null
         # Replace any prior address (renew may change it). ifconfig takes the
