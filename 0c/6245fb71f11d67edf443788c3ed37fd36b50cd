@@ -1,0 +1,23 @@
+patches/busybox/0007-xfork-no-fork-wasm.patch
+  s_73dab31ed0204e::t_5724f688ee71ac 2,10-14,16-17,19
+  s_73dab31ed0204e::t_83f2fed284949d 20-21
+  s_73dab31ed0204e::t_545b3eef9b38d7 22
+patches/busybox/0004-libbb-spawn-clone.patch
+  s_73dab31ed0204e::t_733bb224de1d5d 12-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0c6245fb71f11d67edf443788c3ed37fd36b50cd",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
