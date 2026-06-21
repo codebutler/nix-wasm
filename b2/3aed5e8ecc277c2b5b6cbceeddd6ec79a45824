@@ -1,0 +1,36 @@
+deps-overlay.nix
+  s_73dab31ed0204e::t_462fbb19375458 444-448,456
+  s_73dab31ed0204e::t_0554af7b37210e 441-442,449-451,463-466
+  s_73dab31ed0204e::t_99eb2f81a34e0a 443
+  s_73dab31ed0204e::t_ee3a2e6922e9d3 423-428,430-432
+  s_73dab31ed0204e::t_d8b77aa14d1e97 115-116,122-126,128
+  s_73dab31ed0204e::t_58c0a14df8fe6b 452-455,457-462
+  s_73dab31ed0204e::t_696a82158071c6 282-293
+  s_73dab31ed0204e::t_366abb8b618602 429
+  s_73dab31ed0204e::t_f82328fca61df2 433-440
+  s_73dab31ed0204e::t_20b308e149d539 117-121,127
+patches/busybox/0007-xfork-no-fork-wasm.patch
+  s_73dab31ed0204e::t_83f2fed284949d 1,3-9,13,22-23,25-28,30-32,43
+  s_73dab31ed0204e::t_5724f688ee71ac 2,10-12,14-21,29,33-42
+  s_73dab31ed0204e::t_545b3eef9b38d7 24
+patches/glib/0001-posix-spawn-only-wasm-nommu.patch
+  s_73dab31ed0204e::t_495b7e55282bd1 1-233
+userspace/ash.nix
+  s_73dab31ed0204e::t_2b0b957e8dc13e 34-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b23aed5e8ecc277c2b5b6cbceeddd6ec79a45824",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
