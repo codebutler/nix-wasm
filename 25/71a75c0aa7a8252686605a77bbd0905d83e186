@@ -1,0 +1,22 @@
+docs/process-model.md
+  s_73dab31ed0204e::t_2f8698528eed6c 1-133
+CLAUDE.md
+  s_73dab31ed0204e::t_079a43c0f9e06d 66-73
+  s_73dab31ed0204e::t_e8a38a011b4fd7 443-450
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2571a75c0aa7a8252686605a77bbd0905d83e186",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
