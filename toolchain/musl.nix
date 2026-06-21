@@ -57,6 +57,17 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace src/env/__libc_start_main.c \
       --replace-fail 'exit(main(argc, argv, envp));' \
                      'exit(((int(*)(int,char**))(void*)main)(argc, argv));'
+    # Clean-NOMMU spawn contract: wasm has no fork()/vfork() (return-twice needs a
+    # multi-shot continuation, which no shipped engine provides — see
+    # docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md). Remove the
+    # symbols so a caller fails to LINK in its Nix build (loud, traceable) instead of
+    # SIGILL/abort at runtime. posix_spawn (clone-with-fn) is the spawn contract;
+    # musl's system()/popen() already route through it.
+    # fork(): drop the function (lines `pid_t fork(void)` … first column-0 `}`),
+    # keeping fork.c's lock/atfork weak-aliases that other TUs depend on.
+    sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c
+    # vfork(): the whole TU is just the function — empty it so no symbol remains.
+    : > src/process/vfork.c
   '';
 
   configurePhase = ''

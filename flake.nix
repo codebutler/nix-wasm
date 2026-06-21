@@ -428,6 +428,10 @@
         # served /nix closure.
         galculator = cross.galculator;
 
+        # Task 1 clean-NOMMU probe: verifies fork=ABSENT and spawn=LINKED after the
+        # musl fork/vfork symbol removal. Always builds (link results written to $out/result).
+        nofork-linkcheck = import ./spikes/nofork/check.nix { inherit cross; };
+
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
 
