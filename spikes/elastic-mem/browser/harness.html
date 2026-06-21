@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><title>trap-handler flag test</title>
+<pre id=out>loading…</pre>
+<script>
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + "\n"; console.log(s); };
+function mintN(desc, cap) {
+  const keep = []; let err=null;
+  try { for (let i=0;i<cap;i++) keep.push(new WebAssembly.Memory(desc)); } catch(e){ err=e.message; }
+  const n=keep.length; keep.length=0; return {n,err};
+}
+window.run = async function () {
+  out.textContent="";
+  log("COI="+self.crossOriginIsolated);
+  const cases = [
+    ["wasm32 shared max=512MiB", { initial:1, maximum:0x2000, shared:true }],
+    ["wasm32 shared max=16MiB",  { initial:1, maximum:0x100,  shared:true }],
+    ["wasm32 nonshared max=16MiB",{initial:1, maximum:0x100 }],
+  ];
+  const r={};
+  for (const [label,desc] of cases){ const res=mintN(desc,40000); log("  "+label.padEnd(26)+" -> N="+res.n+(res.err?"":" (hit 40k cap!)")); r[label]=res.n; await new Promise(x=>setTimeout(x,300)); }
+  log("RESULT "+JSON.stringify(r)); window.__result=r;
+};
+window.run();
