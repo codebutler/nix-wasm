@@ -1,0 +1,20 @@
+spikes/elastic-mem/grow-footprint.mjs
+  s_73dab31ed0204e::t_e993f4e4737ff3 10,16-20,26-27,31,36-37,46-47,51-60
+  s_73dab31ed0204e::t_85009ef333be03 1-9,11-15,21-25,28-30,32-35,38-45,48-50,61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "73b2dc1b4f60377f4daf5c58d0fa2fde5a9b9765",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
