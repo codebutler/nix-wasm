@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-06-21-elastic-per-process-memory.md
+  s_73dab31ed0204e::t_2d9189bd589375 1-731
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "cd2b0a093fd9a2e98b7b4629f50b9a51fb8b1c1b",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
