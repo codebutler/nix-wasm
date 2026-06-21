@@ -140,6 +140,14 @@ pkgs.stdenv.mkDerivation {
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
+      `# Guest networking (Phase 1): stock drivers/net/virtio_net.c over the` \
+      `# virtio_wasm transport (dev 2, VW_DEV_NET), IPv4+ICMP, and AF_PACKET raw` \
+      `# sockets (busybox udhcpc/ping). CONFIG_NET is already on above.` \
+      `# CONFIG_NETDEVICES is the gate: drivers/net/Kconfig wraps VIRTIO_NET in` \
+      `# 'if NETDEVICES', so olddefconfig SILENTLY DROPS VIRTIO_NET without it.` \
+      --enable CONFIG_NETDEVICES \
+      --enable CONFIG_VIRTIO_NET \
+      --enable CONFIG_INET --enable CONFIG_PACKET \
       --enable CONFIG_SCHED_STACK_END_CHECK \
       --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
       `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \
