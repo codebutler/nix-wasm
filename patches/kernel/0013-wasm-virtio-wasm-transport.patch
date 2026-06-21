@@ -62,7 +62,7 @@ new file mode 100644
 index 0000000..5e2bcc0
 --- /dev/null
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -0,0 +1,573 @@
+@@ -0,0 +1,587 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * virtio_wasm.c - a virtio transport over Wasm host callbacks (Linux/Wasm, "pc"
@@ -414,11 +414,19 @@ index 0000000..5e2bcc0
 +	return vw;
 +}
 +
-+/* The devices this transport instantiates, in host-index order. */
++/*
++ * The devices this transport instantiates, in host-index order.
++ *
++ * Host index order (must match runtime/kernel-worker.js get_virtio_device):
++ *   0 = VW_DEV_WL, 1 = VW_DEV_ECHO (if built), 2 = VW_DEV_NET (if built).
++ */
 +enum {
 +	VW_DEV_WL = 0,		/* virtio_wl: /dev/wl0 */
 +#ifdef CONFIG_VIRTIO_WASM_ECHO
 +	VW_DEV_ECHO,		/* echo self-test */
++#endif
++#ifdef CONFIG_VIRTIO_NET
++	VW_DEV_NET,		/* virtio-net NIC (stock drivers/net/virtio_net.c) */
 +#endif
 +	VW_DEV_COUNT,
 +};
@@ -433,6 +441,12 @@ index 0000000..5e2bcc0
 +
 +#ifdef CONFIG_VIRTIO_WASM_ECHO
 +	vw = virtio_wasm_register(VW_DEV_ECHO, 0xCB01u);
++	if (IS_ERR(vw))
++		return PTR_ERR(vw);
++#endif
++
++#ifdef CONFIG_VIRTIO_NET
++	vw = virtio_wasm_register(VW_DEV_NET, VIRTIO_ID_NET);
 +	if (IS_ERR(vw))
 +		return PTR_ERR(vw);
 +#endif
