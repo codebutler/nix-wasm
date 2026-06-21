@@ -7,130 +7,24 @@ are the shared helpers many applets funnel through (spawn_and_wait, xspawn,
 bb_daemonize_or_rexec); timeout has its own watcher vfork on top. vfork can't
 work on wasm (a fresh instance can't resume the parent mid-function).
 
-Also neuter libbb's xvfork_parent_waits_and_exits() under !BB_MMU. It is a
+Also compile out libbb's xvfork_parent_waits_and_exits() on wasm. It is a
 genuine vfork-return-twice API (parent waits+exits, the child continues IN the
-caller) that clone-with-a-fn cannot express, and its only callers — nsenter and
-unshare — are disabled on the wasm guest. Stock libbb always defines it (it
-lives in the always-linked xfuncs_printf.o), so under the clean-NOMMU contract
-(wasm musl has no vfork symbol) it left an unresolved `vfork` at static-link
-time even though --gc-sections keeps that TU for its other xfuncs. Compile its
-body to a loud abort on !BB_MMU so no vfork reference remains; it is unreachable
-(no enabled applet calls it).
+caller) that clone-with-a-fn cannot express, and wasm musl ships no vfork
+symbol. Its only callers — nsenter and unshare — are disabled on the wasm
+guest. Stock libbb always defines it (in the always-linked xfuncs_printf.o), so
+it otherwise leaves an unresolved `vfork` at static-link time even though
+--gc-sections keeps that TU for its other xfuncs. Guard the whole definition
+with `#if !defined(__wasm__)` so the symbol is ABSENT on wasm for BOTH the NOMMU
+busybox build (BB_MMU=0) and the allnoconfig ash build (BB_MMU=1): under the
+clean-NOMMU contract any caller fails LOUDLY at static-link time ("undefined
+symbol: xvfork_parent_waits_and_exits") instead of silently linking a runtime
+abort stub. It is unreachable today (no enabled applet calls it). xfork() gets
+the same treatment in patch 0007 (it is BB_MMU-guarded, so it only matters for
+the ash build).
 
---- a/libbb/xfuncs_printf.c
-+++ b/libbb/xfuncs_printf.c
-@@ -698,6 +698,12 @@
-
- void FAST_FUNC xvfork_parent_waits_and_exits(void)
- {
-+#if !BB_MMU
-+	/* wasm NOMMU: this is a vfork-return-twice API (no clone-with-fn
-+	 * equivalent). Its only callers (nsenter/unshare) are disabled here, so
-+	 * it is unreachable — abort loudly rather than reference the absent vfork. */
-+	bb_simple_error_msg_and_die("xvfork_parent_waits_and_exits: unsupported on NOMMU");
-+#else
- 	pid_t pid;
-
- 	fflush_all();
-@@ -710,6 +716,7 @@
- 		_exit(WEXITSTATUS(exit_status));
- 	}
- 	/* Child continues */
-+#endif
- }
-
- // Useful when we do know that pid is valid, and we just want to wait
-
---- a/libbb/vfork_daemon_rexec.c
-+++ b/libbb/vfork_daemon_rexec.c
-@@ -16,6 +16,7 @@
-  */
- #include "busybox.h" /* uses applet tables */
- #include "NUM_APPLETS.h"
-+#include <sched.h> /* clone() — wasm NOMMU spawns children clone-with-a-fn */
- 
- #define NOFORK_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK))
- #define NOEXEC_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE))
-@@ -173,6 +174,20 @@
- 
- /* This does a fork/exec in one call, using vfork().  Returns PID of new child,
-  * -1 for failure.  Runs argv[0], searching path if that has no / in it. */
-+#if !BB_MMU
-+/* wasm NOMMU child fn for spawn(): exec argv, or record errno + _exit so the
-+ * (CLONE_VM) parent sees the failure. vfork() can't be used — a fresh wasm
-+ * instance can't resume the parent mid-function; clone-with-a-fn can. */
-+struct spawn_child_args { char **argv; volatile int *failed; };
-+static int spawn_child(void *arg)
-+{
-+	struct spawn_child_args *a = arg;
-+	BB_EXECVP(a->argv[0], a->argv);
-+	*a->failed = errno;
-+	_exit(111);
-+}
-+#endif
-+
- pid_t FAST_FUNC spawn(char **argv)
- {
- 	/* Compiler should not optimize stores here */
-@@ -183,6 +198,7 @@
- 
- 	/* Be nice to nommu machines. */
- 	failed = 0;
-+#if BB_MMU
- 	pid = vfork();
- 	if (pid < 0) /* error */
- 		return pid;
-@@ -199,6 +215,15 @@
- 		/*bb_perror_msg("can't execute '%s'", argv[0]);*/
- 		_exit(111);
- 	}
-+#else
-+	{
-+		struct spawn_child_args a = { argv, &failed };
-+		pid = clone(spawn_child, NULL,
-+				CLONE_VM | CLONE_VFORK | SIGCHLD, &a);
-+		if (pid < 0) /* error */
-+			return pid;
-+	}
-+#endif
- 	/* parent */
- 	/* Unfortunately, this is not reliable: according to standards
- 	 * vfork() can be equivalent to fork() and we won't see value
-@@ -258,6 +283,14 @@
- 	bb_perror_msg_and_die("can't execute '%s'", bb_busybox_exec_path);
- }
- 
-+/* wasm NOMMU child fn for fork_or_rexec(): re-exec busybox (re_exec execv's and
-+ * does not return). clone-with-a-fn instead of vfork (see spawn_child). */
-+static int fork_or_rexec_child(void *arg)
-+{
-+	re_exec((char **)arg);
-+	return 0; /* not reached (re_exec execs or dies) */
-+}
-+
- pid_t FAST_FUNC fork_or_rexec(char **argv)
- {
- 	pid_t pid;
-@@ -267,11 +300,12 @@
- 
- 	/* fflush_all(); ? - so far all callers had no buffered output to flush */
- 
--	pid = xvfork();
--	if (pid) /* parent */
--		return pid;
--	/* child - re-exec ourself */
--	re_exec(argv);
-+	pid = clone(fork_or_rexec_child, NULL,
-+			CLONE_VM | CLONE_VFORK | SIGCHLD, argv);
-+	if (pid < 0)
-+		bb_simple_perror_msg_and_die("clone");
-+	/* parent (the child re-execs itself via re_exec) */
-+	return pid;
- }
- #endif
- 
---- a/coreutils/timeout.c
-+++ b/coreutils/timeout.c
+diff -ruN a/coreutils/timeout.c b/coreutils/timeout.c
+--- a/coreutils/timeout.c	2026-06-21 19:09:08.483019440 -0400
++++ b/coreutils/timeout.c	2026-06-21 19:13:01.134485905 -0400
 @@ -46,6 +46,23 @@
  //usage:       "If it still exists in KILL_SECS seconds, send KILL.\n"
  
@@ -219,3 +113,119 @@ body to a loud abort on !BB_MMU so no vfork reference remains; it is unreachable
 +
 +	return EXIT_SUCCESS;
  }
+diff -ruN a/libbb/vfork_daemon_rexec.c b/libbb/vfork_daemon_rexec.c
+--- a/libbb/vfork_daemon_rexec.c	2026-06-21 19:09:08.459112546 -0400
++++ b/libbb/vfork_daemon_rexec.c	2026-06-21 19:13:01.134430237 -0400
+@@ -16,6 +16,7 @@
+  */
+ #include "busybox.h" /* uses applet tables */
+ #include "NUM_APPLETS.h"
++#include <sched.h> /* clone() — wasm NOMMU spawns children clone-with-a-fn */
+ 
+ #define NOFORK_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK))
+ #define NOEXEC_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE))
+@@ -173,6 +174,20 @@
+ 
+ /* This does a fork/exec in one call, using vfork().  Returns PID of new child,
+  * -1 for failure.  Runs argv[0], searching path if that has no / in it. */
++#if !BB_MMU
++/* wasm NOMMU child fn for spawn(): exec argv, or record errno + _exit so the
++ * (CLONE_VM) parent sees the failure. vfork() can't be used — a fresh wasm
++ * instance can't resume the parent mid-function; clone-with-a-fn can. */
++struct spawn_child_args { char **argv; volatile int *failed; };
++static int spawn_child(void *arg)
++{
++	struct spawn_child_args *a = arg;
++	BB_EXECVP(a->argv[0], a->argv);
++	*a->failed = errno;
++	_exit(111);
++}
++#endif
++
+ pid_t FAST_FUNC spawn(char **argv)
+ {
+ 	/* Compiler should not optimize stores here */
+@@ -183,6 +198,7 @@
+ 
+ 	/* Be nice to nommu machines. */
+ 	failed = 0;
++#if BB_MMU
+ 	pid = vfork();
+ 	if (pid < 0) /* error */
+ 		return pid;
+@@ -199,6 +215,15 @@
+ 		/*bb_perror_msg("can't execute '%s'", argv[0]);*/
+ 		_exit(111);
+ 	}
++#else
++	{
++		struct spawn_child_args a = { argv, &failed };
++		pid = clone(spawn_child, NULL,
++				CLONE_VM | CLONE_VFORK | SIGCHLD, &a);
++		if (pid < 0) /* error */
++			return pid;
++	}
++#endif
+ 	/* parent */
+ 	/* Unfortunately, this is not reliable: according to standards
+ 	 * vfork() can be equivalent to fork() and we won't see value
+@@ -258,6 +283,14 @@
+ 	bb_perror_msg_and_die("can't execute '%s'", bb_busybox_exec_path);
+ }
+ 
++/* wasm NOMMU child fn for fork_or_rexec(): re-exec busybox (re_exec execv's and
++ * does not return). clone-with-a-fn instead of vfork (see spawn_child). */
++static int fork_or_rexec_child(void *arg)
++{
++	re_exec((char **)arg);
++	return 0; /* not reached (re_exec execs or dies) */
++}
++
+ pid_t FAST_FUNC fork_or_rexec(char **argv)
+ {
+ 	pid_t pid;
+@@ -267,11 +300,12 @@
+ 
+ 	/* fflush_all(); ? - so far all callers had no buffered output to flush */
+ 
+-	pid = xvfork();
+-	if (pid) /* parent */
+-		return pid;
+-	/* child - re-exec ourself */
+-	re_exec(argv);
++	pid = clone(fork_or_rexec_child, NULL,
++			CLONE_VM | CLONE_VFORK | SIGCHLD, argv);
++	if (pid < 0)
++		bb_simple_perror_msg_and_die("clone");
++	/* parent (the child re-execs itself via re_exec) */
++	return pid;
+ }
+ #endif
+ 
+diff -ruN a/libbb/xfuncs_printf.c b/libbb/xfuncs_printf.c
+--- a/libbb/xfuncs_printf.c	2026-06-21 19:09:08.460093980 -0400
++++ b/libbb/xfuncs_printf.c	2026-06-21 19:13:15.736256093 -0400
+@@ -696,6 +696,15 @@
+ }
+ #endif
+ 
++/* wasm: xvfork_parent_waits_and_exits() is a genuine vfork-return-twice API
++ * (parent waits+exits; the child continues IN the caller) that the wasm
++ * NOMMU clone-with-fn model cannot express, and wasm musl ships no vfork
++ * symbol. Its only callers — nsenter and unshare — are disabled on the guest,
++ * so the symbol is compiled out entirely (for BOTH the NOMMU busybox build,
++ * BB_MMU=0, and the allnoconfig ash build, BB_MMU=1): under the clean-NOMMU
++ * contract any caller fails LOUDLY at static-link time ("undefined symbol:
++ * xvfork_parent_waits_and_exits") rather than silently linking an abort stub. */
++#if !defined(__wasm__)
+ void FAST_FUNC xvfork_parent_waits_and_exits(void)
+ {
+ 	pid_t pid;
+@@ -711,6 +720,7 @@
+ 	}
+ 	/* Child continues */
+ }
++#endif
+ 
+ // Useful when we do know that pid is valid, and we just want to wait
+ // for it to exit. Not existing pid is fatal. waitpid() status is not returned.

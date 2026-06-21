@@ -1,5 +1,5 @@
 From: wasm-nommu
-Subject: libbb: compile out xfork()/xvfork_parent_waits_and_exits() on wasm when BB_MMU=1
+Subject: libbb: compile out xfork() on wasm even when BB_MMU=1
 
 The existing #if BB_MMU guard on xfork() was designed for uClibc NOMMU
 systems.  wasm32 busybox builds that use allnoconfig (e.g. ash.nix) do
@@ -7,37 +7,25 @@ NOT set CONFIG_NOMMU=y (ash depends on !NOMMU in Kconfig), so BB_MMU=1
 and xfork() is compiled — but wasm musl ships no fork() symbol (fork is
 unimplementable on the clone-with-fn NOMMU model).
 
-xvfork_parent_waits_and_exits() was already given a !BB_MMU abort-stub
-by patch 0004 (NOMMU busybox builds), but the BB_MMU=1 code path still
-calls xvfork() → vfork(), which is also absent on wasm musl.
+This patch (applies after 0004) extends xfork()'s guard to
+`#if BB_MMU && !defined(__wasm__)` so the ash.nix allnoconfig build does
+not reference the absent fork symbol. xfork() has no enabled caller on
+the guest, so making the symbol ABSENT means any future caller fails
+loudly at static-link time rather than linking a runtime abort stub.
 
-This patch (applies after 0004) adds __wasm__ guards for both functions
-so the ash.nix allnoconfig build links cleanly.
+(xvfork_parent_waits_and_exits() is compiled out for ALL wasm configs by
+patch 0004's `#if !defined(__wasm__)` guard — no separate handling here.)
 
-Applied after patch 0004 (which added #if !BB_MMU/#else/#endif to
-xvfork_parent_waits_and_exits); this patch extends the #else chain with
-#elif defined(__wasm__) so the wasm+BB_MMU=1 path also aborts loudly
-without referencing the absent vfork symbol.
-
---- a/libbb/xfuncs_printf.c
-+++ b/libbb/xfuncs_printf.c
-@@ -669,7 +669,8 @@
+diff -ruN a/libbb/xfuncs_printf.c b/libbb/xfuncs_printf.c
+--- a/libbb/xfuncs_printf.c	2026-06-21 19:14:08.942964416 -0400
++++ b/libbb/xfuncs_printf.c	2026-06-21 19:13:58.371809432 -0400
+@@ -685,7 +685,8 @@
  	buf[4 + 2 + 2] = (buf[4 + 2 + 2] & 0x3f) | 0x80;
  }
-
+ 
 -#if BB_MMU
 +/* wasm32: no fork even with BB_MMU=1 (allnoconfig ash build). */
 +#if BB_MMU && !defined(__wasm__)
  pid_t FAST_FUNC xfork(void)
  {
- 	pid_t pid;
-@@ -687,6 +688,10 @@
- 	 * equivalent). Its only callers (nsenter/unshare) are disabled here, so
- 	 * it is unreachable — abort loudly rather than reference the absent vfork. */
- 	bb_simple_error_msg_and_die("xvfork_parent_waits_and_exits: unsupported on NOMMU");
-+#elif defined(__wasm__)
-+	/* wasm32 with BB_MMU=1: fork/vfork absent (wasm NOMMU model).
-+	 * Callers (nsenter/unshare) disabled; abort loudly. */
-+	bb_simple_error_msg_and_die("xvfork_parent_waits_and_exits: unsupported on wasm");
- #else
  	pid_t pid;
