@@ -1,0 +1,21 @@
+runtime/demo/node/net-spike.mjs
+  s_8dd181a5441a15::t_a571ac8d1897ec 1-73
+docs/2026-06-21-virtio-net-spike.md
+  s_8dd181a5441a15::t_58661bd1662614 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "a5ae0368ed597b1bde4c181a352ecdada2296bff",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
