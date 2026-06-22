@@ -71,7 +71,13 @@ one of these — in order of preference — and **never** add a stub that links:
      (handles `working_directory` via `posix_spawn_file_actions_addchdir_np`, fd
      cleanup, ENOEXEC/shebang retry via `posix_spawn("/bin/sh","-c",…)`), compiles
      out the raw fork/exec block, and **rejects `child_setup`-using calls with a
-     `GError`** ("wasm NOMMU (no fork/exec split; posix_spawn is used)").
+     `GError`** ("wasm NOMMU (no fork/exec split; posix_spawn is used)"). The
+     ENOEXEC fallback re-spawns the target as `/bin/sh <script> <args…>` (execvp's
+     shell-script convention — no `-c`). **Known limitation:** the
+     `G_SPAWN_SEARCH_PATH_FROM_ENVP` case routes through `posix_spawnp`, which
+     searches `$PATH` from the *current* process environment rather than from the
+     supplied `envp`; a caller passing a divergent `PATH` in `envp` fails loudly
+     (ENOENT), never silently mis-spawns. No guest consumer relies on that case.
      `gtestutils.c`'s deprecated `g_test_trap_fork` is compiled out (the guest
      never runs glib's test harness). Grounded in GNOME/glib MR !95 (the
      posix_spawn codepath) + MR !1968 (its fd remapping) — this is *forcing* an
