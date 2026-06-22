@@ -22,6 +22,16 @@ pkgs.writeText "init" ''
   mount -t devtmpfs none /dev 2>/dev/null
   mkdir -p /dev/pts && mount -t devpts none /dev/pts 2>/dev/null
 
+  # /dev/shm for POSIX shared memory. GTK/gdk's wayland backend allocates its
+  # window buffers via open_shared_memory() → memfd_create(), which is ENOSYS on
+  # the wasm kernel, so gdk falls back to shm_open("/dev/shm/..."); without this
+  # mount that fails ENOENT → no wl_shm buffer → an empty (0x0) window + a per-frame
+  # "Gdk-CRITICAL: create_shm_surface" (gtk-wayland-render-blocker). Use RAMFS, not
+  # tmpfs: ramfs has explicit NOMMU MAP_SHARED mmap support (fs/ramfs/file-nommu.c)
+  # — the same backing /tmp uses (proven by the wl-anim shm client) — whereas
+  # shmem/tmpfs lacks reliable shared-writable mmap on NOMMU.
+  mkdir -p /dev/shm && mount -t ramfs none /dev/shm 2>/dev/null
+
   M="trans=cb,version=9p2000.L,msize=524288"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
   # of netfs UNBUFFERED/direct reads. Direct reads call iov_iter_extract_pages /
