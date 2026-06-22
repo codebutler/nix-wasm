@@ -1,0 +1,22 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "devDependencies": {
+        "tcpip": "^0.4.0",
+      },
+    },
+  },
+  "packages": {
+    "@bjorn3/browser_wasi_shim": ["@bjorn3/browser_wasi_shim@0.3.0", "", {}, "sha512-FlRBYttPRLcWORzBe6g8nmYTafBkOEFeOqMYM4tAHJzFsQy4+xJA94z85a9BCs8S+Uzfh9LrkpII7DXr2iUVFg=="],
+
+    "@tcpip/dns": ["@tcpip/dns@0.3.0", "", { "dependencies": { "@tcpip/transport": "0.1.0", "@tcpip/wire": "0.1.4" } }, "sha512-Beh+e+98+BLfKPWQobNSrJ2m6LF23SScujNqRUPGEJ1xAdVXc6GudanFsSGxYtzOZ0YKceixj6e+0oDSq4+5mQ=="],
+
+    "@tcpip/transport": ["@tcpip/transport@0.1.0", "", {}, "sha512-Q7pFwP2/V/MojkLEh86TsXHFgIuymcOqw3oj7W0O6xoiIwReWvtins0Lgu0OYXlVKwplv7UNMXvy4x2ocAmLCw=="],
+
+    "@tcpip/wire": ["@tcpip/wire@0.1.4", "", {}, "sha512-sQKEHopVD0AljgMJVkWkHCXtoMGTF+CZRjy+fAbaaC+e3LS9TUcrfK3R7cSf0RvKu46xO8YBvm6hqFCniUTUOQ=="],
+
+    "tcpip": ["tcpip@0.4.0", "", { "dependencies": { "@bjorn3/browser_wasi_shim": "^0.3.0", "@tcpip/dns": "0.3.0", "@tcpip/transport": "0.1.0", "@tcpip/wire": "0.1.4" } }, "sha512-hQGceoKwItqUc0ACc5qyyQB9CHxE8hNbz3A2QKgxfe6ow3OnmPPDWCwjLNYkBgBSOscXLttmoZjKLB54CqHqYA=="],
+  }
+}

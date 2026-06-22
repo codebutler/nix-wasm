@@ -220,6 +220,15 @@ export async function bootLinux(opts) {
       waylandPushIn?.(clientId, bytes, fds);
     },
 
+    /**
+     * Guest networking (virtio-net eth0). The seam pc's js/vnet/ consumes:
+     *   - `readable`: a ReadableStream<Uint8Array> of guest-egress ethernet frames.
+     *   - `writable`: a WritableStream<Uint8Array>; writing a frame injects it into
+     *     the guest's RX vring (host→guest), waking a parked idle CPU.
+     *   - `setLinkUp(up)`: flips the reported link-status config bit.
+     */
+    net: os.net,
+
     /** Stop the 9P server loop. (Worker teardown is the caller's concern.) */
     kill() {
       if (!alive) return;

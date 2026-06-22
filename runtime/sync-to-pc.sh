@@ -20,7 +20,7 @@ cp "$SRC"/ninep/{protocol.js,server.js,ring.js,transport.js,host-call.js,mem-vfs
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
 # nix-wasm. wl-server.js is the Phase-1 in-worker stub; pc's Phase-2 inversion
 # (worker→main Greenfield bridge) lives in pc, not synced from here.
-cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js} "$DEST/virtio/"
+cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js} "$DEST/virtio/"
 
 # Provenance stamp into pc's SOURCE.md (idempotent: replace the marker line).
 MARK="<!-- runtime-sync -->"
