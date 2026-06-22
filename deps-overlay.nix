@@ -471,7 +471,6 @@ in
         # '# Documentation.', replacing with has_merge_modes_tests=false
         # (that variable is referenced by the summary() block that follows).
         # Tests call fork() which is absent in wasm NOMMU musl.
-        sed -n '1p' meson.build > /dev/null  # sanity check sed works
         start_line=$(grep -n "^m_dep = cc\.find_library" meson.build | head -1 | cut -d: -f1)
         end_line=$(grep -n "^# Documentation\." meson.build | head -1 | cut -d: -f1)
         end_line=$((end_line - 1))
