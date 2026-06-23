@@ -729,27 +729,8 @@ in
   # C (no -fwasm-exceptions) so the base feature set suffices. isWasm-guarded so
   # native galculator is untouched.
   galculator = whenWasm
-    (p:
-    let
-      # All store paths whose DEAD references are stripped from the galculator
-      # binary below (issue #43). galculator statically links gtk3, so gtk3's
-      # compiled-in DATADIR/LIBDIR strings — plus refs to glib/gdk-pixbuf/pango/
-      # fontconfig/iso-codes/xkeyboard-config/libthai/wayland — end up baked into
-      # the binary, and Nix's scanner drags those whole closures into the SERVED
-      # store even though a static guest binary needs none of them at runtime.
-      # Strip EVERY output of each (the `.out` libs are what's actually referenced,
-      # not the default `.bin`/`.dev`). remove-references-to keeps galculator's own
-      # $out ref, so PACKAGE_UI_DIR still resolves its .ui files in the guest.
-      deadRefPkgs = [
-        final.gtk3 final.glib final."gdk-pixbuf" final.pango final.fontconfig
-        final.isocodes final.xkeyboardconfig final.libthai final.wayland
-      ];
-      deadRefPaths = final.lib.concatMap (pkg: map (o: pkg.${o}) pkg.outputs) deadRefPkgs;
-      stripFlags = final.lib.concatMapStringsSep " " (path: "-t ${path}") deadRefPaths;
-    in
-    p.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ])
-        ++ [ final.buildPackages.binaryen final.buildPackages.removeReferencesTo ];
+    (p: p.overrideAttrs (o: {
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.binaryen ];
       # M4 proof: a --selftest source patch that loads the real .ui files from
       # PACKAGE_UI_DIR via gtk_builder_add_from_file (display-free, so it runs in
       # the compositor-less node harness) and asserts GtkWindow "main_window"
@@ -782,22 +763,24 @@ in
           mv "$out/bin/galculator.fpcast" "$out/bin/galculator"
           chmod +x "$out/bin/galculator"
         fi
-        # Cut the DEAD propagated-build-input chain. galculator's
-        # $out/nix-support/propagated-build-inputs records gtk+3-dev (which itself
+        # Cut the DEAD propagated-build-input chain (issue #43). galculator's
+        # $out/nix-support/propagated-build-inputs records gtk+3-dev, which itself
         # propagates pango-dev → libxft-dev → the whole X11 + glibc-locale `-dev`
-        # closure). galculator is a LEAF app — nothing is ever built against it — so
-        # that propagation metadata is pure dead weight, but Nix's reference scanner
-        # still follows it and drags ~20k `-dev`/X11/locale store paths into the
-        # SERVED store closure (store.json ballooned ~26MB→345MB; issue #43).
-        # Statically linked, galculator needs only its own $out/share/ui (.ui files,
-        # via PACKAGE_UI_DIR) at runtime, so dropping nix-support is safe and removes
-        # the whole bloat subtree. Belt-and-suspenders: also strip any gtk3-dev
-        # string left in the binary itself (remove-references-to keeps the $out
-        # self-reference, so PACKAGE_UI_DIR still resolves in the guest).
+        # closure. galculator is a LEAF app — nothing is ever built against it — so
+        # that propagation metadata is pure dead weight, yet Nix's reference scanner
+        # follows it and drags ~15k `-dev`/X11/glibc-locale store paths into the
+        # SERVED store (store.json ballooned ~26MB→345MB). Dropping nix-support is
+        # safe and removes that whole subtree (→ ~28MB store.json / X11+locale gone).
+        #
+        # We do NOT strip the binary's OWN store references with remove-references-to:
+        # several look "dead" for a static binary but are real RUNTIME DATA deps that
+        # ride the served closure for ALL GTK wayland apps — notably
+        # **xkeyboard-config** (libxkbcommon loads `…/etc/X11/xkb` at startup to build
+        # the XKB keymap; gdk treats a keymap failure as FATAL, so stripping it killed
+        # gtk3-widget-factory with "Failed to create XKB keymap"). The remaining
+        # gtk3/glib/gdk-pixbuf data in the closure is the legitimate cost of shipping
+        # a GTK app, not bloat — the catastrophic part was the -dev tree above.
         rm -rf "$out/nix-support"
-        if [ -f "$out/bin/galculator" ]; then
-          remove-references-to ${stripFlags} "$out/bin/galculator"
-        fi
       '';
     }))
     prev.galculator;

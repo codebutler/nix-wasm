@@ -386,21 +386,24 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   window *render* **now works in the browser** (a real GTK window with the label
   draws via Greenfield) — it was gated on the `/dev/shm` mount, see the Guest
   runtime/kernel learnings below (`docs/superpowers/notes/m3b-gtk-visual.md`).
-- **Served-store bloat: strip galculator's dead refs** (`deps-overlay.nix` galculator
-  override `postFixup`; issue #43). galculator is in `environment.systemPackages` (for
-  its `.ui` files), so it's in the SERVED `/nix` closure (`store.json`). Two dead-ref
-  sources ballooned that closure ~26MB→345MB store.json / 3.2k→22.5k files: (1) galculator's
-  `$out/nix-support/propagated-build-inputs` recorded `gtk+3-dev`, which propagates
-  `pango-dev → libxft-dev → the whole X11 + glibc-locale -dev tree` — but galculator is a
-  LEAF app, nothing builds against it, so that metadata is pure dead weight (fix: `rm -rf
-  $out/nix-support`); (2) statically linking gtk3 bakes gtk3's own DATADIR/LIBDIR strings
-  (+ refs to glib/gdk-pixbuf/pango/fontconfig/iso-codes/xkeyboard-config/libthai/wayland)
-  into the binary, which the ref scanner follows even though a static guest binary needs
-  NONE of them at runtime (fix: `remove-references-to -t <every output of each>` —
-  computed from `pkg.outputs`; NOT `nuke-refs`, which would also zero galculator's OWN
-  `$out` self-ref and break `PACKAGE_UI_DIR` → `.ui` loading). After both: 28MB / 4.1k
-  files, X11/glibc/locale gone, `galculator-smoke` still PASS. The store.json design
-  itself (a giant JSON inlining every small file) is the deeper issue — see #43.
+- **Served-store bloat: drop galculator's `nix-support` ONLY — do NOT strip binary refs**
+  (`deps-overlay.nix` galculator override `postFixup`; issue #43). galculator is in
+  `environment.systemPackages` (for its `.ui` files), so it's in the SERVED `/nix` closure
+  (`store.json`). The catastrophic bloat (~26MB→**345MB** store.json / 3.2k→22.5k files) was
+  galculator's `$out/nix-support/propagated-build-inputs` recording `gtk+3-dev`, which
+  propagates `pango-dev → libxft-dev → the whole X11 + glibc-locale -dev tree`. galculator
+  is a LEAF app (nothing builds against it), so that propagation metadata is pure dead
+  weight the ref scanner still follows. **Fix: `rm -rf $out/nix-support`** → ~127MB / 7.5k
+  files, X11/glibc/locale gone. **DEAD-END (caused a regression, reverted):** also running
+  `remove-references-to` over gtk3/glib/gdk-pixbuf/pango/xkeyboard-config/… to shrink
+  further (→28MB) looks safe for a static binary but **breaks GTK at runtime** — those
+  binary refs include REAL runtime data deps that ride the served closure for ALL GTK
+  wayland apps, notably **xkeyboard-config** (libxkbcommon loads `…/etc/X11/xkb` at startup
+  to build the XKB keymap; gdk treats a keymap failure as FATAL → every app died with
+  `Gdk-ERROR: Failed to create XKB keymap`). So keep ONLY the `nix-support` removal; the
+  remaining gtk3/glib data is the legitimate cost of shipping a GTK app, not bloat. The
+  store.json format itself (a giant JSON inlining every small file) is the deeper issue —
+  see #43.
 - **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
   2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
   `isWasm`-guarded nixpkgs override (NOT a from-scratch `userspace/galculator.nix` —
