@@ -383,7 +383,9 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   GtkStyleContext without a display connection"). The gate instead `g_type_class_ref`s
   `GTK_TYPE_WINDOW`/`GTK_TYPE_LABEL` (runs each class_init through the fpcast seam,
   display-free) and asserts `g_type_from_name` + `gtk_get_major_version()==3`. The full
-  window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
+  window *render* **now works in the browser** (a real GTK window with the label
+  draws via Greenfield) — it was gated on the `/dev/shm` mount, see the Guest
+  runtime/kernel learnings below (`docs/superpowers/notes/m3b-gtk-visual.md`).
 - **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
   2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
   `isWasm`-guarded nixpkgs override (NOT a from-scratch `userspace/galculator.nix` —
@@ -438,6 +440,19 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.
+- **`/dev/shm` MUST be mounted (ramfs) for GTK/wl_shm clients** (`bootstrap.nix`).
+  gdk's wayland backend allocates each window's `wl_shm` buffer via
+  `open_shared_memory()` → `memfd_create()` (ENOSYS on the wasm kernel) →
+  `shm_open("/dev/shm/…")` fallback; with `/dev/shm` unmounted that fails ENOENT →
+  `create_shm_pool` returns NULL → an empty **0×0** window + a per-frame
+  `Gdk-CRITICAL` in `_gdk_wayland_display_create_shm_surface` (looks like a render
+  crash but is a missing mount). Use **ramfs**, NOT tmpfs: ramfs has explicit NOMMU
+  `MAP_SHARED` mmap support (`fs/ramfs/file-nommu.c`) — the same backing `/tmp` uses
+  (proven by `wl-anim`'s `mkstemp` shm path) — whereas shmem/tmpfs lacks reliable
+  shared-writable mmap on NOMMU. With the mount, `gtk-hello` renders a real window
+  ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
+  gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
+  future kernel could implement it as the more standard primary path.)
 - **User stack 8 KiB→4 MiB** (`patches/kernel/0007`): musl `realpath()` alone
   overflows 8 KiB and NOMMU can't grow the stack (was both the "readlink -f
   corrupts long paths" bug and the nix.wasm startup "memory access out of bounds").
