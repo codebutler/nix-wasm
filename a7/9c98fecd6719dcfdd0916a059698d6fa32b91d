@@ -1,0 +1,35 @@
+toolchain/musl.nix
+  s_b3600ff8167073::t_6e417da30ff126 35-38
+flake.nix
+  s_b3600ff8167073::t_f2349d47c360c4 156-161
+  s_b3600ff8167073::t_24bdd5f5e237ab 417
+  s_b3600ff8167073::t_5b728a262a5361 415-416
+  s_b3600ff8167073::t_5194a34d40d903 297
+CLAUDE.md
+  s_b3600ff8167073::t_937c47bd4b3d05 456-475
+userspace/pthread-exit-test.c
+  s_b3600ff8167073::t_b7aab0c0940616 1-41
+kernel.nix
+  s_b3600ff8167073::t_2a34dcc36b91ab 151-157
+userspace/pthread-exit-test.nix
+  s_b3600ff8167073::t_2743cfde1a9d6e 1-21
+patches/musl/0008-wasm-unmapself-no-stack-switch.patch
+  s_b3600ff8167073::t_c4b737720a0ac2 3-38
+  s_b3600ff8167073::t_09940d52f06da0 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "a79c98fecd6719dcfdd0916a059698d6fa32b91d",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
