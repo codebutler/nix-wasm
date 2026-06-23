@@ -153,6 +153,12 @@
         libffi = cross.libffi;
       };
 
+      # Regression test for detached-thread exit on wasm (the __unmapself/CRTJMP
+      # SIGILL fixed by patches/musl/0008). See userspace/pthread-exit-test.c.
+      pthreadExitTest = import ./userspace/pthread-exit-test.nix {
+        inherit cross;
+      };
+
       # M3a (galculator): glib-selftest — in-guest gobject proof. Round-trips a
       # GObject and emits a `double` signal through gobject's GENERIC (libffi)
       # marshaller (g_cclosure_marshal_generic → ffi_call) — the first real exercise
@@ -288,7 +294,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -406,6 +412,10 @@
         # FFI backend's f32/f64/i64 by-value argument support → $out/bin/libffi-selftest.
         libffi-selftest = libffiSelftest;
 
+        # Regression test for detached-thread exit on wasm (patches/musl/0008) →
+        # $out/bin/pthread-exit-test.
+        pthread-exit-test = pthreadExitTest;
+
         # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
         # $out/bin/wl-text (--selftest is the headless CI gate).
         wl-text = wlText;
@@ -427,6 +437,7 @@
         # the initramfs as /bin/galculator; its $out/share/galculator/ui/*.ui ride the
         # served /nix closure.
         galculator = cross.galculator;
+
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

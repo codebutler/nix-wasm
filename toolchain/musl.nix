@@ -32,6 +32,10 @@ pkgs.stdenv.mkDerivation {
     ../patches/musl/0005-wasm-per-thread-llvm-tls-block.patch
     ../patches/musl/0006-wasm-seed-page-size-before-ctors.patch
     ../patches/musl/0007-fork-clone-exact-syscall-arity.patch
+    # 0008: detached-thread exit (__unmapself) can't do the native stack-switch
+    # dance on wasm (CRTJMP abort()s) → munmap+exit inline instead. Fixes GLib
+    # GThreadPool worker exit → SIGILL that blocked GTK apps (gtk3-widget-factory).
+    ../patches/musl/0008-wasm-unmapself-no-stack-switch.patch
   ];
 
   nativeBuildInputs = [ bt ];
