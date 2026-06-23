@@ -159,6 +159,13 @@
         inherit cross;
       };
 
+      # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
+      # dispatch rodata (static const) fn pointers correctly? See
+      # userspace/fpcast-vtable-test.c.
+      fpcastVtableTest = import ./userspace/fpcast-vtable-test.nix {
+        inherit cross;
+      };
+
       # M3a (galculator): glib-selftest — in-guest gobject proof. Round-trips a
       # GObject and emits a `double` signal through gobject's GENERIC (libffi)
       # marshaller (g_cclosure_marshal_generic → ffi_call) — the first real exercise
@@ -190,6 +197,21 @@
       # browser check. gtk is gobject → fn-pointer casts, so the linked binary goes
       # through the SHARED --fpcast-emu seam. See userspace/gtk-hello.*.
       gtkHello = import ./userspace/gtk-hello.nix {
+        inherit cross;
+        gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pixman = cross.pixman; wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols; libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
+      # #33: gtk3-widget-factory — the headline GTK3 app. GTK's own widget showcase,
+      # built standalone against the cross gtk3. Proves GtkBuilder signal autoconnect
+      # on the static guest via gtk_builder_add_callback_symbol (no GModule). --selftest
+      # is the display-free headless gate; the full window is a manual browser check.
+      # See userspace/widget-factory.nix + patches/widget-factory/ + issue #33.
+      widgetFactory = import ./userspace/widget-factory.nix {
         inherit cross;
         gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
         gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
@@ -294,7 +316,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest fpcastVtableTest widgetFactory ];
       };
 
       # ---- the served-closure manifest (store.json) for pc -----------------
@@ -416,6 +438,9 @@
         # $out/bin/pthread-exit-test.
         pthread-exit-test = pthreadExitTest;
 
+        # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
+        fpcast-vtable-test = fpcastVtableTest;
+
         # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
         # $out/bin/wl-text (--selftest is the headless CI gate).
         wl-text = wlText;
@@ -437,6 +462,12 @@
         # the initramfs as /bin/galculator; its $out/share/galculator/ui/*.ui ride the
         # served /nix closure.
         galculator = cross.galculator;
+
+        # #33: gtk3-widget-factory — the headline GTK3 app. GtkBuilder autoconnect
+        # via add_callback_symbol (no GModule on the static guest). --selftest is the
+        # headless gate (display-free GtkBuilder signal round-trip); the full window
+        # renders in the browser (needs the musl/RAM/dev-shm fixes). → $out/bin/gtk3-widget-factory.
+        widget-factory = widgetFactory;
 
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
