@@ -148,9 +148,13 @@ pkgs.stdenv.mkDerivation {
       `# clang.wasm needs a single contiguous mmap, and the cc wrapper's sysroot` \
       `# unpack fragments the NOMMU buddy allocator below 57MB first (only 4 order-15` \
       `# blocks at 512MiB, all spoiled). 0x4000 = 1GiB doubles the order-15 block` \
-      `# count so a contiguous 57MB survives; stays under setup.c's 0x80000000` \
-      `# (2GiB) positive-address limit. Shared fix — helps any large-binary exec.` \
-      --set-val CONFIG_BOOT_MEM_PAGES 0x4000 \
+      `# count so a contiguous 57MB survives. 0x7000 = 1.75GiB: GTK apps that map a` \
+      `# large window allocate an order-11 (8MB) GFP_HIGHUSER wl_shm buffer, and after` \
+      `# the served /nix closure + glib/gdk init fragment the heap below 8MB, that mmap` \
+      `# fails ("page allocation failure: order:11") → no window (gtk3-widget-factory).` \
+      `# More RAM keeps order-11 blocks whole. Stays under setup.c's 0x80000000 (2GiB)` \
+      `# positive-address limit. Shared fix — helps any large-binary exec / big window.` \
+      --set-val CONFIG_BOOT_MEM_PAGES 0x7000 \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
 
     make $makeFlags olddefconfig

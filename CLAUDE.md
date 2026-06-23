@@ -453,6 +453,26 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
+- **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
+  DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
+  generic path does a native stack-pointer switch (`CRTJMP`) to `munmap` its own
+  stack — but the wasm arch stubs `CRTJMP(pc,sp)` to `abort()` → SIGILL (exit 132).
+  GLib **GThreadPool** workers (gdk-pixbuf/GTask, so any non-trivial GTK app like
+  gtk3-widget-factory) are detached threads, so they crashed on exit; gtk-hello has
+  no threads and never hit it. Fix: on wasm, `__unmapself` does `munmap`+`exit`
+  inline (no stack switch) — safe because NOMMU `munmap` does NOT invalidate the
+  wasm linear-memory bytes the C shadow stack occupies. Validated by
+  `.#pthread-exit-test` (spawn+exit 16 detached threads). A musl change → world
+  rebuild (musl → stdenv → all guest binaries relink). SAME class as the libffi /
+  futex / fpcast wasm-can't-do-native-asm theme.
+- **Guest RAM = 1.75 GiB for large GTK windows** (`kernel.nix`
+  `CONFIG_BOOT_MEM_PAGES 0x7000`). A GTK app mapping a large window allocates an
+  **order-11 (8 MB) GFP_HIGHUSER** `wl_shm` buffer; after the served `/nix` closure
+  + glib/gdk init fragment the NOMMU buddy heap below 8 MB, that mmap fails
+  (`page allocation failure: order:11`) → no window (gtk3-widget-factory). More RAM
+  keeps order-11 blocks whole. MUST stay **under `0x8000` (2 GiB)** — setup.c
+  positive-address limit. vmlinux-only rebuild; same NOMMU contiguous-mmap class as
+  the 1 GiB bump for the 57 MB clang exec.
 - **User stack 8 KiB→4 MiB** (`patches/kernel/0007`): musl `realpath()` alone
   overflows 8 KiB and NOMMU can't grow the stack (was both the "readlink -f
   corrupts long paths" bug and the nix.wasm startup "memory access out of bounds").

@@ -1,0 +1,38 @@
+--- a/src/thread/__unmapself.c
++++ b/src/thread/__unmapself.c
+@@ -4,6 +4,7 @@
+ /* cheat and reuse CRTJMP macro from dynlink code */
+ #include "dynlink.h"
+ 
++#ifndef __wasm__
+ static void *unmap_base;
+ static size_t unmap_size;
+ static char shared_stack[256];
+@@ -13,12 +14,27 @@
+ 	__syscall(SYS_munmap, unmap_base, unmap_size);
+ 	__syscall(SYS_exit);
+ }
++#endif
+ 
+ void __unmapself(void *base, size_t size)
+ {
++#ifdef __wasm__
++	/* wasm cannot switch the stack pointer and jump (CRTJMP is a stub that
++	 * abort()s), so the generic stack-switch dance is impossible. On this
++	 * NOMMU/wasm target munmap returns the backing pages to the allocator but
++	 * does NOT invalidate the wasm linear-memory bytes the running C shadow
++	 * stack occupies, so it is safe to munmap our own stack region and then
++	 * SYS_exit inline on that same stack. Without this, a detached thread (e.g.
++	 * a GLib GThreadPool worker — gdk-pixbuf/GTask) exits through here and
++	 * abort()s → SIGILL, which kept GTK apps like gtk3-widget-factory from
++	 * rendering. */
++	__syscall(SYS_munmap, base, size);
++	for (;;) __syscall(SYS_exit, 0);
++#else
+ 	char *stack = shared_stack + sizeof shared_stack;
+ 	stack -= (uintptr_t)stack % 16;
+ 	unmap_base = base;
+ 	unmap_size = size;
+ 	CRTJMP(do_unmap, stack);
++#endif
+ }
