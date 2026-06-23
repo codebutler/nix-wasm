@@ -418,7 +418,37 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   the fpcast seam), printing `GALCULATOR-SELFTEST: main_window=1 button_7=1
   gtk_types=1 OK`. Gate: `node demo/node/galculator-smoke.mjs` matches
   `/GALCULATOR-SELFTEST: .* OK/`. The full click-to-42 compute is a MANUAL browser
-  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`).
+  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`). **CAVEAT — the
+  real galculator window is GATED by the GModule wall below**: its `--selftest`
+  passes but `gtk_builder_connect_signals(NULL)` over its 115 `.ui` handlers needs
+  a working GModule, which the static guest lacks. The visual headline moved to
+  gtk3-widget-factory (next entry).
+- **GtkBuilder signal autoconnect on the static guest = `add_callback_symbol`, NOT
+  a runtime `dlsym`** (`userspace/widget-factory.nix`, `patches/widget-factory/`,
+  issue #33). `gtk_builder_connect_signals(builder, NULL)` resolves `.ui` `<signal
+  handler="...">` names via `g_module_open(NULL)`/`g_module_symbol` → musl
+  `dlopen(NULL)`/`dlsym`, which the statically-linked guest stubs to NULL →
+  `Gtk-ERROR: requires working GModule`. **A host-side `dlsym` CANNOT fix this** (a
+  full impl was built + world-rebuild-tested, then reverted — see #33): `--fpcast-emu`
+  rewrites every indirect call to a canonical `(i64×128)→i64` sig, so a fn-pointer
+  must be a canonical *thunk* (made only for address-taken fns); the host can neither
+  synthesize one (`WebAssembly.Function` absent in Node/browsers) nor locate one by
+  name (binaryen exports no thunks). Only `&function` in C yields the fpcast-correct
+  thunk → resolution MUST be guest-side. The GTK-sanctioned static path
+  (`gtk_builder_connect_signals_default` source: `g_error`s only for an *unregistered*
+  handler) is `gtk_builder_add_callback_symbol(builder,"on_foo",G_CALLBACK(on_foo))`
+  per handler — `&on_foo` is the fpcast canonical thunk, and a fully-registered scope
+  never opens GModule (the NULL `g_module_open` is harmless). **fork was never the
+  blocker here** (orthogonal to #25/#29). **Headline app = gtk3-widget-factory**
+  (GTK's own showcase, no new deps, built standalone against cross gtk3 so gtk3
+  itself stays cached): it registers 17/18 handlers upstream; the patch adds the one
+  it leaves to GModule (`gtk_widget_hide_on_delete`) so the real app autoconnects
+  fully, and adds a display-free `--selftest` (a `GtkTextBuffer` `.ui` signal:
+  register → `connect_signals` → emit → assert the handler fired through fpcast).
+  Gate: `node demo/node/widget-factory-smoke.mjs` matches `/WIDGET-FACTORY-SELFTEST:
+  .* OK/` (`buf=1 connected_no_gmodule=1 handler_ran=1 major=3`). The full window
+  **RENDERS in the browser** (complete widget showcase, Adwaita theme) once the
+  /dev/shm mount + musl `__unmapself` + 1.75 GiB RAM fixes are in.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
