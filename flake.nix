@@ -324,6 +324,11 @@
         inherit pkgs; toplevel = wasmToplevel;
       };
 
+      # ---- the base-system store closure as a single squashfs image (#43) ---
+      wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
+        inherit pkgs; toplevel = wasmToplevel;
+      };
+
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
       nixSrc = pkgs.fetchFromGitHub {
         owner = "NixOS";
@@ -488,8 +493,8 @@
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
 
-        # The wasm-system closure exported as store.json for pc to serve over 9P.
-        wasm-store-manifest = wasmStoreManifest;
+        # The base-system store closure as a single squashfs image for virtio-blk.
+        wasm-base-squashfs = wasmBaseSquashfs;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
