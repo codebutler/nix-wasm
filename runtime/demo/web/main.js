@@ -60,28 +60,41 @@ async function boot() {
   });
 
   // Mirror pc's ensureWaylandProxy(): use the last hvc console as a hidden
-  // control shell to start waylandproxyd. We wait until the user console (hvc0)
-  // produces its first output — that means the autologin shell is up on all
-  // consoles — then write to the control console and give the proxy 1 s to bind
-  // the socket (same pattern as pc's kernel-service.js). Fire-and-forget.
+  // control shell to start waylandproxyd. Fire-and-forget.
   const wlConsole = handle.console(handle.consoleCount - 1);
   const startProxy = () =>
     new Promise((resolve) => {
+      // mkdir the dirs the redirect/socket need before using them (the squashfs
+      // base may not pre-create /var/log on a fresh boot).
+      wlConsole.write("mkdir -p /tmp /var/log\n");
       wlConsole.write("export XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0\n");
-      wlConsole.write("mkdir -p /tmp\n");
       wlConsole.write("waylandproxyd >/var/log/waylandproxyd.log 2>&1 &\n");
       setTimeout(resolve, 1000);
     });
 
   const con = handle.console(0);
   let proxyStarted = false;
+  let bootBuf = "";
   con.onData((bytes) => {
-    window._termLog += dec.decode(bytes, { stream: true });
+    const s = dec.decode(bytes, { stream: true });
+    window._termLog += s;
     term.write(bytes);
-    // Start the proxy on the first byte of output from hvc0 (shell is awake).
+    // Start the proxy once the autologin SHELL is actually up — NOT on the first
+    // byte. hvc is a kernel console (`console=hvc` in the cmdline), so hvc0's first
+    // output is the kernel boot log, emitted long before getty/autologin spawns a
+    // shell on the reserved control console; writing the proxy commands then drops
+    // them on the floor (no shell to read them → no proxy → "cannot open display").
+    // Wait for hvc0's shell prompt (autologin done across all consoles), then a beat
+    // for the control console to settle, before driving it.
     if (!proxyStarted) {
-      proxyStarted = true;
-      startProxy().catch((e) => console.warn("[wayland] proxy start failed", e));
+      bootBuf += s;
+      if (/root@[^\n]*#/.test(bootBuf)) {
+        proxyStarted = true;
+        setTimeout(
+          () => startProxy().catch((e) => console.warn("[wayland] proxy start failed", e)),
+          1500,
+        );
+      }
     }
   });
   term.onData((data) => con.write(typeof data === "string" ? enc.encode(data) : data));
