@@ -1,0 +1,20 @@
+toolchain/guest-clang.nix
+  s_af9b2fcb0c03bf::t_c0c1657f62038e 100-107
+  s_af9b2fcb0c03bf::t_12ef444f1b4e08 130-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "70996b202c5664d9ebdeefe0c778135196e16c9a",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
