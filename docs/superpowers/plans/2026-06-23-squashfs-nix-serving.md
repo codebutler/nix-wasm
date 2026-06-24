@@ -110,14 +110,14 @@ In the `scripts/config` invocation, add these flags (append to the existing `--e
 
 - [ ] **Step 5: Build the kernel**
 
-Run (as documented sudo invocation): `sudo nix build .#vmlinux --no-link --print-out-paths`
+Run (as documented sudo invocation): `sudo nix build .#kernel --no-link --print-out-paths`
 Expected: a store path. If it fails to compile, fix patch 0017 / config and rebuild (do NOT kill a long LLVM build).
 
 - [ ] **Step 6: Verify the configs survived `olddefconfig`**
 
 Some NOMMU configs are silently dropped without a gate (cf. SHMEM/TMPFS). Confirm they're present in the built `.config`. Build the config-bearing intermediate or grep the build log; the reliable check:
 
-Run: `sudo nix build .#vmlinux --print-out-paths` then inspect the derivation's `.config` (or add a temporary `grep -E 'SQUASHFS|VIRTIO_BLK|CONFIG_BLOCK=' build/.config` echo into `configurePhase` during the spike).
+Run: `sudo nix build .#kernel --print-out-paths` then inspect the derivation's `.config` (or add a temporary `grep -E 'SQUASHFS|VIRTIO_BLK|CONFIG_BLOCK=' build/.config` echo into `configurePhase` during the spike).
 Expected: `CONFIG_SQUASHFS=y`, `CONFIG_SQUASHFS_ZSTD=y`, `CONFIG_VIRTIO_BLK=y`, `CONFIG_BLOCK=y` all present. If any is `# … is not set`, find its gating symbol (as `NETDEVICES` gates `VIRTIO_NET`) and enable it too.
 
 - [ ] **Step 7: Commit**
@@ -529,7 +529,7 @@ In `userspace/bootstrap.nix`, replace the `aname=nix` 9P mount + overlay block (
 - [ ] **Step 6: Rebuild artifacts**
 
 ```bash
-sudo nix build .#vmlinux .#wasm-initramfs .#wasm-base-squashfs --print-out-paths
+sudo nix build .#kernel .#wasm-initramfs .#wasm-base-squashfs --print-out-paths
 ```
 Assemble an artifacts dir (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, and the existing `nix-cache/`) for the smoke harness.
 
@@ -675,7 +675,7 @@ Expected: **no** clang/wasm-ld/cc/c++ paths in the image; `base.squashfs` size d
 
 - [ ] **Step 4: Assemble artifacts incl. the new cache**
 
-Build `.#vmlinux .#wasm-initramfs .#wasm-base-squashfs .#wasm-binary-cache`; assemble an artifacts dir where `nix-cache/` is the `.#wasm-binary-cache` output.
+Build `.#kernel .#wasm-initramfs .#wasm-base-squashfs .#wasm-binary-cache`; assemble an artifacts dir where `nix-cache/` is the `.#wasm-binary-cache` output.
 
 - [ ] **Step 5: End-to-end — `clang` absent, then substituted, then compiles**
 
@@ -750,7 +750,7 @@ Edit `CLAUDE.md`: (a) Architecture — the guest userspace `/nix` is now a squas
 - [ ] **Step 6: Full build + smoke regression**
 
 ```bash
-sudo nix build .#vmlinux .#wasm-initramfs .#wasm-base-squashfs .#wasm-binary-cache --print-out-paths
+sudo nix build .#kernel .#wasm-initramfs .#wasm-base-squashfs .#wasm-binary-cache --print-out-paths
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node runtime/demo/node/smoke.mjs
 cd runtime && bun run test && bun run lint && bun run format:check && bun run typecheck
 ```
@@ -775,7 +775,7 @@ git commit -m "cleanup: delete store.json manifest path; update sync + docs (#43
 - Modify: `docs/superpowers/notes/squashfs-nommu-spike.md` or a new `docs/superpowers/notes/deploy-r2.md` (the deploy runbook)
 
 **Interfaces:**
-- Consumes: `.#wasm-base-squashfs`, `.#wasm-binary-cache`, `.#vmlinux`, `.#wasm-initramfs`.
+- Consumes: `.#wasm-base-squashfs`, `.#wasm-binary-cache`, `.#kernel`, `.#wasm-initramfs`.
 - Produces: R2 objects `packages/nix-wasm-base/<version>` (the squashfs) and the binary-cache tree under its R2 prefix, with CORP+CORS+immutable headers (via the preview-worker route); prints `bytes`/`sha256`/`version` for the pc `registry.js` entry.
 
 > **Cross-repo note:** the **consumer** side (pc `js/packages/registry.js` entry, the `installCore` identity-mount shim, and the `bootNixSystem({ squashfs })` wiring) lives in **pc** and is a follow-up PR there. This task produces and publishes the bytes + emits the registry values; it does not edit pc.

@@ -150,7 +150,7 @@ CI on **x86_64-linux** (fully cached nixpkgs) builds the wasm outputs and
 **writes them to R2** so the guest substitutes pre-built artifacts (the caching
 design goal). The publish job:
 
-- Builds `.#wasm-base-squashfs`, `.#wasm-binary-cache`, `.#vmlinux`,
+- Builds `.#wasm-base-squashfs`, `.#wasm-binary-cache`, `.#kernel`,
   `.#wasm-initramfs` on `x86_64-linux`.
 - Uploads `base.squashfs` to `pc-previews/packages/nix-wasm-base/<version>` and
   the binary-cache tree (`nix-cache-info` + `*.narinfo` + `nar/*`) under its R2
