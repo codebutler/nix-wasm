@@ -18,7 +18,8 @@
 - **Runtime CI gates (all four must pass before pushing, run from `runtime/`):** `bun run test`, `bun run lint` (zero warnings), `bun run format:check`, `bun run typecheck`.
 - **Kernel sector size:** virtio-blk uses 512-byte logical sectors throughout.
 - **squashfs compressor:** zstd. **Block device transport:** virtio-blk over the existing `virtio_wasm` transport. **Device id:** `VW_DEV_BLK = 3`, `VIRTIO_ID_BLOCK = 2`, `irq = VIRTIO_WASM_IRQ_BASE(8) + 3`.
-- **Hosting (Option X):** base squashfs + cache on R2, consumed via a fetch/URL seam. The hosting/upload/signing/integrity system is SEPARATE and OUT OF SCOPE; this plan stops at "runtime is handed a URL for the squashfs and a baseUrl for the cache."
+- **Hosting / download (Option X):** the base squashfs is delivered by **pc's disc-package system** (`codebutler/pc` commit `24780b14`, #288) — its R2 hosting + Setup wizard + sha256 verify + update checking + offline persistence are reused, but the squashfs is **NOT** mounted into pc's VFS: pc injects an identity mount into `installCore` and hands the raw `.squashfs` bytes to `bootNixSystem`, which feeds virtio-blk so Linux mounts it directly. The **nix-wasm seam** this plan owns: `bootNixSystem` accepts injected bytes (`opts.squashfs` = `ArrayBuffer | () => Promise<ArrayBuffer>`); **when absent it falls back to fetching `base.squashfs` from `baseUrl`** (the standalone-harness/dev/CI path). The pc-side consumer (registry entry, build/upload script, identity-mount shim) lives in **pc** as a follow-up.
+- **Publishing:** CI on `x86_64-linux` builds the wasm outputs and writes them to R2 via `wrangler r2 object put --remote` (Task 9). R2 creds live in CI secrets, never in the repo.
 
 ---
 
@@ -31,6 +32,9 @@
 - `flake.nix` output `wasm-binary-cache` builder (inline or `userspace/binary-cache.nix`).
 - `patches/kernel/0017-wasm-virtio-blk-device.patch` — adds `VW_DEV_BLK` id + registration to the `virtio_wasm` transport.
 - `docs/superpowers/notes/squashfs-nommu-spike.md` — spike findings (chosen block size, gotchas).
+- `scripts/publish-to-r2.sh` — build → hash → upload the wasm artifacts to R2 (manual + CI).
+- `.github/workflows/publish-wasm-artifacts.yml` — CI: build on x86_64, publish to R2.
+- `docs/superpowers/notes/deploy-r2.md` — deploy runbook (upload + verify + pc registry bump).
 
 **Modify:**
 - `kernel.nix` — enable `CONFIG_BLOCK`, `CONFIG_VIRTIO_BLK`, `CONFIG_SQUASHFS`, `CONFIG_SQUASHFS_ZSTD`, `CONFIG_ZSTD_DECOMPRESS`; apply patch 0017.
@@ -451,7 +455,7 @@ git commit -m "build: base-system store as a squashfs image (.#wasm-base-squashf
 
 **Interfaces:**
 - Consumes: `BlkDevice` worker wiring (Task 2), `.#wasm-base-squashfs` (Task 4).
-- Produces: `bootNixSystem` fetches `base.squashfs` and the guest overlays it to `/nix`. The `nixStore`/`nix` 9P export is gone; `nixCache` is unchanged.
+- Produces: `bootNixSystem` obtains `base.squashfs` via the **injected-bytes-or-fallback-fetch seam** (`opts.squashfs` = `ArrayBuffer | (() => Promise<ArrayBuffer>)`, supplied by pc's disc-package system; else fetched from `baseUrl`) and the guest overlays it to `/nix`. The `nixStore`/`nix` 9P export is gone; `nixCache` is unchanged.
 
 - [ ] **Step 1: Thread the squashfs buffer through `boot.js`**
 
@@ -460,16 +464,22 @@ In `runtime/boot.js`:
 2. Remove the `nixStore` opt + `if (opts.nixStore) exports.nix = opts.nixStore;` line (and its JSDoc).
 3. Include the buffer in the worker boot `postMessage` payload (the `{ vmlinux, boot_cmdline, initrd, … }` object ~line 156) as `squashfs: opts.squashfs` and add it to the transfer list `[…]` so it's moved, not copied. (If `opts.squashfs` is undefined, omit it / pass nothing.)
 
-- [ ] **Step 2: Fetch the squashfs in `boot-nix-system.js`**
+- [ ] **Step 2: Wire the squashfs seam in `boot-nix-system.js`**
 
 In `runtime/boot-nix-system.js`:
 1. Remove `import { createNixClosureStore } …` and the `nixStore: …` line.
-2. Fetch the image via the seam and pass it through:
+2. Accept injected bytes/provider, falling back to a `baseUrl` fetch — so pc's disc-package system supplies the verified, persisted bytes in production, while the node harnesses/dev/CI fetch `base.squashfs` directly. Add `squashfs?` to the opts JSDoc (`ArrayBuffer | (() => Promise<ArrayBuffer>)`):
 
 ```js
-  const squashfs = useNix
-    ? await (await fetch(u("base.squashfs"))).arrayBuffer()
-    : undefined;
+  // The base store squashfs: pc's disc-package system passes the verified,
+  // persisted bytes via opts.squashfs (ArrayBuffer or a provider fn); standalone
+  // harnesses/dev/CI omit it and we fetch base.squashfs from baseUrl.
+  let squashfs;
+  if (useNix) {
+    if (typeof opts.squashfs === "function") squashfs = await opts.squashfs();
+    else if (opts.squashfs) squashfs = opts.squashfs;
+    else squashfs = await (await fetch(u("base.squashfs"))).arrayBuffer();
+  }
   return bootLinux({
     vfs: opts.vfs,
     vmlinuxUrl: u("vmlinux.wasm"),
@@ -647,13 +657,13 @@ to keep only `nix` + `ash` in the base:
 
 - [ ] **Step 2: Configure cache trust in `system.nix`**
 
-In `userspace/system.nix` near `nix.settings.substituters` (line 173), keep `substituters = [ "file:///nix-cache" ]` and ensure substitution from the file cache works without a signature gate (the cache is a trusted same-deploy artifact; production signing belongs to the publish system, out of scope):
+In `userspace/system.nix` near `nix.settings.substituters` (line 173), keep `substituters = [ "file:///nix-cache" ]` and ensure substitution from the file cache works without a signature gate (the cache is a trusted same-deploy artifact; production signing happens in CI — Task 9):
 
 ```nix
         nix.settings.require-sigs = lib.mkForce false;
 ```
 
-(If/when the publish system signs the cache, swap this for `trusted-public-keys = [ "<key>" ]`.)
+(When CI signs the published cache, swap this for `trusted-public-keys = [ "<key>" ]` with the CI-published public key.)
 
 - [ ] **Step 3: Rebuild the base squashfs + confirm the toolchain is gone**
 
@@ -755,15 +765,111 @@ git commit -m "cleanup: delete store.json manifest path; update sync + docs (#43
 
 ---
 
+# Phase 4 — CI publishing to R2 (#2 / Phase 5)
+
+## Task 9: CI builds the wasm outputs on x86_64 and writes them to R2
+
+**Files:**
+- Create: `.github/workflows/publish-wasm-artifacts.yml`
+- Create: `scripts/publish-to-r2.sh` (the build → hash → upload step, reusable locally for the manual "deploy" flow)
+- Modify: `docs/superpowers/notes/squashfs-nommu-spike.md` or a new `docs/superpowers/notes/deploy-r2.md` (the deploy runbook)
+
+**Interfaces:**
+- Consumes: `.#wasm-base-squashfs`, `.#wasm-binary-cache`, `.#vmlinux`, `.#wasm-initramfs`.
+- Produces: R2 objects `packages/nix-wasm-base/<version>` (the squashfs) and the binary-cache tree under its R2 prefix, with CORP+CORS+immutable headers (via the preview-worker route); prints `bytes`/`sha256`/`version` for the pc `registry.js` entry.
+
+> **Cross-repo note:** the **consumer** side (pc `js/packages/registry.js` entry, the `installCore` identity-mount shim, and the `bootNixSystem({ squashfs })` wiring) lives in **pc** and is a follow-up PR there. This task produces and publishes the bytes + emits the registry values; it does not edit pc.
+
+- [ ] **Step 1: Write `scripts/publish-to-r2.sh` (build + hash + upload)**
+
+```bash
+#!/usr/bin/env bash
+# publish-to-r2.sh — build the wasm artifacts and upload them to the pc-previews
+# R2 bucket via wrangler (the preview-worker stamps CORP+CORS on /packages).
+# VERSION = the squashfs content hash (immutable, path-versioned object).
+# Requires: CLOUDFLARE_API_TOKEN + R2 creds in the env (CI secrets); never inline.
+set -euo pipefail
+NIX="nix --extra-experimental-features 'nix-command flakes'"
+SQ=$($NIX build .#wasm-base-squashfs --print-out-paths --no-link)/base.squashfs
+CACHE=$($NIX build .#wasm-binary-cache --print-out-paths --no-link)
+SHA=$(sha256sum "$SQ" | cut -d' ' -f1)
+BYTES=$(stat -c%s "$SQ")
+VERSION="$SHA"  # content-addressed; safe to immutable-cache forever
+echo "base.squashfs bytes=$BYTES sha256=$SHA version=$VERSION"
+
+# Upload the base squashfs (raw octet-stream; Linux consumes it directly).
+bunx wrangler r2 object put \
+  "pc-previews/packages/nix-wasm-base/$VERSION" \
+  --file "$SQ" --content-type application/octet-stream --remote
+
+# Upload the binary-cache tree (nix-cache-info + *.narinfo + nar/*) under its prefix.
+( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
+    bunx wrangler r2 object put "pc-previews/nix-cache/${f#./}" \
+      --file "$f" --content-type application/octet-stream --remote
+  done )
+
+echo "PUBLISHED nix-wasm-base version=$VERSION"
+echo "→ update pc js/packages/registry.js: bytes=$BYTES sha256=$SHA version=$VERSION"
+```
+
+(`--remote` is MANDATORY — wrangler 4.x writes the local simulator otherwise and the live URL 404s.)
+
+- [ ] **Step 2: Verify the live objects (manual deploy gate)**
+
+```bash
+curl -I https://pc-previews.eric-c6b.workers.dev/packages/nix-wasm-base/<version>
+```
+Expected: `200`, `access-control-allow-origin: *`, `cross-origin-resource-policy: cross-origin`. (If `Not found`, the preview-worker on the deployed branch lacks the route or `--remote` was omitted — see the pc disc-packages rule.)
+
+- [ ] **Step 3: Write the GitHub Actions workflow**
+
+Create `.github/workflows/publish-wasm-artifacts.yml`: run on `x86_64-linux` (fully cached nixpkgs — avoids from-source LLVM), install Nix + the `nixos-26.05` pin, install `bun`/`wrangler`, run `scripts/publish-to-r2.sh` with R2 creds from `secrets`. Trigger on push to `master` (and `workflow_dispatch`). Emit `bytes`/`sha256`/`version` as a job summary so the pc registry update is copy-paste.
+
+```yaml
+name: publish-wasm-artifacts
+on:
+  push: { branches: [ master ] }
+  workflow_dispatch:
+jobs:
+  publish:
+    runs-on: ubuntu-latest        # x86_64-linux, cached cache.nixos.org
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with: { nix_path: nixpkgs=channel:nixos-26.05 }
+      - uses: oven-sh/setup-bun@v2
+      - name: Build + publish to R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/publish-to-r2.sh | tee -a "$GITHUB_STEP_SUMMARY"
+```
+
+- [ ] **Step 4: Write the deploy runbook**
+
+Create `docs/superpowers/notes/deploy-r2.md`: the manual `scripts/publish-to-r2.sh` flow, the `curl -I` verification, the `--remote` + preview-worker-route gotchas (cite the pc `.claude/rules/disc-packages.md`), and the "bump pc `registry.js` `version`/`sha256`/`bytes`" step that finalizes a release.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .github/workflows/publish-wasm-artifacts.yml scripts/publish-to-r2.sh docs/superpowers/notes/deploy-r2.md
+git commit -m "ci: build wasm artifacts on x86_64 and publish to R2 (#2/#43)"
+```
+
+> **Note on CI validation:** the workflow can't be fully green-verified without R2 secrets + a deployed preview-worker route; Step 2's `curl -I` is the real gate. Until secrets are wired, run `scripts/publish-to-r2.sh` locally (with creds) to publish, then verify with `curl -I`.
+
+---
+
 ## Self-Review Notes (coverage against the spec)
 
 - §1 base squashfs → Task 4 (build) + Task 1/3 (kernel+mount) + Task 5 (boot wiring). NOMMU block-size tuning → Task 3 Step 4.
-- §2 toolchain → binary cache → Task 6 (publish, real `.drv`s #1) + Task 7 (remove from base, e2e). Signing: realized as a seam (require-sigs=false locally; production signing deferred to the out-of-scope publish system — noted in Task 7 Step 2).
+- §2 toolchain → binary cache → Task 6 (publish, real `.drv`s #1) + Task 7 (remove from base, e2e). Signing: `require-sigs=false` locally; production signing in CI (Task 9 / Task 7 Step 2).
 - §3 kernel → Task 1 (configs + patch 0017); mmap-for-exec de-risk validated in Task 3 Step 3.
-- §4 runtime → Task 2 (BlkDevice + worker) + Task 5 (boot.js/boot-nix-system/index, delete nix-closure-store).
+- §4 runtime → Task 2 (BlkDevice + worker) + Task 5 (boot.js/boot-nix-system/index, delete nix-closure-store). The injected-bytes-or-fallback-fetch seam → Task 5 Step 2.
 - §5 bootstrap mount swap → Task 5 Step 5.
-- §6 vendoring/pc → Task 8 (sync-to-pc, docs). Option-X R2 hosting consumed via the `bootNixSystem` URL seam (Task 5 Step 2); upload system out of scope.
+- §6 vendoring/pc → Task 8 (sync-to-pc, docs). Disc-package delivery (download/verify/wizard/update/offline) reused via pc's `installCore` with an identity mount; the squashfs bytes reach `bootNixSystem` through the Task 5 Step 2 seam. pc-side consumer wiring is a follow-up in pc.
 - §7 testing/acceptance → blk unit tests (Task 2), boot smoke (Task 5/7/8), the `which clang`→install→`cc` e2e (Task 7 Step 5), size assertion (Task 7 Step 3).
+- "Deploy the built image" + CI → R2 → Task 9 (`scripts/publish-to-r2.sh` + workflow + `deploy-r2.md` runbook).
 - Deletions (store.json/store-manifest/nix-closure-store) → Tasks 5 + 8.
 
 **Open item carried to execution:** confirm `vring.js` method names (`popAvail`/`chain`/`pushUsed`) in Task 2 Step 1 and use the existing API verbatim.
