@@ -1,0 +1,31 @@
+docs/superpowers/specs/2026-06-23-squashfs-nix-serving-design.md
+  s_af9b2fcb0c03bf::t_1914f9582f3c6a 226-230
+  s_af9b2fcb0c03bf::t_bd7bd0ed4f2a0a 314-324,328-330,332-333
+  s_af9b2fcb0c03bf::t_0106dda1e2be30 250-257
+  s_af9b2fcb0c03bf::t_9bed5a355ef57e 88-168
+  s_af9b2fcb0c03bf::t_1cf5380bb58832 196-200
+docs/superpowers/plans/2026-06-23-squashfs-nix-serving.md
+  s_af9b2fcb0c03bf::t_08b6c46139615a 458
+  s_af9b2fcb0c03bf::t_5e808a8bdda319 21-22
+  s_af9b2fcb0c03bf::t_7244dfaa8f5816 467,471,474-482
+  s_af9b2fcb0c03bf::t_38d0cb9e4b0378 35-37
+  s_af9b2fcb0c03bf::t_281c79a9e84acd 866,868,870,872
+  s_af9b2fcb0c03bf::t_98e3d33e0d9e84 660,666
+  s_af9b2fcb0c03bf::t_26e05fef27d849 768-862
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "a46b7a43eefeee878cb5fbdd4c788868920da123",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
