@@ -1,0 +1,23 @@
+.github/workflows/publish-wasm-artifacts.yml
+  s_af9b2fcb0c03bf::t_b5abc5ae36b933 1-34
+docs/superpowers/notes/deploy-r2.md
+  s_af9b2fcb0c03bf::t_9fb927764e26ef 1-164
+scripts/publish-to-r2.sh
+  s_af9b2fcb0c03bf::t_efccbf5a94e75c 1-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "829b8d91f45b37ff84f6208036996bbacd8e12a5",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
