@@ -359,6 +359,22 @@
           chmod -R u+w $out/bin
           nuke-refs $out/bin/nix
         '';
+
+      # ---- Wasm binary cache: the on-demand compiler toolchain (#43/#2/#1) -----
+      # A standard file:// Nix binary cache (nix-cache-info + narinfo + nar/) for
+      # the in-guest compiler tools. Served by runtime/nix-cache.js and substituted
+      # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
+      # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
+      # arrive on demand through substitution.
+      wasmDevToolsEnv = pkgs.buildEnv {
+        name = "wasm-dev-tools";
+        paths = [ guestClang guestCc guestCxx makeWasm ];
+      };
+      wasmBinaryCache = import ./userspace/binary-cache.nix {
+        inherit pkgs;
+        devPaths = [ guestClang guestCc guestCxx makeWasm ];
+        devToolsEnv = wasmDevToolsEnv;
+      };
     in
     {
       # The FULL wasm32 cross package set — exposing it as legacyPackages lets
@@ -495,6 +511,11 @@
 
         # The base-system store closure as a single squashfs image for virtio-blk.
         wasm-base-squashfs = wasmBaseSquashfs;
+
+        # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
+        # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
+        # Served by runtime/nix-cache.js; in-guest: `nix-env -iA dev-tools`.
+        wasm-binary-cache = wasmBinaryCache;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
