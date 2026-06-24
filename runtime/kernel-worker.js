@@ -12,6 +12,7 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
+import { BlkDevice } from "./virtio/blk-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -208,6 +209,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// serviceable from a userspace task worker.
   let virtio_queues = null;
 
+  /// squashfs image bytes for the BlkDevice (VW_DEV_BLK=3); set from the boot
+  /// message in init(). Zero-length when no squashfs was provided (--no-nix).
+  let squashfsImage = new Uint8Array(0);
+
   /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
   /// transport, keyed by the host device index `dev` the guest passes in every
   /// import call. Lazily built on first use because they need the guest's
@@ -226,6 +231,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VW_DEV_WL = 0;
   const VW_DEV_ECHO = 1;
   const VW_DEV_NET = 2;
+  const VW_DEV_BLK = 3;
 
   /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
   const virtio_devices = new Map();
@@ -310,6 +316,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           );
         });
         d = net;
+      } else if (id === VW_DEV_BLK) {
+        // Read-only base-system squashfs, handed in via the boot message.
+        // squashfsImage is a 0-length Uint8Array when absent (--no-nix boot).
+        d = new BlkDevice({ ...common, image: squashfsImage });
       } else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;
@@ -634,6 +644,11 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // Wayland Phase 1 (1b): attach the shared virtio queue-layout store.
       if (message.virtio_queues) {
         virtio_queues = new SharedQueues(message.virtio_queues);
+      }
+      // Task 2 (#43): squashfs image for the read-only virtio-blk device.
+      // Absent on --no-nix boots; the 0-capacity device simply mounts empty.
+      if (message.squashfs) {
+        squashfsImage = new Uint8Array(message.squashfs);
       }
 
       if (message.user_executable) {
