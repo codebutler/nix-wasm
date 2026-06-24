@@ -1,0 +1,21 @@
+runtime/demo/node/profile-install-e2e.mjs
+  s_af9b2fcb0c03bf::t_b7d94d5b68a32d 77
+  s_af9b2fcb0c03bf::t_cd6aa361b430bf 3,26-76,78-117
+  s_af9b2fcb0c03bf::t_8c7831f5d27747 1-2,4-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "9d3535bc9411f8585e43fdab0f3713114f749cc4",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
