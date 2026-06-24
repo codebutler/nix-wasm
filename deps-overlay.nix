@@ -769,8 +769,8 @@ in
         # closure. galculator is a LEAF app — nothing is ever built against it — so
         # that propagation metadata is pure dead weight, yet Nix's reference scanner
         # follows it and drags ~15k `-dev`/X11/glibc-locale store paths into the
-        # SERVED store (store.json ballooned ~26MB→345MB). Dropping nix-support is
-        # safe and removes that whole subtree (→ ~28MB store.json / X11+locale gone).
+        # served store (base.squashfs ballooned ~26MB→345MB). Dropping nix-support is
+        # safe and removes that whole subtree (→ ~28MB base.squashfs / X11+locale gone).
         #
         # We do NOT strip the binary's OWN store references with remove-references-to:
         # several look "dead" for a static binary but are real RUNTIME DATA deps that

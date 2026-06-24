@@ -326,8 +326,8 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   fonts.nix` + `system.nix` bake DejaVu + `/etc/fonts/fonts.conf` +
   `FONTCONFIG_FILE`): the wl-text/M2 smoke MUST boot `nix:true` (served `/nix`
   closure) — a busybox-only boot has no font config and fontconfig `FcInit` fails.
-  Rebuild `.#wasm-store-manifest` after any `fonts.nix`/`system.nix` change so
-  the new store path is included in the served `store.json`.
+  Rebuild `.#wasm-base-squashfs` after any `fonts.nix`/`system.nix` change so
+  the new store path is included in the served `base.squashfs`.
 - **M3a glib/gobject** (`deps-overlay.nix` glib override): disable
   `selinux`/`libmount`/`sysprof`/`man-pages`/`dtrace`/`documentation` + `tests`
   (nixpkgs glib drags libselinux/libsepol + util-linux/libmount + libsysprof-capture
