@@ -1,0 +1,22 @@
+userspace/binary-cache.nix
+  s_af9b2fcb0c03bf::t_7c068d7013edc8 1-51
+flake.nix
+  s_af9b2fcb0c03bf::t_0c831c0bc15b93 515-519
+  s_af9b2fcb0c03bf::t_8d7541a1b3e01d 362-377
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "aa90460cd03af6d01c4128ee46f92a087f8cabda",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
