@@ -1,0 +1,28 @@
+runtime/package.json
+  s_af9b2fcb0c03bf::t_45159756589635 17
+runtime/boot-nix-system.js
+  s_af9b2fcb0c03bf::t_d46e3cf50d87c0 2-4,7,14-16,34-44,54
+runtime/boot.js
+  s_af9b2fcb0c03bf::t_b7ee09abf83fa5 122-123
+userspace/bootstrap.nix
+  s_af9b2fcb0c03bf::t_bd7ee87a98b19c 12-13
+  s_af9b2fcb0c03bf::t_5618afb4006ce5 53,55,57
+runtime/sync-to-pc.sh
+  s_af9b2fcb0c03bf::t_f140ab6fc48ee4 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "8f6bf43cb128590d0d490ac866f5101fbb91b96b",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
