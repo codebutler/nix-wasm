@@ -286,10 +286,10 @@
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
-        # The in-guest toolchain, folded into the system profile/closure (one
-        # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
-        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
-        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh ];
+        # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
+        # c++, make) lives in .#wasm-binary-cache and is installed on demand via
+        # `nix-env -iA dev-tools`. Removing it here shrinks the squashfs by ~89 MB.
+        toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {

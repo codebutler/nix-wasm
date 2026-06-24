@@ -26,19 +26,37 @@ let
   };
 
   # The pkgs.nix expression file: maps attr names → substitutable store paths
-  # so `nix-env -iA <attr>` resolves from ~/.nix-defexpr.
+  # as fake derivations so `nix-env -iA <attr>` resolves from ~/.nix-defexpr.
   # bootstrap.nix copies /nix-cache/pkgs.nix to ~/.nix-defexpr/pkgs.nix at boot.
-  pkgsNix = pkgs.writeText "pkgs.nix" ''
-    {
-      clang    = builtins.storePath "${builtins.elemAt devPaths 0}";
-      cc       = builtins.storePath "${builtins.elemAt devPaths 1}";
-      "c++"    = builtins.storePath "${builtins.elemAt devPaths 2}";
-      make     = builtins.storePath "${builtins.elemAt devPaths 3}";
-      dev-tools = builtins.storePath "${devToolsEnv}";
-    }
-  '';
+  # Each attr uses a "fake derivation" (type="derivation" + outPath + name) —
+  # plain builtins.storePath returns a path not a derivation and nix-env rejects it.
+  pkgsNix = pkgs.writeText "pkgs.nix" (
+    let
+      mkFakeDrv = sp: name:
+        ''{ type = "derivation"; name = "${name}"; outPath = "${sp}"; out = { outPath = "${sp}"; }; outputs = [ "out" ]; }'';
+      clangPath    = builtins.elemAt devPaths 0;
+      ccPath       = builtins.elemAt devPaths 1;
+      cxxPath      = builtins.elemAt devPaths 2;
+      makePath     = builtins.elemAt devPaths 3;
+      devToolsPath = devToolsEnv;
+      # Extract name from store path (drop "/nix/store/<32-char-hash>-")
+      pname = sp: builtins.substring 44 (builtins.stringLength (toString sp) - 44) (toString sp);
+    in ''
+      {
+        clang     = ${mkFakeDrv clangPath    (pname clangPath)};
+        cc        = ${mkFakeDrv ccPath       (pname ccPath)};
+        "c++"     = ${mkFakeDrv cxxPath      (pname cxxPath)};
+        make      = ${mkFakeDrv makePath     (pname makePath)};
+        dev-tools = ${mkFakeDrv devToolsPath (pname devToolsPath)};
+      }
+    ''
+  );
 in
-# Wrap mkBinaryCache's output: symlink its entire tree into $out and add pkgs.nix.
+# Wrap mkBinaryCache's output: symlink its entire tree into $out, add pkgs.nix,
+# and generate manifest.json — the file index consumed by runtime/nix-cache.js.
+# Without manifest.json, nix-cache.js falls back to an empty index (only the
+# seeded log/nar/realisations dirs), so pkgs.nix is never visible to the guest
+# and `nix-env -iA` fails with "attribute not found".
 pkgs.runCommand "wasm-binary-cache" { } ''
   # Symlink the cache content (nix-cache-info + narinfo + nar/ + realisations/ + …)
   # into our $out so the caller gets a single store path for the whole cache.
@@ -48,4 +66,15 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   done
   # Add the pkgs.nix index so the guest's ~/.nix-defexpr resolves `nix-env -iA`.
   cp ${pkgsNix} "$out/pkgs.nix"
+  # Generate manifest.json: a JSON array of all relative file paths in the cache.
+  # nix-cache.js fetches this on first access to build its file index; a missing
+  # manifest degrades to an empty cache (nothing served, no pkgs.nix copy in guest).
+  cd "$out"
+  # Collect flat files + files under nar/, realisations/, log/ subdirs
+  (
+    for f in *; do [ -f "$f" ] && printf '"%s"\n' "$f"; done
+    for sub in nar realisations log; do
+      [ -d "$sub" ] && for f in "$sub"/*; do [ -f "$f" ] && printf '"%s"\n' "$f"; done
+    done
+  ) | paste -sd ',' - | sed 's/^/[/;s/$/]/' > "$out/manifest.json"
 ''

@@ -153,7 +153,13 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_VIRTIO_NET \
       --enable CONFIG_INET --enable CONFIG_PACKET \
       --enable CONFIG_SCHED_STACK_END_CHECK \
-      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
+      `# MAX_ORDER=15 → 128MB max buddy block. nix-env substituting the 96MB` \
+      `# guest-clang NAR calls mmap(MAP_ANON, ~134MB) internally (malloc for NAR` \
+      `# extraction buffer); this needs order 16 (256MB) = above the 128MB cap,` \
+      `# so it always fails. Raise to 16 → 256MB max buddy block, which covers` \
+      `# the 134MB nix-env allocation and any future large-binary mmap. The` \
+      `# Kconfig allows up to 17 (arch/wasm/Kconfig range 10 17).` \
+      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 16 \
       `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \
       `# (64KiB pages) and that becomes the kernel's physical RAM. The default` \
       `# 0x2000 = 512MiB is too tight for in-guest compilation: exec'ing the 57MB` \
@@ -164,9 +170,11 @@ pkgs.stdenv.mkDerivation {
       `# large window allocate an order-11 (8MB) GFP_HIGHUSER wl_shm buffer, and after` \
       `# the served /nix closure + glib/gdk init fragment the heap below 8MB, that mmap` \
       `# fails ("page allocation failure: order:11") → no window (gtk3-widget-factory).` \
-      `# More RAM keeps order-11 blocks whole. Stays under setup.c's 0x80000000 (2GiB)` \
-      `# positive-address limit. Shared fix — helps any large-binary exec / big window.` \
-      --set-val CONFIG_BOOT_MEM_PAGES 0x7000 \
+      `# 0x7FFF = 1.99GiB (max under setup.c's 0x80000000/2GiB positive-address limit):` \
+      `# with MAX_ORDER=16 (256MB blocks) we need enough RAM to have a free 256MB region` \
+      `# after boot + squashfs load; 1.99GiB gives ~1.6GB free which the buddy allocator` \
+      `# coalesces into 256MB+ blocks. 0x7FFF is the safe maximum.` \
+      --set-val CONFIG_BOOT_MEM_PAGES 0x7FFF \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS \
       `# Squashfs/virtio-blk spike (#43 Task 1): block layer + virtio-blk driver +` \
       `# squashfs filesystem (with ZSTD decompression). CONFIG_BLOCK is the gate for` \

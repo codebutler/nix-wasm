@@ -171,7 +171,7 @@ let
         nix.enable = true;
         nix.settings.experimental-features = [ "nix-command" "flakes" ];
         nix.settings.substituters = lib.mkForce [ "file:///nix-cache" ];
-        nix.settings.require-sigs = false;
+        nix.settings.require-sigs = lib.mkForce false;
         nix.settings.sandbox = false;
         # Single-user guest: build/realize as the calling user (root). Empty
         # build-users-group disables build-user isolation — otherwise nix aborts

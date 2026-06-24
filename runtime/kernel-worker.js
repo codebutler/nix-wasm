@@ -310,10 +310,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // is woken without this worker servicing a postMessage (the wl pattern).
         const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
         net.setFrameSink((frame) => {
-          port.postMessage(
-            { method: "net_out", dev: id, frame: frame.buffer },
-            [frame.buffer],
-          );
+          port.postMessage({ method: "net_out", dev: id, frame: frame.buffer }, [frame.buffer]);
         });
         d = net;
       } else if (id === VW_DEV_BLK) {
@@ -875,7 +872,22 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             __wasm_syscall_1: syscall_logged(vmlinux_instance.exports.wasm_syscall_1),
             __wasm_syscall_2: syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
             __wasm_syscall_3: syscall_logged(vmlinux_instance.exports.wasm_syscall_3),
-            __wasm_syscall_4: syscall_logged(vmlinux_instance.exports.wasm_syscall_4),
+            // pc: futex_time64 (nr=422) split-arity shim — see patch 0015.
+            // glib's g_futex_simple calls __NR_futex_time64 with 4 args
+            // (uaddr, op, val, utime) via __wasm_syscall_4.  The kernel's
+            // wasm_syscall_4 dispatch does a 4-arg call_indirect but
+            // sys_call_table[422] = sys_futex which is 6-arg → type mismatch
+            // trap.  Intercept here: when nr=422 forward to wasm_syscall_6
+            // with two extra zero args (uaddr2=0, val3=0), which FUTEX_WAIT/
+            // WAKE ignore.  nix.wasm's musl pthread uses __wasm_syscall_6 for
+            // nr=422 directly, so it never hits this path.
+            __wasm_syscall_4: syscall_logged((sp, tp, nr, a0, a1, a2, a3) => {
+              // nr is a Number (wasm32) or BigInt (wasm64); compare both
+              if (nr == 422) {
+                return vmlinux_instance.exports.wasm_syscall_6(sp, tp, nr, a0, a1, a2, a3, 0, 0);
+              }
+              return vmlinux_instance.exports.wasm_syscall_4(sp, tp, nr, a0, a1, a2, a3);
+            }),
             __wasm_syscall_5: syscall_logged(vmlinux_instance.exports.wasm_syscall_5),
             __wasm_syscall_6: syscall_logged(vmlinux_instance.exports.wasm_syscall_6),
 
