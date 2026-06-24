@@ -14,7 +14,6 @@ import {
   bootNixSystem, // high-level — what most callers use
   bootLinux, // low-level
   makeConsoleSession,
-  createNixClosureStore,
   createNixCacheExport,
   createNixStore,
   MemVfs,
@@ -25,9 +24,9 @@ import {
 
 ### `bootNixSystem(opts)` → `Promise<handle>`
 
-The one call most consumers make. Resolves the four nix-wasm build artifacts
-(`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) under
-`baseUrl`, wires the Nix closure store and binary cache, and returns a boot
+The one call most consumers make. Resolves the nix-wasm build artifacts
+(`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) under
+`baseUrl`, wires the `/nix` squashfs base and binary cache, and returns a boot
 handle.
 
 ```js
@@ -52,7 +51,7 @@ const handle = await bootLinux({
   vfs, // required
   vmlinuxUrl, // required — URL of the kernel wasm
   initrdUrl, // required — URL of the initramfs.cpio.gz
-  nixStore, // optional — return value of createNixClosureStore(...)
+  squashfs, // optional — ArrayBuffer of base.squashfs (served via BlkDevice)
   nixCache, // optional — return value of createNixCacheExport(...)
   consoleCount, // optional number
   cmdline, // optional string
@@ -81,15 +80,15 @@ Output that arrives before `onData` is called is buffered per console.
 
 ### Building blocks
 
-| Export                                                 | Description                                                               |
-| ------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `createNixClosureStore(storeJsonUrl, { onProgress? })` | Read-only 9P VFS for the `/nix` closure (lazy blobs from `nix-cache/`)    |
-| `createNixCacheExport(cacheDirUrl)`                    | Read-only 9P VFS for `/nix-cache` (in-guest binary cache substituter)     |
-| `createNixStore(packages?)`                            | Minimal in-memory nix store for tests                                     |
-| `makeConsoleSession(console, hooks?)`                  | Wraps a console handle with `write`, `onData`, `resize`, `kill`, `hangup` |
-| `MemVfs`                                               | In-memory VFS — reference implementation and test double                  |
-| `HVC_CONSOLES`                                         | Default console count (8)                                                 |
-| `DEFAULT_CMDLINE`                                      | Default kernel command line                                               |
+| Export                                | Description                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------- |
+| `BlkDevice` (virtio/blk-device.js)    | Read-only virtio-blk device serving `base.squashfs` to the guest (`/nix`) |
+| `createNixCacheExport(cacheDirUrl)`   | Read-only 9P VFS for `/nix-cache` (in-guest binary cache substituter)     |
+| `createNixStore(packages?)`           | Minimal in-memory nix store for tests                                     |
+| `makeConsoleSession(console, hooks?)` | Wraps a console handle with `write`, `onData`, `resize`, `kill`, `hangup` |
+| `MemVfs`                              | In-memory VFS — reference implementation and test double                  |
+| `HVC_CONSOLES`                        | Default console count (8)                                                 |
+| `DEFAULT_CMDLINE`                     | Default kernel command line                                               |
 
 ### VFS contract
 
@@ -114,7 +113,7 @@ Errors are thrown as `Error` with a `.code` (`ENOENT`, `EEXIST`, `EROFS`, …).
 
 ### Prerequisites
 
-Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) are
+Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) are
 **not committed** — they are `nix build` outputs from the nix-wasm repo. Point
 at them via:
 
@@ -128,7 +127,7 @@ For local dev without a fresh `nix build`, both default to pc's vendored set
 
 ```sh
 cd runtime
-bun run test        # 79 tests across 7 files — ninep/, nix-closure-store, nix-store
+bun run test        # 72 tests across 6 files — ninep/, nix-store
 ```
 
 ### Node integration tests
@@ -179,7 +178,7 @@ node demo/web/smoke.mjs
 
 ```sh
 cd runtime
-bun run test            # engine unit tests (79/7)
+bun run test            # engine unit tests (72/6)
 bun run lint            # oxlint, zero warnings tolerated
 bun run format:check    # oxfmt
 bun run typecheck       # tsc

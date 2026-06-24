@@ -98,7 +98,7 @@ async function fileResponse(url) {
     blob: async () => new Blob([u8]),
     text: async () => buf.toString("utf8"),
     json: async () => JSON.parse(buf.toString("utf8")),
-    // nix-closure-store streams via r.body.getReader() when present; body:null
+    // Streaming callers check r.body.getReader() when present; body:null
     // makes it fall back to arrayBuffer().
     body: null,
   };

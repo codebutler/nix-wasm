@@ -15,7 +15,7 @@
 // different ORIGIN additionally needs cross-origin-isolation-compatible headers,
 // since the app runs under COEP: require-corp). `baseUrl` is the only knob.
 //
-// Lazy like nix-closure-store.js: the per-file bytes are fetched (and cached) on first
+// Lazy fetch: the per-file bytes are fetched (and cached) on first
 // access, and the file index (manifest.json — the cache's relative file paths)
 // is fetched on the first VFS call. An idle session, or one that never runs nix,
 // pays nothing.

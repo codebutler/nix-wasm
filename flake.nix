@@ -319,11 +319,6 @@
         extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest fpcastVtableTest widgetFactory ];
       };
 
-      # ---- the served-closure manifest (store.json) for pc -----------------
-      wasmStoreManifest = import ./userspace/store-manifest.nix {
-        inherit pkgs; toplevel = wasmToplevel;
-      };
-
       # ---- the base-system store closure as a single squashfs image (#43) ---
       wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
         inherit pkgs; toplevel = wasmToplevel;
@@ -343,10 +338,10 @@
       # nix.wasm is statically linked, but the wasm binary embeds dead build-time
       # store-path strings (openssl-static/boost-static-dev/nlohmann_json), which
       # Nix scans as references — transitively dragging native glibc + its
-      # thousands of locale files into the wasm-system closure (it ballooned
-      # store.json to 258MB). The guest never touches those host paths, so strip
-      # them (the standard removeReferencesTo technique) via a cheap post-process —
-      # no nix rebuild. Result: nix-wasm's closure is just its own binary.
+      # thousands of locale files into the wasm-system closure (it bloated the
+      # served /nix closure to ~258MB). The guest never touches those host paths,
+      # so strip them (the standard removeReferencesTo technique) via a cheap
+      # post-process — no nix rebuild. Result: nix-wasm's closure is just its own binary.
       nixWasmClean = pkgs.runCommand "nix-wasm-2.34.7"
         {
           nativeBuildInputs = [ pkgs.nukeReferences ];
