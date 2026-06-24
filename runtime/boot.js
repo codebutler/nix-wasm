@@ -69,6 +69,7 @@ const dec = new TextDecoder();
  *   consoleCount: number,
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
+ *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
  *   kill(): void,
  * }>}
  */
