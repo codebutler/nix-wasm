@@ -4,7 +4,7 @@
 // Artifact source:
 //   Default: repo-relative runtime/web/artifacts/ (symlink to a `nix build` output)
 //   Override: LINUX_WASM_ARTIFACTS env var (absolute file:// or http(s):// URL, trailing slash optional)
-//   CI:       set LINUX_WASM_ARTIFACTS to the dir produced by `nix build .#vmlinux .#wasm-initramfs .#wasm-store-manifest`
+//   CI:       set LINUX_WASM_ARTIFACTS to the dir produced by `nix build .#kernel .#wasm-initramfs .#wasm-base-squashfs .#wasm-binary-cache`
 //
 // Tests SKIP (not fail) when artifacts are absent — prerequisite-gate only.
 import { test } from "node:test";

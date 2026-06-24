@@ -286,10 +286,10 @@
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
-        # The in-guest toolchain, folded into the system profile/closure (one
-        # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
-        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
-        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh ];
+        # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
+        # c++, make) lives in .#wasm-binary-cache and is installed on demand via
+        # `nix-env -iA dev-tools`. Removing it here shrinks the squashfs by ~89 MB.
+        toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -319,8 +319,8 @@
         extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest fpcastVtableTest widgetFactory ];
       };
 
-      # ---- the served-closure manifest (store.json) for pc -----------------
-      wasmStoreManifest = import ./userspace/store-manifest.nix {
+      # ---- the base-system store closure as a single squashfs image (#43) ---
+      wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
         inherit pkgs; toplevel = wasmToplevel;
       };
 
@@ -338,10 +338,10 @@
       # nix.wasm is statically linked, but the wasm binary embeds dead build-time
       # store-path strings (openssl-static/boost-static-dev/nlohmann_json), which
       # Nix scans as references — transitively dragging native glibc + its
-      # thousands of locale files into the wasm-system closure (it ballooned
-      # store.json to 258MB). The guest never touches those host paths, so strip
-      # them (the standard removeReferencesTo technique) via a cheap post-process —
-      # no nix rebuild. Result: nix-wasm's closure is just its own binary.
+      # thousands of locale files into the wasm-system closure (it bloated the
+      # served /nix closure to ~258MB). The guest never touches those host paths,
+      # so strip them (the standard removeReferencesTo technique) via a cheap
+      # post-process — no nix rebuild. Result: nix-wasm's closure is just its own binary.
       nixWasmClean = pkgs.runCommand "nix-wasm-2.34.7"
         {
           nativeBuildInputs = [ pkgs.nukeReferences ];
@@ -354,6 +354,22 @@
           chmod -R u+w $out/bin
           nuke-refs $out/bin/nix
         '';
+
+      # ---- Wasm binary cache: the on-demand compiler toolchain (#43/#2/#1) -----
+      # A standard file:// Nix binary cache (nix-cache-info + narinfo + nar/) for
+      # the in-guest compiler tools. Served by runtime/nix-cache.js and substituted
+      # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
+      # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
+      # arrive on demand through substitution.
+      wasmDevToolsEnv = pkgs.buildEnv {
+        name = "wasm-dev-tools";
+        paths = [ guestClang guestCc guestCxx makeWasm ];
+      };
+      wasmBinaryCache = import ./userspace/binary-cache.nix {
+        inherit pkgs;
+        devPaths = [ guestClang guestCc guestCxx makeWasm ];
+        devToolsEnv = wasmDevToolsEnv;
+      };
     in
     {
       # The FULL wasm32 cross package set — exposing it as legacyPackages lets
@@ -488,8 +504,13 @@
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
 
-        # The wasm-system closure exported as store.json for pc to serve over 9P.
-        wasm-store-manifest = wasmStoreManifest;
+        # The base-system store closure as a single squashfs image for virtio-blk.
+        wasm-base-squashfs = wasmBaseSquashfs;
+
+        # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
+        # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
+        # Served by runtime/nix-cache.js; in-guest: `nix-env -iA dev-tools`.
+        wasm-binary-cache = wasmBinaryCache;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''

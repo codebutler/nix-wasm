@@ -1,0 +1,48 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Tue, 24 Jun 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: add VW_DEV_BLK (virtio-blk, device index 3)
+
+Register a virtio-blk device on the wasm virtio transport as device
+index 3 (VW_DEV_BLK), using the standard VIRTIO_ID_BLOCK (2) virtio
+device id.  This wires the kernel's CONFIG_VIRTIO_BLK driver into the
+host-callback transport, enabling a read-only squashfs image to be
+served to the guest over a virtio-blk device rather than 9P JSON.
+
+The registration is guarded by IS_ENABLED(CONFIG_VIRTIO_BLK) so the
+enum index and init call are a no-op when the driver is absent.
+
+Part of the #43 squashfs-over-virtio-blk spike (Task 1).
+---
+ drivers/virtio/virtio_wasm.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+index 2e5dbc305..b47e06ce7 100644
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -362,6 +362,9 @@ enum {
+ #endif
+ #ifdef CONFIG_VIRTIO_NET
+ 	VW_DEV_NET,		/* virtio-net NIC (stock drivers/net/virtio_net.c) */
++#endif
++#if IS_ENABLED(CONFIG_VIRTIO_BLK)
++	VW_DEV_BLK,		/* virtio-blk block device (squashfs /nix image) */
+ #endif
+ 	VW_DEV_COUNT,
+ };
+@@ -385,6 +388,13 @@ static int __init virtio_wasm_transport_init(void)
+ 	if (IS_ERR(vw))
+ 		return PTR_ERR(vw);
+ #endif
++
++#if IS_ENABLED(CONFIG_VIRTIO_BLK)
++	vw = virtio_wasm_register(VW_DEV_BLK, VIRTIO_ID_BLOCK);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: blk register failed: %ld\n", PTR_ERR(vw));
++#endif
++
+ 	return 0;
+ }
+
+--
+2.53.0

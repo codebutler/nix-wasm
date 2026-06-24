@@ -12,6 +12,7 @@ import { makeWasm9pRequest } from "./ninep/host-call.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
+import { BlkDevice } from "./virtio/blk-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -208,6 +209,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// serviceable from a userspace task worker.
   let virtio_queues = null;
 
+  /// squashfs image bytes for the BlkDevice (VW_DEV_BLK=3); set from the boot
+  /// message in init(). Zero-length when no squashfs was provided (--no-nix).
+  let squashfsImage = new Uint8Array(0);
+
   /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
   /// transport, keyed by the host device index `dev` the guest passes in every
   /// import call. Lazily built on first use because they need the guest's
@@ -226,6 +231,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VW_DEV_WL = 0;
   const VW_DEV_ECHO = 1;
   const VW_DEV_NET = 2;
+  const VW_DEV_BLK = 3;
 
   /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
   const virtio_devices = new Map();
@@ -304,12 +310,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // is woken without this worker servicing a postMessage (the wl pattern).
         const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
         net.setFrameSink((frame) => {
-          port.postMessage(
-            { method: "net_out", dev: id, frame: frame.buffer },
-            [frame.buffer],
-          );
+          port.postMessage({ method: "net_out", dev: id, frame: frame.buffer }, [frame.buffer]);
         });
         d = net;
+      } else if (id === VW_DEV_BLK) {
+        // Read-only base-system squashfs, handed in via the boot message.
+        // squashfsImage is a 0-length Uint8Array when absent (--no-nix boot).
+        d = new BlkDevice({ ...common, image: squashfsImage });
       } else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;
@@ -635,6 +642,11 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       if (message.virtio_queues) {
         virtio_queues = new SharedQueues(message.virtio_queues);
       }
+      // Task 2 (#43): squashfs image for the read-only virtio-blk device.
+      // Absent on --no-nix boots; the 0-capacity device simply mounts empty.
+      if (message.squashfs) {
+        squashfsImage = new Uint8Array(message.squashfs);
+      }
 
       if (message.user_executable) {
         // We are in a new runner that should duplicate the user executable. Happens when someone calls clone().
@@ -860,7 +872,22 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             __wasm_syscall_1: syscall_logged(vmlinux_instance.exports.wasm_syscall_1),
             __wasm_syscall_2: syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
             __wasm_syscall_3: syscall_logged(vmlinux_instance.exports.wasm_syscall_3),
-            __wasm_syscall_4: syscall_logged(vmlinux_instance.exports.wasm_syscall_4),
+            // pc: futex_time64 (nr=422) split-arity shim — see patch 0015.
+            // glib's g_futex_simple calls __NR_futex_time64 with 4 args
+            // (uaddr, op, val, utime) via __wasm_syscall_4.  The kernel's
+            // wasm_syscall_4 dispatch does a 4-arg call_indirect but
+            // sys_call_table[422] = sys_futex which is 6-arg → type mismatch
+            // trap.  Intercept here: when nr=422 forward to wasm_syscall_6
+            // with two extra zero args (uaddr2=0, val3=0), which FUTEX_WAIT/
+            // WAKE ignore.  nix.wasm's musl pthread uses __wasm_syscall_6 for
+            // nr=422 directly, so it never hits this path.
+            __wasm_syscall_4: syscall_logged((sp, tp, nr, a0, a1, a2, a3) => {
+              // nr is a Number (wasm32) or BigInt (wasm64); compare both
+              if (nr == 422) {
+                return vmlinux_instance.exports.wasm_syscall_6(sp, tp, nr, a0, a1, a2, a3, 0, 0);
+              }
+              return vmlinux_instance.exports.wasm_syscall_4(sp, tp, nr, a0, a1, a2, a3);
+            }),
             __wasm_syscall_5: syscall_logged(vmlinux_instance.exports.wasm_syscall_5),
             __wasm_syscall_6: syscall_logged(vmlinux_instance.exports.wasm_syscall_6),
 

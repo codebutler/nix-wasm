@@ -1,20 +1,35 @@
 From: nix-wasm <eric@codebutler.com>
 Date: Fri, 20 Jun 2026 00:00:00 -0400
-Subject: [PATCH] wasm: 4-arg futex_time64 trampoline (call_indirect arity)
+Subject: [PATCH] wasm: futex_time64 split-arity fix (kernel 6-arg + host intercept for 4-arg callers)
 
-__NR_futex_time64 (422) maps to the generic 6-arg sys_futex, but glib's raw
-syscall() (g_futex_simple → g_cond/g_mutex) invokes it with only 4 args
-(uaddr, op, val, utime) for FUTEX_WAIT/WAKE. (musl pads its own futex calls to
-6 args, so musl pthread — used by nix.wasm/busybox — is unaffected; only glib's
-raw 4-arg call traps.) The wasm syscall
-trampoline (__wasm_syscall_4) dispatches through a strictly-typed
-call_indirect, so a 4-arg call landing on the 6-arg sys_futex traps with
-"null function or function signature mismatch" — killing any futex user
-(observed: glib's GType bootstrap calling g_cond_broadcast during the first
-g_object_new). Add a 4-arg sys_wasm32_futex wrapper (mirroring the existing
-sys_wasm32_* u64-split overrides) that forwards to sys_futex with the requeue
-args (uaddr2, val3) zeroed — correct for WAIT/WAKE, which ignore them — and
-override __NR_futex_time64 to it in the syscall table.
+__NR_futex_time64 (422) maps to the generic 6-arg sys_futex. Two callers use
+different arg counts on wasm:
+  - nix.wasm's musl pthread: calls with 6 args via __wasm_syscall_6 (correct)
+  - glib's g_futex_simple: calls with 4 args via __wasm_syscall_4 (only
+    uaddr, op, val, utime — FUTEX_WAIT/WAKE, which ignore uaddr2/val3)
+
+The wasm call_indirect in each __wasm_syscall_N path dispatches with EXACTLY N
+args through a strictly-typed indirect call; the kernel syscall table maps each
+entry to exactly one function arity.  No single table entry can serve both.
+
+Split the fix: keep sys_futex (6-arg) in syscall_table.c (so __wasm_syscall_6
+from nix.wasm/musl works), and intercept the 4-arg path at the HOST level in
+kernel-worker.js — when __wasm_syscall_4 is called with nr=422 the host shim
+zero-pads uaddr2/val3 and forwards the call to vmlinux_instance.exports.
+wasm_syscall_6 directly, bypassing the 4-arg call_indirect path entirely.
+FUTEX_WAIT/WAKE ignore the two extra args, so the zero-pad is correct.
+
+The kernel-side change vs. the earlier "SYSCALL_DEFINE4 trampoline" approach:
+the trampoline in the table worked for glib but broke nix.wasm's 6-arg path;
+this patch restores sys_futex for the kernel side. The kernel-worker.js shim
+was added alongside this patch to cover glib.
+
+Add the 4-arg prototype + implementation (sys_wasm32_futex) anyway — it is still
+referenced by the .h declarations added here, and the implementation is correct
+and useful as documentation even though it is not registered in the table.
+
+(musl itself pads its own futex calls to 6 args; only glib's raw syscall() call
+site uses 4 args, so the host intercept is narrowly scoped.)
 --- a/arch/wasm/include/asm/syscalls_wasm32.h	2026-06-20 03:33:21.221143796 -0400
 +++ b/arch/wasm/include/asm/syscalls_wasm32.h	2026-06-20 03:33:34.791224508 -0400
 @@ -34,6 +34,18 @@
@@ -58,13 +73,16 @@ override __NR_futex_time64 to it in the syscall table.
 +}
 --- a/arch/wasm/kernel/syscall_table.c	2026-06-20 03:33:21.261144034 -0400
 +++ b/arch/wasm/kernel/syscall_table.c	2026-06-20 03:34:18.615486255 -0400
-@@ -22,5 +22,9 @@
+@@ -22,5 +22,12 @@
  	__SYSCALL(__NR_fadvise64_64, sys_wasm32_fadvise64_64)
  	__SYSCALL(__NR_fallocate, sys_wasm32_fallocate)
  	__SYSCALL(__NR_sync_file_range, sys_wasm32_sync_file_range)
-+	/* 4-arg futex_time64 trampoline — userspace calls it with 4 args but the
-+	 * generic handler is 6-arg sys_futex; wasm call_indirect needs the arity to
-+	 * match. See sys_wasm32_futex(). */
-+	__SYSCALL(__NR_futex_time64, sys_wasm32_futex)
++	/* __NR_futex_time64 (422): keep the generic 6-arg sys_futex here.
++	 * The host runtime (kernel-worker.js) intercepts 4-arg callers (glib's
++	 * g_futex_simple) via __wasm_syscall_4 and zero-pads them to 6 args
++	 * before forwarding to wasm_syscall_6, so the kernel always sees 6 args.
++	 * See also sys_wasm32_futex() in sys_wasm32.c (implementation kept for
++	 * reference, not registered in the table). */
++	__SYSCALL(__NR_futex_time64, sys_futex)
  #endif
  };

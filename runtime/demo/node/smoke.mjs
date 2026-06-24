@@ -1,6 +1,9 @@
 // smoke.mjs — boots ONCE with the full nix-system wiring and runs the cheap
 // per-boot assertions:
-//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA sl.
+//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make.
+// The LINUX_WASM_ARTIFACTS nix-cache/ must be the .#wasm-binary-cache output
+// (has `make` attr in pkgs.nix). See devtools-e2e.mjs for the full dev-tools
+// install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";
 import { MemVfs } from "../../ninep/mem-vfs.js";
@@ -59,11 +62,13 @@ try {
   s.send("ls /mnt/pc/Home\n");
   check(await s.waitForOutput(/smoke-wtest\.txt/), "ls lists the written file");
 
-  // nix-system: substitute a package from the committed binary cache
-  s.send("nix-env -iA sl\n");
+  // nix-system: substitute a package from the committed binary cache.
+  // Use `make` (lightweight; in .#wasm-binary-cache pkgs.nix) as the smoke
+  // substitution package — the full install+compile proof is in devtools-e2e.mjs.
+  s.send("nix-env -iA make 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
-    await s.waitForOutput(/installing 'sl|building path|sl-[0-9]/, 180000),
-    "nix-env -iA sl substitutes from the cache",
+    await s.waitForOutput(/NIX_MAKE_RC=0/, 180000),
+    "nix-env -iA make substitutes from the cache",
   );
 } finally {
   if (!pass) console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));

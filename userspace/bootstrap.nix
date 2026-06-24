@@ -9,8 +9,8 @@
 # baked /bin/sh persists).
 #
 # 9P: trans=cb -> net/9p/trans_cb.c -> the JS 9P server. msize 512K = the kernel
-# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache,
-# nix=the served wasm-system closure (createNixClosureStore).
+# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache.
+# /nix is now a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
 { pkgs }:
 pkgs.writeText "init" ''
   #!/bin/sh
@@ -50,11 +50,11 @@ pkgs.writeText "init" ''
   mkdir -p /nix-cache
   mount -t 9p -o "$RO,aname=nixcache" cb /nix-cache 2>/dev/null || true
 
-  # The served wasm-system closure: real /nix store paths, read-only (9p) ->
+  # The served base-system closure: a read-only squashfs on virtio-blk ->
   # overlay lower; ramfs upper makes /nix writable for nix-env. NOMMU has no
-  # tmpfs, so the upper is ramfs (always available, backs the initramfs root).
+  # block-backed writable fs, so the upper is ramfs (as before).
   mkdir -p /mnt/nix-ro /run/nix-upper /run/nix-work /nix
-  if mount -t 9p -o "$RO,aname=nix" cb /mnt/nix-ro 2>/dev/null; then
+  if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
     mount -t overlay overlay \
       -o lowerdir=/mnt/nix-ro,upperdir=/run/nix-upper,workdir=/run/nix-work /nix \
       || { echo "pc: /nix overlay failed; falling back to ramfs /nix"; mkdir -p /nix/store; }

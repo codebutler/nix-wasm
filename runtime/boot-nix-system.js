@@ -1,19 +1,19 @@
 // boot-nix-system.js — the high-level boot every consumer uses. Resolves the
-// four nix-wasm build artifacts under a single baseUrl, wires the read-only
-// /nix closure store + /nix-cache binary cache, then boots. Returns the same
-// handle as bootLinux.
+// nix-wasm build artifacts under a single baseUrl, wires the read-only squashfs
+// base-system image (virtio-blk) + /nix-cache binary cache, then boots. Returns
+// the same handle as bootLinux.
 //
 // Artifact layout under baseUrl (nix-wasm's build-output contract):
-//   vmlinux.wasm  initramfs.cpio.gz  store.json  nix-cache/
+//   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
 import { bootLinux } from "./boot.js";
-import { createNixClosureStore } from "./nix-closure-store.js";
 import { createNixCacheExport } from "./nix-cache.js";
 
 /**
  * @param {{
  *   vfs: any,
- *   baseUrl: string|URL,              // dir holding the 4 artifacts (trailing slash optional)
- *   onDownload?: (ev: any) => void,   // lazy-blob fetch progress from the closure store
+ *   baseUrl: string|URL,              // dir holding the artifacts (trailing slash optional)
+ *   squashfs?: ArrayBuffer | (() => Promise<ArrayBuffer>),  // pc's disc-package system passes the verified, persisted bytes; standalone harnesses/dev/CI omit it and we fetch base.squashfs from baseUrl
+ *   onDownload?: (ev: any) => void,   // reserved (was lazy-blob fetch progress from the closure store)
  *   onModuleCached?: () => void,      // a streamed user binary finished compiling+caching host-side (close a "loading <tool>…" indicator)
  *   consoleCount?: number,
  *   cmdline?: string,
@@ -31,6 +31,17 @@ export async function bootNixSystem(opts) {
   );
   const u = (p) => new URL(p, base).href;
   const useNix = opts.nix !== false;
+
+  // The base store squashfs: pc's disc-package system passes the verified,
+  // persisted bytes via opts.squashfs (ArrayBuffer or a provider fn); standalone
+  // harnesses/dev/CI omit it and we fetch base.squashfs from baseUrl.
+  let squashfs;
+  if (useNix) {
+    if (typeof opts.squashfs === "function") squashfs = await opts.squashfs();
+    else if (opts.squashfs) squashfs = opts.squashfs;
+    else squashfs = await (await fetch(u("base.squashfs"))).arrayBuffer();
+  }
+
   return bootLinux({
     vfs: opts.vfs,
     vmlinuxUrl: u("vmlinux.wasm"),
@@ -40,9 +51,7 @@ export async function bootNixSystem(opts) {
     onLog: opts.onLog,
     onModuleCached: opts.onModuleCached,
     wayland: opts.wayland,
-    nixStore: useNix
-      ? await createNixClosureStore(u("store.json"), { onProgress: opts.onDownload })
-      : undefined,
+    squashfs,
     nixCache: useNix ? createNixCacheExport(u("nix-cache")) : undefined,
   });
 }
