@@ -1,0 +1,48 @@
+runtime/demo/node/devtools-e2e.mjs
+  s_af9b2fcb0c03bf::t_1a9d8ec077e7b2 84-88,91
+  s_af9b2fcb0c03bf::t_a42482550cf452 89-90
+  s_af9b2fcb0c03bf::t_3df3de7b353503 76-79,81
+  s_af9b2fcb0c03bf::t_84a703f5c5bdad 1-55,58-75,92-101
+  s_af9b2fcb0c03bf::t_1365b3d8e959f6 56-57
+  s_af9b2fcb0c03bf::t_e3758a2a787de3 80
+  s_af9b2fcb0c03bf::t_96911d2f53bc77 82-83
+kernel.nix
+  s_af9b2fcb0c03bf::t_9114a288d374cc 177
+  s_af9b2fcb0c03bf::t_633f50d19735da 156-162,173-176
+patches/kernel/0015-wasm-futex-time64-4arg-trampoline.patch
+  s_af9b2fcb0c03bf::t_4b1804f6c0a50f 3,5-32
+  s_af9b2fcb0c03bf::t_75ebab31f9952b 76
+  s_af9b2fcb0c03bf::t_92c3d8409d7f51 83-85
+  s_af9b2fcb0c03bf::t_9920eaf4ce1965 80-82,86
+flake.nix
+  s_af9b2fcb0c03bf::t_a18c6ef076e096 289-292
+userspace/system.nix
+  s_af9b2fcb0c03bf::t_5fe82fde9ec8eb 174
+runtime/demo/node/smoke.mjs
+  s_af9b2fcb0c03bf::t_478b301b4de502 3-6
+  s_af9b2fcb0c03bf::t_c3e5b873dd0f37 65-68,70-71
+userspace/binary-cache.nix
+  s_af9b2fcb0c03bf::t_067a25a2f525d3 29,31-53
+  s_af9b2fcb0c03bf::t_bbc2b7dcf791c1 55-59,69-79
+runtime/kernel-worker.js
+  s_af9b2fcb0c03bf::t_a3bbb19f9965e2 313,884-890
+  s_af9b2fcb0c03bf::t_886cded67de47c 875-883
+docs/superpowers/sdd/task-7-report.md
+  s_af9b2fcb0c03bf::t_e09b2dce06c4be 1-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "ed0b2b221a1c493e69c331d43c93efb811191160",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
