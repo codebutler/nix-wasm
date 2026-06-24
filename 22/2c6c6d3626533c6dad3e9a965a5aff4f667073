@@ -1,0 +1,22 @@
+docs/superpowers/notes/squashfs-nommu-spike.md
+  s_af9b2fcb0c03bf::t_610b0801b2ac1a 1-122
+runtime/demo/node/blk-spike.mjs
+  s_af9b2fcb0c03bf::t_c3074c8d27d87d 129-130
+  s_af9b2fcb0c03bf::t_38757d05090d6a 1-128,131-136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "222c6c6d3626533c6dad3e9a965a5aff4f667073",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
