@@ -1,0 +1,30 @@
+runtime/kernel-worker.js
+  s_af9b2fcb0c03bf::t_8c56e801891a40 234
+  s_af9b2fcb0c03bf::t_f58eaeedf0b939 648-652
+  s_af9b2fcb0c03bf::t_ad20d5bb05479d 15
+  s_af9b2fcb0c03bf::t_2bfd5d02ec152c 319-322
+  s_af9b2fcb0c03bf::t_88c17ca38fe5d8 212-215
+runtime/virtio/blk-device.js
+  s_af9b2fcb0c03bf::t_6fd13e14888beb 1-17,19-107
+  s_af9b2fcb0c03bf::t_e6f544694bf956 18
+runtime/virtio/blk-device.test.js
+  s_af9b2fcb0c03bf::t_ea2a21304ba035 1-54,56-67,69-144
+  s_af9b2fcb0c03bf::t_0fa40f4caf28ac 68
+  s_af9b2fcb0c03bf::t_c2a395fe1a60b5 55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "70fd1d843752ba01b520724012b507af0a31441a",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
