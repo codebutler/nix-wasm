@@ -64,6 +64,14 @@ definitions then cross-compile.
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
   mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
   lowerdir and hands off to busybox-init.
+- **Process model** = single shared NOMMU arena + a **`posix_spawn`-only spawn
+  contract**; `fork`/`vfork` are **removed at the libc level** (`toolchain/musl.nix`)
+  so callers fail to **link** (loud build error) rather than SIGILL/abort at runtime.
+  Holdouts are handled by one documented rule (don't-build an unused CLI / port a
+  real library to `posix_spawn` / compile out an unused return-twice symbol) — never
+  a stub. See **`docs/process-model.md`**. Per-process Memory and real `fork()` are
+  *measured* dead-ends (`spikes/elastic-mem/` ~124-Memory/tab cap;
+  `spikes/stackswitch/` WasmFX/JSPI one-shot).
 
 LLVM target triple is `wasm32-unknown-unknown` (clang rejects
 `wasm32-unknown-linux-musl`); `-D__linux__ -matomics -mbulk-memory
@@ -491,9 +499,14 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 
 **Guest runtime / kernel:**
 - **No fork/vfork — clone-with-fn only.** A fresh wasm instance can't resume the
-  parent mid-function → `fork()`/`vfork()` SIGILL/abort. Everything that "spawns"
-  (busybox, ash, `make`, nix's external `sh` builder) goes through `posix_spawn` /
-  clone-with-fn; this is why busybox + ash carry the clone-with-fn patches.
+  parent mid-function, so `fork()`/`vfork()` are unimplementable. The `fork`/`vfork`
+  symbols are **removed from the nix-built musl** (`toolchain/musl.nix`) → a caller
+  fails to **link** in its Nix build (loud, traceable) rather than SIGILL/abort at
+  runtime. Everything that "spawns" (busybox, ash, `make`, nix's external `sh`
+  builder, glib's `g_spawn`) goes through `posix_spawn` / clone-with-fn; this is why
+  busybox + ash + glib carry the spawn-port patches. Holdouts follow one documented
+  rule (don't-build an unused CLI / port a library to `posix_spawn` / compile out an
+  unused return-twice symbol). **Full contract: `docs/process-model.md`.**
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.

@@ -1,0 +1,265 @@
+--- glib-orig/glib/gspawn-posix.c	2026-06-21 14:40:06.760281032 -0400
++++ glib-src/glib/gspawn-posix.c	2026-06-21 14:42:47.915338653 -0400
+@@ -37,6 +37,11 @@
+ #ifdef HAVE_SPAWN_H
+ #include <spawn.h>
+ #endif /* HAVE_SPAWN_H */
++/* wasm NOMMU: musl always has spawn.h; include it unconditionally when we
++ * force POSIX_SPAWN_AVAILABLE so posix_spawn* symbols are declared. */
++#if defined(__wasm__) && !defined(HAVE_SPAWN_H)
++#include <spawn.h>
++#endif
+ 
+ #ifdef HAVE_CRT_EXTERNS_H
+ #include <crt_externs.h> /* for _NSGetEnviron */
+@@ -98,6 +103,12 @@
+ #endif /* __GLIBC__ */
+ #endif /* HAVE_POSIX_SPAWN */
+ 
++/* wasm32 NOMMU has no fork/vfork; musl implements posix_spawn cleanly.
++ * Force the posix_spawn path regardless of HAVE_POSIX_SPAWN. */
++#if defined(__wasm__) && !defined(POSIX_SPAWN_AVAILABLE)
++#define POSIX_SPAWN_AVAILABLE
++#endif
++
+ #ifdef HAVE__NSGETENVIRON
+ #define environ (*_NSGetEnviron())
+ #else
+@@ -999,21 +1010,23 @@
+ 
+ #ifdef POSIX_SPAWN_AVAILABLE
+ static gboolean
+-do_posix_spawn (const gchar * const *argv,
+-                const gchar * const *envp,
+-                gboolean    search_path,
+-                gboolean    stdout_to_null,
+-                gboolean    stderr_to_null,
+-                gboolean    child_inherits_stdin,
+-                gboolean    file_and_argv_zero,
+-                GPid       *child_pid,
+-                gint       *child_close_fds,
+-                gint        stdin_fd,
+-                gint        stdout_fd,
+-                gint        stderr_fd,
+-                const gint *source_fds,
+-                const gint *target_fds,
+-                gsize       n_fds)
++do_posix_spawn (const gchar * const  *argv,
++                const gchar * const  *envp,
++                gboolean              search_path,
++                gboolean              stdout_to_null,
++                gboolean              stderr_to_null,
++                gboolean              child_inherits_stdin,
++                gboolean              file_and_argv_zero,
++                GPid                 *child_pid,
++                gint                 *child_close_fds,
++                gint                  stdin_fd,
++                gint                  stdout_fd,
++                gint                  stderr_fd,
++                const gint           *source_fds,
++                const gint           *target_fds,
++                gsize                 n_fds,
++                const gchar          *working_directory,
++                gboolean              close_descriptors)
+ {
+   pid_t pid;
+   gint *duped_source_fds = NULL;
+@@ -1208,6 +1221,28 @@
+   if (envp == NULL)
+     envp = (const gchar * const *) environ;
+ 
++#ifdef __wasm__
++  /* wasm NOMMU: handle working_directory via posix_spawn_file_actions_addchdir_np.
++   * This is available in musl (exposed under _GNU_SOURCE). */
++  if (working_directory != NULL)
++    {
++      r = posix_spawn_file_actions_addchdir_np (&file_actions, working_directory);
++      if (r != 0)
++        goto out_close_fds;
++    }
++
++  /* wasm NOMMU: close_descriptors — mark all fds >= 3 CLOEXEC in the parent
++   * before posix_spawn so the child does not inherit them.  posix_spawn is
++   * not fork, so there is no race window with other threads opening fds.
++   * The fds we explicitly redirect are dup2'd by file_actions above, which
++   * clears CLOEXEC on the target fd inside the child. */
++  if (close_descriptors)
++    g_fdwalk_set_cloexec (3);
++#else
++  (void) working_directory;
++  (void) close_descriptors;
++#endif /* __wasm__ */
++
+   /* Don't search when it contains a slash. */
+   if (!search_path || strchr (argv[0], '/') != NULL)
+     r = posix_spawn (&pid, argv[0], &file_actions, &attr, (char * const *) argv_pass, (char * const *) envp);
+@@ -1353,7 +1388,9 @@
+                                stderr_fd,
+                                source_fds,
+                                target_fds,
+-                               n_fds);
++                               n_fds,
++                               NULL  /* working_directory: fast-path requires NULL */,
++                               FALSE /* close_descriptors: fast-path requires FALSE */);
+       if (status == 0)
+         goto success;
+ 
+@@ -1374,6 +1411,33 @@
+        * gspawn codepath so that script execution can be attempted,
+        * per standard gspawn behaviour. */
+       g_debug ("posix_spawn failed (ENOEXEC), fall back to regular gspawn");
++#ifdef __wasm__
++      /* wasm NOMMU: no fork fallback.  Retry with /bin/sh instead. */
++      {
++        gsize argc = g_strv_length ((gchar **) argv);
++        const gchar **sh_argv = g_new (const gchar *, argc + 2);
++        sh_argv[0] = "/bin/sh";
++        for (gsize si = 0; si < argc; si++)
++          sh_argv[si + 1] = argv[si];
++        sh_argv[argc + 1] = NULL;
++        status = do_posix_spawn (sh_argv, envp,
++                                 FALSE /* /bin/sh is an absolute path */,
++                                 stdout_to_null, stderr_to_null,
++                                 child_inherits_stdin, file_and_argv_zero,
++                                 child_pid, child_close_fds,
++                                 stdin_fd, stdout_fd, stderr_fd,
++                                 source_fds, target_fds, n_fds,
++                                 NULL /* fast-path: working_directory is NULL */,
++                                 FALSE /* fast-path: close_descriptors is FALSE */);
++        g_free (sh_argv);
++        if (status == 0)
++          goto success;
++        g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_FAILED,
++                     _("Failed to spawn script \"%s\" via /bin/sh (%s)"),
++                     argv[0], g_strerror (status));
++        goto cleanup_and_fail;
++      }
++#endif /* __wasm__ */
+     }
+   else
+     {
+@@ -1385,9 +1449,73 @@
+                     !close_descriptors ? "" : "(fd close requested) ",
+                     !search_path_from_envp ? "" : "(using envp for search path) ",
+                     child_setup == NULL ? "" : "(child_setup specified) ");
++
++#ifdef __wasm__
++      /* wasm NOMMU: fork() does not exist.  Use do_posix_spawn() with the
++       * extended signature that supports working_directory + close_descriptors.
++       *
++       * child_setup cannot run between posix_spawn and exec — reject loudly.
++       * intermediate_child is a zombie-prevention trick not needed on NOMMU.
++       * search_path_from_envp: pass envp to do_posix_spawn; posix_spawnp
++       * already searches $PATH from the inherited env; for search_path_from_envp
++       * we merge the flags so PATH lookup still happens. */
++      if (child_setup != NULL)
++        {
++          g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_FAILED,
++                       "g_spawn: child_setup callback is not supported on "
++                       "wasm NOMMU (no fork/exec split; posix_spawn is used)");
++          goto cleanup_and_fail;
++        }
++
++      status = do_posix_spawn (argv, envp,
++                               search_path || search_path_from_envp,
++                               stdout_to_null, stderr_to_null,
++                               child_inherits_stdin, file_and_argv_zero,
++                               child_pid, child_close_fds,
++                               stdin_fd, stdout_fd, stderr_fd,
++                               source_fds, target_fds, n_fds,
++                               working_directory, close_descriptors);
++      if (status == 0)
++        goto success;
++
++      if (status == ENOEXEC)
++        {
++          /* Script file — retry via posix_spawn("/bin/sh", argv[0], ...).
++           * /bin/sh is always a real ELF-like binary on the wasm guest. */
++          gsize argc = g_strv_length ((gchar **) argv);
++          const gchar **sh_argv = g_new (const gchar *, argc + 2);
++          sh_argv[0] = "/bin/sh";
++          for (gsize si = 0; si < argc; si++)
++            sh_argv[si + 1] = argv[si];
++          sh_argv[argc + 1] = NULL;
++          status = do_posix_spawn (sh_argv, envp,
++                                   FALSE /* /bin/sh is an absolute path */,
++                                   stdout_to_null, stderr_to_null,
++                                   child_inherits_stdin, file_and_argv_zero,
++                                   child_pid, child_close_fds,
++                                   stdin_fd, stdout_fd, stderr_fd,
++                                   source_fds, target_fds, n_fds,
++                                   working_directory, close_descriptors);
++          g_free (sh_argv);
++          if (status == 0)
++            goto success;
++        }
++
++      g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_FAILED,
++                   _("Failed to spawn child process \"%s\" (%s)"),
++                   argv[0], g_strerror (status));
++      goto cleanup_and_fail;
++#endif /* __wasm__ */
+     }
+ #endif /* POSIX_SPAWN_AVAILABLE */
+ 
++#ifdef __wasm__
++  /* All wasm spawn paths end before reaching this point (goto success or
++   * goto cleanup_and_fail above).  The fork/exec block below is excluded
++   * from wasm compilation so that no fork() symbol is referenced. */
++  g_assert_not_reached ();
++#else /* !__wasm__ */
++
+   /* Choose a search path. This has to be done before calling fork()
+    * as getenv() isn’t async-signal-safe (see `man 7 signal-safety`). */
+   chosen_search_path = NULL;
+@@ -1749,6 +1877,8 @@
+       goto success;
+     }
+ 
++#endif /* !__wasm__ */
++
+ success:
+   /* Close the uncared-about ends of the pipes */
+   g_unix_pipe_close (&stdin_pipe, G_UNIX_PIPE_END_READ, NULL);
+--- glib-orig/glib/gtestutils.c	2026-06-21 14:40:06.761060373 -0400
++++ glib-src/glib/gtestutils.c	2026-06-21 14:41:37.341717563 -0400
+@@ -3949,7 +3949,10 @@
+ g_test_trap_fork (guint64        usec_timeout,
+                   GTestTrapFlags test_trap_flags)
+ {
+-#if defined(G_OS_UNIX) && (!defined(__APPLE__) || (!TARGET_OS_TV && !TARGET_OS_WATCH))
++#if defined(G_OS_UNIX) && (!defined(__APPLE__) || (!TARGET_OS_TV && !TARGET_OS_WATCH)) && !defined(__wasm__)
++  /* wasm NOMMU: fork() does not exist; g_test_trap_fork is deprecated and
++   * never called by the wasm guest (which does not run glib's test harness).
++   * The implementation is compiled out so no fork symbol is referenced. */
+   int stdout_pipe[2] = { -1, -1 };
+   int stderr_pipe[2] = { -1, -1 };
+   int errsv;
+--- glib-orig/glib/gbacktrace.c	2026-06-21 14:40:06.751416615 -0400
++++ glib-src/glib/gbacktrace.c	2026-06-21 14:48:39.612156388 -0400
+@@ -82,7 +82,10 @@
+ #define DEBUGGER "gdb"
+ #endif
+ 
+-#if defined(G_OS_UNIX) && (!defined(__APPLE__) || TARGET_OS_OSX)
++#if defined(G_OS_UNIX) && (!defined(__APPLE__) || TARGET_OS_OSX) && !defined(__wasm__)
++/* wasm NOMMU: fork() does not exist; g_on_error_stack_trace uses fork to run
++ * gdb for crash reporting.  Disable HAVE_STACK_TRACE so the fork body is not
++ * compiled.  g_on_error_stack_trace falls through to the g_abort() path. */
+ #define HAVE_STACK_TRACE
+ static void stack_trace (const char * const *args);
+ #endif
+--- glib-orig/gio/gtestdbus.c	2026-06-21 14:40:06.732059140 -0400
++++ glib-src/gio/gtestdbus.c	2026-06-21 14:48:34.205115727 -0400
+@@ -153,7 +153,10 @@
+ #define ADD_PID_FORMAT "add pid %d\n"
+ #define REMOVE_PID_FORMAT "remove pid %d\n"
+ 
+-#if !defined(__APPLE__) || (!TARGET_OS_TV && !TARGET_OS_WATCH)
++#if (!defined(__APPLE__) || (!TARGET_OS_TV && !TARGET_OS_WATCH)) && !defined(__wasm__)
++/* wasm NOMMU: fork() does not exist; GTestDBus watcher uses fork to spawn a
++ * cleanup child.  The guest never runs glib's D-Bus test harness, so compile
++ * out the fork-based implementation and fall through to the g_error() stub. */
+ static void
+ watch_parent (gint fd)
+ {

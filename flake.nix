@@ -479,12 +479,15 @@
         # served /nix closure.
         galculator = cross.galculator;
 
+        # Task 1 clean-NOMMU probe: verifies fork=ABSENT and spawn=LINKED after the
+        # musl fork/vfork symbol removal. Always builds (link results written to $out/result).
+        nofork-linkcheck = import ./spikes/nofork/check.nix { inherit cross; };
+
         # #33: gtk3-widget-factory — the headline GTK3 app. GtkBuilder autoconnect
         # via add_callback_symbol (no GModule on the static guest). --selftest is the
         # headless gate (display-free GtkBuilder signal round-trip); the full window
         # renders in the browser (needs the musl/RAM/dev-shm fixes). → $out/bin/gtk3-widget-factory.
         widget-factory = widgetFactory;
-
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

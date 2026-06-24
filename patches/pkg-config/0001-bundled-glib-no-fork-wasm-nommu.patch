@@ -1,0 +1,52 @@
+--- a/glib/glib/gspawn.c	2026-06-21 15:01:09.590238387 -0400
++++ b/glib/glib/gspawn.c	2026-06-21 15:03:11.807194827 -0400
+@@ -1332,6 +1332,17 @@
+   if (standard_error && !make_pipe (stderr_pipe, error))
+     goto cleanup_and_fail;
+ 
++#ifdef __wasm__
++  /* wasm NOMMU: no fork/vfork.  g_spawn is not called by pkg-config at
++   * runtime (it only reads .pc files), but the glib bundled in pkg-config
++   * 0.29.2 does not have the posix_spawn codepath.  Fail loudly here so
++   * no fork symbol is referenced and any accidental spawn call is caught. */
++  g_set_error (error, G_SPAWN_ERROR, G_SPAWN_ERROR_FAILED,
++               "g_spawn: fork() is not available on wasm NOMMU");
++  goto cleanup_and_fail;
++#endif /* __wasm__ */
++
++#ifndef __wasm__ /* fork()/vfork() do not exist on wasm NOMMU; wasm exits above */
+   pid = fork ();
+ 
+   if (pid < 0)
+@@ -1578,6 +1589,7 @@
+       
+       return TRUE;
+     }
++#endif /* !__wasm__ */
+ 
+  cleanup_and_fail:
+ 
+--- a/glib/glib/gtestutils.c	2026-06-21 15:01:09.590275263 -0400
++++ b/glib/glib/gtestutils.c	2026-06-21 15:01:30.442525161 -0400
+@@ -2643,7 +2643,8 @@
+ g_test_trap_fork (guint64        usec_timeout,
+                   GTestTrapFlags test_trap_flags)
+ {
+-#ifdef G_OS_UNIX
++#if defined(G_OS_UNIX) && !defined(__wasm__)
++  /* wasm NOMMU: no fork(); g_test_trap_fork is deprecated and unused on guest. */
+   int stdout_pipe[2] = { -1, -1 };
+   int stderr_pipe[2] = { -1, -1 };
+ 
+--- a/glib/glib/gbacktrace.c	2026-06-21 15:01:09.590205804 -0400
++++ b/glib/glib/gbacktrace.c	2026-06-21 15:01:21.863468264 -0400
+@@ -228,7 +228,8 @@
+ void
+ g_on_error_stack_trace (const gchar *prg_name)
+ {
+-#if defined(G_OS_UNIX) || defined(G_OS_BEOS)
++#if (defined(G_OS_UNIX) || defined(G_OS_BEOS)) && !defined(__wasm__)
++  /* wasm NOMMU: no fork(); g_on_error_stack_trace falls through to abort(). */
+   pid_t pid;
+   gchar buf[16];
+   gchar *args[4] = { "gdb", NULL, NULL, NULL };

@@ -101,16 +101,23 @@ cross.stdenv.mkDerivation {
 
     # Curated NOMMU surface: DISABLE every applet that still spawns via vfork() and
     # that the guest doesn't need (network servers/clients, service supervisors,
-    # cron, mail, misc) — so an unpatched vfork can never be reached and abort
-    # ("vfork() is not implemented yet"). The core/kept spawn paths (hush run_pipe/
-    # cmdsub/heredoc, libbb spawn/fork_or_rexec, tar, fork_transformer, timeout) are
-    # converted to clone-with-a-fn by the patches above; everything else with a live
-    # vfork is removed here. `time` is dropped too (marginal; its applet vfork isn't
-    # worth keeping). Disabling rather than patching is the deliberate choice (no
-    # landmines). olddefconfig then re-resolves deps.
+    # cron, mail, misc) — so an unpatched vfork can never be reached. Under the
+    # clean-NOMMU spawn contract wasm musl ships NO vfork() symbol, so a live vfork
+    # now fails to LINK ("undefined symbol: vfork") at build time rather than abort
+    # at runtime — disabling these applets removes the only callers that pull it in.
+    # The core/kept spawn paths (hush run_pipe/cmdsub/heredoc, libbb
+    # spawn/fork_or_rexec, tar, fork_transformer, timeout) are converted to
+    # clone-with-a-fn by the patches above; everything else with a live vfork is
+    # removed here. `time` is dropped too (marginal; its applet vfork isn't worth
+    # keeping). The clean-NOMMU additions are the vfork()-using network tools:
+    # IFUP/IFDOWN (both compile networking/ifupdown.o, which vfork-execs /sbin/ip)
+    # and TELNETD (vfork per session) — the last applets pulling libbb's xvfork()
+    # into the static link, which now fails to resolve (wasm musl has no vfork).
+    # Disabling rather than patching is the deliberate choice (no landmines).
     for c in CROND CRONTAB CONSPY SCRIPT RUNSV SVLOGD RUNSVDIR OPENVT \
              FTPD HTTPD INETD NC TCPSVD UDPSVD WGET REFORMIME SENDMAIL MAKEMIME \
              POPMAILDIR START_STOP_DAEMON BOOTCHARTD NSENTER TIME \
+             IFUP IFDOWN TELNETD \
              FEATURE_TAR_TO_COMMAND; do
       sed -i "s/^CONFIG_$c=y\$/# CONFIG_$c is not set/" build/.config
     done
@@ -126,7 +133,7 @@ cross.stdenv.mkDerivation {
     # No `make olddefconfig` (busybox 1.36 kconfig has no such target); the build
     # regenerates include/autoconf.h from .config via silentoldconfig, which keeps
     # these existing values disabled. Sanity-check a few stuck.
-    for c in CROND HTTPD WGET NC TIME; do
+    for c in CROND HTTPD WGET NC TIME IFUP IFDOWN TELNETD; do
       grep -q "^# CONFIG_$c is not set" build/.config \
         || { echo "ERROR: CONFIG_$c not disabled in .config" >&2; exit 1; }
     done

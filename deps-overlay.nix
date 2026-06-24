@@ -112,18 +112,92 @@ in
 
   # --- per-package NON-static cross fixes -------------------------------------
 
+  # pkg-config 0.29.2 bundles an old glib (~2.40 era) via --with-internal-glib.
+  # That bundled glib's gspawn.c, gtestutils.c, and gbacktrace.c reference fork().
+  # The nixpkgs `pkg-config` attr is a thin wrapper; the actual compiled package is
+  # `pkg-config-unwrapped`. Override that so the patch applies to the C compilation.
+  # (pkg-config is a build tool consumed by meson/autoconf cross probes; it never
+  # spawns subprocesses at runtime — the fork path is dead code here.)
+  "pkg-config-unwrapped" = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [
+        ./patches/pkg-config/0001-bundled-glib-no-fork-wasm-nommu.patch
+      ];
+    }))
+    prev."pkg-config-unwrapped";
+
   # openssl: undo the wrapper's forced -D_GNU_SOURCE. openssl's o_str.c picks the
   # GNU strerror_r prototype (returns char*) when _GNU_SOURCE is defined, but musl
   # ALWAYS provides POSIX strerror_r (returns int) → the GNU branch assigns
   # int→char* and clang errors (-Wint-conversion). -U lets openssl take its POSIX
   # branch on musl. (static linking comes from isStatic.)
+  #
+  # `no-apps`: clean-NOMMU spawn contract — the `openssl` CLI binary (apps/openssl)
+  # is the ONLY openssl artifact that calls fork() (speed.c parallel benchmark
+  # workers + apps/http_server.c); libssl/libcrypto do NOT. wasm musl ships no
+  # fork() (return-twice is unimplementable on the NOMMU clone-with-fn model), so
+  # apps/openssl fails to LINK ("undefined symbol: fork"). The cross-compiled wasm
+  # openssl CLI would never run on the host and the guest only consumes the
+  # libraries (curl/libgit2 → nix.wasm), so skip building it. Wasm-guarded → native
+  # openssl still builds its CLI.
+  #
+  # With `no-apps` there is no `$out/bin/openssl`, so nixpkgs' stock `postInstall`
+  # (which `mv $out/bin → $bin/bin` then `makeWrapper $bin/bin/openssl … c_rehash`)
+  # dies wrapping the absent CLI. Replace it with a CLI-free postInstall: drop the
+  # static `.a` only if shared libs exist (they don't here), provide an empty $bin,
+  # split $dev, and prune the perl-dependent etc/ssl/misc + empty cert dirs — i.e.
+  # the same library-only result minus every openssl-CLI step.
   openssl = whenWasm
     (p: p.overrideAttrs (o: {
+      configureFlags = (o.configureFlags or [ ]) ++ [ "no-apps" ];
       env = (o.env or { }) // {
         NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "") + " -U_GNU_SOURCE";
       };
+      postInstall = ''
+        if [ -n "$(echo $out/lib/*.so $out/lib/*.dylib $out/lib/*.dll 2>/dev/null)" ]; then
+          rm -f "$out/lib/"*.a
+        fi
+        etc=$out
+        mkdir -p $bin
+        # no-apps → no $out/bin (no openssl CLI, no c_rehash wrapper to make)
+        mkdir $dev
+        mv $out/include $dev/
+        rm -rf $etc/etc/ssl/misc
+        rmdir $etc/etc/ssl/{certs,private} 2>/dev/null || true
+      '';
     }))
     prev.openssl;
+
+  # pcre2: clean-NOMMU spawn contract — the `pcre2grep` CLI tool calls fork() for
+  # its `--exec`/callout-fork feature (pcre2grep.c, guarded by
+  # SUPPORT_PCRE2GREP_CALLOUT_FORK). The libpcre2 LIBRARY (the only thing libgit2 →
+  # nix.wasm consumes) does NOT. wasm musl ships no fork(), so pcre2grep fails to
+  # LINK ("undefined symbol: fork"). `--disable-pcre2grep-callout-fork` drops the
+  # fork-based callout from pcre2grep — the tool still builds (and is unused on the
+  # guest), the library is unaffected. Wasm-guarded → native pcre2 keeps the
+  # feature.
+  pcre2 = whenWasm
+    (p: p.overrideAttrs (o: {
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-pcre2grep-callout-fork" ];
+    }))
+    prev.pcre2;
+
+  # ncurses: clean-NOMMU spawn contract — ncurses' default `make all` descends into
+  # its `test/` directory and builds the demo programs (ditto.c is a multi-terminal
+  # demo that calls fork(); several others do too). Those demos are NEVER installed
+  # (the install targets are install.{libs,progs,includes,data,man} — none touch
+  # test/) and never run on the guest. They only linked on the old runtime-abort-stub
+  # model because `fork` was a linkable symbol that SIGILL'd at runtime; with the
+  # symbol removed from musl they fail at LINK ("undefined symbol: fork"). Build only
+  # the targets that are actually installed (`libs progs` → libncursesw + tic/tput/…),
+  # so the unused fork-using demos are not built. The library and programs the guest
+  # consumes (terminfo via tic, libncursesw) are unaffected. Wasm-guarded → native
+  # ncurses still builds its full `all` (test demos included).
+  ncurses = whenWasm
+    (p: p.overrideAttrs (o: {
+      buildFlags = (o.buildFlags or [ ]) ++ [ "libs" "progs" ];
+    }))
+    prev.ncurses;
 
   # --- libffi: replace the emscripten-JS wasm backend with a raw one ----------
   # libffi 3.5 auto-selects src/wasm/ffi.c for any wasm32 host, but that file is
@@ -221,6 +295,18 @@ in
           "-Ddocumentation=false"
           "-Dtests=false"
           "-Dnls=enabled"
+        ];
+        # wasm NOMMU has no fork/vfork.  Force glib's existing posix_spawn path
+        # (GNOME/glib MR !95, !1968) to be the ONLY spawn mechanism.  The patch:
+        #   - forces POSIX_SPAWN_AVAILABLE on __wasm__
+        #   - extends do_posix_spawn() with working_directory + close_descriptors
+        #   - handles the fork-fallback conditions (intermediate_child, search_path_from_envp)
+        #     via the extended posix_spawn call; child_setup fails loudly
+        #   - retries ENOEXEC scripts via posix_spawn("/bin/sh", argv...)
+        #   - compiles out the entire fork()/exec() block so no fork symbol is emitted
+        #   - compiles out g_test_trap_fork()'s fork body (deprecated, never used on guest)
+        patches = (o.patches or [ ]) ++ [
+          ./patches/glib/0001-posix-spawn-only-wasm-nommu.patch
         ];
       }))
     prev.glib;
@@ -350,6 +436,49 @@ in
       };
     }))
     prev.zlib;
+
+  # --- pixman: disable tests (test code references fork, not in library itself) --
+  # pixman's meson.build builds tests/fence-image-self-test which calls fork().
+  # The library itself has no fork reference; only the test binary does.
+  # Disable tests so the cross build doesn't attempt to link them.
+  pixman = whenWasm
+    (p: p.overrideAttrs (o: {
+      mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dtests=disabled" ];
+    }))
+    prev.pixman;
+
+  # --- wayland: disable tests (test runner calls fork; library itself is clean) --
+  # wayland 1.25.0 tests/test-runner.c calls fork() to isolate each test process.
+  # The wayland libraries (libwayland-client, -server, -util) have no fork reference.
+  # withTests=false passes -Dtests=false to meson, skipping the test executables.
+  wayland = whenWasm
+    (p: p.override { withTests = false; })
+    prev.wayland;
+
+  # --- libxkbcommon: disable tests (test binaries call fork; library is clean) ---
+  # libxkbcommon 1.13.1 test/ binaries call fork() to isolate each test. meson
+  # builds them unconditionally as part of ninja all (no -Dtests option exists).
+  # Use postPatch with python to remove all test() / benchmark() / executable()
+  # calls whose target names start with "test-" or "bench-" and their associated
+  # libxkbcommon_test_internal / fuzz- executables.  Leave has_merge_modes_tests
+  # defined (used by summary()) but set to false so the condition is vacuous.
+  # The library itself (libxkbcommon.a / libxkbregistry.a) has no fork references.
+  libxkbcommon = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        # Remove test+bench stanzas from meson.build: lines from
+        # 'm_dep = cc.find_library' through the blank line just before
+        # '# Documentation.', replacing with has_merge_modes_tests=false
+        # (that variable is referenced by the summary() block that follows).
+        # Tests call fork() which is absent in wasm NOMMU musl.
+        start_line=$(grep -n "^m_dep = cc\.find_library" meson.build | head -1 | cut -d: -f1)
+        end_line=$(grep -n "^# Documentation\." meson.build | head -1 | cut -d: -f1)
+        end_line=$((end_line - 1))
+        sed -i "$((start_line)),$((end_line))d" meson.build
+        sed -i "$((start_line - 1))a\\# wasm: test/bench disabled (fork absent in NOMMU musl)\nhas_merge_modes_tests = false\n" meson.build
+      '';
+    }))
+    prev.libxkbcommon;
 
   # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
   # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the
