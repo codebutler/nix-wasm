@@ -2,10 +2,11 @@
 # build-artifacts.sh — build the wasm guest artifacts and assemble them under
 # <repo>/.artifacts/ for the browser demo (runtime/web/artifacts -> ../../.artifacts).
 #
-# Builds vmlinux.wasm (.#kernel), initramfs.cpio.gz (.#wasm-initramfs), and the
-# served store (.#wasm-store-manifest -> store.json + store-content/). galculator +
-# the whole GTK3 stack and any deps-overlay fixes (e.g. the libxkbcommon HAVE_MMAP
-# fix) are pulled in transitively by the initramfs + store manifest.
+# Builds four artifacts: vmlinux.wasm (.#kernel), initramfs.cpio.gz (.#wasm-initramfs),
+# base.squashfs (.#wasm-base-squashfs — the read-only /nix overlay lowerdir, served
+# over virtio-blk), and nix-cache/ (.#wasm-binary-cache — on-demand binary cache for
+# toolchain substitution). galculator + the whole GTK3 stack and any deps-overlay fixes
+# are pulled in transitively by the initramfs + squashfs base image.
 #
 # The nix daemon runs as root in this environment, so builds use `sudo nix`.
 # sudo must be usable non-interactively (run `sudo -v` first if it prompts).
@@ -33,10 +34,11 @@ ln -sfn "$(nixbuild .#kernel)/vmlinux.wasm" "$ART/vmlinux.wasm"
 echo "==> initramfs.cpio.gz (busybox + /bin/* incl. galculator/gtk-hello)"
 ln -sfn "$(nixbuild .#wasm-initramfs)/initramfs.cpio.gz" "$ART/initramfs.cpio.gz"
 
-echo "==> store manifest (store.json + store-content/)"
-sm="$(nixbuild .#wasm-store-manifest)"
-ln -sfn "$sm/store.json" "$ART/store.json"
-ln -sfn "$sm/store-content" "$ART/store-content"
+echo "==> base squashfs (/nix overlay lowerdir)"
+ln -sfn "$(nixbuild .#wasm-base-squashfs)/base.squashfs" "$ART/base.squashfs"
+
+echo "==> binary cache (nix-cache/ — on-demand toolchain substitution)"
+ln -sfn "$(nixbuild .#wasm-binary-cache)" "$ART/nix-cache"
 
 echo "==> assembled artifacts in $ART:"
 ls -l "$ART"

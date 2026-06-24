@@ -6,7 +6,7 @@
 // Artifacts are expected at ./artifacts/ relative to this page (symlink to the
 // nix-wasm build output, e.g.:
 //   ln -sfn /path/to/nix-wasm/.artifacts runtime/web/artifacts
-// The four required files: vmlinux.wasm, initramfs.cpio.gz, store.json, nix-cache/
+// The required files: vmlinux.wasm, initramfs.cpio.gz, base.squashfs, nix-cache/
 import { init, Terminal, FitAddon } from "./vendor/ghostty/ghostty.mjs";
 import { bootNixSystem, MemVfs } from "../../index.js";
 import { getWaylandCompositor } from "./wayland-compositor.js";

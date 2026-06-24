@@ -60,7 +60,7 @@ const dec = new TextDecoder();
  *   cmdline?: string,                 // kernel command line
  *   consoleCount?: number,            // hvc consoles to expose (default HVC_CONSOLES)
  *   onLog?: (text: string) => void,   // host/diagnostic log sink
- *   nixStore?: any,                   // a read-only /nix store VFS (createNixClosureStore); registered as the `nix` 9P export — carries the whole userspace + toolchain closure
+ *   squashfs?: ArrayBuffer,           // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
@@ -119,11 +119,9 @@ export async function bootLinux(opts) {
   // and the negotiated server msize must agree; pc-init mounts request it too.
   const NINEP_MSIZE = 512 * 1024;
   const ring = Ring.create(8, NINEP_MSIZE);
-  // Register the user VFS at the root aname; add the /nix store as a second
-  // export when provided (Phase E/N1 — the guest mounts it at /nix via aname=nix,
-  // sharing this one ring; the server isolates the two mounts by connection id).
+  // Register the user VFS at the root aname; the /nix-cache binary cache is
+  // a second export when provided (#141).
   const exports = { "/": vfs };
-  if (opts.nixStore) exports.nix = opts.nixStore; // read-only /nix store: the whole userspace + toolchain closure (lazy big files)
   if (opts.nixCache) exports.nixcache = opts.nixCache; // read-only Nix binary cache, pc-init mounts at /nix-cache + substituters=file:///nix-cache (#141)
   const transport = createNinePTransport({
     ring,
@@ -160,6 +158,11 @@ export async function bootLinux(opts) {
     console_write: emit,
     ninep_ring: ring.buffer,
     virtio_queues: virtioQueues,
+    // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
+    // An ArrayBuffer; kernel-host copies it once into a SharedArrayBuffer so
+    // every task worker (any may service the blk vring) sees the same image.
+    // Absent on a --no-nix / busybox-only boot (the blk device mounts empty).
+    squashfs: opts.squashfs,
     wayland,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
@@ -219,6 +222,15 @@ export async function bootLinux(opts) {
     pushIn(clientId, bytes, fds) {
       waylandPushIn?.(clientId, bytes, fds);
     },
+
+    /**
+     * Guest networking (virtio-net eth0). The seam pc's js/vnet/ consumes:
+     *   - `readable`: a ReadableStream<Uint8Array> of guest-egress ethernet frames.
+     *   - `writable`: a WritableStream<Uint8Array>; writing a frame injects it into
+     *     the guest's RX vring (host→guest), waking a parked idle CPU.
+     *   - `setLinkUp(up)`: flips the reported link-status config bit.
+     */
+    net: os.net,
 
     /** Stop the 9P server loop. (Worker teardown is the caller's concern.) */
     kill() {

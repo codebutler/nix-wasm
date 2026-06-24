@@ -23,6 +23,7 @@ import { createModuleWorker } from "./make-worker.js";
 // consistent across the two writers. See wayland_push_in below + kernel patch 0014.
 import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
+import { NetDevice } from "./virtio/net-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -39,6 +40,13 @@ export const linux = async ({
   ninep_ring,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
+  // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
+  // over virtio-blk. The BlkDevice is built lazily in WHICHEVER task worker
+  // first services the virtio-blk vring (not necessarily the boot worker), so —
+  // exactly like the 9P ring and the virtio queue-layout store — the image must
+  // be a SharedArrayBuffer handed to EVERY worker, not a per-worker copy. We
+  // copy the caller's ArrayBuffer into a SAB once here. Undefined on --no-nix.
+  squashfs,
   // Wayland Phase 4f: optional host hook for the worker→main Greenfield bridge.
   // `sendOut(clientId, buffer, fds)` is called FIRE-AND-FORGET when a guest
   // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
@@ -52,6 +60,17 @@ export const linux = async ({
 }) => {
   const arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
   const Ulong = arch_bits == 32 ? Number : BigInt;
+
+  // #43: copy the squashfs ArrayBuffer into a SharedArrayBuffer ONCE so every
+  // task worker (any of which may end up servicing the virtio-blk vring) sees
+  // the same read-only image — the per-worker JS heaps are otherwise isolated.
+  // Undefined on a --no-nix boot → no blk image (the device mounts empty).
+  let squashfs_sab = null;
+  if (squashfs && squashfs.byteLength) {
+    squashfs_sab = new SharedArrayBuffer(squashfs.byteLength);
+    new Uint8Array(squashfs_sab).set(new Uint8Array(squashfs));
+    squashfs = null; // copied into the SAB; allow gc of the caller's buffer
+  }
 
   /// Dict of online CPUs.
   const cpus = {};
@@ -134,6 +153,48 @@ export const linux = async ({
     }
     return hostWlDevice;
   };
+
+  // virtio-net (guest networking): a MAIN-thread NetDevice mirrors the worker's,
+  // driving the RX queue (host→guest). It reuses the wl idle-wake machinery —
+  // the same raised_irqs[0] address (wlRaisedIrqsAddr, armed by wayland_irq_addr)
+  // and raiseHostWlIrq — so writing an inbound frame to the RX vring wakes a
+  // parked idle CPU directly, without postMessaging a worker that can't run JS.
+  // It shares hostWlQueues (the cross-worker queue-layout SAB) so the RX vring +
+  // its avail cursor stay consistent with the worker's instance. dev=2, irq=10.
+  const VW_DEV_NET = 2;
+  let hostNetDevice = null;
+  const hostNet = () => {
+    if (!hostNetDevice && wlRaisedIrqsAddr != null) {
+      hostNetDevice = new NetDevice({
+        dev: VW_DEV_NET,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_NET,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues,
+        log,
+        mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02],
+      });
+    }
+    return hostNetDevice;
+  };
+
+  // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
+  // frame as { method: "net_out", frame } and we enqueue it here.
+  let netController = null;
+  let netLinkUp = false;
+  const netReadable = new ReadableStream({
+    start: (c) => {
+      netController = c;
+    },
+  });
+  // handle.net.writable: inbound ethernet frames. Each write is delivered to the
+  // guest via the main-thread NetDevice's RX vring (pushRx).
+  const netWritable = new WritableStream({
+    write: (frame) => {
+      hostNet()?.pushRx(frame instanceof Uint8Array ? frame : new Uint8Array(frame));
+    },
+  });
 
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
@@ -238,6 +299,22 @@ export const linux = async ({
     // on the worker, which forwards it here (the host owns the IN vring).
     wayland_in_refill: (_message) => {
       hostWl()?.flushIn();
+    },
+
+    // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on
+    // handle.net.readable for the pc-side tap. `frame` is a transferred
+    // ArrayBuffer (the worker posted it with a transfer list).
+    net_out: (message) => {
+      // Gate: only forward guest-egress frames once the link is up AND a reader
+      // is keeping up (desiredSize > 0). Before a tap attaches, frames would
+      // buffer unbounded; after close/error, enqueue would throw in this handler.
+      if (!netLinkUp || netController == null) return;
+      if (!(netController.desiredSize > 0)) return; // queue full — drop rather than buffer unbounded
+      try {
+        netController.enqueue(new Uint8Array(message.frame));
+      } catch {
+        // controller closed or errored — drop the frame rather than throw here
+      }
     },
 
     // Wayland: the guest closed a ctx vfd (its Wayland client exited) — forward to
@@ -381,7 +458,7 @@ export const linux = async ({
       log("[worker messageerror]");
     };
 
-    worker.postMessage({
+    const init_msg = {
       ...options,
       method: "init",
       variant: variant,
@@ -393,7 +470,9 @@ export const linux = async ({
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
-    });
+      squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX
+    };
+    worker.postMessage(init_msg);
 
     return {
       worker: worker,
@@ -451,8 +530,23 @@ export const linux = async ({
         return;
       }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
+      const fdBufs =
+        fds && fds.length
+          ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f)))
+          : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
+    },
+
+    // virtio-net guest networking. `readable` emits guest-egress ethernet
+    // frames; writing a frame to `writable` injects it into the guest's RX vring.
+    // `setLinkUp(up)` flips the reported VIRTIO_NET_S_LINK_UP config bit.
+    net: {
+      readable: netReadable,
+      writable: netWritable,
+      setLinkUp: (up) => {
+        netLinkUp = !!up;
+        hostNet()?.setLinkUp(up);
+      },
     },
   };
 };

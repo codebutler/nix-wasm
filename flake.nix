@@ -153,6 +153,19 @@
         libffi = cross.libffi;
       };
 
+      # Regression test for detached-thread exit on wasm (the __unmapself/CRTJMP
+      # SIGILL fixed by patches/musl/0008). See userspace/pthread-exit-test.c.
+      pthreadExitTest = import ./userspace/pthread-exit-test.nix {
+        inherit cross;
+      };
+
+      # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
+      # dispatch rodata (static const) fn pointers correctly? See
+      # userspace/fpcast-vtable-test.c.
+      fpcastVtableTest = import ./userspace/fpcast-vtable-test.nix {
+        inherit cross;
+      };
+
       # M3a (galculator): glib-selftest — in-guest gobject proof. Round-trips a
       # GObject and emits a `double` signal through gobject's GENERIC (libffi)
       # marshaller (g_cclosure_marshal_generic → ffi_call) — the first real exercise
@@ -184,6 +197,21 @@
       # browser check. gtk is gobject → fn-pointer casts, so the linked binary goes
       # through the SHARED --fpcast-emu seam. See userspace/gtk-hello.*.
       gtkHello = import ./userspace/gtk-hello.nix {
+        inherit cross;
+        gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pixman = cross.pixman; wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols; libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
+      # #33: gtk3-widget-factory — the headline GTK3 app. GTK's own widget showcase,
+      # built standalone against the cross gtk3. Proves GtkBuilder signal autoconnect
+      # on the static guest via gtk_builder_add_callback_symbol (no GModule). --selftest
+      # is the display-free headless gate; the full window is a manual browser check.
+      # See userspace/widget-factory.nix + patches/widget-factory/ + issue #33.
+      widgetFactory = import ./userspace/widget-factory.nix {
         inherit cross;
         gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
         gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
@@ -258,10 +286,10 @@
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
-        # The in-guest toolchain, folded into the system profile/closure (one
-        # /nix userspace; no /opt/bin side-mount). guestClang gives bin/{clang,
-        # wasm-ld}; nixWasm bin/nix; makeWasm bin/make; guestCc bin/cc; guestCxx bin/c++.
-        toolchain = [ nixWasmClean guestClang guestCc guestCxx makeWasm wasmAsh ];
+        # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
+        # c++, make) lives in .#wasm-binary-cache and is installed on demand via
+        # `nix-env -iA dev-tools`. Removing it here shrinks the squashfs by ~89 MB.
+        toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -288,11 +316,11 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest fpcastVtableTest widgetFactory ];
       };
 
-      # ---- the served-closure manifest (store.json) for pc -----------------
-      wasmStoreManifest = import ./userspace/store-manifest.nix {
+      # ---- the base-system store closure as a single squashfs image (#43) ---
+      wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
         inherit pkgs; toplevel = wasmToplevel;
       };
 
@@ -310,10 +338,10 @@
       # nix.wasm is statically linked, but the wasm binary embeds dead build-time
       # store-path strings (openssl-static/boost-static-dev/nlohmann_json), which
       # Nix scans as references — transitively dragging native glibc + its
-      # thousands of locale files into the wasm-system closure (it ballooned
-      # store.json to 258MB). The guest never touches those host paths, so strip
-      # them (the standard removeReferencesTo technique) via a cheap post-process —
-      # no nix rebuild. Result: nix-wasm's closure is just its own binary.
+      # thousands of locale files into the wasm-system closure (it bloated the
+      # served /nix closure to ~258MB). The guest never touches those host paths,
+      # so strip them (the standard removeReferencesTo technique) via a cheap
+      # post-process — no nix rebuild. Result: nix-wasm's closure is just its own binary.
       nixWasmClean = pkgs.runCommand "nix-wasm-2.34.7"
         {
           nativeBuildInputs = [ pkgs.nukeReferences ];
@@ -326,6 +354,22 @@
           chmod -R u+w $out/bin
           nuke-refs $out/bin/nix
         '';
+
+      # ---- Wasm binary cache: the on-demand compiler toolchain (#43/#2/#1) -----
+      # A standard file:// Nix binary cache (nix-cache-info + narinfo + nar/) for
+      # the in-guest compiler tools. Served by runtime/nix-cache.js and substituted
+      # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
+      # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
+      # arrive on demand through substitution.
+      wasmDevToolsEnv = pkgs.buildEnv {
+        name = "wasm-dev-tools";
+        paths = [ guestClang guestCc guestCxx makeWasm ];
+      };
+      wasmBinaryCache = import ./userspace/binary-cache.nix {
+        inherit pkgs;
+        devPaths = [ guestClang guestCc guestCxx makeWasm ];
+        devToolsEnv = wasmDevToolsEnv;
+      };
     in
     {
       # The FULL wasm32 cross package set — exposing it as legacyPackages lets
@@ -406,6 +450,13 @@
         # FFI backend's f32/f64/i64 by-value argument support → $out/bin/libffi-selftest.
         libffi-selftest = libffiSelftest;
 
+        # Regression test for detached-thread exit on wasm (patches/musl/0008) →
+        # $out/bin/pthread-exit-test.
+        pthread-exit-test = pthreadExitTest;
+
+        # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
+        fpcast-vtable-test = fpcastVtableTest;
+
         # M2 (text stack): wl-text — fontconfig→freetype→harfbuzz→cairo-ft proof →
         # $out/bin/wl-text (--selftest is the headless CI gate).
         wl-text = wlText;
@@ -432,6 +483,12 @@
         # musl fork/vfork symbol removal. Always builds (link results written to $out/result).
         nofork-linkcheck = import ./spikes/nofork/check.nix { inherit cross; };
 
+        # #33: gtk3-widget-factory — the headline GTK3 app. GtkBuilder autoconnect
+        # via add_callback_symbol (no GModule on the static guest). --selftest is the
+        # headless gate (display-free GtkBuilder signal round-trip); the full window
+        # renders in the browser (needs the musl/RAM/dev-shm fixes). → $out/bin/gtk3-widget-factory.
+        widget-factory = widgetFactory;
+
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
 
@@ -450,8 +507,13 @@
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
 
-        # The wasm-system closure exported as store.json for pc to serve over 9P.
-        wasm-store-manifest = wasmStoreManifest;
+        # The base-system store closure as a single squashfs image for virtio-blk.
+        wasm-base-squashfs = wasmBaseSquashfs;
+
+        # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
+        # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
+        # Served by runtime/nix-cache.js; in-guest: `nix-env -iA dev-tools`.
+        wasm-binary-cache = wasmBinaryCache;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''

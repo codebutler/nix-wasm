@@ -1,5 +1,6 @@
 # The guest system closure in boot layout. Host-built; SERVED read-only into the
-# guest /nix store over 9P (overlay lowerdir) by pc's createNixClosureStore.
+# guest /nix store as a squashfs image (base.squashfs) over a read-only virtio-blk
+# device, mounted as the overlay lowerdir for /nix.
 #
 # Boot-layout CONTRACT (what the thin /init does — see nix-wasm initramfs):
 #   1. mount pseudofs + the 9P exports; overlay the served store -> /nix.

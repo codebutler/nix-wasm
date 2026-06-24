@@ -892,6 +892,24 @@ in
           mv "$out/bin/galculator.fpcast" "$out/bin/galculator"
           chmod +x "$out/bin/galculator"
         fi
+        # Cut the DEAD propagated-build-input chain (issue #43). galculator's
+        # $out/nix-support/propagated-build-inputs records gtk+3-dev, which itself
+        # propagates pango-dev → libxft-dev → the whole X11 + glibc-locale `-dev`
+        # closure. galculator is a LEAF app — nothing is ever built against it — so
+        # that propagation metadata is pure dead weight, yet Nix's reference scanner
+        # follows it and drags ~15k `-dev`/X11/glibc-locale store paths into the
+        # served store (base.squashfs ballooned ~26MB→345MB). Dropping nix-support is
+        # safe and removes that whole subtree (→ ~28MB base.squashfs / X11+locale gone).
+        #
+        # We do NOT strip the binary's OWN store references with remove-references-to:
+        # several look "dead" for a static binary but are real RUNTIME DATA deps that
+        # ride the served closure for ALL GTK wayland apps — notably
+        # **xkeyboard-config** (libxkbcommon loads `…/etc/X11/xkb` at startup to build
+        # the XKB keymap; gdk treats a keymap failure as FATAL, so stripping it killed
+        # gtk3-widget-factory with "Failed to create XKB keymap"). The remaining
+        # gtk3/glib/gdk-pixbuf data in the closure is the legitimate cost of shipping
+        # a GTK app, not bloat — the catastrophic part was the -dev tree above.
+        rm -rf "$out/nix-support"
       '';
     }))
     prev.galculator;

@@ -62,7 +62,8 @@ definitions then cross-compile.
   closure (no systemd/perl/python) + a patched busybox (`userspace/busybox.nix`:
   clone-with-fn spawn — NOMMU wasm can't fork/vfork) built via the `cross`
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
-  overlays the served `/nix` closure and hands off to busybox-init.
+  mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
+  lowerdir and hands off to busybox-init.
 - **Process model** = single shared NOMMU arena + a **`posix_spawn`-only spawn
   contract**; `fork`/`vfork` are **removed at the libc level** (`toolchain/musl.nix`)
   so callers fail to **link** (loud build error) rather than SIGILL/abort at runtime.
@@ -107,8 +108,8 @@ vendors it via `runtime/sync-to-pc.sh`. **Any change to a runtime engine file
 M3a) requires re-running `runtime/sync-to-pc.sh <pc-checkout>`, or pc boots a stale
 engine that fails to instantiate glib/GTK binaries.**
 
-Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `store.json`, `nix-cache/`) come
-from `nix build` (`.#vmlinux`, `.#wasm-initramfs`, `.#wasm-store-manifest`). Point
+Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) come
+from `nix build` (`.#kernel`, `.#wasm-initramfs`, `.#wasm-base-squashfs`, `.#wasm-binary-cache`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
 symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
 fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
@@ -116,7 +117,7 @@ fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
 Run these from the **runtime/** directory:
 
 ```sh
-# Engine unit tests (79 tests, no artifacts needed):
+# Engine unit tests (72 tests, no artifacts needed):
 bun run test
 
 # Node integration tests:
@@ -207,6 +208,12 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
 history). The old "hush isn't POSIX-enough" gap is closed.
+
+**#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
+a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
+compiler toolchain is no longer in the base — it's substituted on demand via the
+Nix binary cache (`nix-env -iA dev-tools`). Phase 5 CI wiring (Task 9, issue #2)
+follows.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
@@ -327,8 +334,8 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   fonts.nix` + `system.nix` bake DejaVu + `/etc/fonts/fonts.conf` +
   `FONTCONFIG_FILE`): the wl-text/M2 smoke MUST boot `nix:true` (served `/nix`
   closure) — a busybox-only boot has no font config and fontconfig `FcInit` fails.
-  Rebuild `.#wasm-store-manifest` after any `fonts.nix`/`system.nix` change so
-  the new store path is included in the served `store.json`.
+  Rebuild `.#wasm-base-squashfs` after any `fonts.nix`/`system.nix` change so
+  the new store path is included in the served `base.squashfs`.
 - **M3a glib/gobject** (`deps-overlay.nix` glib override): disable
   `selinux`/`libmount`/`sysprof`/`man-pages`/`dtrace`/`documentation` + `tests`
   (nixpkgs glib drags libselinux/libsepol + util-linux/libmount + libsysprof-capture
@@ -338,14 +345,17 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   guest never uses glib's m4 macros); drop the `devdoc` output (like harfbuzz). gio
   modules build **into libgio** (the NOMMU guest can't dlopen). Codegen tools
   (glib-genmarshal/compile-schemas/…) come from native `buildPackages` via meson cross.
-- **futex_time64 arity** (`patches/kernel/0015`): `__NR_futex_time64` (422) maps to the
-  6-arg `sys_futex`, but **glib's raw `syscall()`** (`g_futex_simple`) calls it with
-  **4** args (`uaddr,op,val,utime`) for FUTEX_WAIT/WAKE → strict wasm `call_indirect`
-  on the 6-arg handler traps. (musl pads its OWN futex calls to 6, so musl pthread —
-  used by nix.wasm/busybox — is unaffected; only glib's raw 4-arg call traps.) Fix = a
-  4-arg `sys_wasm32_futex` wrapper forwarding `sys_futex(uaddr,op,val,utime,NULL,0)`
-  (FUTEX_WAIT/WAKE ignore uaddr2/val3), overriding `__NR_futex_time64` — mirrors the
-  `sys_wasm32_*` pattern. Rebuilds only vmlinux.
+- **futex_time64 arity** (`patches/kernel/0015`; `runtime/kernel-worker.js`): `__NR_futex_time64`
+  (422) stays mapped to the **6-arg `sys_futex`** in the kernel syscall table — this is
+  correct because nix.wasm's **musl pthread** issues 6-arg futex calls and a 4-arg kernel
+  entry trapped them under heavy threading (large on-demand `nix-env` installs). Glib's raw
+  `syscall()` (`g_futex_simple`) calls with only **4** args (`uaddr,op,val,utime`) for
+  FUTEX_WAIT/WAKE → strict wasm `call_indirect` on the 6-arg handler would trap. Fix =
+  a **host shim in `runtime/kernel-worker.js`** that intercepts `__wasm_syscall_4` with
+  `nr==422` and forwards to `wasm_syscall_6` zero-padding `uaddr2/val3` (safe for
+  FUTEX_WAIT/WAKE). Patch 0015 keeps an unregistered `SYSCALL_DEFINE4(wasm32_futex)` for
+  reference only — the syscall table entry is the 6-arg handler. (This host edit, like all
+  `kernel-worker.js` edits, needs a pc sync via `sync-to-pc.sh`.)
 - **glib/GTK `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
   wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
   `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is
@@ -391,7 +401,26 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   GtkStyleContext without a display connection"). The gate instead `g_type_class_ref`s
   `GTK_TYPE_WINDOW`/`GTK_TYPE_LABEL` (runs each class_init through the fpcast seam,
   display-free) and asserts `g_type_from_name` + `gtk_get_major_version()==3`. The full
-  window *render* is a MANUAL browser check (`docs/superpowers/notes/m3b-gtk-visual.md`).
+  window *render* **now works in the browser** (a real GTK window with the label
+  draws via Greenfield) — it was gated on the `/dev/shm` mount, see the Guest
+  runtime/kernel learnings below (`docs/superpowers/notes/m3b-gtk-visual.md`).
+- **Served-store bloat: drop galculator's `nix-support` ONLY — do NOT strip binary refs**
+  (`deps-overlay.nix` galculator override `postFixup`; issue #43). galculator is in
+  `environment.systemPackages` (for its `.ui` files), so it's in the served `/nix` closure.
+  The catastrophic bloat (~26MB→**345MB** served closure / 3.2k→22.5k files) was
+  galculator's `$out/nix-support/propagated-build-inputs` recording `gtk+3-dev`, which
+  propagates `pango-dev → libxft-dev → the whole X11 + glibc-locale -dev tree`. galculator
+  is a LEAF app (nothing builds against it), so that propagation metadata is pure dead
+  weight the ref scanner still follows. **Fix: `rm -rf $out/nix-support`** → ~127MB / 7.5k
+  files, X11/glibc/locale gone. **DEAD-END (caused a regression, reverted):** also running
+  `remove-references-to` over gtk3/glib/gdk-pixbuf/pango/xkeyboard-config/… to shrink
+  further (→28MB) looks safe for a static binary but **breaks GTK at runtime** — those
+  binary refs include REAL runtime data deps that ride the served closure for ALL GTK
+  wayland apps, notably **xkeyboard-config** (libxkbcommon loads `…/etc/X11/xkb` at startup
+  to build the XKB keymap; gdk treats a keymap failure as FATAL → every app died with
+  `Gdk-ERROR: Failed to create XKB keymap`). So keep ONLY the `nix-support` removal; the
+  remaining gtk3/glib data is the legitimate cost of shipping a GTK app, not bloat. The
+  squashfs format (#43) resolved the deeper format issue.
 - **M4 galculator packaging** (`deps-overlay.nix` `galculator` override): galculator
   2.1.4 is a plain GTK3 autotools app (`pkg_modules = "gtk+-3.0"`); packaged via an
   `isWasm`-guarded nixpkgs override (NOT a from-scratch `userspace/galculator.nix` —
@@ -424,7 +453,37 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   the fpcast seam), printing `GALCULATOR-SELFTEST: main_window=1 button_7=1
   gtk_types=1 OK`. Gate: `node demo/node/galculator-smoke.mjs` matches
   `/GALCULATOR-SELFTEST: .* OK/`. The full click-to-42 compute is a MANUAL browser
-  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`).
+  check (PENDING, `docs/superpowers/notes/m4-galculator-visual.md`). **CAVEAT — the
+  real galculator window is GATED by the GModule wall below**: its `--selftest`
+  passes but `gtk_builder_connect_signals(NULL)` over its 115 `.ui` handlers needs
+  a working GModule, which the static guest lacks. The visual headline moved to
+  gtk3-widget-factory (next entry).
+- **GtkBuilder signal autoconnect on the static guest = `add_callback_symbol`, NOT
+  a runtime `dlsym`** (`userspace/widget-factory.nix`, `patches/widget-factory/`,
+  issue #33). `gtk_builder_connect_signals(builder, NULL)` resolves `.ui` `<signal
+  handler="...">` names via `g_module_open(NULL)`/`g_module_symbol` → musl
+  `dlopen(NULL)`/`dlsym`, which the statically-linked guest stubs to NULL →
+  `Gtk-ERROR: requires working GModule`. **A host-side `dlsym` CANNOT fix this** (a
+  full impl was built + world-rebuild-tested, then reverted — see #33): `--fpcast-emu`
+  rewrites every indirect call to a canonical `(i64×128)→i64` sig, so a fn-pointer
+  must be a canonical *thunk* (made only for address-taken fns); the host can neither
+  synthesize one (`WebAssembly.Function` absent in Node/browsers) nor locate one by
+  name (binaryen exports no thunks). Only `&function` in C yields the fpcast-correct
+  thunk → resolution MUST be guest-side. The GTK-sanctioned static path
+  (`gtk_builder_connect_signals_default` source: `g_error`s only for an *unregistered*
+  handler) is `gtk_builder_add_callback_symbol(builder,"on_foo",G_CALLBACK(on_foo))`
+  per handler — `&on_foo` is the fpcast canonical thunk, and a fully-registered scope
+  never opens GModule (the NULL `g_module_open` is harmless). **fork was never the
+  blocker here** (orthogonal to #25/#29). **Headline app = gtk3-widget-factory**
+  (GTK's own showcase, no new deps, built standalone against cross gtk3 so gtk3
+  itself stays cached): it registers 17/18 handlers upstream; the patch adds the one
+  it leaves to GModule (`gtk_widget_hide_on_delete`) so the real app autoconnects
+  fully, and adds a display-free `--selftest` (a `GtkTextBuffer` `.ui` signal:
+  register → `connect_signals` → emit → assert the handler fired through fpcast).
+  Gate: `node demo/node/widget-factory-smoke.mjs` matches `/WIDGET-FACTORY-SELFTEST:
+  .* OK/` (`buf=1 connected_no_gmodule=1 handler_ran=1 major=3`). The full window
+  **RENDERS in the browser** (complete widget showcase, Adwaita theme) once the
+  /dev/shm mount + musl `__unmapself` + 1.75 GiB RAM fixes are in.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
@@ -451,15 +510,61 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.
+- **`/dev/shm` MUST be mounted (ramfs) for GTK/wl_shm clients** (`bootstrap.nix`).
+  gdk's wayland backend allocates each window's `wl_shm` buffer via
+  `open_shared_memory()` → `memfd_create()` (ENOSYS on the wasm kernel) →
+  `shm_open("/dev/shm/…")` fallback; with `/dev/shm` unmounted that fails ENOENT →
+  `create_shm_pool` returns NULL → an empty **0×0** window + a per-frame
+  `Gdk-CRITICAL` in `_gdk_wayland_display_create_shm_surface` (looks like a render
+  crash but is a missing mount). Use **ramfs**, NOT tmpfs: ramfs has explicit NOMMU
+  `MAP_SHARED` mmap support (`fs/ramfs/file-nommu.c`) — the same backing `/tmp` uses
+  (proven by `wl-anim`'s `mkstemp` shm path) — whereas shmem/tmpfs lacks reliable
+  shared-writable mmap on NOMMU. With the mount, `gtk-hello` renders a real window
+  ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
+  gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
+  future kernel could implement it as the more standard primary path.)
+- **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
+  DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
+  generic path does a native stack-pointer switch (`CRTJMP`) to `munmap` its own
+  stack — but the wasm arch stubs `CRTJMP(pc,sp)` to `abort()` → SIGILL (exit 132).
+  GLib **GThreadPool** workers (gdk-pixbuf/GTask, so any non-trivial GTK app like
+  gtk3-widget-factory) are detached threads, so they crashed on exit; gtk-hello has
+  no threads and never hit it. Fix: on wasm, `__unmapself` does `munmap`+`exit`
+  inline (no stack switch) — safe because NOMMU `munmap` does NOT invalidate the
+  wasm linear-memory bytes the C shadow stack occupies. Validated by
+  `.#pthread-exit-test` (spawn+exit 16 detached threads). A musl change → world
+  rebuild (musl → stdenv → all guest binaries relink). SAME class as the libffi /
+  futex / fpcast wasm-can't-do-native-asm theme.
+- **Guest RAM = 1.75 GiB for large GTK windows** (`kernel.nix`
+  `CONFIG_BOOT_MEM_PAGES 0x7000`). A GTK app mapping a large window allocates an
+  **order-11 (8 MB) GFP_HIGHUSER** `wl_shm` buffer; after the served `/nix` closure
+  + glib/gdk init fragment the NOMMU buddy heap below 8 MB, that mmap fails
+  (`page allocation failure: order:11`) → no window (gtk3-widget-factory). More RAM
+  keeps order-11 blocks whole. MUST stay **under `0x8000` (2 GiB)** — setup.c
+  positive-address limit. vmlinux-only rebuild; same NOMMU contiguous-mmap class as
+  the 1 GiB bump for the 57 MB clang exec.
 - **User stack 8 KiB→4 MiB** (`patches/kernel/0007`): musl `realpath()` alone
   overflows 8 KiB and NOMMU can't grow the stack (was both the "readlink -f
   corrupts long paths" bug and the nix.wasm startup "memory access out of bounds").
   4 MiB (not 8) so the alloc fits an order-11 buddy block.
+- **Base `/nix` = squashfs over virtio-blk** (#43; `userspace/base-squashfs.nix`,
+  `runtime/virtio/blk-device.js`): the guest's `/nix` lowerdir is a squashfs image
+  (`base.squashfs`) served to the guest over a read-only virtio-blk device. Kernel
+  needs `CONFIG_SQUASHFS`/`CONFIG_SQUASHFS_ZSTD`/`CONFIG_BLOCK`/`CONFIG_VIRTIO_BLK` +
+  `CONFIG_MISC_FILESYSTEMS` (gates squashfs — silently dropped without it) + patch 0017
+  (`VW_DEV_BLK=3`). The squashfs image is a `SharedArrayBuffer` shared to all workers;
+  `BlkDevice` is built lazily in the task worker. Block size `-b 131072` (128 KiB) works
+  on NOMMU. mmap-exec off squashfs relies on patch 0016 (RO file mmap copy).
+  See `docs/superpowers/notes/squashfs-nommu-spike.md` for the spike notes. The
+  compiler toolchain is NOT in the base squashfs — it is substituted on demand via the
+  Nix binary cache (`wasm-binary-cache` → `nix-env -iA dev-tools`).
+- **`CONFIG_ARCH_FORCE_MAX_ORDER` 16 + `CONFIG_BOOT_MEM_PAGES` 0x7FFF** (`kernel.nix`):
+  `nix-env` extracting a large on-demand package needs a contiguous ~134 MB allocation
+  from the NOMMU buddy allocator. `ARCH_FORCE_MAX_ORDER=16` allows 256 MB buddy blocks;
+  `BOOT_MEM_PAGES=0x7FFF` gives ~2 GiB RAM (under the 0x8000 positive-address limit).
+  Without this, large on-demand installs fail with `page allocation failure`.
 - **Single-user nix** (`userspace/system.nix`): `build-users-group = ""` +
   `filter-syscalls = false` (no seccomp on wasm) — either otherwise aborts `nix-env`.
-- **`store-manifest` splits large files into lazy `store-content/<sha256>` blobs**
-  so the ~113 MB toolchain fetches on first exec, not at boot.
-
 **Dead-ends — do NOT retry:**
 - `crossSystem.hasSharedLibraries = false` — too aggressive; sqlite eval abort.
 - `stdenvAdapters.makeStaticLibraries` — doesn't compose with our
@@ -483,8 +588,9 @@ Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →
 guest-clang/cc → kernel); the code + this file + git history are the record.
 Remaining work and design notes live as GitHub issues, not in-repo plan files:
 
-- **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, guest
-  substitutes). The last phase; see the Caching design goal above.
+- **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, publish to
+  R2, guest substitutes). The CI workflow (Task 9) wires this; see the Caching
+  design goal above.
 - **#3** — retire the `cc`/`c++` shell wrappers by making `clang`/`clang++`
   their own driver for the wasm target (config file / custom ToolChain), gated on
   whether LLVM's linker spawn uses `posix_spawn` on the NOMMU port.

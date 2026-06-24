@@ -1,0 +1,109 @@
+diff --git a/demos/widget-factory/widget-factory.c b/demos/widget-factory/widget-factory.c
+index eb0f96a..9d2a031 100644
+--- a/demos/widget-factory/widget-factory.c
++++ b/demos/widget-factory/widget-factory.c
+@@ -20,6 +20,7 @@
+ 
+ #include "config.h"
+ 
++#include <stdio.h> /* nix-wasm #33 selftest: printf/fprintf */
+ #include <glib/gi18n.h>
+ #include <gtk/gtk.h>
+ 
+@@ -1785,6 +1786,15 @@ activate (GApplication *app)
+   gtk_builder_add_callback_symbol (builder, "validate_more_details", (GCallback)validate_more_details);
+   gtk_builder_add_callback_symbol (builder, "mode_switch_state_set", (GCallback)mode_switch_state_set);
+   gtk_builder_add_callback_symbol (builder, "level_scale_value_changed", (GCallback)level_scale_value_changed);
++  /* nix-wasm #33: register the one .ui handler upstream leaves to GModule.
++     widget-factory.ui binds delete-event to the GTK library function
++     gtk_widget_hide_on_delete, which upstream relies on g_module_open(NULL)/
++     dlsym to resolve. On the statically-linked wasm guest there is no working
++     GModule, so an unregistered handler makes gtk_builder_connect_signals()
++     fatal ("requires working GModule"). Registering it (its &address is the
++     fpcast-emu canonical thunk) means connect_signals resolves every handler
++     from the builder's callback scope and never touches GModule. */
++  gtk_builder_add_callback_symbol (builder, "gtk_widget_hide_on_delete", (GCallback)gtk_widget_hide_on_delete);
+ 
+   gtk_builder_connect_signals (builder, NULL);
+ 
+@@ -2038,11 +2048,80 @@ local_options (GApplication *app,
+   return -1;
+ }
+ 
++/* nix-wasm #33 headless gate. The full widget-factory window needs a Wayland
++   display (no compositor in the node test harness), so the real autoconnect path
++   is a MANUAL browser check. This --selftest instead proves the SAME mechanism
++   display-free: GtkBuilder signal autoconnect resolving a .ui <signal> handler
++   by name via gtk_builder_add_callback_symbol() WITHOUT GModule (which the static
++   wasm guest cannot provide), and the resolved &handler — the fpcast-emu canonical
++   thunk — actually firing when the signal is emitted. Uses a GtkTextBuffer (a
++   non-widget GObject) so no display is required. */
++static int wf_selftest_ran = 0;
++void wf_on_buf_changed (GtkTextBuffer *buffer, gpointer user_data);
++void wf_on_buf_changed (GtkTextBuffer *buffer, gpointer user_data)
++{
++  (void) buffer; (void) user_data;
++  wf_selftest_ran = 1;
++}
++
++static int
++run_selftest (void)
++{
++  static const char *ui =
++    "<interface>"
++    "  <object class=\"GtkTextBuffer\" id=\"buf\">"
++    "    <signal name=\"changed\" handler=\"wf_on_buf_changed\"/>"
++    "  </object>"
++    "</interface>";
++  GtkBuilder *builder;
++  GObject *buf;
++  GError *err = NULL;
++  int have_buf, parsed, ok;
++
++  /* Register GtkTextBuffer's type without a display (no gtk_init). */
++  g_type_class_ref (GTK_TYPE_TEXT_BUFFER);
++
++  builder = gtk_builder_new ();
++  /* The #33 fix: register the handler so connect_signals resolves it from the
++     callback scope and never falls back to g_module_open(NULL)/dlsym. */
++  gtk_builder_add_callback_symbol (builder, "wf_on_buf_changed", G_CALLBACK (wf_on_buf_changed));
++
++  parsed = gtk_builder_add_from_string (builder, ui, -1, &err);
++  if (!parsed)
++    {
++      fprintf (stderr, "widget-factory selftest: builder parse failed: %s\n",
++               err ? err->message : "unknown");
++      g_clear_error (&err);
++      return 1;
++    }
++  /* No GModule needed — the one referenced handler is registered. On the static
++     guest g_module_open(NULL) returns NULL, but that NULL is never consulted
++     because the handler resolves from the callback scope first. */
++  gtk_builder_connect_signals (builder, NULL);
++
++  buf = gtk_builder_get_object (builder, "buf");
++  have_buf = GTK_IS_TEXT_BUFFER (buf);
++  if (have_buf)
++    gtk_text_buffer_set_text (GTK_TEXT_BUFFER (buf), "hi", -1); /* emits "changed" */
++
++  ok = have_buf && wf_selftest_ran && gtk_get_major_version () == 3;
++  printf ("WIDGET-FACTORY-SELFTEST: buf=%d connected_no_gmodule=1 handler_ran=%d major=%u %s\n",
++          have_buf, wf_selftest_ran, gtk_get_major_version (), ok ? "OK" : "FAIL");
++  fflush (stdout);
++  g_object_unref (builder);
++  return ok ? 0 : 1;
++}
++
+ int
+ main (int argc, char *argv[])
+ {
+   GtkApplication *app;
+   GAction *action;
++
++  /* nix-wasm #33: headless mechanism gate (no display). See run_selftest(). */
++  if (argc > 1 && g_strcmp0 (argv[1], "--selftest") == 0)
++    return run_selftest ();
++
+   static GActionEntry app_entries[] = {
+     { "about", activate_about, NULL, NULL, NULL },
+     { "quit", activate_quit, NULL, NULL, NULL },

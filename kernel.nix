@@ -68,6 +68,10 @@ pkgs.stdenv.mkDerivation {
     # directly, instead of failing with -ENODEV. File mmap then works like a
     # normal system — the correct shared fix, NOT a per-package workaround.
     ./patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
+    # Squashfs/virtio-blk spike (#43 Task 1): register VW_DEV_BLK (index 3) on
+    # the wasm virtio transport so CONFIG_VIRTIO_BLK can drive a squashfs image
+    # served via a host-side virtio-blk device (VIRTIO_ID_BLOCK = 2).
+    ./patches/kernel/0017-wasm-virtio-blk-device.patch
   ];
 
   nativeBuildInputs = [
@@ -140,18 +144,51 @@ pkgs.stdenv.mkDerivation {
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
+      `# Guest networking (Phase 1): stock drivers/net/virtio_net.c over the` \
+      `# virtio_wasm transport (dev 2, VW_DEV_NET), IPv4+ICMP, and AF_PACKET raw` \
+      `# sockets (busybox udhcpc/ping). CONFIG_NET is already on above.` \
+      `# CONFIG_NETDEVICES is the gate: drivers/net/Kconfig wraps VIRTIO_NET in` \
+      `# 'if NETDEVICES', so olddefconfig SILENTLY DROPS VIRTIO_NET without it.` \
+      --enable CONFIG_NETDEVICES \
+      --enable CONFIG_VIRTIO_NET \
+      --enable CONFIG_INET --enable CONFIG_PACKET \
       --enable CONFIG_SCHED_STACK_END_CHECK \
-      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 15 \
+      `# MAX_ORDER=15 → 128MB max buddy block. nix-env substituting the 96MB` \
+      `# guest-clang NAR calls mmap(MAP_ANON, ~134MB) internally (malloc for NAR` \
+      `# extraction buffer); this needs order 16 (256MB) = above the 128MB cap,` \
+      `# so it always fails. Raise to 16 → 256MB max buddy block, which covers` \
+      `# the 134MB nix-env allocation and any future large-binary mmap. The` \
+      `# Kconfig allows up to 17 (arch/wasm/Kconfig range 10 17).` \
+      --set-val CONFIG_ARCH_FORCE_MAX_ORDER 16 \
       `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \
       `# (64KiB pages) and that becomes the kernel's physical RAM. The default` \
       `# 0x2000 = 512MiB is too tight for in-guest compilation: exec'ing the 57MB` \
       `# clang.wasm needs a single contiguous mmap, and the cc wrapper's sysroot` \
       `# unpack fragments the NOMMU buddy allocator below 57MB first (only 4 order-15` \
       `# blocks at 512MiB, all spoiled). 0x4000 = 1GiB doubles the order-15 block` \
-      `# count so a contiguous 57MB survives; stays under setup.c's 0x80000000` \
-      `# (2GiB) positive-address limit. Shared fix — helps any large-binary exec.` \
-      --set-val CONFIG_BOOT_MEM_PAGES 0x4000 \
-      --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
+      `# count so a contiguous 57MB survives. 0x7000 = 1.75GiB: GTK apps that map a` \
+      `# large window allocate an order-11 (8MB) GFP_HIGHUSER wl_shm buffer, and after` \
+      `# the served /nix closure + glib/gdk init fragment the heap below 8MB, that mmap` \
+      `# fails ("page allocation failure: order:11") → no window (gtk3-widget-factory).` \
+      `# 0x7FFF = 1.99GiB (max under setup.c's 0x80000000/2GiB positive-address limit):` \
+      `# with MAX_ORDER=16 (256MB blocks) we need enough RAM to have a free 256MB region` \
+      `# after boot + squashfs load; 1.99GiB gives ~1.6GB free which the buddy allocator` \
+      `# coalesces into 256MB+ blocks. 0x7FFF is the safe maximum.` \
+      --set-val CONFIG_BOOT_MEM_PAGES 0x7FFF \
+      --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS \
+      `# Squashfs/virtio-blk spike (#43 Task 1): block layer + virtio-blk driver +` \
+      `# squashfs filesystem (with ZSTD decompression). CONFIG_BLOCK is the gate for` \
+      `# CONFIG_VIRTIO_BLK (drivers/block/Kconfig is wrapped in 'if BLOCK'), so both` \
+      `# must be enabled or olddefconfig silently drops VIRTIO_BLK.` \
+      `# CONFIG_MISC_FILESYSTEMS is the gate for CONFIG_SQUASHFS (fs/Kconfig wraps` \
+      `# squashfs in 'if MISC_FILESYSTEMS'); wasm32_nommu_defconfig explicitly sets it` \
+      `# to 'n', so olddefconfig silently drops SQUASHFS without this enable.` \
+      --enable CONFIG_BLOCK \
+      --enable CONFIG_VIRTIO_BLK \
+      --enable CONFIG_MISC_FILESYSTEMS \
+      --enable CONFIG_SQUASHFS \
+      --enable CONFIG_SQUASHFS_ZSTD \
+      --enable CONFIG_ZSTD_DECOMPRESS
 
     make $makeFlags olddefconfig
 

@@ -9,8 +9,8 @@
 # baked /bin/sh persists).
 #
 # 9P: trans=cb -> net/9p/trans_cb.c -> the JS 9P server. msize 512K = the kernel
-# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache,
-# nix=the served wasm-system closure (createNixClosureStore).
+# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache.
+# /nix is now a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
 { pkgs }:
 pkgs.writeText "init" ''
   #!/bin/sh
@@ -21,6 +21,16 @@ pkgs.writeText "init" ''
   mount -t sysfs none /sys
   mount -t devtmpfs none /dev 2>/dev/null
   mkdir -p /dev/pts && mount -t devpts none /dev/pts 2>/dev/null
+
+  # /dev/shm for POSIX shared memory. GTK/gdk's wayland backend allocates its
+  # window buffers via open_shared_memory() → memfd_create(), which is ENOSYS on
+  # the wasm kernel, so gdk falls back to shm_open("/dev/shm/..."); without this
+  # mount that fails ENOENT → no wl_shm buffer → an empty (0x0) window + a per-frame
+  # "Gdk-CRITICAL: create_shm_surface" (gtk-wayland-render-blocker). Use RAMFS, not
+  # tmpfs: ramfs has explicit NOMMU MAP_SHARED mmap support (fs/ramfs/file-nommu.c)
+  # — the same backing /tmp uses (proven by the wl-anim shm client) — whereas
+  # shmem/tmpfs lacks reliable shared-writable mmap on NOMMU.
+  mkdir -p /dev/shm && mount -t ramfs none /dev/shm 2>/dev/null
 
   M="trans=cb,version=9p2000.L,msize=524288"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
@@ -40,17 +50,42 @@ pkgs.writeText "init" ''
   mkdir -p /nix-cache
   mount -t 9p -o "$RO,aname=nixcache" cb /nix-cache 2>/dev/null || true
 
-  # The served wasm-system closure: real /nix store paths, read-only (9p) ->
+  # The served base-system closure: a read-only squashfs on virtio-blk ->
   # overlay lower; ramfs upper makes /nix writable for nix-env. NOMMU has no
-  # tmpfs, so the upper is ramfs (always available, backs the initramfs root).
+  # block-backed writable fs, so the upper is ramfs (as before).
   mkdir -p /mnt/nix-ro /run/nix-upper /run/nix-work /nix
-  if mount -t 9p -o "$RO,aname=nix" cb /mnt/nix-ro 2>/dev/null; then
+  if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
     mount -t overlay overlay \
       -o lowerdir=/mnt/nix-ro,upperdir=/run/nix-upper,workdir=/run/nix-work /nix \
       || { echo "pc: /nix overlay failed; falling back to ramfs /nix"; mkdir -p /nix/store; }
   else
     echo "pc: served store not mounted; booting empty ramfs /nix"
     mkdir -p /nix/store
+  fi
+
+  # Auto-configure networking via DHCP before handing off to init, so BOTH the
+  # nix-system path (exec "$sys/init") and the busybox-only path (exec /bin/sh)
+  # come up networked. The host (pc tcpip.js) runs a DHCP server on the bridge
+  # gateway 10.0.2.1/24; udhcpc gets us a 10.0.2.x lease and runs the lease
+  # script (/usr/share/udhcpc/default.script) to set the address/route/DNS.
+  #
+  # NOMMU caveats (proven by the Task 2.5 node spike — see docs/2026-06-21-
+  # guest-dhcp-spike.md). udhcpc's DHCP protocol AND its lease-script exec work
+  # fine on this wasm NOMMU guest — the script runs via libbb spawn() ->
+  # clone-with-a-fn (patch 0004). Two things DON'T work and we route around them:
+  #   1. udhcpc's OWN `-b` daemonize (bb_daemonize_or_rexec) silently dies — with
+  #      -b it never even sends a DISCOVER. So we use `-f` (stay foreground).
+  #   2. Backgrounding udhcpc directly from THIS init with `&` and then
+  #      `exec`-ing the next stage races the just-forked job away (no udhcpc in
+  #      the process table afterwards). Wrapping the launch in `sh -c '... &'`
+  #      detaches it into its own shell that fully spawns udhcpc before this init
+  #      continues to the exec handoff — that survives and acquires the lease.
+  # Flags: -f (foreground, no self-daemonize), -t 0 (retry DISCOVER forever — the
+  # host DHCP server may not be up yet at boot), -A 2 (short inter-round wait).
+  # No -q: udhcpc stays resident so it re-runs the lease script on renew. Guarded
+  # on the NIC existing so a no-net kernel still boots.
+  if [ -e /sys/class/net/eth0 ]; then
+    sh -c 'ip link set eth0 up 2>/dev/null; udhcpc -i eth0 -f -t 0 -A 2 >/dev/null 2>&1 &'
   fi
 
   # Resolve + activate the system, then hand off to init. The whole toolchain
