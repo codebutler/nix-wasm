@@ -68,6 +68,10 @@ pkgs.stdenv.mkDerivation {
     # directly, instead of failing with -ENODEV. File mmap then works like a
     # normal system — the correct shared fix, NOT a per-package workaround.
     ./patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
+    # Squashfs/virtio-blk spike (#43 Task 1): register VW_DEV_BLK (index 3) on
+    # the wasm virtio transport so CONFIG_VIRTIO_BLK can drive a squashfs image
+    # served via a host-side virtio-blk device (VIRTIO_ID_BLOCK = 2).
+    ./patches/kernel/0017-wasm-virtio-blk-device.patch
   ];
 
   nativeBuildInputs = [
@@ -163,7 +167,20 @@ pkgs.stdenv.mkDerivation {
       `# More RAM keeps order-11 blocks whole. Stays under setup.c's 0x80000000 (2GiB)` \
       `# positive-address limit. Shared fix — helps any large-binary exec / big window.` \
       --set-val CONFIG_BOOT_MEM_PAGES 0x7000 \
-      --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS
+      --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS \
+      `# Squashfs/virtio-blk spike (#43 Task 1): block layer + virtio-blk driver +` \
+      `# squashfs filesystem (with ZSTD decompression). CONFIG_BLOCK is the gate for` \
+      `# CONFIG_VIRTIO_BLK (drivers/block/Kconfig is wrapped in 'if BLOCK'), so both` \
+      `# must be enabled or olddefconfig silently drops VIRTIO_BLK.` \
+      `# CONFIG_MISC_FILESYSTEMS is the gate for CONFIG_SQUASHFS (fs/Kconfig wraps` \
+      `# squashfs in 'if MISC_FILESYSTEMS'); wasm32_nommu_defconfig explicitly sets it` \
+      `# to 'n', so olddefconfig silently drops SQUASHFS without this enable.` \
+      --enable CONFIG_BLOCK \
+      --enable CONFIG_VIRTIO_BLK \
+      --enable CONFIG_MISC_FILESYSTEMS \
+      --enable CONFIG_SQUASHFS \
+      --enable CONFIG_SQUASHFS_ZSTD \
+      --enable CONFIG_ZSTD_DECOMPRESS
 
     make $makeFlags olddefconfig
 
