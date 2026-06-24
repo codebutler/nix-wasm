@@ -4,53 +4,47 @@
 # exactly as real Nix does (#43 / folds in #2 + #1). The compiler tools are NOT
 # in the base squashfs; they arrive here, on demand.
 #
-# pkgs        — the NATIVE host pkgs (mkBinaryCache, runCommand, buildEnv, writeText)
-# devPaths    — list of cross/wasm store paths (guestClang, guestCc, guestCxx, makeWasm)
-# devToolsEnv — a buildEnv/symlinkJoin of devPaths (pre-built by the caller so
-#               its store path is stable for the pkgs.nix index)
+# pkgs     — the NATIVE host pkgs (mkBinaryCache, runCommand, writeText, lib)
+# devPaths — the wasm toolchain DERIVATIONS (guestClang, guestCc, guestCxx,
+#            makeWasm). The pkgs.nix index is GENERATED from these — one attr per
+#            package, named by its real `lib.getName` (no hand-written aliases).
 {
   pkgs,
   devPaths,
-  devToolsEnv,
 }:
 let
+  inherit (pkgs) lib;
+
   # Build the binary cache using the nixpkgs-blessed builder. It uses
   # exportReferencesGraph to compute full closures inside the sandbox — no
   # in-sandbox `nix copy` needed. Produces: nix-cache-info + *.narinfo + nar/*.nar.zst.
   # NOTE: mkBinaryCache's make-binary-cache.py does NOT emit a Deriver: line,
   # so narinfo will NOT carry Deriver fields (known gap; `nix profile install` won't
-  # accept these paths, but `nix-env -iA` works fine).
+  # accept these paths, but `nix-env -iA` works fine — see codebutler/nix-wasm#1).
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
-    rootPaths = devPaths ++ [ devToolsEnv ];
+    rootPaths = devPaths;
   };
 
-  # The pkgs.nix expression file: maps attr names → substitutable store paths
-  # as fake derivations so `nix-env -iA <attr>` resolves from ~/.nix-defexpr.
-  # bootstrap.nix copies /nix-cache/pkgs.nix to ~/.nix-defexpr/pkgs.nix at boot.
-  # Each attr uses a "fake derivation" (type="derivation" + outPath + name) —
-  # plain builtins.storePath returns a path not a derivation and nix-env rejects it.
-  pkgsNix = pkgs.writeText "pkgs.nix" (
-    let
-      mkFakeDrv = sp: name:
-        ''{ type = "derivation"; name = "${name}"; outPath = "${sp}"; out = { outPath = "${sp}"; }; outputs = [ "out" ]; }'';
-      clangPath    = builtins.elemAt devPaths 0;
-      ccPath       = builtins.elemAt devPaths 1;
-      cxxPath      = builtins.elemAt devPaths 2;
-      makePath     = builtins.elemAt devPaths 3;
-      devToolsPath = devToolsEnv;
-      # Extract name from store path (drop "/nix/store/<32-char-hash>-")
-      pname = sp: builtins.substring 44 (builtins.stringLength (toString sp) - 44) (toString sp);
-    in ''
-      {
-        clang     = ${mkFakeDrv clangPath    (pname clangPath)};
-        cc        = ${mkFakeDrv ccPath       (pname ccPath)};
-        "c++"     = ${mkFakeDrv cxxPath      (pname cxxPath)};
-        make      = ${mkFakeDrv makePath     (pname makePath)};
-        dev-tools = ${mkFakeDrv devToolsPath (pname devToolsPath)};
-      }
-    ''
-  );
+  # pkgs.nix — the guest's package catalog, i.e. its channel-substitute: the guest
+  # ships no nixpkgs and cannot build (substitute-only), so `nix-env -iA <name>`
+  # resolves against THIS list of the prebuilt, substitutable packages in the
+  # cache. bootstrap.nix copies /nix-cache/pkgs.nix to ~/.nix-defexpr at boot.
+  #
+  # GENERATED from devPaths — nothing is hand-declared: one attr per package,
+  # named by the package's real `lib.getName` (e.g. `guest-cc`, `make-wasm32`),
+  # as a "fake derivation" (type="derivation" + name + outPath) because a bare
+  # `builtins.storePath` is a path, not a derivation, and nix-env rejects it.
+  entry =
+    drv:
+    "  ${lib.getName drv} = { "
+    + ''type = "derivation"; name = "${drv.name}"; system = "wasm32-linux"; ''
+    + ''outPath = "${drv.outPath}"; out = { outPath = "${drv.outPath}"; }; outputs = [ "out" ]; };'';
+  pkgsNix = pkgs.writeText "pkgs.nix" ''
+    {
+    ${lib.concatMapStringsSep "\n" entry devPaths}
+    }
+  '';
 in
 # Wrap mkBinaryCache's output: symlink its entire tree into $out, add pkgs.nix,
 # and generate manifest.json — the file index consumed by runtime/nix-cache.js.

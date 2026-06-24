@@ -1,0 +1,91 @@
+--- a/llvm/lib/Support/Unix/Program.inc	2026-06-24 16:37:34.459403062 -0400
++++ b/llvm/lib/Support/Unix/Program.inc	2026-06-24 16:37:34.459434645 -0400
+@@ -257,79 +257,15 @@
+   }
+ #endif // HAVE_POSIX_SPAWN
+ 
+-  // Create a child process.
+-  int child = fork();
+-  switch (child) {
+-  // An error occurred:  Return to the caller.
+-  case -1:
+-    MakeErrMsg(ErrMsg, "Couldn't fork");
+-    return false;
+-
+-  // Child process: Execute the program.
+-  case 0: {
+-    // Redirect file descriptors...
+-    if (!Redirects.empty()) {
+-      // Redirect stdin
+-      if (RedirectIO(Redirects[0], 0, ErrMsg)) {
+-        return false;
+-      }
+-      // Redirect stdout
+-      if (RedirectIO(Redirects[1], 1, ErrMsg)) {
+-        return false;
+-      }
+-      if (Redirects[1] && Redirects[2] && *Redirects[1] == *Redirects[2]) {
+-        // If stdout and stderr should go to the same place, redirect stderr
+-        // to the FD already open for stdout.
+-        if (-1 == dup2(1, 2)) {
+-          MakeErrMsg(ErrMsg, "Can't redirect stderr to stdout");
+-          return false;
+-        }
+-      } else {
+-        // Just redirect stderr
+-        if (RedirectIO(Redirects[2], 2, ErrMsg)) {
+-          return false;
+-        }
+-      }
+-    }
+-
+-    if (DetachProcess) {
+-      // Detach from controlling terminal
+-      if (::setsid() == -1) {
+-        MakeErrMsg(ErrMsg, "Could not detach process, ::setsid failed");
+-        return false;
+-      }
+-    }
+-
+-    // Set memory limits
+-    if (MemoryLimit != 0) {
+-      SetMemoryLimits(MemoryLimit);
+-    }
+-
+-    // Execute!
+-    std::string PathStr = std::string(Program);
+-    if (Envp != nullptr)
+-      execve(PathStr.c_str(), const_cast<char **>(Argv),
+-             const_cast<char **>(Envp));
+-    else
+-      execv(PathStr.c_str(), const_cast<char **>(Argv));
+-    // If the execve() failed, we should exit. Follow Unix protocol and
+-    // return 127 if the executable was not found, and 126 otherwise.
+-    // Use _exit rather than exit so that atexit functions and static
+-    // object destructors cloned from the parent process aren't
+-    // redundantly run, and so that any data buffered in stdio buffers
+-    // cloned from the parent aren't redundantly written out.
+-    _exit(errno == ENOENT ? 127 : 126);
+-  }
+-
+-  // Parent process: Break out of the switch to do our processing.
+-  default:
+-    break;
+-  }
+-
+-  PI.Pid = child;
+-  PI.Process = child;
+-
+-  return true;
++  // clean-NOMMU wasm (nix-wasm #36 / #50): fork()/exec are unavailable on this
++  // platform — posix_spawn (above) is the only spawn mechanism, and it serves
++  // every spawn the clang/lld drivers make (MemoryLimit == 0 && !DetachProcess).
++  // Dropping the fork/exec fallback keeps `fork` out of the wasm import set, so
++  // the binary instantiates (a dangling `env.fork` import otherwise traps at
++  // WebAssembly.instantiate). The fallback is only reached for detach/memory-
++  // limit spawns, which the drivers never request; error out instead.
++  return !MakeErrMsg(
++      ErrMsg, "fork/exec unavailable on this platform; posix_spawn required");
+ }
+ 
+ namespace llvm {

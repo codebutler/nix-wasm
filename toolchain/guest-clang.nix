@@ -97,6 +97,14 @@ pkgs.stdenv.mkDerivation ({
   version = llvm.release_version;
   inherit src;
 
+  # clean-NOMMU wasm (#36/#50): drop LLVM's fork()/exec fallback in
+  # sys::ExecuteAndWait so `clang`/`wasm-ld` don't reference `fork` — which #36's
+  # fork-less musl no longer provides, so under --allow-undefined it became a
+  # dangling `env.fork` wasm import that traps at instantiation (the in-guest cc
+  # crash). posix_spawn (forced on below) is the only spawn path; it serves every
+  # spawn the drivers make. See patches/llvm/0001 + -DHAVE_POSIX_SPAWN=1.
+  patches = [ ../patches/llvm/0001-program-inc-posix-spawn-only.patch ];
+
   nativeBuildInputs = [ pkgs.cmake pkgs.ninja pkgs.python3 cu bt ]
     ++ lib.optional useCcache pkgs.ccache;
   dontUseCmakeConfigure = true;
@@ -119,6 +127,12 @@ pkgs.stdenv.mkDerivation ({
       -DCMAKE_CXX_FLAGS="${cxxFlags}" \
       -DCMAKE_EXE_LINKER_FLAGS="${exeLinkerFlags}" \
       -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+      `# HAVE_POSIX_SPAWN: LLVM's check_symbol_exists LINKS a probe, but the` \
+      `# STATIC_LIBRARY try-compile above skips linking, so the probe silently` \
+      `# fails and Program.inc falls back to fork() (→ the dangling env.fork` \
+      `# import). musl provides posix_spawn (it's THE spawn path post-#36), so` \
+      `# force it on; patch 0001 removes the now-dead fork() fallback entirely.` \
+      -DHAVE_POSIX_SPAWN=1 \
       -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
       -DCMAKE_SKIP_INSTALL_RPATH=ON \
       -DLLVM_TABLEGEN=${llvm.libllvm}/bin/llvm-tblgen \

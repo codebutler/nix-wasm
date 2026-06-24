@@ -212,7 +212,7 @@ history). The old "hush isn't POSIX-enough" gap is closed.
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
 compiler toolchain is no longer in the base — it's substituted on demand via the
-Nix binary cache (`nix-env -iA dev-tools`). Phase 5 CI wiring (Task 9, issue #2)
+Nix binary cache (`nix-env -iA guest-cc`). Phase 5 CI wiring (Task 9, issue #2)
 follows.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
@@ -557,7 +557,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   on NOMMU. mmap-exec off squashfs relies on patch 0016 (RO file mmap copy).
   See `docs/superpowers/notes/squashfs-nommu-spike.md` for the spike notes. The
   compiler toolchain is NOT in the base squashfs — it is substituted on demand via the
-  Nix binary cache (`wasm-binary-cache` → `nix-env -iA dev-tools`).
+  Nix binary cache (`wasm-binary-cache` → `nix-env -iA guest-cc`).
 - **`CONFIG_ARCH_FORCE_MAX_ORDER` 16 + `CONFIG_BOOT_MEM_PAGES` 0x7FFF** (`kernel.nix`):
   `nix-env` extracting a large on-demand package needs a contiguous ~134 MB allocation
   from the NOMMU buddy allocator. `ARCH_FORCE_MAX_ORDER=16` allows 256 MB buddy blocks;
