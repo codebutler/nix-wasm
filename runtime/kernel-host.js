@@ -40,6 +40,13 @@ export const linux = async ({
   ninep_ring,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
+  // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
+  // over virtio-blk. The BlkDevice is built lazily in WHICHEVER task worker
+  // first services the virtio-blk vring (not necessarily the boot worker), so —
+  // exactly like the 9P ring and the virtio queue-layout store — the image must
+  // be a SharedArrayBuffer handed to EVERY worker, not a per-worker copy. We
+  // copy the caller's ArrayBuffer into a SAB once here. Undefined on --no-nix.
+  squashfs,
   // Wayland Phase 4f: optional host hook for the worker→main Greenfield bridge.
   // `sendOut(clientId, buffer, fds)` is called FIRE-AND-FORGET when a guest
   // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
@@ -53,6 +60,17 @@ export const linux = async ({
 }) => {
   const arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
   const Ulong = arch_bits == 32 ? Number : BigInt;
+
+  // #43: copy the squashfs ArrayBuffer into a SharedArrayBuffer ONCE so every
+  // task worker (any of which may end up servicing the virtio-blk vring) sees
+  // the same read-only image — the per-worker JS heaps are otherwise isolated.
+  // Undefined on a --no-nix boot → no blk image (the device mounts empty).
+  let squashfs_sab = null;
+  if (squashfs && squashfs.byteLength) {
+    squashfs_sab = new SharedArrayBuffer(squashfs.byteLength);
+    new Uint8Array(squashfs_sab).set(new Uint8Array(squashfs));
+    squashfs = null; // copied into the SAB; allow gc of the caller's buffer
+  }
 
   /// Dict of online CPUs.
   const cpus = {};
@@ -440,7 +458,7 @@ export const linux = async ({
       log("[worker messageerror]");
     };
 
-    worker.postMessage({
+    const init_msg = {
       ...options,
       method: "init",
       variant: variant,
@@ -452,7 +470,9 @@ export const linux = async ({
       ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
-    });
+      squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX
+    };
+    worker.postMessage(init_msg);
 
     return {
       worker: worker,
@@ -510,7 +530,10 @@ export const linux = async ({
         return;
       }
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const fdBufs = fds && fds.length ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f))) : null;
+      const fdBufs =
+        fds && fds.length
+          ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f)))
+          : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
 

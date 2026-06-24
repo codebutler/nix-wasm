@@ -60,6 +60,7 @@ const dec = new TextDecoder();
  *   cmdline?: string,                 // kernel command line
  *   consoleCount?: number,            // hvc consoles to expose (default HVC_CONSOLES)
  *   onLog?: (text: string) => void,   // host/diagnostic log sink
+ *   squashfs?: ArrayBuffer,           // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
  *   nixStore?: any,                   // a read-only /nix store VFS (createNixClosureStore); registered as the `nix` 9P export — carries the whole userspace + toolchain closure
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
@@ -160,6 +161,11 @@ export async function bootLinux(opts) {
     console_write: emit,
     ninep_ring: ring.buffer,
     virtio_queues: virtioQueues,
+    // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
+    // An ArrayBuffer; kernel-host copies it once into a SharedArrayBuffer so
+    // every task worker (any may service the blk vring) sees the same image.
+    // Absent on a --no-nix / busybox-only boot (the blk device mounts empty).
+    squashfs: opts.squashfs,
     wayland,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
