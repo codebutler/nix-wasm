@@ -288,7 +288,7 @@
         inherit nixpkgs cross; busybox = wasmBusybox;
         # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
         # c++, make) lives in .#wasm-binary-cache and is installed on demand via
-        # `nix-env -iA dev-tools`. Removing it here shrinks the squashfs by ~89 MB.
+        # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
       };
@@ -361,14 +361,9 @@
       # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
       # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
       # arrive on demand through substitution.
-      wasmDevToolsEnv = pkgs.buildEnv {
-        name = "wasm-dev-tools";
-        paths = [ guestClang guestCc guestCxx makeWasm ];
-      };
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = [ guestClang guestCc guestCxx makeWasm ];
-        devToolsEnv = wasmDevToolsEnv;
       };
     in
     {
@@ -512,7 +507,7 @@
 
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
-        # Served by runtime/nix-cache.js; in-guest: `nix-env -iA dev-tools`.
+        # Served by runtime/nix-cache.js; in-guest: `nix-env -iA guest-cc`.
         wasm-binary-cache = wasmBinaryCache;
 
         # Static passwd/group files for the wasm guest.

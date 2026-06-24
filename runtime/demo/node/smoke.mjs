@@ -2,7 +2,7 @@
 // per-boot assertions:
 //   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make.
 // The LINUX_WASM_ARTIFACTS nix-cache/ must be the .#wasm-binary-cache output
-// (has `make` attr in pkgs.nix). See devtools-e2e.mjs for the full dev-tools
+// (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";

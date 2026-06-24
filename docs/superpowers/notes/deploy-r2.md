@@ -155,7 +155,7 @@ nix-cache-info          ← cache priority / substituter info
 <hash>.narinfo          ← one per store path; no Deriver: field (known gap — nix profile
                            install rejects these; nix-env -iA works fine)
 nar/<hash>.nar.zst      ← the actual NAR archives
-pkgs.nix                ← fake-derivation index for nix-env -iA dev-tools / clang / cc / c++
+pkgs.nix                ← fake-derivation index for nix-env -iA guest-cc / guest-clang-wasm32 / guest-cxx / make-wasm32
 manifest.json           ← file list consumed by runtime/nix-cache.js on first access
 ```
 

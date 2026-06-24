@@ -27,7 +27,7 @@
 // Steps:
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
 //   2. Assert `clang` is NOT in $PATH (toolchain removed from base).
-//   3. `nix profile install -f /nix-cache/pkgs.nix dev-tools`.
+//   3. `nix profile install -f /nix-cache/pkgs.nix guest-cc`.
 //   4. Assert `clang` is now in $PATH.
 //   5. Compile `int main(){return 42;}` with `cc`, run it, assert exit 42.
 //
@@ -72,12 +72,12 @@ try {
   const clangAbsent = await s.waitForOutput(/CLANG_ABSENT_OK/, 15000);
   check(clangAbsent, "clang absent from base system (CLANG_ABSENT_OK)");
 
-  // Step 3: `nix profile install` dev-tools from the derivation-aware cache.
-  console.log("  [nix profile install dev-tools from nix-cache — may take a while…]");
-  s.send("nix profile install -f /nix-cache/pkgs.nix dev-tools 2>&1; echo NIX_PROFILE_RC=$?\n");
+  // Step 3: `nix profile install` guest-cc from the derivation-aware cache.
+  console.log("  [nix profile install guest-cc from nix-cache — may take a while…]");
+  s.send("nix profile install -f /nix-cache/pkgs.nix guest-cc 2>&1; echo NIX_PROFILE_RC=$?\n");
   const installed = await s.waitForOutput(/NIX_PROFILE_RC=[0-9]/, 300000);
   const installOk = installed && /NIX_PROFILE_RC=0\b/.test(s.snapshot());
-  check(installOk, "nix profile install dev-tools from /nix-cache");
+  check(installOk, "nix profile install guest-cc from /nix-cache");
   if (!installOk) {
     console.log(
       "\n── nix profile install output (tail) ──\n" +
