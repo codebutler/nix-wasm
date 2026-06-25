@@ -480,6 +480,24 @@ in
     }))
     prev.libxkbcommon;
 
+  # --- minigbm: abort-stub libgbm.a + gbm.h shim for Sommelier (link-only) ----
+  # Sommelier links libgbm but NEVER calls it on the wl_shm/virtwl path:
+  # ctx->gbm stays null and every gbm call site is guarded by that check.
+  # We need libgbm.a + gbm.h only to satisfy the linker.
+  #
+  # minigbm (chromiumos's small-C gbm, what Sommelier targets) is NOT in the
+  # pinned nixpkgs (9ae611a). Mesa's libgbm IS in nixpkgs but is the full GL
+  # stack and must not be used. Fallback: a 3-file shim (gbm.h + gbm-shim.c
+  # + default.nix) in userspace/libgbm-shim/ — all symbols abort() so any
+  # accidental call fails loud rather than silently.
+  #
+  # isWasm-guarded: native packages never see this attr (it shadows nothing —
+  # minigbm is absent from this nixpkgs pin — but the guard keeps the overlay
+  # scoped to the wasm cross set, consistent with every other entry here).
+  minigbm = if isWasm
+    then final.callPackage ./userspace/libgbm-shim { }
+    else prev.minigbm or (throw "minigbm: only available in the wasm cross set");
+
   # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
   # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the
   # freetype + fontconfig font backends — required for the text rendering stack
