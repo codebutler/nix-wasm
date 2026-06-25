@@ -111,8 +111,16 @@ engine that fails to instantiate glib/GTK binaries.**
 Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) come
 from `nix build` (`.#kernel`, `.#wasm-initramfs`, `.#wasm-base-squashfs`, `.#wasm-binary-cache`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
-symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo. Local-dev
-fallback: pc's vendored set (`vendor/linux-wasm/` in a pc checkout).
+symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo.
+
+**pc-facing delivery:** the versioned `linux` channel — `nix build .#linux-image`
+bundles kernel + initramfs + squashfs into a channel image uploaded to R2 under
+`packages/linux/<v>/`; `packages/linux/latest.json` (served `no-cache`) is the
+pointer pc resolves at runtime via `js/packages/linux-channel.js`. The full
+end-to-end republish runbook lives in pc's `vendor/linux-wasm/SOURCE.md` §
+"Republish the guest". The guest inittab and `/etc` live in `base.squashfs`
+(via `userspace/init.nix → toplevel.nix → base-squashfs.nix`), **not** the
+initramfs — an `init.nix` change republishes via `.#linux-image`'s squashfs member.
 
 Run these from the **runtime/** directory:
 
