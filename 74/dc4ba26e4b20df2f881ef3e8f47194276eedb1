@@ -1,0 +1,42 @@
+toolchain/guest-clang.nix
+  s_b3600ff8167073::t_5cf96c01817903 36-42
+  s_b3600ff8167073::t_c377df8ce43752 110-117
+  s_b3600ff8167073::t_11508b87059bd7 24-31,43-50,196-206
+nix-wasm.nix
+  s_b3600ff8167073::t_48122b253a5541 21-26
+  s_b3600ff8167073::t_ca79c33e0a305f 143
+wasm-cross.nix
+  s_b3600ff8167073::t_29361c5544c853 35-41
+toolchain/wasm-host-imports.nix
+  s_b3600ff8167073::t_665b28c1954250 1-39
+runtime/demo/node/wrapperless-cc-e2e.mjs
+  s_b3600ff8167073::t_ffa0fa18bfdba8 1-60,62-86
+  s_b3600ff8167073::t_cad59318904939 61
+toolchain/wasm-clang-config.nix
+  s_b3600ff8167073::t_3a21bce57439ba 1-87
+toolchain/guest-cc.nix
+  s_b3600ff8167073::t_11508b87059bd7 1-8,10-13,15-17,24-27
+flake.nix
+  s_b3600ff8167073::t_11508b87059bd7 254-260,262-264,266,273,278-280
+toolchain/guest-cxx.nix
+  s_b3600ff8167073::t_11508b87059bd7 1-7,9-12,14-15,22-25
+CLAUDE.md
+  s_b3600ff8167073::t_3127cefb5857a7 197-219
+  s_b3600ff8167073::t_5b3731ee58e132 627-630
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "74dc4ba26e4b20df2f881ef3e8f47194276eedb1",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
