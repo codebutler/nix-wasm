@@ -655,7 +655,7 @@ new file mode 100644
 index 0000000..a4c90ac
 --- /dev/null
 +++ b/drivers/virtio/virtio_wl.c
-@@ -0,0 +1,1625 @@
+@@ -0,0 +1,1616 @@
 +/*
 + *  Wayland Virtio Driver
 + *  Copyright (C) 2017 Google, Inc.
@@ -1876,15 +1876,12 @@ index 0000000..a4c90ac
 +		ctrl_new->flags = VIRTIO_WL_VFD_WRITE;
 +		break;
 +	case VIRTWL_IOCTL_NEW_DMABUF:
-+		/* Make sure ioctl_new contains enough data for NEW_DMABUF. */
-+		if (ioctl_new_size == sizeof(*ioctl_new)) {
-+			ctrl_new->hdr.type = VIRTIO_WL_CMD_VFD_NEW_DMABUF;
-+			/* FIXME: convert from host byte order. */
-+			memcpy(&ctrl_new->dmabuf, &ioctl_new->dmabuf,
-+			       sizeof(ioctl_new->dmabuf));
-+			break;
-+		}
-+		fallthrough;
++		/* wasm/NOMMU: this virtwl device has no dmabuf driver. Return
++		 * -ENOTTY so Sommelier's VirtWaylandChannel::init() dmabuf probe
++		 * (errno==ENOTTY) cleanly selects the wl_shm path. The GPU/dmabuf
++		 * path needs gbm/virtgpu we don't provide. */
++		ret = -ENOTTY;
++		goto remove_vfd;
 +	default:
 +		ret = -EINVAL;
 +		goto remove_vfd;
@@ -1909,12 +1906,6 @@ index 0000000..a4c90ac
 +	vfd->flags = ctrl_new->flags;
 +
 +	mutex_unlock(&vfd->lock);
-+
-+	if (ioctl_new->type == VIRTWL_IOCTL_NEW_DMABUF) {
-+		/* FIXME: convert to host byte order. */
-+		memcpy(&ioctl_new->dmabuf, &ctrl_new->dmabuf,
-+		       sizeof(ctrl_new->dmabuf));
-+	}
 +
 +	kfree(ctrl_new);
 +	return vfd;
