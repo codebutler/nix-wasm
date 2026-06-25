@@ -27,7 +27,6 @@ pkgs.stdenv.mkDerivation {
   src = kernelSrc;
 
   patches = [
-    ./patches/kernel/0001-9p-trans_cb.patch
     ./patches/kernel/0002-hvc-wasm-multi-console.patch
     ./patches/kernel/0003-hvc-wasm-winsize.patch
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
@@ -140,12 +139,11 @@ pkgs.stdenv.mkDerivation {
     # but the working overlay upper is RAMFS (always built in, backs the
     # initramfs). CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
     bash ./scripts/config --file build/.config \
-      `# 9P: trans_cb (NET_9P_CB) is the legacy bespoke SAB-ring transport; #10` \
-      `# moves the mounts onto the stock mainline 9P-over-virtio transport` \
-      `# (NET_9P_VIRTIO) so the guest looks like a standard virtualized Linux.` \
-      `# Both are built during the migration so trans_cb stays selectable for the` \
-      `# A/B benchmark; NET_9P_VIRTIO rides the virtio_wasm transport (patch 0018).` \
-      --enable CONFIG_NET --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB \
+      `# 9P rides the stock mainline 9P-over-virtio transport (NET_9P_VIRTIO) on` \
+      `# the virtio_wasm transport (patch 0018) — the guest looks like a standard` \
+      `# virtualized Linux at the 9P layer. The bespoke trans_cb (NET_9P_CB)` \
+      `# SAB-ring transport it replaced is gone (#10).` \
+      --enable CONFIG_NET --enable CONFIG_NET_9P \
       --enable CONFIG_NET_9P_VIRTIO --enable CONFIG_9P_FS \
       --enable CONFIG_DEVTMPFS --enable CONFIG_DEVTMPFS_MOUNT \
       --enable CONFIG_FILE_LOCKING \

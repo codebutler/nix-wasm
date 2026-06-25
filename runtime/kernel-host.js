@@ -5,9 +5,10 @@
 //
 // Adapted from linux-wasm's runtime/linux.js (Joel Severin, GPL-2.0) — the
 // main-thread orchestrator that creates the shared memory and spawns a Web
-// Worker per CPU/task. pc additions (ticket #74) are marked "pc:": the
-// `ninep_ring` option threads our SAB 9P ring into each task worker, and workers
-// are module-type so they can import the 9P glue. (pc also took the upstream
+// Worker per CPU/task. pc additions (ticket #74) are marked "pc:": the 9P
+// filesystem rides the stock virtio-9p transport (issue #10) — `ninep_server`
+// is serviced by the main-thread virtio-9p host devices — and workers are
+// module-type so they can import the 9P glue. (pc also took the upstream
 // positional args into a single options object — `on_module_cached` (#141) made
 // it 9, which was unwieldy.) See SOURCE.md.
 //
@@ -38,11 +39,10 @@ export const linux = async ({
   initrd,
   log,
   console_write,
-  ninep_ring,
   // Issue #10: the 9P server (createNinePServer) the main-thread virtio-9p
-  // devices service. Same instance the legacy trans_cb transport.run() drives,
-  // so both transports share one VFS/export set; the per-connection cid keeps
-  // their state isolated. Absent → no virtio-9p host servicing (trans_cb only).
+  // devices service. The server is transport-agnostic (bytes-in/bytes-out via
+  // handle(frame, cid)); the per-connection cid keeps each mount's state
+  // isolated. Absent → no virtio-9p host servicing.
   ninep_server,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
@@ -522,7 +522,6 @@ export const linux = async ({
       locks: locks,
       last_task: last_task,
       runner_name: name,
-      ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
       squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX

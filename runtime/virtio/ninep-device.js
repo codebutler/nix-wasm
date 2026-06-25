@@ -121,8 +121,8 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
         }
         // Snapshot every available chain up front (readOut copies the request
         // bytes out of the vring), then service them concurrently — matching the
-        // trans_cb transport's Promise.all dispatch so independent in-flight 9P
-        // requests (distinct tags) aren't serialized behind one slow VFS call.
+        // concurrently so independent in-flight 9P requests (distinct tags)
+        // aren't serialized behind one slow VFS call.
         const work = [];
         let chain;
         while ((chain = vr.next())) work.push({ chain, req: vr.readOut(chain) });

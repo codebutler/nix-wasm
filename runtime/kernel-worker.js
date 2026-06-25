@@ -5,10 +5,9 @@
 //
 // Adapted from linux-wasm's runtime/linux-worker.js (Joel Severin, GPL-2.0) —
 // the per-task Web Worker that runs vmlinux/user wasm over the shared memory.
-// pc additions (ticket #74) are marked "pc:": the wasm_driver_9p_request host
-// import wired to our SAB 9P ring. See vendor/linux-wasm/SOURCE.md.
-import { Ring } from "./ninep/ring.js";
-import { makeWasm9pRequest } from "./ninep/host-call.js";
+// pc additions (ticket #74) are marked "pc:". The 9P filesystem rides the stock
+// virtio-9p transport (issue #10), serviced by the main-thread host devices —
+// this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
@@ -201,9 +200,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     lock_wait("serialize");
     return switch_to_last_task[0]; // last_task was written by the caller just prior to waking.
   };
-
-  /// 9P host-call (ticket #74), set up in init() if a ring SAB was provided.
-  let ninep_request = null;
 
   /// Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB),
   /// attached in init(). Shared so a queue set up on the boot worker is
@@ -593,15 +589,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       return console_read_count;
     },
 
-    // Host callback for our trans_cb 9P transport (ticket #74). When a 9P
-    // backend is wired (ninep_request set in init), delegate to it; otherwise
-    // fail the request with -EIO so the kernel links + boots and pc-init's
-    // `mount -t 9p` degrades gracefully. `cid` is the per-mount connection id
-    // trans_cb passes (Phase E/N1) so the server isolates each mount's state.
-    wasm_driver_9p_request: (cid, tc, tc_size, rc, rc_cap) => {
-      return ninep_request ? ninep_request(cid, tc, tc_size, rc, rc_cap) : -5;
-    },
-
     // pc (ticket #74, TIOCSWINSZ): the hvc driver polls this for a console's
     // window size, packed (rows<<16)|cols (0 = unset), read straight from the
     // shared winsize array the main thread writes via set_winsize.
@@ -666,11 +653,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       locks = message.locks;
       switch_to_last_task = message.last_task; // Only defined for tasks and CPU 0 (init task).
 
-      // ticket #74: wire the 9P transport host-call to the shared SAB ring, so
-      // wasm_driver_9p_request drives ring.clientRequest → the JS 9P server.
-      if (message.ninep_ring) {
-        ninep_request = makeWasm9pRequest({ memory, ring: Ring.attach(message.ninep_ring) });
-      }
       if (message.winsize_buf) {
         winsizes = new Int32Array(message.winsize_buf);
       }
