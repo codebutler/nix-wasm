@@ -5,9 +5,10 @@
 //
 // Adapted from linux-wasm's runtime/linux.js (Joel Severin, GPL-2.0) — the
 // main-thread orchestrator that creates the shared memory and spawns a Web
-// Worker per CPU/task. pc additions (ticket #74) are marked "pc:": the
-// `ninep_ring` option threads our SAB 9P ring into each task worker, and workers
-// are module-type so they can import the 9P glue. (pc also took the upstream
+// Worker per CPU/task. pc additions (ticket #74) are marked "pc:": the 9P
+// filesystem rides the stock virtio-9p transport (issue #10) — `ninep_server`
+// is serviced by the main-thread virtio-9p host devices — and workers are
+// module-type so they can import the 9P glue. (pc also took the upstream
 // positional args into a single options object — `on_module_cached` (#141) made
 // it 9, which was unwieldy.) See SOURCE.md.
 //
@@ -24,6 +25,7 @@ import { createModuleWorker } from "./make-worker.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
+import { NinePVirtioDevice } from "./virtio/ninep-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -37,7 +39,11 @@ export const linux = async ({
   initrd,
   log,
   console_write,
-  ninep_ring,
+  // Issue #10: the 9P server (createNinePServer) the main-thread virtio-9p
+  // devices service. The server is transport-agnostic (bytes-in/bytes-out via
+  // handle(frame, cid)); the per-connection cid keeps each mount's state
+  // isolated. Absent → no virtio-9p host servicing.
+  ninep_server,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
   // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
@@ -179,6 +185,42 @@ export const linux = async ({
     return hostNetDevice;
   };
 
+  // Issue #10: virtio-9p — MAIN-thread devices that service the 9P "requests"
+  // vqs through the shared 9P server. The guest's vq kick lands on a task worker
+  // (which forwards it here as virtio9p_notify); the worker can't run the async
+  // server.handle (the VFS is main-thread-bound), so the host drains the vring,
+  // awaits the reply, writes it back, and raises the completion IRQ via the SAME
+  // raised_irqs self-wake virtio-wl/net use (raiseHostWlIrq) — waking the guest
+  // task parked in p9_client_rpc. dev/cid MUST match kernel-worker's VW_DEV_9P +
+  // kernel patch 0018: 9P_ROOT=dev4/cid1, 9P_NIXCACHE=dev5/cid2.
+  const VW_DEV_9P = [
+    { dev: 4, cid: 1 },
+    { dev: 5, cid: 2 },
+  ];
+  const hostNinePByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
+  const hostNinePDevices = new Map();
+  const hostNineP = (dev) => {
+    const id = dev >>> 0;
+    const spec = hostNinePByDev.get(id);
+    if (!spec || !ninep_server || wlRaisedIrqsAddr == null) return null;
+    let d = hostNinePDevices.get(id);
+    if (!d) {
+      d = new NinePVirtioDevice({
+        dev: id,
+        irq: VIRTIO_WASM_IRQ_BASE + id,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+        cid: spec.cid,
+        server: ninep_server,
+      });
+      hostNinePDevices.set(id, d);
+    }
+    return d;
+  };
+
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -304,6 +346,14 @@ export const linux = async ({
     // on the worker, which forwards it here (the host owns the IN vring).
     wayland_in_refill: (_message) => {
       hostWl()?.flushIn();
+    },
+
+    // Issue #10: a guest virtio-9p kick the task worker forwarded. The 9P server
+    // is async + main-thread, so the worker can't service it — the host drains
+    // the device's "requests" vq, runs each T-message through the server, writes
+    // the R-message back, and raises the completion IRQ (raised_irqs self-wake).
+    virtio9p_notify: (message) => {
+      void hostNineP(message.dev)?.service(message.q >>> 0);
     },
 
     // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on
@@ -472,7 +522,6 @@ export const linux = async ({
       locks: locks,
       last_task: last_task,
       runner_name: name,
-      ninep_ring: ninep_ring, // ticket #74: shared 9P transport ring (SAB)
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
       squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX

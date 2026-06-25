@@ -15,12 +15,13 @@ rm -rf "$DEST"
 mkdir -p "$DEST/ninep" "$DEST/virtio"
 # Engine files only (including make-worker.js):
 cp "$SRC"/{index.js,abi.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js} "$DEST/"
-cp "$SRC"/ninep/{protocol.js,server.js,ring.js,transport.js,host-call.js,mem-vfs.js} "$DEST/ninep/"
+cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # Wayland Phase 1 (1a/1b/1c/1d): the virtio_wasm transport device models + the
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
 # nix-wasm. wl-server.js is the Phase-1 in-worker stub; pc's Phase-2 inversion
-# (worker→main Greenfield bridge) lives in pc, not synced from here.
-cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js} "$DEST/virtio/"
+# (worker→main Greenfield bridge) lives in pc, not synced from here. ninep-device.js
+# is the virtio-9p host device (#10) — the 9P filesystem transport.
+cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js,ninep-device.js} "$DEST/virtio/"
 
 # Provenance stamp into pc's SOURCE.md (idempotent: replace the marker line).
 MARK="<!-- runtime-sync -->"

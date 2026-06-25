@@ -1,0 +1,98 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 25 Jun 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: register virtio-9p channels (VIRTIO_ID_9P)
+
+Register virtio-9p devices on the wasm virtio transport so the stock
+mainline 9P-over-virtio transport (net/9p/trans_virtio.c,
+CONFIG_NET_9P_VIRTIO) can carry the guest's filesystem mounts, replacing
+the bespoke trans_cb (CONFIG_NET_9P_CB) SAB-ring transport. This is the
+load-bearing step of the "everything is a virtio device" consolidation
+(issue #10): once 9P rides virtio, the guest looks like a standard
+virtualized Linux to the 9P layer — stock v9fs over a stock carrier.
+
+Mainline 9pnet_virtio binds exactly one virtqueue ("requests") and one
+mount tag per virtio device; a mount selects a channel by tag via
+`-o trans=virtio <tag>`. So we register one device per 9P connection the
+guest needs. This repo has two: the pc VFS export (tag "pcroot") and the
+nix binary cache (tag "nixcache"). The host serves each device's mount
+tag in config space and offers VIRTIO_9P_MOUNT_TAG in its feature bits
+(runtime/virtio/ninep-device.js); the kernel side here is just the device
+registration — no custom 9P transport code, the stock driver does the
+rest.
+
+Device indices follow the existing enum order (WL=0, ECHO=1, NET=2,
+BLK=3), so 9P_ROOT=4 and 9P_NIXCACHE=5 — matching the host-side VW_DEV_*
+constants in runtime/kernel-worker.js / runtime/kernel-host.js. Guarded
+by IS_ENABLED(CONFIG_NET_9P_VIRTIO) so the enum slots and init calls are
+a no-op when the stock virtio-9p transport is not built.
+
+Part of issue #10 (host<->guest bridge consolidation onto virtio).
+---
+ drivers/virtio/virtio_wasm.c | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+index b47e06ce7..c0ffee123 100644
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -281,13 +281,21 @@ static int vw_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+ 		struct virtqueue_info *vqi = &vqs_info[i];
+ 		struct virtqueue *vq;
+ 		/*
+ 		 * Per-vq ring size. Keep it small but big enough for virtio_wl's
+ 		 * in-queue prefill (it stuffs PAGE_SIZE inbufs until num_free
+-		 * runs out). 64 entries comfortably covers ctx + a few pipes.
++		 * runs out). 64 entries comfortably covers ctx + a few pipes.
++		 * virtio-9p is the exception: the stock 9pnet_virtio transport
++		 * packs up to VIRTQUEUE_NUM (128) scatter-gather entries into ONE
++		 * request chain (a single read up to its ~500 KB msize spans ~125
++		 * pages), so a 64-entry ring overflows on large transfers
++		 * (-ENOSPC in virtqueue_add) — e.g. a big NAR read for nix-env.
++		 * Give VIRTIO_ID_9P a 128-entry ring (what QEMU's virtio-9p uses)
++		 * so msize-sized requests fit. Issue #10.
+ 		 */
+-		unsigned int qsize = 64;
++		unsigned int qsize =
++			(vdev->id.device == VIRTIO_ID_9P) ? 128 : 64;
+
+ 		if (!vqi->name) {
+ 			vqs[i] = NULL;
+ 			vw->vqs[i] = NULL;
+ 			continue;
+@@ -363,5 +371,9 @@ enum {
+ #if IS_ENABLED(CONFIG_VIRTIO_BLK)
+ 	VW_DEV_BLK,		/* virtio-blk block device (squashfs /nix image) */
+ #endif
++#if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
++	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
++	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
++#endif
+ 	VW_DEV_COUNT,
+ };
+
+@@ -395,6 +410,22 @@ static int __init virtio_wasm_transport_init(void)
+ 	if (IS_ERR(vw))
+ 		pr_warn("virtio_wasm: blk register failed: %ld\n", PTR_ERR(vw));
+ #endif
+
++#if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
++	/*
++	 * virtio-9p channels for the host 9P server (stock net/9p/trans_virtio.c).
++	 * One device per mount/connection — mainline 9pnet_virtio binds one
++	 * virtqueue + one mount tag per virtio device, selected at mount time via
++	 * `-o trans=virtio <tag>`. The host serves the tag in config space and
++	 * VIRTIO_9P_MOUNT_TAG in features (runtime/virtio/ninep-device.js).
++	 */
++	vw = virtio_wasm_register(VW_DEV_9P_ROOT, VIRTIO_ID_9P);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: 9p root register failed: %ld\n", PTR_ERR(vw));
++	vw = virtio_wasm_register(VW_DEV_9P_NIXCACHE, VIRTIO_ID_9P);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
++#endif
++
+ 	return 0;
+ }
+
+--
+2.53.0

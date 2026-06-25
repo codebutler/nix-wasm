@@ -4,7 +4,7 @@
 // design (docs/linux.md §9.3 / §19): no standalone JS 9P library exists, so we
 // own a small, schema-driven marshaller for the Linux-extended dialect
 // (9P2000.L) and feed it to a VFS-backed server (server.js). The kernel's own
-// in-tree `v9fs` client speaks this on the other end of the `trans_cb`
+// in-tree `v9fs` client speaks this on the other end of the stock virtio-9p
 // transport (§9.1); here we only encode/decode frames.
 //
 // Wire format (little-endian throughout):
