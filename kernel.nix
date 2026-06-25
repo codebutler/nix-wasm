@@ -78,6 +78,20 @@ pkgs.stdenv.mkDerivation {
     # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
     # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
     ./patches/kernel/0018-wasm-virtio-9p-device.patch
+    # Issue #10 (option 2): register a virtio-console device (VIRTIO_ID_CONSOLE
+    # = 3) on the wasm virtio transport so the stock mainline virtio-console
+    # driver (CONFIG_VIRTIO_CONSOLE) can carry a guest TTY, ALONGSIDE the
+    # existing bespoke hvc_wasm backend (patches 0002/0003) for an A/B. Single
+    # port (no MULTIPORT), VW_DEV_CONSOLE = 6, irq 14; the host serves it via
+    # runtime/virtio/console-device.js. hvc_wasm retirement is a later change.
+    ./patches/kernel/0019-wasm-virtio-console-device.patch
+    # Issue #10 option 3 (the vsock piece): register a virtio-vsock device
+    # (VIRTIO_ID_VSOCK = 19) on the wasm virtio transport so the stock mainline
+    # virtio-vsock transport (CONFIG_VIRTIO_VSOCKETS riding CONFIG_VSOCKETS)
+    # gives the guest→host /Ctl desktop-control bridge a standard AF_VSOCK
+    # socket channel. VW_DEV_VSOCK is pinned to host index 7; the host serves
+    # the guest CID + drives the rx/tx/event vqs (runtime/virtio/vsock-device.js).
+    ./patches/kernel/0020-wasm-virtio-vsock-device.patch
   ];
 
   nativeBuildInputs = [
@@ -155,6 +169,14 @@ pkgs.stdenv.mkDerivation {
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
+      `# Issue #10 (option 2): stock mainline virtio-console driver` \
+      `# (drivers/char/virtio_console.c) over the virtio_wasm transport` \
+      `# (patch 0019, VW_DEV_CONSOLE = 6). It binds a single console port to a` \
+      `# receiveq/transmitq vq pair and wires it to hvc — a standard virtualized` \
+      `# Linux console path ALONGSIDE the bespoke hvc_wasm backend, for an A/B` \
+      `# during the bridge consolidation. CONFIG_VIRTIO_CONSOLE selects` \
+      `# HVC_DRIVER (already on for hvc_wasm) and depends on VIRTIO + TTY.` \
+      --enable CONFIG_VIRTIO_CONSOLE \
       `# Guest networking (Phase 1): stock drivers/net/virtio_net.c over the` \
       `# virtio_wasm transport (dev 2, VW_DEV_NET), IPv4+ICMP, and AF_PACKET raw` \
       `# sockets (busybox udhcpc/ping). CONFIG_NET is already on above.` \
@@ -199,7 +221,19 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_MISC_FILESYSTEMS \
       --enable CONFIG_SQUASHFS \
       --enable CONFIG_SQUASHFS_ZSTD \
-      --enable CONFIG_ZSTD_DECOMPRESS
+      --enable CONFIG_ZSTD_DECOMPRESS \
+      `# Issue #10 option 3: AF_VSOCK + the stock virtio-vsock transport` \
+      `# (net/vmw_vsock/virtio_transport.c) on the virtio_wasm transport (patch` \
+      `# 0020, VW_DEV_VSOCK=7, VIRTIO_ID_VSOCK=19) — a standard socket channel` \
+      `# for the guest→host /Ctl bridge. CONFIG_VSOCKETS is the AF_VSOCK core;` \
+      `# CONFIG_VIRTIO_VSOCKETS is the guest driver (it selects` \
+      `# CONFIG_VIRTIO_VSOCKETS_COMMON automatically). CONFIG_VSOCKETS depends on` \
+      `# CONFIG_NET (already on above); CONFIG_VIRTIO_VSOCKETS depends on both` \
+      `# CONFIG_VSOCKETS and CONFIG_VIRTIO (both on above), or olddefconfig` \
+      `# silently drops the driver.` \
+      --enable CONFIG_VSOCKETS \
+      --enable CONFIG_VIRTIO_VSOCKETS \
+      --enable CONFIG_VIRTIO_VSOCKETS_COMMON
 
     make $makeFlags olddefconfig
 

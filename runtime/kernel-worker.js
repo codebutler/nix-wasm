@@ -13,6 +13,8 @@ import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { ConsoleVirtioDevice } from "./virtio/console-device.js";
+import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -229,6 +231,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VW_DEV_ECHO = 1;
   const VW_DEV_NET = 2;
   const VW_DEV_BLK = 3;
+  // Issue #10 option 3: virtio-vsock — AF_VSOCK socket channel for the /Ctl
+  // bridge. Pinned to host index 7 (must match kernel patch 0020's `VW_DEV_VSOCK
+  // = 7` and kernel-host.js). Like virtio-9p, the host socket API is async +
+  // main-thread, so the worker instance only answers the synchronous transport
+  // probes (features/config/setup) and forwards the kick.
+  const VW_DEV_VSOCK = 7;
   // Issue #10: virtio-9p channels — one virtio device per 9P mount/connection.
   // Device index, mount tag, and connection id (cid, for per-connection state
   // isolation in the shared 9P server) MUST match kernel patch 0018's enum and
@@ -240,6 +248,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     { dev: 5, tag: "nixcache", cid: 2 }, // VW_DEV_9P_NIXCACHE — nix binary cache
   ];
   const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
+  // Issue #10 (option 2): virtio-console — a guest TTY on the stock mainline
+  // virtio-console driver, ADDED alongside the bespoke hvc_wasm backend for an
+  // A/B. Index 6 MUST match kernel patch 0019's enum (after the 9P channels) and
+  // kernel-host.js. Like virtio-9p, the worker instance only answers the
+  // synchronous transport probes and FORWARDS the kick; the main-thread instance
+  // owns the console sink (guest output) + input buffer (host input) and raises
+  // the completion IRQ via the raised_irqs self-wake.
+  const VW_DEV_CONSOLE = 6;
 
   // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
   // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
@@ -332,6 +348,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           forwardNotify: (dev, q) => port.postMessage({ method: "virtio9p_notify", dev, q }),
         });
         publish_raised_irqs_addr();
+      } else if (id === VW_DEV_CONSOLE) {
+        // Issue #10 (option 2): virtio-console. Like virtio-9p, the console sink
+        // (guest output) + input buffer (host input) are on the MAIN thread, but
+        // this kick lands on a task worker — so the worker-side device only
+        // answers the synchronous transport probes (getFeatures/config/setup via
+        // the base ctor) and FORWARDS the notify to the main thread, where the
+        // host instance drains the transmitq to the sink / delivers receiveq
+        // input and raises the completion IRQ via the raised_irqs self-wake.
+        // Publish that wake address (the console needs it for host->guest input).
+        d = new ConsoleVirtioDevice({
+          ...common,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtioconsole_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
       } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
       else if (id === VW_DEV_NET) {
         // virtio-net: this worker owns the TX queue (guest egress). Each frame
@@ -349,6 +379,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // Read-only base-system squashfs, handed in via the boot message.
         // squashfsImage is a 0-length Uint8Array when absent (--no-nix boot).
         d = new BlkDevice({ ...common, image: squashfsImage });
+      } else if (id === VW_DEV_VSOCK) {
+        // Issue #10 option 3: virtio-vsock. The host socket API (the /Ctl
+        // bridge) is async + main-thread, but this kick lands on a task worker —
+        // so the worker-side device only answers the synchronous transport
+        // probes (getFeatures/configRead serving the guest CID, via the base
+        // ctor) and FORWARDS the notify to the main thread, where the host
+        // instance runs the vsock protocol + raises the completion IRQ via the
+        // raised_irqs self-wake. Publish that wake address (vsock needs it like
+        // 9P, even with no wayland device present).
+        d = new VsockVirtioDevice({
+          ...common,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtiovsock_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
       } else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;

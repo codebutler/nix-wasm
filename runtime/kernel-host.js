@@ -26,6 +26,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { ConsoleVirtioDevice } from "./virtio/console-device.js";
+import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -44,6 +46,20 @@ export const linux = async ({
   // handle(frame, cid)); the per-connection cid keeps each mount's state
   // isolated. Absent → no virtio-9p host servicing.
   ninep_server,
+  // Issue #10 (option 2): optional sink for the virtio-console's guest output.
+  // The main-thread ConsoleVirtioDevice drains the transmitq and calls this with
+  // each chunk of guest console bytes (a Uint8Array). Absent → no virtio-console
+  // host servicing (the guest's stock virtio_console still probes, but its
+  // transmitq output is dropped and no input is delivered). The bespoke
+  // hvc_wasm console (console_write/console_read) is unaffected — this is the
+  // parallel A/B path, not a replacement.
+  console_sink,
+  // Issue #10 option 3: optional host hook for the virtio-vsock /Ctl bridge.
+  // `onReady(device)` is called once with the main-thread VsockVirtioDevice so a
+  // caller (the future pc /Ctl consumer) can `device.listen(port, conn => …)`.
+  // Absent → the vsock device still exists (config/features answered) but no
+  // host listener is registered, so guest connect attempts are RST'd.
+  vsock,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
   // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
@@ -221,6 +237,68 @@ export const linux = async ({
     return d;
   };
 
+  // Issue #10 (option 2): virtio-console — a MAIN-thread device that drains the
+  // guest's transmitq (output) to console_sink and delivers host input on the
+  // receiveq. The guest's vq kick lands on a task worker (which forwards it here
+  // as virtioconsole_notify); the sink + input buffer are main-thread-bound, so
+  // the host services the vrings here and raises the completion IRQ via the SAME
+  // raised_irqs self-wake virtio-wl/net/9P use (raiseHostWlIrq) — waking a parked
+  // idle CPU for host->guest input. dev MUST match kernel-worker's
+  // VW_DEV_CONSOLE + kernel patch 0019: index 6, irq 14. Built lazily once the
+  // self-wake addr is published (and only if a console_sink was provided).
+  const VW_DEV_CONSOLE = 6;
+  let hostConsoleDevice = null;
+  const hostConsole = () => {
+    if (!hostConsoleDevice && console_sink && wlRaisedIrqsAddr != null) {
+      hostConsoleDevice = new ConsoleVirtioDevice({
+        dev: VW_DEV_CONSOLE,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_CONSOLE,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net/9P
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+        sink: (bytes) => console_sink(bytes),
+      });
+    }
+    return hostConsoleDevice;
+  };
+
+  // Issue #10 option 3: virtio-vsock — a MAIN-thread device that runs the vsock
+  // protocol (handshake / RW / credit / shutdown) and exposes the host socket
+  // API for the /Ctl bridge. The guest's vq kick lands on a task worker (which
+  // forwards it here as virtiovsock_notify); the worker can't run the async
+  // socket callbacks. The completion/host→guest IRQ uses the SAME raised_irqs
+  // self-wake virtio-wl/net/9p use (raiseHostWlIrq). dev MUST match
+  // kernel-worker's VW_DEV_VSOCK + kernel patch 0020: index 7.
+  const VW_DEV_VSOCK = 7;
+  let hostVsockDevice = null;
+  let vsockReadyFired = false;
+  const hostVsock = () => {
+    if (wlRaisedIrqsAddr == null) return null;
+    if (!hostVsockDevice) {
+      hostVsockDevice = new VsockVirtioDevice({
+        dev: VW_DEV_VSOCK,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_VSOCK,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net/9p
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+      });
+      // Hand the device to the caller (pc /Ctl consumer) so it can listen().
+      if (!vsockReadyFired && vsock && typeof vsock.onReady === "function") {
+        vsockReadyFired = true;
+        try {
+          vsock.onReady(hostVsockDevice);
+        } catch (e) {
+          log("[vsock] onReady threw: " + (e && e.stack ? e.stack : e));
+        }
+      }
+    }
+    return hostVsockDevice;
+  };
+
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -354,6 +432,23 @@ export const linux = async ({
     // the R-message back, and raises the completion IRQ (raised_irqs self-wake).
     virtio9p_notify: (message) => {
       void hostNineP(message.dev)?.service(message.q >>> 0);
+    },
+
+    // Issue #10 (option 2): a guest virtio-console kick the task worker
+    // forwarded. The console sink + input buffer are main-thread-bound, so the
+    // worker can't service it — the host drains the transmitq to console_sink
+    // (q1) or flushes pending host input into the receiveq (q0), then raises the
+    // completion IRQ (raised_irqs self-wake). The device routes the queue index.
+    virtioconsole_notify: (message) => {
+      hostConsole()?.onNotify(message.q >>> 0);
+    },
+
+    // Issue #10 option 3: a guest virtio-vsock kick the task worker forwarded.
+    // The vsock protocol + host socket callbacks are main-thread-bound, so the
+    // worker can't service it — the host drives the kicked vq (tx drain / rx
+    // refill / event) and raises the IRQ via the raised_irqs self-wake.
+    virtiovsock_notify: (message) => {
+      hostVsock()?.onNotify(message.q >>> 0);
     },
 
     // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on
@@ -601,6 +696,18 @@ export const linux = async ({
         netLinkUp = !!up;
         hostNet()?.setLinkUp(up);
       },
+    },
+
+    // Issue #10 (option 2): feed host input bytes to the guest over the
+    // virtio-console receiveq (the A/B counterpart of key_input's hvc path).
+    // Queues + flushes via the main-thread ConsoleVirtioDevice's raised_irqs
+    // self-wake; bytes posted before the receiveq is set up stay pending and are
+    // delivered on the next guest refill. No-op until the console device exists
+    // (a console_sink was provided AND the self-wake addr is published).
+    // @param {Uint8Array|ArrayBuffer} bytes
+    virtio_console_input: (bytes) => {
+      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      hostConsole()?.pushRx(buf);
     },
   };
 };

@@ -1,0 +1,89 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 25 Jun 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: register a virtio-vsock device (VIRTIO_ID_VSOCK)
+
+Register a virtio-vsock device on the wasm virtio transport so the stock
+mainline virtio-vsock transport (net/vmw_vsock/virtio_transport.c,
+CONFIG_VIRTIO_VSOCKETS riding CONFIG_VSOCKETS) provides a standard
+AF_VSOCK socket channel between guest and host. This is the vsock piece
+of the "everything is a virtio device" consolidation (issue #10, option
+3): it gives the guest→host /Ctl desktop-control bridge (launch pc app,
+clipboard, notify) a standard socket carrier instead of riding 9P as an
+`aname` mount. The /Ctl protocol consumer lives downstream in pc; this
+patch (+ runtime/virtio/vsock-device.js) lands only the transport
+substrate — the kernel device registration and the host device model.
+
+Device index follows the existing enum order (WL=0, ECHO=1, NET=2,
+BLK=3, 9P_ROOT=4, 9P_NIXCACHE=5, CONSOLE=6), so VSOCK is index 7. The
+index is pinned with an explicit `= 7` so it stays stable regardless of
+which of the CONFIG-guarded earlier slots are built — the host side
+(runtime/kernel-worker.js / runtime/kernel-host.js VW_DEV_VSOCK = 7) and
+the kernel must agree on the index that selects the device in every
+host-call. Guarded by IS_ENABLED(CONFIG_VIRTIO_VSOCKETS) so the enum slot
+and the init call are a no-op when the stock virtio-vsock transport is
+not built.
+
+Mainline virtio_transport.c (the guest-side virtio-vsock driver) binds
+three virtqueues — rx (q0), tx (q1), event (q2) — and reads the 64-bit
+guest CID from config space (struct virtio_vsock_config { __le64
+guest_cid; }). The host serves the guest CID (3, the first guest CID;
+the host is CID 2 = VMADDR_CID_HOST) in config space and drives the vqs
+per the virtio-vsock packet framing (struct virtio_vsock_hdr + payload)
+in runtime/virtio/vsock-device.js. The kernel side here is just the
+device registration — no custom vsock transport code, the stock driver
+does the rest.
+
+The default 64-entry virtqueue is left unchanged for vsock: virtio-vsock
+posts one packet (a virtio_vsock_hdr + bounded payload) per descriptor
+chain, never the 128-sg-entry msize-sized chains that forced the 9P ring
+to 128 — so 64 is comfortably correct (it is what QEMU's virtio-vsock
+uses by default).
+
+Part of issue #10 (host<->guest bridge consolidation onto virtio) —
+the vsock transport for /Ctl (option 3).
+---
+ drivers/virtio/virtio_wasm.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+index c0ffee123..d15eaf456 100644
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -371,6 +371,16 @@ enum {
+ #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
++#endif
++#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
++	/*
++	 * virtio-vsock: AF_VSOCK socket channel for the /Ctl bridge (issue #10
++	 * option 3). Pinned to host index 7 (WL=0..9P_NIXCACHE=5, CONSOLE=6)
++	 * with an explicit value so it stays stable regardless of which
++	 * CONFIG-guarded earlier slots are built; the host (VW_DEV_VSOCK = 7)
++	 * must agree on this index.
++	 */
++	VW_DEV_VSOCK = 7,
+ #endif
+ 	VW_DEV_COUNT,
+ };
+@@ -426,6 +436,17 @@ static int __init virtio_wasm_transport_init(void)
+ 		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
+ #endif
+
++#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
++	/*
++	 * virtio-vsock channel for the host /Ctl bridge (stock
++	 * net/vmw_vsock/virtio_transport.c). The host serves the guest CID in
++	 * config space and drives the rx/tx/event vqs per the virtio-vsock
++	 * packet framing (runtime/virtio/vsock-device.js).
++	 */
++	vw = virtio_wasm_register(VW_DEV_VSOCK, VIRTIO_ID_VSOCK);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: vsock register failed: %ld\n", PTR_ERR(vw));
++#endif
++
+ 	return 0;
+ }
+
+--
+2.53.0

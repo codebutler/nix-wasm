@@ -108,6 +108,19 @@ vendors it via `runtime/sync-to-pc.sh`. **Any change to a runtime engine file
 M3a) requires re-running `runtime/sync-to-pc.sh <pc-checkout>`, or pc boots a stale
 engine that fails to instantiate glib/GTK binaries.**
 
+**ABI-BUMP RULE (non-negotiable):** any change to the kernel↔engine contract —
+the 9P/virtio transport, the exec ABI, the virtio/9P device models, syscall/loader
+stubs — MUST bump `ENGINE_ABI` in `runtime/abi.js` **in the same change**. That
+constant is the single source of truth for the guest↔engine ABI version (pc#315):
+`.#linux-image` stamps it as the published image's `minEngine`, and pc refuses to
+boot an image whose `minEngine` exceeds the vendored engine's `ENGINE_ABI`
+(surfacing "reload pc" instead of a silent boot crash). Forgetting the bump
+defeats the guard — a `master`-based channel republish would silently brick the
+deployed engine (this is exactly what #61 caught for #59's virtio-9p migration).
+A `master`-based `linux` channel can only ship **after** the matching engine is
+synced into pc (`runtime/sync-to-pc.sh`) and pc is deployed; until then the higher
+`minEngine` correctly shows "reload pc".
+
 Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) come
 from `nix build` (`.#kernel`, `.#wasm-initramfs`, `.#wasm-base-squashfs`, `.#wasm-binary-cache`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
