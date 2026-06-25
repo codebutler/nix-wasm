@@ -84,16 +84,17 @@ jobs:
   artifacts:
     name: build wasm artifacts
     needs: toolchain
-    runs-on: ubuntu-latest
+    # Namespace small runner. This job only substitutes the toolchain from Cachix
+    # and builds the cheap top layer (nix.wasm C++ compile + squashfs/initramfs/
+    # image), so the default profile is plenty — and it stays off GitHub-hosted
+    # runners so it doesn't depend on this private repo's GitHub Actions minutes.
+    runs-on: namespace-profile-default
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
-          df -h /
+      - name: Disk free
+        run: df -h /
 
       - uses: cachix/install-nix-action@v27
         with:

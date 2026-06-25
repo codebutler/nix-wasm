@@ -7,16 +7,15 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest        # x86_64-linux: cache.nixos.org has full nixos-26.05 cache
+    # Namespace small runner (x86_64) — substitutes the closure from Cachix and
+    # uploads to R2, so the default profile suffices; stays off GitHub-hosted
+    # minutes (private repo). cache.nixos.org still serves the native deps.
+    runs-on: namespace-profile-default
     steps:
       - uses: actions/checkout@v4
 
-      # Reclaim disk in case the wasm closure isn't fully cached yet (cold Cachix).
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
-          df -h /
+      - name: Disk free
+        run: df -h /
 
       # Install Nix with the nixos-26.05 channel pin. This matches the project's
       # CI caching strategy: 26.05 has a complete x86_64 binary cache (including

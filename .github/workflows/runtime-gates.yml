@@ -25,7 +25,8 @@ on:
 jobs:
   gates:
     name: engine tests + typecheck
-    runs-on: ubuntu-latest
+    # Namespace small runner — keeps this off GitHub-hosted minutes (private repo).
+    runs-on: namespace-profile-default
     timeout-minutes: 15
     defaults:
       run:
