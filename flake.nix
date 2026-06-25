@@ -139,6 +139,15 @@
         inherit pkgs cross;
       };
 
+      # Task 10 (leak regression, issue #7): wl-pool-churn — creates and destroys
+      # N wl_shm_pools through Sommelier/virtwl, asserting guest MemFree stays
+      # bounded (no kernel-side shm leak per pool). On waylandproxyd the leaked
+      # VIRTWL_IOCTL_NEW_ALLOC objects fragment the buddy allocator; Sommelier
+      # issues VIRTWL_IOCTL_CLOSE on destroy so the test passes.
+      wlPoolChurn = import ./userspace/wl-pool-churn.nix {
+        inherit pkgs cross;
+      };
+
       # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app. Links the
       # cross libwayland-client + libffi (raw backend) + wayland-protocols
       # (xdg-shell), generates the xdg-shell glue with the BUILD-host
@@ -353,7 +362,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -543,6 +552,11 @@
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.
         inherit sommelier;
+
+        # Task 10 (leak regression, issue #7): wl-pool-churn — creates N wl_shm_pools
+        # through Sommelier/virtwl and destroys them, asserting no kernel-side leak.
+        # Gate: runtime/demo/node/sommelier-leak-smoke.mjs.
+        wasm-pool-churn = wlPoolChurn;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
