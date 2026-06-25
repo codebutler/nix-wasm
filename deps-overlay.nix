@@ -947,4 +947,60 @@ in
   busybox = whenWasm
     (p: p.override { stdenv = final.stdenv; })
     prev.busybox;
+
+  # --- libxcb closure (link-only for Sommelier) ----------------------------------
+  # Sommelier links libxcb + the composite/shape/xfixes extension libs but NEVER
+  # executes them — all xcb calls are on the Xwayland path, which is never enabled
+  # (no -X / --x-display on the wasm guest; Xwayland is not built). We only need
+  # the static .a archives + headers to satisfy the linker.
+  #
+  # libxau + libxdmcp are pure autotools C with no tests; they cross-build cleanly
+  # after dropping unused doc/man outputs. libxcb drives Python codegen (xcb-proto's
+  # xcbgen module + python3) to emit the extension C sources at build time — those
+  # tools MUST be native (buildPackages), not wasm32. With strictDeps=true, moving
+  # xcb-proto to nativeBuildInputs and pulling xcbgen from buildPackages.xcb-proto
+  # is the correct cross fix. Docs/man are dropped (no doc toolchain in the cross
+  # closure; the .a + headers are all Sommelier needs). isWasm-guarded throughout —
+  # the native packages are stock nixpkgs (cached).
+
+  # libxau: no tests, "out"+"dev" only. No changes needed beyond the isWasm guard;
+  # override is a no-op except to confirm the attr composes with our stdenv.
+  libxau = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxau;
+
+  # libxdmcp: has a "doc" output (xmlto → xorg-docs build chain). Drop it — the
+  # host-side doc toolchain does not cross to wasm32, and we only need the .a + .h.
+  libxdmcp = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxdmcp;
+
+  # libxcb: xcb-proto is pure Python XML codegen that runs on the BUILD host.
+  # With strictDeps=true it must be in nativeBuildInputs (wasm32 Python can't run).
+  # Pull the native xcb-proto from buildPackages; also pull python3 from there (it
+  # already is in the upstream nativeBuildInputs, but xcb-proto carries xcbgen as a
+  # Python package so the native python3 must see it on PYTHONPATH — buildPackages
+  # handles that automatically). Drop "man"+"doc" outputs (no man-page or doc tools
+  # in the cross closure; Sommelier only needs .a + headers).
+  libxcb = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" "dev" ];
+      # xcb-proto in the upstream buildInputs provides xcbgen for the native Python
+      # codegen step. Move it to nativeBuildInputs so the build host's Python finds
+      # the xcbgen module. Remove it from buildInputs (wasm32 xcb-proto has no
+      # runtime presence — it is a pure-Python package; keeping it in buildInputs
+      # pulls it into the cross env where it is unused and can cause configure noise).
+      nativeBuildInputs = (o.nativeBuildInputs or [ ])
+        ++ [ final.buildPackages.xcb-proto ];
+      buildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "xcb-proto")
+        (o.buildInputs or [ ]);
+      doCheck = false;
+    }))
+    prev.libxcb;
 }
