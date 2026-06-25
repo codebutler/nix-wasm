@@ -498,6 +498,34 @@ in
     then final.callPackage ./userspace/libgbm-shim { }
     else prev.minigbm or (throw "minigbm: only available in the wasm cross set");
 
+  # --- libdrm: link-only for Sommelier; dmabuf path is dead at runtime ----------
+  # Sommelier links libdrm for the GPU/dmabuf path, but that path is never taken
+  # on the wl_shm/virtwl route we use.  We need only the core ioctl wrappers
+  # (libdrm.a + xf86drm.h + libdrm/drm_fourcc.h) to satisfy the linker.
+  # All GPU-driver backends (intel/amdgpu/radeon/nouveau/vmwgfx) are disabled:
+  # they pull GPU-specific kernel uAPIs we don't have and tests call fork().
+  # -Dman-pages=disabled: man-pages need xsltproc, absent in the cross sandbox.
+  # -Dvalgrind=disabled:  valgrind headers not available in the wasm sysroot.
+  libdrm = whenWasm
+    (p: p.overrideAttrs (o: {
+      # Drop the `bin` output — it only carries test binaries and man-pages,
+      # both of which we disable below.  An empty declared output causes the
+      # Nix builder to error ("failed to produce output path for output 'bin'").
+      outputs = [ "out" "dev" ];
+      mesonFlags = (o.mesonFlags or [ ]) ++ [
+        "-Dintel=disabled"
+        "-Damdgpu=disabled"
+        "-Dradeon=disabled"
+        "-Dnouveau=disabled"
+        "-Dvmwgfx=disabled"
+        "-Dman-pages=disabled"
+        "-Dvalgrind=disabled"
+        "-Dtests=false"
+      ];
+      doCheck = false;
+    }))
+    prev.libdrm;
+
   # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
   # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the
   # freetype + fontconfig font backends — required for the text rendering stack
