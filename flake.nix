@@ -365,6 +365,16 @@
         inherit pkgs;
         devPaths = [ guestClang guestCc guestCxx makeWasm ];
       };
+
+      # ---- the single versioned `linux` boot bundle (pc#315) ----------------
+      # vmlinux + initramfs + squashfs + manifest(minEngine) as one iso9660
+      # image. Downloaded once by pc via the disc installer, mounted, and booted
+      # from the bytes. nix-cache stays a separate lazy R2 cache.
+      linuxImage = import ./userspace/linux-image.nix {
+        inherit pkgs nixpkgs kernel;
+        initramfs = wasmInitramfs;
+        squashfs = wasmBaseSquashfs;
+      };
     in
     {
       # The FULL wasm32 cross package set — exposing it as legacyPackages lets
@@ -509,6 +519,9 @@
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
         # Served by runtime/nix-cache.js; in-guest: `nix-env -iA guest-cc`.
         wasm-binary-cache = wasmBinaryCache;
+
+        # The single versioned `linux` boot bundle (pc#315): $out/iso/linux.iso.
+        linux-image = linuxImage;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''
