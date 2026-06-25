@@ -1,0 +1,19 @@
+runtime/demo/node/wl-handshake.test.mjs
+  s_b3600ff8167073::t_a8451cc4c8e42b 1-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "26d5dbf44413dff50df96a2e7324d116cf74cfd9",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
