@@ -1,0 +1,31 @@
+userspace/wl-pool-churn.c
+  s_cd1a77be509bb9::t_0390df9ef47e17 1-141
+flake.nix
+  s_cd1a77be509bb9::t_192b384cef4ce6 548-552
+  s_cd1a77be509bb9::t_489474de6bc436 134-142
+  s_cd1a77be509bb9::t_53607a70a1bdee 357
+runtime/demo/node/sommelier-leak-smoke.mjs
+  s_cd1a77be509bb9::t_ca4157b7e59cad 3-4,92,129
+  s_cd1a77be509bb9::t_4307ac3e884fb3 1-2,5-19,40-91,93-111,113-128,130-173,179
+  s_cd1a77be509bb9::t_9b2362dcbcb07b 20-39
+  s_cd1a77be509bb9::t_4735575de386a7 112
+  s_cd1a77be509bb9::t_986bdbacdbb393 174-178
+userspace/wl-pool-churn.nix
+  s_cd1a77be509bb9::t_23aa801ab0cfee 1-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "00f8bb41d2374aff200e45b344b730ab28697144",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
