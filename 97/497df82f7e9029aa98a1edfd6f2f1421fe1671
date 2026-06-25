@@ -1,0 +1,25 @@
+runtime/sync-to-pc.sh
+  s_21419a5db8af1c::t_4f4ffc92dbd271 17
+runtime/index.js
+  s_21419a5db8af1c::t_94f7f9a33a70b6 4
+runtime/abi.js
+  s_21419a5db8af1c::t_3afd0ec1fd180f 1-12
+runtime/abi.test.js
+  s_21419a5db8af1c::t_34806dd83ad6c7 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "97497df82f7e9029aa98a1edfd6f2f1421fe1671",
+  "prompts": {},
+  "sessions": {
+    "s_21419a5db8af1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959963a1-433c-4e2b-9aea-1b890ee5c25e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
