@@ -1,0 +1,21 @@
+docs/superpowers/specs/2026-06-24-linux-bundle-channel-design.md
+  s_21419a5db8af1c::t_8618c4fbd4d299 1-80,85-103,107-198
+  s_21419a5db8af1c::t_c50396981c7315 104-106
+  s_21419a5db8af1c::t_aff1a40141c2bd 81-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "d2b85e330da648edd46d3cb7dfb4c25e9a849e80",
+  "prompts": {},
+  "sessions": {
+    "s_21419a5db8af1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959963a1-433c-4e2b-9aea-1b890ee5c25e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
