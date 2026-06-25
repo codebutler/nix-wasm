@@ -12,9 +12,19 @@ standard virtualized Linux at the 9P layer (stock `v9fs` over a stock carrier).
 - **Kernel** — `patches/kernel/0018-wasm-virtio-9p-device.patch`: register two
   virtio-9p channels on the wasm transport, `VW_DEV_9P_ROOT` (index 4, tag
   `pcroot`) and `VW_DEV_9P_NIXCACHE` (index 5, tag `nixcache`), both with
-  `VIRTIO_ID_9P` (9). `kernel.nix` enables `CONFIG_NET_9P_VIRTIO` (keeps
-  `NET_9P_CB` built for the A/B benchmark). No custom 9P transport code — the
-  stock driver does the rest; the kernel side is just device registration.
+  `VIRTIO_ID_9P` (9), AND give `VIRTIO_ID_9P` devices a **128-entry virtqueue**
+  (vs the default 64). `kernel.nix` enables `CONFIG_NET_9P_VIRTIO` (keeps
+  `NET_9P_CB` built so the two transports can still be A/B'd). No custom 9P
+  transport code — the stock driver does the rest; the kernel side is just
+  device registration + the vq sizing.
+  - **Why 128, not "benchmark later":** mainline `9pnet_virtio` sets
+    `.maxsize = PAGE_SIZE*(VIRTQUEUE_NUM-3)` with `VIRTQUEUE_NUM` a fixed
+    compile-time **128**, so msize ≈ 500 KB *regardless of vq size* — already on
+    par with `trans_cb`'s 512 KB (no msize regression to tune). But the driver
+    packs up to `VIRTQUEUE_NUM` (128) scatter-gather entries into ONE request
+    chain, so a 64-entry ring **overflows (`-ENOSPC` in `virtqueue_add`) on any
+    large transfer** — e.g. a nix-env NAR read. That's a correctness floor, not a
+    perf knob, so the vq is sized to 128 up front (what QEMU's virtio-9p uses).
 - **Runtime** — `runtime/virtio/ninep-device.js` (`NinePVirtioDevice`): host
   model of a virtio-9p device. Serves the mount tag in config space
   (`struct virtio_9p_config`) + `VIRTIO_9P_MOUNT_TAG`/`VIRTIO_F_VERSION_1`
@@ -58,13 +68,13 @@ standard virtualized Linux at the 9P layer (stock `v9fs` over a stock carrier).
    Boot log should show `virtio_wasm: registered dev=4 id=0x9` / `dev=5 id=0x9`
    and `9pnet_virtio` binding tags `pcroot`/`nixcache`.
 
-## Known follow-up (perf re-tuning)
+## Perf parity & retiring trans_cb
 
-`9pnet_virtio` caps msize at `trans_maxsize = PAGE_SIZE*(vq_size-3)` ≈ 244 KB
-with the current 64-entry vq, so the mount's requested 512 KB is negotiated down
-(vs `trans_cb`'s 512 KB). Benchmark virtio-9p vs `trans_cb` (`nix-env -iA`
-wall-clock, large-file throughput, IRQ round-trip latency) BEFORE retiring
-`trans_cb`. If virtio-9p loses on the round-trip-bound nix path, lift the cap by
-giving the 9P devices a larger vq (`vw_find_vqs` hardcodes `qsize=64`) so a
-512 KB msize fits the descriptor table. Only retire `NET_9P_CB` once virtio-9p
-wins or ties.
+msize is ≈ 500 KB (the driver's fixed `VIRTQUEUE_NUM`-derived cap), on par with
+`trans_cb`'s 512 KB, and the 9P vq is sized to 128 so large transfers don't
+overflow — so there's no known regression baked in; the round-trip-bound nix
+path should perform comparably. A confirming benchmark (`nix-env -iA` wall-clock,
+IRQ round-trip latency) is still worth running once it boots, but it's a
+*confirmation*, not a gate hiding a known handicap. Retire `NET_9P_CB` (drop the
+`trans_cb` transport + `runtime/ninep/{ring,host-call,transport}.js`) once the
+boot smoke passes and the benchmark confirms parity.

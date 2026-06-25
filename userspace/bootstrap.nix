@@ -15,9 +15,12 @@
 # trans_cb SAB-ring transport. The device is selected by MOUNT TAG (the first
 # `mount` arg: "pcroot" / "nixcache" — kernel patch 0018 + the host devices);
 # aname still selects the server export. Exports (boot.js): "/"=pc VFS, nixcache.
-# Requested msize 512K is negotiated DOWN by 9pnet_virtio to trans_maxsize =
-# PAGE_SIZE*(vq_size-3) ≈ 244K (vq_size 64) — still large; perf re-tuning vs
-# trans_cb's 512K is tracked in #10 (bump the 9P vq size to lift the cap).
+# msize ~500K: 9pnet_virtio caps it at PAGE_SIZE*(VIRTQUEUE_NUM-3) (VIRTQUEUE_NUM
+# is the driver's fixed 128), so requesting 512K negotiates to ~500K — on par
+# with trans_cb's 512K (no regression). The 9P virtqueues are sized to 128
+# entries (patch 0018) so a single msize-sized request's ~125-page scatter-gather
+# list fits in one descriptor chain; the default 64-entry ring would overflow
+# (-ENOSPC) on large reads like a nix-env NAR fetch.
 # /nix is a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
 { pkgs }:
 pkgs.writeText "init" ''

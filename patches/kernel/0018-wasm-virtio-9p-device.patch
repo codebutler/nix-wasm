@@ -28,14 +28,38 @@ a no-op when the stock virtio-9p transport is not built.
 
 Part of issue #10 (host<->guest bridge consolidation onto virtio).
 ---
- drivers/virtio/virtio_wasm.c | 18 ++++++++++++++++++
- 1 file changed, 18 insertions(+)
+ drivers/virtio/virtio_wasm.c | 30 ++++++++++++++++++++++++++++--
+ 1 file changed, 28 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 index b47e06ce7..c0ffee123 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -363,6 +363,10 @@ enum {
+@@ -281,13 +281,21 @@ static int vw_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
+ 		struct virtqueue_info *vqi = &vqs_info[i];
+ 		struct virtqueue *vq;
+ 		/*
+ 		 * Per-vq ring size. Keep it small but big enough for virtio_wl's
+ 		 * in-queue prefill (it stuffs PAGE_SIZE inbufs until num_free
+-		 * runs out). 64 entries comfortably covers ctx + a few pipes.
++		 * runs out). 64 entries comfortably covers ctx + a few pipes.
++		 * virtio-9p is the exception: the stock 9pnet_virtio transport
++		 * packs up to VIRTQUEUE_NUM (128) scatter-gather entries into ONE
++		 * request chain (a single read up to its ~500 KB msize spans ~125
++		 * pages), so a 64-entry ring overflows on large transfers
++		 * (-ENOSPC in virtqueue_add) — e.g. a big NAR read for nix-env.
++		 * Give VIRTIO_ID_9P a 128-entry ring (what QEMU's virtio-9p uses)
++		 * so msize-sized requests fit. Issue #10.
+ 		 */
+-		unsigned int qsize = 64;
++		unsigned int qsize =
++			(vdev->id.device == VIRTIO_ID_9P) ? 128 : 64;
+
+ 		if (!vqi->name) {
+ 			vqs[i] = NULL;
+ 			vw->vqs[i] = NULL;
+ 			continue;
+@@ -363,5 +371,9 @@ enum {
  #if IS_ENABLED(CONFIG_VIRTIO_BLK)
  	VW_DEV_BLK,		/* virtio-blk block device (squashfs /nix image) */
  #endif
@@ -46,7 +70,7 @@ index b47e06ce7..c0ffee123 100644
  	VW_DEV_COUNT,
  };
 
-@@ -395,6 +399,20 @@ static int __init virtio_wasm_transport_init(void)
+@@ -395,6 +410,22 @@ static int __init virtio_wasm_transport_init(void)
  	if (IS_ERR(vw))
  		pr_warn("virtio_wasm: blk register failed: %ld\n", PTR_ERR(vw));
  #endif
