@@ -1,0 +1,20 @@
+docs/superpowers/specs/2026-06-25-sommelier-virtwl-proxy-design.md
+  s_cd1a77be509bb9::t_c2c4e6b410f0df 1-80,91-92,96-155,162-237
+  s_cd1a77be509bb9::t_e6187f44f2b429 81-90,93-95,156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "988b5b72a4db3c487323a5434272460034dbbf5e",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
