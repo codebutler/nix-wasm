@@ -1,0 +1,363 @@
+--- a/sommelier.cc	2026-06-25 11:00:31.663678888 -0400
++++ b/sommelier.cc	2026-06-25 11:07:53.146436414 -0400
+@@ -38,6 +38,7 @@
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/un.h>
++#include <spawn.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include <vector>
+@@ -3489,19 +3490,41 @@
+   return 1;
+ }
+ 
+-static void sl_execvp(const char* file,
++/* wasm/NOMMU: musl has no fork(). Spawn via posix_spawn (fork+exec atomically),
++ * mirroring sl_execvp's WAYLAND_SOCKET fd hand-off and SOMMELIER_VERSION env.
++ * wayland_socket_fd >= 0: the fd is exposed to the child as WAYLAND_SOCKET=<fd>
++ * (its CLOEXEC flag is cleared so it survives across exec); pass -1 when no
++ * Wayland socket hand-off is needed.
++ * fa: optional pre-built file_actions (e.g. to close fds in the child); pass
++ * NULL for the common case. */
++static pid_t sl_spawn(const char* file,
+                       char* const argv[],
+-                      int wayland_socked_fd) {
+-  if (wayland_socked_fd >= 0) {
+-    int fd;
+-    fd = dup(wayland_socked_fd);
+-    putenv(sl_xasprintf("WAYLAND_SOCKET=%d", fd));
++                      int wayland_socket_fd,
++                      posix_spawn_file_actions_t* fa) {
++  posix_spawn_file_actions_t local_fa;
++  posix_spawn_file_actions_t* fap = fa;
++  if (!fap) {
++    posix_spawn_file_actions_init(&local_fa);
++    fap = &local_fa;
++  }
++  if (wayland_socket_fd >= 0) {
++    /* Clear CLOEXEC so the fd survives into the child. */
++    fcntl(wayland_socket_fd, F_SETFD, 0);
++    putenv(sl_xasprintf("WAYLAND_SOCKET=%d", wayland_socket_fd));
+   }
+-
+   setenv("SOMMELIER_VERSION", SOMMELIER_VERSION, 1);
+-
+-  execvp(file, argv);
+-  perror(file);
++  pid_t pid = -1;
++  extern char** environ;
++  int rv = posix_spawnp(&pid, file, fap, NULL, argv, environ);
++  if (!fa) {
++    posix_spawn_file_actions_destroy(&local_fa);
++  }
++  if (rv != 0) {
++    errno = rv;
++    perror(file);
++    return -1;
++  }
++  return pid;
+ }
+ 
+ static void sl_calculate_scale_for_xwayland(struct sl_context* ctx) {
+@@ -3624,17 +3647,13 @@
+   putenv(sl_xasprintf("XCURSOR_SIZE=%d",
+                       static_cast<int>(XCURSOR_SIZE_BASE * ctx->scale + 0.5)));
+ 
+-  pid = fork();
++  // Set WAYLAND_DISPLAY to a value that is guaranteed to not point to a
++  // valid wayland compositor socket name. Unsetting WAYLAND_DISPLAY is
++  // insufficient as some clients may attempt to connect to wayland-0 as a
++  // default fallback.
++  setenv("WAYLAND_DISPLAY", ".", 1);
++  pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, NULL);
+   errno_assert(pid >= 0);
+-  if (pid == 0) {
+-    // Set WAYLAND_DISPLAY to a value that is guaranteed to not point to a
+-    // valid wayland compositor socket name. Unsetting WAYLAND_DISPLAY is
+-    // insufficient as some clients may attempt to connect to wayland-0 as a
+-    // default fallback.
+-    setenv("WAYLAND_DISPLAY", ".", 1);
+-    sl_execvp(ctx->runprog[0], ctx->runprog, -1);
+-    _exit(EXIT_FAILURE);
+-  }
+ 
+   ctx->child_pid = pid;
+ 
+@@ -3932,13 +3951,9 @@
+   // to accept connections. WAYLAND_DISPLAY will be set but any attempt to
+   // connect to this socket at this time will fail.
+   if (ctx->runprog && ctx->runprog[0]) {
+-    int pid = fork();
++    setenv("WAYLAND_DISPLAY", socket_name, 1);
++    int pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, NULL);
+     errno_assert(pid != -1);
+-    if (pid == 0) {
+-      setenv("WAYLAND_DISPLAY", socket_name, 1);
+-      sl_execvp(ctx->runprog[0], ctx->runprog, -1);
+-      _exit(EXIT_FAILURE);
+-    }
+     while (waitpid(-1, nullptr, WNOHANG) != pid) {
+       continue;
+     }
+@@ -3969,56 +3984,56 @@
+     length = sizeof(ucred);
+     rv = getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &ucred, &length);
+ 
+-    int pid = fork();
+-    errno_assert(pid != -1);
+-    if (pid == 0) {
+-      char* client_fd_str;
+-      char* peer_pid_str;
+-      char* peer_cmd_prefix_str;
+-      char const* args[64];
+-      int i = 0;
+-
+-      close(sock_fd);
+-      close(lock_fd);
+-
+-      if (peer_cmd_prefix) {
+-        peer_cmd_prefix_str = sl_xasprintf("%s", peer_cmd_prefix);
+-
+-        i = sl_parse_cmd_prefix(peer_cmd_prefix_str, 32, args);
+-        if (i > 32) {
+-          LOG(ERROR) << "too many arguments in cmd prefix: " << i;
+-          i = 0;
+-        }
++    char* client_fd_str;
++    char* peer_pid_str;
++    char* peer_cmd_prefix_str;
++    char const* args[64];
++    int i = 0;
++
++    if (peer_cmd_prefix) {
++      peer_cmd_prefix_str = sl_xasprintf("%s", peer_cmd_prefix);
++
++      i = sl_parse_cmd_prefix(peer_cmd_prefix_str, 32, args);
++      if (i > 32) {
++        LOG(ERROR) << "too many arguments in cmd prefix: " << i;
++        i = 0;
+       }
++    }
+ 
+-      args[i++] = argv[0];
+-      peer_pid_str = sl_xasprintf("--peer-pid=%d", ucred.pid);
+-      args[i++] = peer_pid_str;
+-      client_fd_str = sl_xasprintf("--client-fd=%d", client_fd);
+-      args[i++] = client_fd_str;
+-
+-      // forward some flags.
+-      for (int j = 1; j < argc; ++j) {
+-        char* arg = argv[j];
+-        if (strstr(arg, "--display") == arg || strstr(arg, "--scale") == arg ||
+-            strstr(arg, "--direct-scale") == arg ||
+-            strstr(arg, "--accelerators") == arg ||
+-            strstr(arg, "--windowed-accelerators") == arg ||
+-            strstr(arg, "--drm-device") == arg ||
+-            strstr(arg, "--support-damage-buffer") == arg ||
+-            strstr(arg, "--vm-identififer") == arg ||
+-            strstr(arg, "--trace-system") == arg ||
+-            strstr(arg, "--virtgpu-channel") == arg ||
+-            strstr(arg, "--enable-linux-dmabuf") == arg) {
+-          args[i++] = arg;
+-        }
++    args[i++] = argv[0];
++    peer_pid_str = sl_xasprintf("--peer-pid=%d", ucred.pid);
++    args[i++] = peer_pid_str;
++    client_fd_str = sl_xasprintf("--client-fd=%d", client_fd);
++    args[i++] = client_fd_str;
++
++    // forward some flags.
++    for (int j = 1; j < argc; ++j) {
++      char* arg = argv[j];
++      if (strstr(arg, "--display") == arg || strstr(arg, "--scale") == arg ||
++          strstr(arg, "--direct-scale") == arg ||
++          strstr(arg, "--accelerators") == arg ||
++          strstr(arg, "--windowed-accelerators") == arg ||
++          strstr(arg, "--drm-device") == arg ||
++          strstr(arg, "--support-damage-buffer") == arg ||
++          strstr(arg, "--vm-identififer") == arg ||
++          strstr(arg, "--trace-system") == arg ||
++          strstr(arg, "--virtgpu-channel") == arg ||
++          strstr(arg, "--enable-linux-dmabuf") == arg) {
++        args[i++] = arg;
+       }
++    }
+ 
+-      args[i++] = nullptr;
++    args[i++] = nullptr;
+ 
+-      execvp(args[0], const_cast<char* const*>(args));
+-      _exit(EXIT_FAILURE);
+-    }
++    /* Close the listening fds in the child; client_fd (from accept without
++     * SOCK_CLOEXEC) is inherited intentionally for --client-fd=. */
++    posix_spawn_file_actions_t fa;
++    posix_spawn_file_actions_init(&fa);
++    posix_spawn_file_actions_addclose(&fa, sock_fd);
++    posix_spawn_file_actions_addclose(&fa, lock_fd);
++    int pid = sl_spawn(args[0], const_cast<char* const*>(args), -1, &fa);
++    posix_spawn_file_actions_destroy(&fa);
++    errno_assert(pid != -1);
+     close(client_fd);
+   }
+ 
+@@ -4053,68 +4068,77 @@
+ 
+   ctx->wm_fd = wm[0];
+ 
+-  int pid = fork();
+-  errno_assert(pid != -1);
+-  if (pid == 0) {
+-    char const* args[64];
+-    int i = 0;
+-
+-    if (xwayland_cmd_prefix) {
+-      char* xwayland_cmd_prefix_str = sl_xasprintf("%s", xwayland_cmd_prefix);
+-
+-      i = sl_parse_cmd_prefix(xwayland_cmd_prefix_str, 32, args);
+-      if (i > 32) {
+-        LOG(ERROR) << "too many arguments in cmd prefix: " << i;
+-        i = 0;
+-      }
+-    }
+-
+-    args[i++] = sl_xasprintf("%s", xwayland_path ?: XWAYLAND_PATH);
+-
+-    int fd = dup(ds[1]);
+-    char* display_fd_str = sl_xasprintf("%d", fd);
+-    fd = dup(wm[1]);
+-    char* wm_fd_str = sl_xasprintf("%d", fd);
+-
+-    if (xdisplay > 0) {
+-      args[i++] = sl_xasprintf(":%d", xdisplay);
+-    }
+-    args[i++] = "-nolisten";
+-    args[i++] = "tcp";
+-    args[i++] = "-rootless";
+-    // Use software rendering unless we have a DRM device and glamor is
+-    // enabled.
+-    if (!ctx->drm_device || !glamor || !strcmp(glamor, "0")) {
+-      args[i++] = "-shm";
+-    }
+-    args[i++] = "-displayfd";
+-    args[i++] = display_fd_str;
+-    args[i++] = "-wm";
+-    args[i++] = wm_fd_str;
+-    if (xauth_path) {
+-      args[i++] = "-auth";
+-      args[i++] = sl_xasprintf("%s", xauth_path);
+-    }
+-    if (xfont_path) {
+-      args[i++] = "-fp";
+-      args[i++] = sl_xasprintf("%s", xfont_path);
+-    }
+-    args[i++] = nullptr;
++  char const* args[64];
++  int i = 0;
+ 
+-    // If a path is explicitly specified via command line or environment
+-    // use that instead of the compiled in default.  In either case, only
+-    // set the environment variable if the value specified is non-empty.
+-    if (xwayland_gl_driver_path) {
+-      if (*xwayland_gl_driver_path) {
+-        setenv("LIBGL_DRIVERS_PATH", xwayland_gl_driver_path, 1);
+-      }
+-    } else if (XWAYLAND_GL_DRIVER_PATH && *XWAYLAND_GL_DRIVER_PATH) {
+-      setenv("LIBGL_DRIVERS_PATH", XWAYLAND_GL_DRIVER_PATH, 1);
+-    }
++  if (xwayland_cmd_prefix) {
++    char* xwayland_cmd_prefix_str = sl_xasprintf("%s", xwayland_cmd_prefix);
+ 
+-    sl_execvp(args[0], const_cast<char* const*>(args), wayland_socket_fd);
+-    _exit(EXIT_FAILURE);
+-  }
++    i = sl_parse_cmd_prefix(xwayland_cmd_prefix_str, 32, args);
++    if (i > 32) {
++      LOG(ERROR) << "too many arguments in cmd prefix: " << i;
++      i = 0;
++    }
++  }
++
++  args[i++] = sl_xasprintf("%s", xwayland_path ?: XWAYLAND_PATH);
++
++  /* Use well-known target fds for the display-ready and wm sockets so we
++   * can pass them by number in the argument list without relying on dup(). */
++  int display_fd = ds[1];
++  int wm_fd = wm[1];
++  char* display_fd_str = sl_xasprintf("%d", display_fd);
++  char* wm_fd_str = sl_xasprintf("%d", wm_fd);
++
++  if (xdisplay > 0) {
++    args[i++] = sl_xasprintf(":%d", xdisplay);
++  }
++  args[i++] = "-nolisten";
++  args[i++] = "tcp";
++  args[i++] = "-rootless";
++  // Use software rendering unless we have a DRM device and glamor is
++  // enabled.
++  if (!ctx->drm_device || !glamor || !strcmp(glamor, "0")) {
++    args[i++] = "-shm";
++  }
++  args[i++] = "-displayfd";
++  args[i++] = display_fd_str;
++  args[i++] = "-wm";
++  args[i++] = wm_fd_str;
++  if (xauth_path) {
++    args[i++] = "-auth";
++    args[i++] = sl_xasprintf("%s", xauth_path);
++  }
++  if (xfont_path) {
++    args[i++] = "-fp";
++    args[i++] = sl_xasprintf("%s", xfont_path);
++  }
++  args[i++] = nullptr;
++
++  // If a path is explicitly specified via command line or environment
++  // use that instead of the compiled in default.  In either case, only
++  // set the environment variable if the value specified is non-empty.
++  if (xwayland_gl_driver_path) {
++    if (*xwayland_gl_driver_path) {
++      setenv("LIBGL_DRIVERS_PATH", xwayland_gl_driver_path, 1);
++    }
++  } else if (XWAYLAND_GL_DRIVER_PATH && *XWAYLAND_GL_DRIVER_PATH) {
++    setenv("LIBGL_DRIVERS_PATH", XWAYLAND_GL_DRIVER_PATH, 1);
++  }
++
++  /* Clear CLOEXEC on the child-facing ends so they survive posix_spawn. */
++  fcntl(display_fd, F_SETFD, 0);
++  fcntl(wm_fd, F_SETFD, 0);
++
++  posix_spawn_file_actions_t fa;
++  posix_spawn_file_actions_init(&fa);
++  /* Close the parent-facing ends in the child. */
++  posix_spawn_file_actions_addclose(&fa, ds[0]);
++  posix_spawn_file_actions_addclose(&fa, wm[0]);
++  int pid = sl_spawn(args[0], const_cast<char* const*>(args),
++                     wayland_socket_fd, &fa);
++  posix_spawn_file_actions_destroy(&fa);
++  errno_assert(pid != -1);
+   close(wm[1]);
+   ctx->xwayland_pid = pid;
+ }
+@@ -4604,15 +4628,12 @@
+                           xwayland_path, xdisplay, xauth_path, xfont_path,
+                           xwayland_gl_driver_path, glamor);
+       } else {
+-        pid = fork();
++        // Unset DISPLAY to prevent X clients from connecting to an existing X
++        // server when X forwarding is not enabled.
++        unsetenv("DISPLAY");
++        /* sv[1] CLOEXEC is cleared inside sl_spawn via WAYLAND_SOCKET path. */
++        pid = sl_spawn(ctx.runprog[0], ctx.runprog, sv[1], NULL);
+         errno_assert(pid != -1);
+-        if (pid == 0) {
+-          // Unset DISPLAY to prevent X clients from connecting to an existing X
+-          // server when X forwarding is not enabled.
+-          unsetenv("DISPLAY");
+-          sl_execvp(ctx.runprog[0], ctx.runprog, sv[1]);
+-          _exit(EXIT_FAILURE);
+-        }
+         ctx.child_pid = pid;
+       }
+       close(sv[1]);
