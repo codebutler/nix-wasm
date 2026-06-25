@@ -159,6 +159,12 @@
         inherit cross;
       };
 
+      # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery on
+      # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
+      sigalrmTest = import ./userspace/sigalrm-test.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -316,7 +322,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest fpcastVtableTest widgetFactory ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -448,6 +454,10 @@
         # Regression test for detached-thread exit on wasm (patches/musl/0008) →
         # $out/bin/pthread-exit-test.
         pthread-exit-test = pthreadExitTest;
+
+        # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
+        # on the wasm guest (#35) → $out/bin/sigalrm-test.
+        sigalrm-test = sigalrmTest;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;
