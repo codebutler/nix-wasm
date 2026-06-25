@@ -124,10 +124,13 @@ export async function bootLinux(opts) {
   // a second export when provided (#141).
   const exports = { "/": vfs };
   if (opts.nixCache) exports.nixcache = opts.nixCache; // read-only Nix binary cache, pc-init mounts at /nix-cache + substituters=file:///nix-cache (#141)
-  const transport = createNinePTransport({
-    ring,
-    server: createNinePServer({ exports, msize: NINEP_MSIZE }),
-  });
+  // One 9P server instance, shared by BOTH transports during the #10 migration:
+  // the legacy trans_cb SAB ring (transport.run below) AND the new virtio-9p
+  // host devices (passed to linux() as ninep_server). Each carries a distinct
+  // connection id (cid), so the server's per-connection state stays isolated and
+  // the two transports can be A/B-benchmarked by flipping the mount's trans=.
+  const ninepServer = createNinePServer({ exports, msize: NINEP_MSIZE });
+  const transport = createNinePTransport({ ring, server: ninepServer });
   transport.run(); // Atomics.waitAsync server loop; self-driving, resolves on stop()
 
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB), threaded
@@ -158,6 +161,7 @@ export async function bootLinux(opts) {
     log: onLog,
     console_write: emit,
     ninep_ring: ring.buffer,
+    ninep_server: ninepServer, // #10: main-thread virtio-9p host devices service this
     virtio_queues: virtioQueues,
     // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
     // An ArrayBuffer; kernel-host copies it once into a SharedArrayBuffer so

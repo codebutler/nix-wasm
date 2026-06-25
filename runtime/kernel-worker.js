@@ -13,6 +13,7 @@ import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
+import { NinePVirtioDevice } from "./virtio/ninep-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -232,6 +233,36 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VW_DEV_ECHO = 1;
   const VW_DEV_NET = 2;
   const VW_DEV_BLK = 3;
+  // Issue #10: virtio-9p channels — one virtio device per 9P mount/connection.
+  // Device index, mount tag, and connection id (cid, for per-connection state
+  // isolation in the shared 9P server) MUST match kernel patch 0018's enum and
+  // the host side (kernel-host.js). The worker instance only answers the
+  // synchronous transport probes (features/config/setup) and forwards the kick;
+  // the main-thread instance does the async server round-trip + IRQ self-wake.
+  const VW_DEV_9P = [
+    { dev: 4, tag: "pcroot", cid: 1 }, // VW_DEV_9P_ROOT — pc VFS export (aname "/")
+    { dev: 5, tag: "nixcache", cid: 2 }, // VW_DEV_9P_NIXCACHE — nix binary cache
+  ];
+  const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
+
+  // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
+  // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
+  // even on a boot with no wayland device to publish it).
+  let raised_irqs_published = false;
+  const publish_raised_irqs_addr = () => {
+    if (raised_irqs_published) return;
+    try {
+      const fn = vmlinux_instance.exports.wasm_raised_irqs_ptr;
+      if (typeof fn === "function") {
+        port.postMessage({ method: "wayland_irq_addr", addr: Number(fn(0)) >>> 0 });
+        raised_irqs_published = true;
+      } else {
+        log("[virtio] wasm_raised_irqs_ptr export missing (stale vmlinux?) — idle wake off");
+      }
+    } catch (e) {
+      log("[virtio] wasm_raised_irqs_ptr failed: " + e);
+    }
+  };
 
   /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
   const virtio_devices = new Map();
@@ -288,18 +319,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // guest by replicating raise_interrupt() (OR irq bit + memory.atomic.notify
         // on this word) directly on shared memory — the parked idle Worker can't
         // run JS to service an async `wayland_in` postMessage (the 4e finding).
-        // per_cpu_ptr(&raised_irqs, 0) is fixed after per-cpu init; publish once.
-        // CPU 0 is the sole online CPU under maxcpus=1, so cpu 0 is the wait64 target.
-        try {
-          const fn = vmlinux_instance.exports.wasm_raised_irqs_ptr;
-          if (typeof fn === "function") {
-            port.postMessage({ method: "wayland_irq_addr", addr: Number(fn(0)) >>> 0 });
-          } else {
-            log("[virtio-wl] wasm_raised_irqs_ptr export missing (stale vmlinux?) — idle wake off");
-          }
-        } catch (e) {
-          log("[virtio-wl] wasm_raised_irqs_ptr failed: " + e);
-        }
+        publish_raised_irqs_addr();
+      } else if (ninepVirtioByDev.has(id)) {
+        // Issue #10: virtio-9p channel. The 9P server is async + main-thread, but
+        // this kick lands on a task worker — so the worker-side device only
+        // answers the synchronous transport probes (getFeatures/configRead via the
+        // base ctor + tag) and FORWARDS the notify to the main thread, where the
+        // host instance runs server.handle() and raises the completion IRQ via the
+        // raised_irqs self-wake. Publish that wake address (9P needs it even with
+        // no wayland device present).
+        const m = ninepVirtioByDev.get(id);
+        d = new NinePVirtioDevice({
+          ...common,
+          tag: m.tag,
+          cid: m.cid,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtio9p_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
       } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
       else if (id === VW_DEV_NET) {
         // virtio-net: this worker owns the TX queue (guest egress). Each frame

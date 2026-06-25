@@ -24,6 +24,7 @@ import { createModuleWorker } from "./make-worker.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
+import { NinePVirtioDevice } from "./virtio/ninep-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -38,6 +39,11 @@ export const linux = async ({
   log,
   console_write,
   ninep_ring,
+  // Issue #10: the 9P server (createNinePServer) the main-thread virtio-9p
+  // devices service. Same instance the legacy trans_cb transport.run() drives,
+  // so both transports share one VFS/export set; the per-connection cid keeps
+  // their state isolated. Absent → no virtio-9p host servicing (trans_cb only).
+  ninep_server,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
   // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
@@ -179,6 +185,42 @@ export const linux = async ({
     return hostNetDevice;
   };
 
+  // Issue #10: virtio-9p — MAIN-thread devices that service the 9P "requests"
+  // vqs through the shared 9P server. The guest's vq kick lands on a task worker
+  // (which forwards it here as virtio9p_notify); the worker can't run the async
+  // server.handle (the VFS is main-thread-bound), so the host drains the vring,
+  // awaits the reply, writes it back, and raises the completion IRQ via the SAME
+  // raised_irqs self-wake virtio-wl/net use (raiseHostWlIrq) — waking the guest
+  // task parked in p9_client_rpc. dev/cid MUST match kernel-worker's VW_DEV_9P +
+  // kernel patch 0018: 9P_ROOT=dev4/cid1, 9P_NIXCACHE=dev5/cid2.
+  const VW_DEV_9P = [
+    { dev: 4, cid: 1 },
+    { dev: 5, cid: 2 },
+  ];
+  const hostNinePByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
+  const hostNinePDevices = new Map();
+  const hostNineP = (dev) => {
+    const id = dev >>> 0;
+    const spec = hostNinePByDev.get(id);
+    if (!spec || !ninep_server || wlRaisedIrqsAddr == null) return null;
+    let d = hostNinePDevices.get(id);
+    if (!d) {
+      d = new NinePVirtioDevice({
+        dev: id,
+        irq: VIRTIO_WASM_IRQ_BASE + id,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+        cid: spec.cid,
+        server: ninep_server,
+      });
+      hostNinePDevices.set(id, d);
+    }
+    return d;
+  };
+
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -304,6 +346,14 @@ export const linux = async ({
     // on the worker, which forwards it here (the host owns the IN vring).
     wayland_in_refill: (_message) => {
       hostWl()?.flushIn();
+    },
+
+    // Issue #10: a guest virtio-9p kick the task worker forwarded. The 9P server
+    // is async + main-thread, so the worker can't service it — the host drains
+    // the device's "requests" vq, runs each T-message through the server, writes
+    // the R-message back, and raises the completion IRQ (raised_irqs self-wake).
+    virtio9p_notify: (message) => {
+      void hostNineP(message.dev)?.service(message.q >>> 0);
     },
 
     // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on

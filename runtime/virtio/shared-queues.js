@@ -16,7 +16,11 @@
 //   [4] used_lo  [5] used_hi  [6] num       [7] lastAvail (Atomics)  [8] valid
 
 const SLOT_WORDS = 9;
-const MAX_DEVS = 4;
+// Device-index capacity of the cross-worker table. Must cover every VW_DEV_*
+// the transport registers: WL=0, ECHO=1, NET=2, BLK=3, plus the virtio-9p
+// channels 9P_ROOT=4 / 9P_NIXCACHE=5 (issue #10). 8 leaves headroom; the SAB is
+// MAX_DEVS*MAX_QS*9*4 bytes (1152 B at 8×4), threaded into every worker.
+const MAX_DEVS = 8;
 const MAX_QS = 4;
 const TOTAL_WORDS = MAX_DEVS * MAX_QS * SLOT_WORDS;
 
