@@ -13,6 +13,7 @@ import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { ConsoleVirtioDevice } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
@@ -247,6 +248,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     { dev: 5, tag: "nixcache", cid: 2 }, // VW_DEV_9P_NIXCACHE — nix binary cache
   ];
   const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
+  // Issue #10 (option 2): virtio-console — a guest TTY on the stock mainline
+  // virtio-console driver, ADDED alongside the bespoke hvc_wasm backend for an
+  // A/B. Index 6 MUST match kernel patch 0019's enum (after the 9P channels) and
+  // kernel-host.js. Like virtio-9p, the worker instance only answers the
+  // synchronous transport probes and FORWARDS the kick; the main-thread instance
+  // owns the console sink (guest output) + input buffer (host input) and raises
+  // the completion IRQ via the raised_irqs self-wake.
+  const VW_DEV_CONSOLE = 6;
 
   // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
   // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
@@ -337,6 +346,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           tag: m.tag,
           cid: m.cid,
           forwardNotify: (dev, q) => port.postMessage({ method: "virtio9p_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
+      } else if (id === VW_DEV_CONSOLE) {
+        // Issue #10 (option 2): virtio-console. Like virtio-9p, the console sink
+        // (guest output) + input buffer (host input) are on the MAIN thread, but
+        // this kick lands on a task worker — so the worker-side device only
+        // answers the synchronous transport probes (getFeatures/config/setup via
+        // the base ctor) and FORWARDS the notify to the main thread, where the
+        // host instance drains the transmitq to the sink / delivers receiveq
+        // input and raises the completion IRQ via the raised_irqs self-wake.
+        // Publish that wake address (the console needs it for host->guest input).
+        d = new ConsoleVirtioDevice({
+          ...common,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtioconsole_notify", dev, q }),
         });
         publish_raised_irqs_addr();
       } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);

@@ -62,6 +62,7 @@ const dec = new TextDecoder();
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
+ *   onVirtioConsole?: (bytes: Uint8Array) => void,  // #10 option 2: sink for the stock virtio-console's guest output (the A/B counterpart of the hvc console). Absent → logged.
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
  * }} opts
  * @returns {Promise<{
@@ -69,6 +70,7 @@ const dec = new TextDecoder();
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
+ *   virtioConsoleInput(data: Uint8Array|string): void,
  *   kill(): void,
  * }>}
  */
@@ -149,6 +151,13 @@ export async function bootLinux(opts) {
     initrd,
     log: onLog,
     console_write: emit,
+    // Issue #10 (option 2): the virtio-console output sink — guest bytes drained
+    // from the stock virtio_console transmitq. This is the A/B counterpart to the
+    // hvc_wasm console (console_write/emit above), NOT a replacement: both probe
+    // and run. Funnel it to the caller's onVirtioConsole hook if provided, else
+    // the host log so the path is observable rather than silently dropped.
+    console_sink:
+      opts.onVirtioConsole || ((bytes) => onLog("[virtio-console] " + dec.decode(bytes))),
     ninep_server: ninepServer, // #10: main-thread virtio-9p host devices service this
     virtio_queues: virtioQueues,
     // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
@@ -228,6 +237,18 @@ export async function bootLinux(opts) {
      *   - `setLinkUp(up)`: flips the reported link-status config bit.
      */
     net: os.net,
+
+    /**
+     * Issue #10 (option 2): feed host input bytes to the guest over the stock
+     * virtio-console (the A/B counterpart of console(vt).write's hvc path). Bytes
+     * posted before the guest sets up the receiveq stay pending and are delivered
+     * on the next refill. No-op until a virtio-console device exists (a
+     * console_sink was wired AND the self-wake address is published post-boot).
+     * @param {Uint8Array|string} data
+     */
+    virtioConsoleInput(data) {
+      os.virtio_console_input(typeof data === "string" ? enc.encode(data) : data);
+    },
 
     /** Mark this boot handle dead. The 9P server is passive (driven by the
      *  guest's virtio-9p kicks — no background loop to stop); worker teardown is

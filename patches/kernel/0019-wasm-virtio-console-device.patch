@@ -1,0 +1,90 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Thu, 25 Jun 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: register a virtio-console device (VIRTIO_ID_CONSOLE)
+
+Register a virtio-console device on the wasm virtio transport so the
+stock mainline virtio-console driver (drivers/char/virtio_console.c,
+CONFIG_VIRTIO_CONSOLE) can carry a guest TTY/console, riding the same
+virtio_wasm carrier the 9P / blk / net devices already use. This is the
+console edition of the "everything is a virtio device" consolidation
+(issue #10, option 2): the guest gains a standard virtualized-Linux
+console path (stock hvc-over-virtio) ALONGSIDE the existing bespoke
+hvc_wasm backend, so the two can be A/B'd before hvc_wasm is retired in a
+later change. This patch ADDS the virtio-console path; it does NOT remove
+hvc_wasm (patches 0002/0003) — that is a separate follow-up gated on
+boot-validating virtio-console.
+
+SINGLE PORT (no VIRTIO_CONSOLE_F_MULTIPORT): mainline virtio_console
+binds a port to a (receiveq, transmitq) vq pair; a featureless device
+gets exactly ONE port (port 0) which the driver wires to hvc as a console
+line — vq[0] = receiveq (host->guest input), vq[1] = transmitq
+(guest->host output). That is the hvc-equivalent of one console, which is
+all this path needs to A/B against hvc0. We deliberately offer NO feature
+bits: VIRTIO_CONSOLE_F_SIZE (cols/rows in config space) is unused (the
+TIOCSWINSZ path stays on hvc_wasm's wasm_driver_hvc_winsize for now), and
+VIRTIO_CONSOLE_F_MULTIPORT (the control vq + N extra ports = the
+hvc0..hvc7 multi-console model) is intentionally NOT implemented here.
+MULTIPORT GAP: the existing hvc_wasm path exposes 8 consoles (hvc0..hvc7,
+HVC_WASM_NR); this single-port virtio-console exposes ONE. Closing that
+gap (a multiport control vq + per-port add/open) is future work,
+documented rather than stubbed — the host device model
+(runtime/virtio/console-device.js) would grow a control vq and per-port
+queues, and this registration would offer VIRTIO_CONSOLE_F_MULTIPORT.
+Until then the single port is the correct, complete minimal console.
+
+Device index follows the existing enum order (WL=0, ECHO=1, NET=2, BLK=3,
+9P_ROOT=4, 9P_NIXCACHE=5), so VW_DEV_CONSOLE=6 — matching the host-side
+VW_DEV_CONSOLE constants in runtime/kernel-worker.js / runtime/kernel-host.js
+and the ConsoleVirtioDevice's irq = VIRTIO_WASM_IRQ_BASE(8) + 6 = 14.
+(Like the 9P channels, the index assumes the preceding NET/BLK/9P slots
+are built — the production config enables all of them.) Guarded by
+IS_ENABLED(CONFIG_VIRTIO_CONSOLE) so the enum slot and init call are a
+no-op when the stock virtio-console driver is not built.
+
+The default 64-entry vq is fine: virtio_console moves a TTY byte stream in
+small page-sized chunks (no 9P-style 128-page msize chain), so no per-id
+qsize override is needed (unlike VIRTIO_ID_9P in patch 0018).
+
+Part of issue #10 (host<->guest bridge consolidation onto virtio).
+---
+ drivers/virtio/virtio_wasm.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+index c0ffee123..d0c0ff456 100644
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -371,6 +371,9 @@ enum {
+ #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
++#endif
++#if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
++	VW_DEV_CONSOLE,		/* virtio-console: a guest TTY (stock virtio_console.c) */
+ #endif
+ 	VW_DEV_COUNT,
+ };
+@@ -410,6 +413,21 @@ static int __init virtio_wasm_transport_init(void)
+ 	if (IS_ERR(vw))
+ 		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
+ #endif
++
++#if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
++	/*
++	 * virtio-console for a guest TTY (stock drivers/char/virtio_console.c).
++	 * Single port, no features: the driver binds vq[0]=receiveq (host->guest
++	 * input) + vq[1]=transmitq (guest->host output) and wires port 0 to hvc
++	 * as a console line. The host serves it via runtime/virtio/console-device.js.
++	 * Added ALONGSIDE the bespoke hvc_wasm backend (patches 0002/0003) for an
++	 * A/B during the #10 consolidation; hvc_wasm retirement is a later change.
++	 * MULTIPORT (hvc0..hvc7 parity) is a documented gap, not implemented here.
++	 */
++	vw = virtio_wasm_register(VW_DEV_CONSOLE, VIRTIO_ID_CONSOLE);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: console register failed: %ld\n", PTR_ERR(vw));
++#endif
+
+ 	return 0;
+ }
+--
+2.53.0
