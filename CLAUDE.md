@@ -194,11 +194,29 @@ COMPILES C **and C++** in-browser entirely from Nix-built artifacts (`cc -O2 hel
 in-guest). Enabling clang needed a shared kernel fix: `CONFIG_BOOT_MEM_PAGES`
 0x2000→0x4000 (512MiB→1GiB) so the 57MB clang.wasm can be mmap'd contiguously after
 the sysroot unpack fragments the NOMMU heap. C startup needed two link/loader fixes
-(guest-cc `--gc-sections` + a loader data-relocs guard — see the guest-compile
-SIGILL note in agent memory + `toolchain/guest-cc.nix`); `c++` adds `-D__linux__`
-(libc++ pthread thread-API selection on the `-unknown` triple) + `--allow-undefined`
-(the host-provided `__cpp_exception` wasm-EH tag), with libc++ shipped in
-`cc-sysroot` (`sys/cxx`).
+(`--gc-sections` + a loader data-relocs guard — see the guest-compile SIGILL note in
+agent memory); `c++` adds `-D__linux__` (libc++ pthread thread-API selection on the
+`-unknown` triple) + the `__cpp_exception` wasm-EH tag (allow-listed), with libc++
+shipped in `cc-sysroot` (`sys/cxx`).
+
+**clang is its own driver — the `cc`/`c++` shell wrappers are retired** (#3,
+2026-06-24): the wrappers existed only because bare clang for the `wasm32-unknown-unknown`
+target didn't know our sysroot/dylink link model. clang's STOCK wasm driver already
+emits the exact link `cc` hand-rolled (crt1.o, `-L`s, `-lc`, builtins) from
+`--sysroot`+`-resource-dir`; the only missing pieces (target features, the dylink/
+shared-memory link, the libc++/EH set) now live ONCE in **`toolchain/wasm-clang-config.nix`**
+as `clang.cfg`/`clang++.cfg`, installed next to the `clang` binary in `guest-clang`
+(+ a `clang++` symlink). clang **auto-loads `<driver>.cfg` only from the REAL binary's
+dir** (it resolves argv[0] symlinks first — a downstream symlink-farm package does NOT
+work, which is why the config lives in `guest-clang`), so bare `clang hello.c -o hello`
+/ `clang++ …` are complete drivers and in-process-link via `wasm-ld` + `posix_spawn`
+(`patches/llvm/0001`, #48/#50). `guest-cc`/`guest-cxx` collapse to thin
+`exec clang/clang++` aliases (kept as packages so the `nix-env -iA guest-cc` catalog
+names from #48 are unchanged). The four duplicated flag sites (guest-cc, guest-cxx,
+plus the host-side `make.nix`/`nix-wasm.nix` `wcc`/`wcxx`) now share one vocabulary;
+the host-side two still inline it (they use the host clang-unwrapped raw, not the
+guest config). Validated in-guest (`runtime/demo/node/wrapperless-cc-e2e.mjs`): bare
+`clang`/`clang++` and the `cc`/`c++` aliases all compile+run.
 
 **In-guest autotools also works** (2026-06-17): a real autoconf `./configure &&
 make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
@@ -606,9 +624,10 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
 - **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, publish to
   R2, guest substitutes). The CI workflow (Task 9) wires this; see the Caching
   design goal above.
-- **#3** — retire the `cc`/`c++` shell wrappers by making `clang`/`clang++`
-  their own driver for the wasm target (config file / custom ToolChain), gated on
-  whether LLVM's linker spawn uses `posix_spawn` on the NOMMU port.
+- **#3** — DONE (2026-06-24): the `cc`/`c++` shell wrappers are retired; clang is
+  its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
+  approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
+  satisfied (#48/#50). See the "clang is its own driver" note in Current state.
 - **#1** — `nix profile install` rejects the `outPath`-only guest index (use
   `nix-env -iA`); fix folds into #2.
 

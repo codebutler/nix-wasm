@@ -21,7 +21,14 @@
 # standard build stays fully hermetic/reproducible (PRIME DIRECTIVE) — enable it
 # only for the dev iteration loop via `.#guest-clang-ccache`. Requires the host
 # nix.conf to expose `/nix/var/cache/ccache` (see CLAUDE.md § ccache).
-{ pkgs, musl, busyboxKernelHeaders, libcxx, compilerRt, useCcache ? false }:
+# `ccSysroot` is the runtime cc-sysroot ($ccSysroot/sys = {musl,clang,cxx}); the
+# installed clang.cfg/clang++.cfg reference it so the guest's bare `clang`/`clang++`
+# are complete drivers (#3 — see toolchain/wasm-clang-config.nix). clang auto-loads
+# a `<driver>.cfg` only from the directory of the REAL clang binary (it resolves
+# argv[0] symlinks first — verified), so the config MUST live here next to clang,
+# not in a downstream symlink package. cc-sysroot only depends on
+# musl/compilerRt/libcxx, so this is not a cycle.
+{ pkgs, musl, busyboxKernelHeaders, libcxx, compilerRt, ccSysroot, useCcache ? false }:
 let
   lib = pkgs.lib;
   llvm = pkgs.llvmPackages_21;
@@ -32,6 +39,14 @@ let
   # a stray `fork` — fails the link instead of becoming a dangling `env.*`
   # import that traps at instantiation (that was the #50 in-guest-cc crash).
   allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
+
+  # clang.cfg / clang++.cfg — the single source of truth for the guest's compile +
+  # link flags (#3). Installed next to the clang binary below so bare `clang
+  # hello.c -o hello` / `clang++ …` are complete wasm32-NOMMU drivers (clang
+  # auto-loads the config named after the driver from its real install dir, then
+  # in-process-links via wasm-ld + posix_spawn). Retires the `cc`/`c++` flag-
+  # duplicating shell wrappers (which reduce to thin name aliases).
+  clangConfig = import ./wasm-clang-config.nix { inherit pkgs ccSysroot allowUndefined; };
 
   # cmake's COMPILER_LAUNCHER prefixes ccache onto each compile command. The
   # trailing space + inline prepend means that when OFF this expands to "" and the
@@ -178,6 +193,17 @@ pkgs.stdenv.mkDerivation ({
     cp build/bin/clang-21 $out/bin/clang
     cp build/bin/lld      $out/bin/wasm-ld
     cp -a build/lib/clang $out/lib/clang
+
+    # Make clang its own driver (#3): a `clang++` entrypoint (clang dispatches C++
+    # mode on the `++` in argv[0]) and the auto-loaded config files next to the
+    # binaries. clang auto-loads `<driver>.cfg` from its real install dir, so bare
+    # `clang`/`clang++` now carry the full wasm32-NOMMU compile + dylink-link flags
+    # with no wrapper — clang finds wasm-ld in this same $out/bin and spawns it via
+    # posix_spawn (patches/llvm/0001). The `cc`/`c++` packages reduce to thin name
+    # aliases over these.
+    ln -s clang $out/bin/clang++
+    cp ${clangConfig}/clang.cfg   $out/bin/clang.cfg
+    cp ${clangConfig}/clang++.cfg $out/bin/clang++.cfg
     runHook postInstall
   '';
 } // lib.optionalAttrs useCcache {

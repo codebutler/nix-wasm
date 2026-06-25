@@ -257,29 +257,34 @@
         src = weston;
       };
 
+      # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
+      # headers + compiler-rt builtins + libc++) — the runtime sysroot the guest
+      # clang/clang++ config files reference (#3), served read-only over 9P in the
+      # /nix closure. Defined BEFORE guestClang because guest-clang.nix now installs
+      # those config files (only deps are musl/compilerRt/libcxx → no cycle).
+      ccSysroot = import ./toolchain/cc-sysroot.nix { inherit pkgs musl compilerRt libcxx; };
+
       # ---- Phase 3: the in-guest compiler (clang.wasm + wasm-ld.wasm), LLVM-21
-      # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++.
+      # clang+lld cross-built to wasm32 against the nix musl sysroot + libc++. It
+      # also ships clang.cfg/clang++.cfg so bare `clang`/`clang++` are complete
+      # wasm32-NOMMU drivers (#3).
       guestClang = import ./toolchain/guest-clang.nix {
-        inherit pkgs musl libcxx compilerRt;
+        inherit pkgs musl libcxx compilerRt ccSysroot;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
       # Opt-in ccache variant (CLAUDE.md § ccache): same derivation, clang routed
       # through ccache so a rebuild after a flag/patch tweak reuses object files.
       # Build via `.#guest-clang-ccache`; the default `.#guest-clang` stays hermetic.
       guestClangCcache = import ./toolchain/guest-clang.nix {
-        inherit pkgs musl libcxx compilerRt;
+        inherit pkgs musl libcxx compilerRt ccSysroot;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
         useCcache = true;
       };
 
-      # ---- Phase 3 Stage B: the in-guest `cc` pipeline — cc-sysroot (a store DIR
-      # of musl + LLVM-21 builtin headers + compiler-rt builtins) and the `cc`
-      # driver (references clang/wasm-ld + the sysroot by store path; no /opt/bin,
-      # no cpio extraction — all served read-only over 9P in the /nix closure).
-      ccSysroot = import ./toolchain/cc-sysroot.nix { inherit pkgs musl compilerRt libcxx; };
+      # ---- the in-guest `cc`/`c++` drivers — thin aliases over the self-configuring
+      # guest clang/clang++ (#3). Kept as the guest-cc/guest-cxx packages so the
+      # install catalog names are unchanged (`nix-env -iA guest-cc`).
       guestCc = import ./toolchain/guest-cc.nix { inherit pkgs guestClang ccSysroot; };
-      # ---- the in-guest `c++` driver (C++ companion to `cc`): same clang+wasm-ld
-      # over the cc-sysroot's libc++ (sys/cxx), with wasm-EH + the libc++ link.
       guestCxx = import ./toolchain/guest-cxx.nix { inherit pkgs guestClang ccSysroot; };
 
       # ---- in-guest `make` (pdpmake → wasm32). Works unpatched: it spawns recipes
