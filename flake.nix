@@ -2,8 +2,9 @@
   description = "wasm32-linux-musl NOMMU toolchain + Nix, built with Nix (#139/#141)";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   # wl-eyes: a native Wayland client (source-only; built by ./wl-eyes.nix against
-  # the wasm32 cross stack). flake = false → consumed as a plain source tree.
-  inputs.wl-eyes = { url = "git+file:///home/vbvntv/Code/wl-eyes"; flake = false; };
+  # the wasm32 cross stack). Vendored into ./vendor/wl-eyes so it builds in CI
+  # from a fresh checkout (issue #62) — referenced as a repo-relative path literal
+  # in outputs, NOT a flake input, since the source lives in this repo's own tree.
   # weston: upstream source for the weston-flowers demo client (built by
   # ./weston-flowers.nix — minimal toytoolkit subset, see that file). Pinned to
   # the 14.0.1 release tarball; flake = false → plain source tree.
@@ -12,7 +13,7 @@
     flake = false;
   };
 
-  outputs = { self, nixpkgs, wl-eyes, weston }:
+  outputs = { self, nixpkgs, weston }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -123,7 +124,7 @@
         wayland = cross.wayland;
         wayland-protocols = cross.wayland-protocols;
         libffi = cross.libffi;
-        src = wl-eyes;
+        src = ./vendor/wl-eyes;
       };
 
       # Wayland Phase 4f: wl-anim — a minimal SELF-ANIMATING client (wl_shm +

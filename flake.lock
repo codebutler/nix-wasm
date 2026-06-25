@@ -19,8 +19,7 @@
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "weston": "weston",
-        "wl-eyes": "wl-eyes"
+        "weston": "weston"
       }
     },
     "weston": {
@@ -34,22 +33,6 @@
       "original": {
         "type": "tarball",
         "url": "https://gitlab.freedesktop.org/wayland/weston/-/releases/14.0.1/downloads/weston-14.0.1.tar.xz"
-      }
-    },
-    "wl-eyes": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1781782571,
-        "narHash": "sha256-TpDdDP4BJsV7VDUQjeVMBdz81OElPfpxYwKcqvc2Vvc=",
-        "ref": "refs/heads/master",
-        "rev": "6cd1ccb69f8a1d178337257dd79b404843feb17a",
-        "revCount": 1,
-        "type": "git",
-        "url": "file:///home/vbvntv/Code/wl-eyes"
-      },
-      "original": {
-        "type": "git",
-        "url": "file:///home/vbvntv/Code/wl-eyes"
       }
     }
   },
