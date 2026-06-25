@@ -47,8 +47,13 @@ jobs:
   # --- the heavy from-source LLVM builds, one runner each, pushed to Cachix ----
   toolchain:
     name: build .#${{ matrix.attr }}
-    runs-on: ubuntu-latest # x86_64-linux: cache.nixos.org has the full nixos-26.05 cache
-    timeout-minutes: 350 # cold cache compiles LLVM from source (~1-2h); under the 6h job limit
+    # Namespace large runner (x86_64). The from-source LLVM poles (guest-clang, the
+    # kernel's patched LLVM) are RAM/core-bound — they time out on a stock 4-core/
+    # 16 GB ubuntu-latest (kernel hit the 6h cap). The nix-heavy profile gives the
+    # cores/RAM/disk to land each in ~1-2h. cache.nixos.org still has the full
+    # nixos-26.05 x86_64 cache for the native deps.
+    runs-on: namespace-profile-nix-heavy
+    timeout-minutes: 350 # headroom under the 6h job limit; warm reruns substitute from Cachix
     strategy:
       fail-fast: false
       matrix:
@@ -56,14 +61,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The from-source LLVM builds need far more than the ~14 GB free on a stock
-      # ubuntu-latest runner — reclaim the preinstalled toolchains we don't use.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
-          sudo docker image prune --all --force || true
-          df -h /
+      # Namespace profiles provision ample disk, so the ubuntu-latest preinstalled-
+      # toolchain reclaim hack isn't needed here — just record free space.
+      - name: Disk free
+        run: df -h /
 
       - uses: cachix/install-nix-action@v27
         with:
