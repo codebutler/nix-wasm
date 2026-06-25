@@ -1,0 +1,48 @@
+name: runtime-gates
+
+# Phase 5 (#2): the runtime/ engine static gates. Fast (no Nix, no artifacts) —
+# runs on every change under runtime/. Covers the two gates that are green on a
+# clean checkout with the pinned tooling: the engine unit tests (bun:test, 72/0)
+# and the tsc typecheck.
+#
+# `lint` (oxlint) and `format:check` (oxfmt) are intentionally NOT wired here yet:
+# on a clean checkout they are red on pre-existing debt (vendored bundles under
+# demo/web/vendor/ aren't excluded, and several committed source files don't match
+# oxfmt 0.52.0 defaults — the repo ships no oxfmt/oxlint config). That cleanup is
+# separate from this issue; wiring a knowingly-red gate would just block every PR.
+on:
+  push:
+    branches: [master, 'claude/**']
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/runtime-gates.yml'
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/runtime-gates.yml'
+  workflow_dispatch:
+
+jobs:
+  gates:
+    name: engine tests + typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      # Engine unit tests (ninep + nix-store): 72 tests, no artifacts needed.
+      - name: Engine unit tests
+        run: bun run test
+
+      # tsc -p jsconfig.json. *.test.js are excluded from the typecheck include
+      # (they import "bun:test", which tsc can't resolve) — see jsconfig.json.
+      - name: Typecheck
+        run: bun run typecheck

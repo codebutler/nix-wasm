@@ -11,6 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Reclaim disk in case the wasm closure isn't fully cached yet (cold Cachix).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          df -h /
+
       # Install Nix with the nixos-26.05 channel pin. This matches the project's
       # CI caching strategy: 26.05 has a complete x86_64 binary cache (including
       # LLVM 21), so no heavy from-source rebuilds occur. (aarch64 lacks the cache
@@ -20,6 +27,14 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Substitute the wasm artifacts (incl. guest-clang/kernel) from the Cachix
+      # cache the nix-wasm build CI populated — so this publish job copies prebuilt
+      # store paths instead of rebuilding LLVM from source (Phase 5 #2).
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       # Install bun so `bunx wrangler` is available in publish-to-r2.sh.
       - uses: oven-sh/setup-bun@v2

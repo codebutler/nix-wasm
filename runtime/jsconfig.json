@@ -11,5 +11,9 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"]
   },
   "include": ["**/*.js", "**/*.mjs"],
-  "exclude": ["node_modules", "demo"]
+  // *.test.js import "bun:test" (resolved by the bun runtime, not tsc) — tsc has
+  // no module for it (TS2307) and they exercise loose test-only shapes. bun runs
+  // them via `bun test`; tsc needn't. Excluding keeps the typecheck gate green
+  // without pulling @types/bun into devDeps. (issue #2, comment re: typecheck baseline)
+  "exclude": ["node_modules", "demo", "**/*.test.js"]
 }

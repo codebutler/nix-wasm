@@ -261,6 +261,36 @@ than building in-guest — that's the "install any package" model and what makes
 the crossSystem approach scale. From-source host rebuilds are a failure mode to
 design out (see the Environment notes under Hard-won learnings).
 
+**Two-tier cache wiring (#2, Phase 5):** the **host build cache is Cachix**
+(`nix-wasm.cachix.org`, public read; signing key
+`nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0=`); the
+**guest-facing cache is R2** (`nix-cache/` tree, served by `runtime/nix-cache.js`).
+CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
+`packagesFor system` + `genAttrs ["x86_64-linux" "aarch64-linux"]`, with
+`localSystem` threaded into `wasm-cross.nix`; `nix build .#X` picks the runner's
+system). Three workflows:
+- `.github/workflows/nix-wasm.yml` — builds the wasm world from source on a
+  build-input/patch change and pushes to Cachix. The two from-source LLVM poles
+  (`guest-clang`, `kernel`) build on their own runners in a matrix (each under the
+  6h job limit, both in parallel), then the cheaper `artifacts` job
+  (`nix-wasm`/`wasm-binary-cache`/`wasm-base-squashfs`) **substitutes** them from
+  Cachix. Cold cache pays the LLVM rebuild once; warm reruns are minutes.
+  Content-addressed — a `flake.lock`/`patches/` change self-invalidates (no
+  manual cache key). Initramfs/linux-image are **not** built in CI yet: they pull
+  the local-only `wl-eyes` input (`git+file:///home/...`), which must be vendored
+  first.
+- `.github/workflows/publish-wasm-artifacts.yml` — on master, substitutes the
+  closure from Cachix and uploads `base.squashfs` + the `nix-cache/` tree to R2
+  (`scripts/publish-to-r2.sh`).
+- `.github/workflows/runtime-gates.yml` — runtime/ engine `test` + `typecheck`
+  (the two gates green on a clean checkout). `lint`/`format:check` are red on
+  pre-existing debt (no committed oxfmt/oxlint config) and deliberately unwired.
+
+**Secret required:** add `CACHIX_AUTH_TOKEN` (a push token for `nix-wasm.cachix.org`)
+to repo secrets so CI can push. Without it the jobs still substitute from the
+public cache; they just don't populate it. (The R2 publish also needs
+`CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`.)
+
 ## ccache (opt-in compile cache — dev iteration only)
 
 ccache is **not** the caching design goal above (that's the Nix binary cache,
@@ -629,9 +659,12 @@ Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →
 guest-clang/cc → kernel); the code + this file + git history are the record.
 Remaining work and design notes live as GitHub issues, not in-repo plan files:
 
-- **#2** — Phase 5: CI + binary cache (build wasm outputs on x86_64, publish to
-  R2, guest substitutes). The CI workflow (Task 9) wires this; see the Caching
-  design goal above.
+- **#2** — Phase 5: CI + binary cache. **Cachix is wired** as the host build
+  cache (`nix-wasm.cachix.org`) and the flake builds on x86_64-linux; the three
+  workflows + the two-tier (Cachix host / R2 guest) design are documented under
+  the Caching section above. Remaining to fully close: add the `CACHIX_AUTH_TOKEN`
+  repo secret, run the cold-cache build once to populate Cachix, and vendor the
+  `wl-eyes` input so initramfs/linux-image can build in CI too.
 - **#3** — DONE (2026-06-24): the `cc`/`c++` shell wrappers are retired; clang is
   its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
   approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
