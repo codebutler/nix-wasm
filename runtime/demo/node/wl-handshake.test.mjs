@@ -1,10 +1,12 @@
 // wl-handshake.test.mjs — node:test gate for the Wayland registry round-trip
-// (issue #30). Boots the busybox guest, runs /bin/waylandproxyd + the stock
+// (issue #30). Boots the busybox guest, runs /bin/sommelier --parent + the stock
 // libwayland /bin/wlhandshake client, and asserts the handshake completes:
 //
-//   wlhandshake --AF_UNIX--> waylandproxyd --VIRTWL SEND--> JS virtio-wl device
+//   wlhandshake --AF_UNIX wayland-0--> sommelier --parent
+//     (accept) --posix_spawn--> sommelier --client-fd=N
+//       --VIRTWL SEND--> JS virtio-wl device
 //   --OUT--> host WlServer fallback (no compositor bridge: WlDevice.serveLocal)
-//   --IN VFD_RECV--> guest --RECV--> waylandproxyd --> wlhandshake sees globals.
+//   --IN VFD_RECV--> guest --RECV--> sommelier --AF_UNIX--> wlhandshake sees globals.
 //
 // The host→guest reply leg is the path #30 found broken: with no Greenfield
 // bridge wired the node harness used to DROP the SEND ("no host bridge wired").
@@ -13,7 +15,7 @@
 // path uses, just with the registry-handshake WlServer instead of Greenfield.
 //
 // Artifact source / SKIP behavior mirror boot.test.mjs (prerequisite-gate only;
-// nix:false busybox boot — wlhandshake + waylandproxyd are initramfs extraBins).
+// nix:false busybox boot).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -60,11 +62,21 @@ test(
       // wl_display_connect(NULL) composes "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY".
       send("export XDG_RUNTIME_DIR=/tmp\n");
       send("export WAYLAND_DISPLAY=wayland-0\n");
-      send("/bin/waylandproxyd & sleep 1\n");
-      assert.ok(
-        await waitFor(/RESULT waylandproxyd PASS .*listening/, 15000),
-        "waylandproxyd did not come up",
-      );
+      // Redirect stderr to capture Sommelier's LOG(WARNING) dmabuf fallback line.
+      send("/bin/sommelier --parent 2>&1 &\n");
+
+      // Sommelier --parent binds wayland-0 silently; poll until the socket appears.
+      let socketReady = false;
+      for (let i = 0; i < 15; i++) {
+        send("ls /tmp/wayland-0 2>/dev/null && echo SOCKREADY || echo SOCKWAIT\n");
+        await waitFor(/SOCKREADY|SOCKWAIT/, 3000);
+        if (/SOCKREADY/.test(out)) {
+          socketReady = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      assert.ok(socketReady, "sommelier --parent socket /tmp/wayland-0 never appeared");
 
       send("/bin/wlhandshake; echo HSDONE=$?\n");
       assert.ok(await waitFor(/HSDONE=\d/, 30000), "wlhandshake did not finish");

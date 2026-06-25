@@ -388,6 +388,30 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **wasm-ld flag filter** must also drop `--compress-debug-sections` (silently
   failed every sqlite autosetup link probe → bogus "Cannot find libm") alongside
   the ELF-only flags (`--undefined-version`, …).
+- **`-fvisibility=hidden` in the cc-wrapper** (`wasm-cross.nix`; #7): C++ standard
+  library stream objects (`std::cout`, `std::cin`, …) have vtable/typeinfo symbols
+  that clang emits as `default` visibility even in `-fvisibility=hidden` builds. When
+  those symbols flow through the cc-wrapper WITHOUT `-fvisibility=hidden`, wasm-ld
+  emits them as `env.*` imports (external undefined), causing a `LinkError` at
+  instantiation. Fix: pass `-fvisibility=hidden` in the cc-wrapper's `$NIX_CFLAGS_COMPILE`
+  so ALL cross-compiled objects get it — the vtable/typeinfo definitions are then
+  hidden and wasm-ld keeps them internal instead of emitting import stubs.
+- **Sommelier virtwl `NEW_DMABUF→-ENOTTY` shm-path selection** (`patches/kernel/0013`):
+  the kernel's `virtwl_ioctl_new` must return `-ENOTTY` (not `-EINVAL`) when the
+  `VIRTWL_IOCTL_NEW_DMABUF` subtype is unsupported. Sommelier's `virtwl_channel.cc`
+  probes for dmabuf support with that ioctl; a `−EINVAL` response means "bad args, try
+  again" (infinite retry / crash), whereas `-ENOTTY` means "not implemented, use plain
+  virtwl" — which triggers the `"using virtwl instead"` fallback and lets wl_shm
+  operate normally. The probe result is logged at Sommelier startup.
+- **Sommelier link-only cross closure (libxcb/libdrm/minigbm)** (`userspace/sommelier.nix`;
+  `deps-overlay.nix`): Sommelier's build system unconditionally links `libxcb`, `libdrm`,
+  and `minigbm` even on the wayland-only/no-GPU path. None of these are used at runtime
+  on the NOMMU wasm guest (no X11, no DRM, no GBM). Cross them as **link-only stubs**:
+  `libxcb` via `cross.xorg.libxcb` (nixpkgs, cross-builds fine for headers); `libdrm`
+  via `cross.libdrm` (nixpkgs); `minigbm` via a minimal `userspace/minigbm.nix` stub
+  that provides the `gbm.h` header and an empty `libgbm.a` (the GPU entry points are
+  never called — any call aborts via the allow-list contract). Do NOT pull in the full
+  GPU stack (mesa, EGL, DRM device nodes); these are purely link-time satisfiers.
 - **crt `int main`**: a weak 2-arg crt `main` wrapper (`musl.nix`) so all of
   `int main(void)` / `(int,char**)` link — else autoconf's "C compiler cannot
   create executables" aborts every autoconf dep.

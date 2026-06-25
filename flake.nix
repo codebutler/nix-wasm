@@ -97,26 +97,10 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
-      # Wayland Phase 1 (1c, Sommelier pivot): the thin guest-side Wayland↔virtwl
-      # bridge. Opens /dev/wl0 + a wayland-0 AF_UNIX socket and splices the wire
-      # protocol (bytes + fds) between guest clients and the host compositor.
-      wasmWaylandProxyd = import ./userspace/waylandproxyd.nix {
-        inherit pkgs cross;
-        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
-      };
-
-      # Wayland Phase 1 (1c M3): a minimal AF_UNIX test client that sends a
-      # wl_display.get_registry request to wayland-0 — proves waylandproxyd
-      # accepts a connection and forwards the initial bytes to the host.
-      wasmWlClient = import ./userspace/wlclient.nix {
-        inherit pkgs cross;
-        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
-      };
-
       # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
       # the Phase 1 deliverable. Links the cross libwayland-client and runs the
       # canonical wl_display_connect → get_registry → roundtrip → enumerate
-      # globals flow THROUGH waylandproxyd, end-to-end across the transport.
+      # globals flow THROUGH Sommelier --parent, end-to-end across the transport.
       wasmWlHandshake = import ./userspace/wlhandshake.nix {
         inherit pkgs cross;
       };
@@ -141,9 +125,8 @@
 
       # Task 10 (leak regression, issue #7): wl-pool-churn — creates and destroys
       # N wl_shm_pools through Sommelier/virtwl, asserting guest MemFree stays
-      # bounded (no kernel-side shm leak per pool). On waylandproxyd the leaked
-      # VIRTWL_IOCTL_NEW_ALLOC objects fragment the buddy allocator; Sommelier
-      # issues VIRTWL_IOCTL_CLOSE on destroy so the test passes.
+      # bounded (no kernel-side shm leak per pool). Sommelier issues
+      # VIRTWL_IOCTL_CLOSE on destroy so pools are reclaimed by the kernel.
       wlPoolChurn = import ./userspace/wl-pool-churn.nix {
         inherit pkgs cross;
       };
@@ -362,7 +345,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -471,12 +454,6 @@
 
         # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
         wltest = wasmWlTest;
-
-        # Wayland Phase 1 (1c): the guest-side Wayland↔virtwl bridge binary.
-        waylandproxyd = wasmWaylandProxyd;
-
-        # Wayland Phase 1 (1c M3): the AF_UNIX test client for waylandproxyd.
-        wlclient = wasmWlClient;
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;
@@ -617,9 +594,9 @@
       # Exposed as `wl-<name>` so `nix build -k .#wl-…` surfaces every cross
       # failure at once. wayland-scanner builds for the BUILD host (buildPackages
       # native/target split, same as wl-eyes); the libwayland-* libraries cross-
-      # compile. These deps are what waylandproxyd (1c) + the stock-libwayland
-      # client test (1d) link against. Only libffi needed an overlay fix (the raw
-      # backend, see deps-overlay.nix); wayland/pixman/expat cross-build unmodified.
+      # compile. These deps are what Sommelier + the stock-libwayland client test
+      # (1d) link against. Only libffi needed an overlay fix (the raw backend, see
+      # deps-overlay.nix); wayland/pixman/expat cross-build unmodified.
       // builtins.listToAttrs (map (n: { name = "wl-${n}"; value = cross.${n}; }) [
         "libffi"
         "expat"
