@@ -121,6 +121,15 @@
         inherit pkgs cross;
       };
 
+      # Task 2 (Sommelier/virtwl de-risk B): in-process libwayland-SERVER libffi
+      # dispatch proof. Drives a custom test_ffi protocol request over a
+      # socketpair, asserting the server handler fires via wl_closure_invoke →
+      # ffi_call through our raw wasm FFI backend. SERVER-side ffi_call is new
+      # vs wlhandshake (client-side only). See userspace/wl-server-ffi.c.
+      wlServerFfi = import ./userspace/wl-server-ffi.nix {
+        inherit pkgs cross;
+      };
+
       # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app. Links the
       # cross libwayland-client + libffi (raw backend) + wayland-protocols
       # (xdg-shell), generates the xdg-shell glue with the BUILD-host
@@ -335,7 +344,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -453,6 +462,11 @@
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;
+
+        # Task 2 (Sommelier/virtwl de-risk B): libwayland-server wl_closure_invoke
+        # → ffi_call proof. In-process socketpair, custom test_ffi protocol, asserts
+        # server ping handler fires via SERVER-side ffi_call → $out/bin/wl-server-ffi.
+        wl-server-ffi = wlServerFfi;
 
         # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app
         # (wl_shm + xdg-shell + wl_pointer) cross-built to wasm → $out/bin/wl-eyes.
