@@ -78,6 +78,13 @@ pkgs.stdenv.mkDerivation {
     # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
     # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
     ./patches/kernel/0018-wasm-virtio-9p-device.patch
+    # Issue #10 option 3 (the vsock piece): register a virtio-vsock device
+    # (VIRTIO_ID_VSOCK = 19) on the wasm virtio transport so the stock mainline
+    # virtio-vsock transport (CONFIG_VIRTIO_VSOCKETS riding CONFIG_VSOCKETS)
+    # gives the guest→host /Ctl desktop-control bridge a standard AF_VSOCK
+    # socket channel. VW_DEV_VSOCK is pinned to host index 7; the host serves
+    # the guest CID + drives the rx/tx/event vqs (runtime/virtio/vsock-device.js).
+    ./patches/kernel/0020-wasm-virtio-vsock-device.patch
   ];
 
   nativeBuildInputs = [
@@ -199,7 +206,19 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_MISC_FILESYSTEMS \
       --enable CONFIG_SQUASHFS \
       --enable CONFIG_SQUASHFS_ZSTD \
-      --enable CONFIG_ZSTD_DECOMPRESS
+      --enable CONFIG_ZSTD_DECOMPRESS \
+      `# Issue #10 option 3: AF_VSOCK + the stock virtio-vsock transport` \
+      `# (net/vmw_vsock/virtio_transport.c) on the virtio_wasm transport (patch` \
+      `# 0020, VW_DEV_VSOCK=7, VIRTIO_ID_VSOCK=19) — a standard socket channel` \
+      `# for the guest→host /Ctl bridge. CONFIG_VSOCKETS is the AF_VSOCK core;` \
+      `# CONFIG_VIRTIO_VSOCKETS is the guest driver (it selects` \
+      `# CONFIG_VIRTIO_VSOCKETS_COMMON automatically). CONFIG_VSOCKETS depends on` \
+      `# CONFIG_NET (already on above); CONFIG_VIRTIO_VSOCKETS depends on both` \
+      `# CONFIG_VSOCKETS and CONFIG_VIRTIO (both on above), or olddefconfig` \
+      `# silently drops the driver.` \
+      --enable CONFIG_VSOCKETS \
+      --enable CONFIG_VIRTIO_VSOCKETS \
+      --enable CONFIG_VIRTIO_VSOCKETS_COMMON
 
     make $makeFlags olddefconfig
 

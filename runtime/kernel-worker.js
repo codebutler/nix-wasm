@@ -13,6 +13,7 @@ import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -229,6 +230,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const VW_DEV_ECHO = 1;
   const VW_DEV_NET = 2;
   const VW_DEV_BLK = 3;
+  // Issue #10 option 3: virtio-vsock — AF_VSOCK socket channel for the /Ctl
+  // bridge. Pinned to host index 7 (must match kernel patch 0020's `VW_DEV_VSOCK
+  // = 7` and kernel-host.js). Like virtio-9p, the host socket API is async +
+  // main-thread, so the worker instance only answers the synchronous transport
+  // probes (features/config/setup) and forwards the kick.
+  const VW_DEV_VSOCK = 7;
   // Issue #10: virtio-9p channels — one virtio device per 9P mount/connection.
   // Device index, mount tag, and connection id (cid, for per-connection state
   // isolation in the shared 9P server) MUST match kernel patch 0018's enum and
@@ -349,6 +356,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // Read-only base-system squashfs, handed in via the boot message.
         // squashfsImage is a 0-length Uint8Array when absent (--no-nix boot).
         d = new BlkDevice({ ...common, image: squashfsImage });
+      } else if (id === VW_DEV_VSOCK) {
+        // Issue #10 option 3: virtio-vsock. The host socket API (the /Ctl
+        // bridge) is async + main-thread, but this kick lands on a task worker —
+        // so the worker-side device only answers the synchronous transport
+        // probes (getFeatures/configRead serving the guest CID, via the base
+        // ctor) and FORWARDS the notify to the main thread, where the host
+        // instance runs the vsock protocol + raises the completion IRQ via the
+        // raised_irqs self-wake. Publish that wake address (vsock needs it like
+        // 9P, even with no wayland device present).
+        d = new VsockVirtioDevice({
+          ...common,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtiovsock_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
       } else {
         log(`[virtio] import for unknown device index ${id}`);
         return null;
