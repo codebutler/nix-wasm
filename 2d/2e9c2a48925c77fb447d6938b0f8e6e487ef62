@@ -1,0 +1,22 @@
+runtime/demo/node/sommelier-smoke.mjs
+  s_cd1a77be509bb9::t_e40426e74fd46d 1-145
+runtime/kernel-worker.js
+  s_cd1a77be509bb9::t_0b05c582033d92 956-974,988
+  s_cd1a77be509bb9::t_d5f97e1cd5cc3d 975-987
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "2d2e9c2a48925c77fb447d6938b0f8e6e487ef62",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
