@@ -19,9 +19,22 @@ let
     (i: "hvc${toString i}::respawn:${sw}/getty -L -i -n -l ${sw}/autologin 0 hvc${toString i} xterm-256color")
     (lib.range 0 (nrConsoles - 1));
   syslogLine = "::respawn:${sw}/sh -c '${sw}/syslogd -n -O /var/log/messages -s 16 -b 1; sleep 5'";
+  # waylandproxyd: the guest-side Wayland↔virtwl bridge (userspace/waylandproxyd.c).
+  # GUEST-owned autostart (issue #31) so EVERY host/embedder gets the Wayland proxy
+  # without JS-side startup choreography (previously pc's kernel-service.js
+  # ensureWaylandProxy / the web demo's main.js wrote the launch to a hidden hvc).
+  # It binds $XDG_RUNTIME_DIR/wayland-0 for guest GUI clients and splices the wire
+  # to the host compositor over /dev/wl0. INITRAMFS-absolute paths (/bin/sh,
+  # /bin/waylandproxyd): waylandproxyd ships in the initramfs `extraBins` (baked
+  # /bin), so this comes up BEFORE the served /nix closure is activated and does
+  # not depend on the system profile. The env is set INLINE (busybox init does not
+  # source /etc/profile for ::respawn entries), matching /etc/profile's values.
+  # Guard on /dev/wl0 so a kernel without virtwl doesn't hot-respawn; the trailing
+  # `sleep 5` backs off if the proxy ever exits (same pattern as syslogd above).
+  waylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/waylandproxyd >>/var/log/waylandproxyd.log 2>&1; sleep 5'";
   # Build the inittab by explicit newline-join — do NOT use a `''` block: it strips
   # only the COMMON leading indent, so a single misaligned line keeps its leading
   # space and busybox then reads the tty id as whitespace ("can't open /dev/  ").
 in
 pkgs.writeText "inittab"
-  (lib.concatStringsSep "\n" ([ syslogLine ] ++ consoleLines) + "\n")
+  (lib.concatStringsSep "\n" ([ syslogLine waylandLine ] ++ consoleLines) + "\n")
