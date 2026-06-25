@@ -41,7 +41,11 @@ on:
 
 concurrency:
   group: nix-wasm-${{ github.ref }}
-  cancel-in-progress: false
+  # Supersede an in-flight run on a newer push. Safe for a cache-populating build:
+  # cachix-action pushes each derivation as it finishes (post-build-hook), so a
+  # cancelled run's completed paths are already in Cachix and the new run just
+  # substitutes them — no lost work, no double-building the slow poles.
+  cancel-in-progress: true
 
 jobs:
   # --- the heavy from-source LLVM builds, one runner each, pushed to Cachix ----
@@ -84,11 +88,13 @@ jobs:
   artifacts:
     name: build wasm artifacts
     needs: toolchain
-    # Namespace small runner. This job only substitutes the toolchain from Cachix
-    # and builds the cheap top layer (nix.wasm C++ compile + squashfs/initramfs/
-    # image), so the default profile is plenty — and it stays off GitHub-hosted
-    # runners so it doesn't depend on this private repo's GitHub Actions minutes.
-    runs-on: namespace-profile-default
+    # Namespace heavy runner for now: the FIRST run compiles nix.wasm's whole
+    # cross-dependency closure (boost/openssl/curl/libgit2/sqlite/… → wasm) + the
+    # nix.wasm C++ + a second nix.wasm compile for the --rebuild determinism check,
+    # none of it cached yet — CPU-heavy, wants cores. Once Cachix is populated this
+    # job is just substitution (I/O-bound) and can drop back to namespace-profile-
+    # default. Stays off GitHub-hosted minutes either way (private repo).
+    runs-on: namespace-profile-nix-heavy
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
