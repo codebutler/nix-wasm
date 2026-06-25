@@ -32,21 +32,13 @@ let
            $out/lib/wasm32-unknown-unknown/libclang_rt.builtins.a
       '';
 
-      # Kernel host-import names the dylink link allows undefined (imports).
-      allowUndefined = native.writeText "wasm-allow-undefined.txt" ''
-        __wasm_abort
-        __cpp_exception
-        logAPIs
-        __dlsym_time64
-        __cxa_thread_atexit_impl
-        __wasm_syscall_0
-        __wasm_syscall_1
-        __wasm_syscall_2
-        __wasm_syscall_3
-        __wasm_syscall_4
-        __wasm_syscall_5
-        __wasm_syscall_6
-      '';
+      # The dylink link's allow-list of host-provided imports — the shared
+      # single source of truth (toolchain/wasm-host-imports.nix), so the
+      # crossSystem cc-wrapper, guest-clang, guest-cxx and nix.wasm all enforce
+      # the SAME no-undef contract (#52). Passed to wasm-ld via
+      # --allow-undefined-file (NOT a blanket --allow-undefined): a stray
+      # fork/exec/system reference then fails the link loudly.
+      allowUndefined = import ./toolchain/wasm-host-imports.nix { pkgs = native; };
 
       filteredLd = native.writeShellScriptBin "wasm-ld" ''
         args=(); skip=; has_r=
