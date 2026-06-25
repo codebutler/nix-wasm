@@ -130,6 +130,15 @@
         inherit pkgs cross;
       };
 
+      # Task 8 (Sommelier/virtwl): Sommelier cross-compiled to wasm32-nommu.
+      # The guest-side Wayland compositor shim: bridges wl_shm Wayland clients to
+      # the host compositor via /dev/wl0 (virtwl). posix-spawn patch applied;
+      # dmabuf/GPU paths are link-only (gbm shim + libdrm abort stubs). No glib →
+      # no fpcast-emu needed. Baked into the initramfs as /bin/sommelier.
+      sommelier = import ./userspace/sommelier.nix {
+        inherit pkgs cross;
+      };
+
       # Wayland Phase 2 (2c): wl-eyes — the first end-user Wayland app. Links the
       # cross libwayland-client + libffi (raw backend) + wayland-protocols
       # (xdg-shell), generates the xdg-shell glue with the BUILD-host
@@ -344,7 +353,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi ];
+        extraBins = [ wasmWlTest wasmWaylandProxyd wasmWlClient wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -530,6 +539,10 @@
         # headless gate (display-free GtkBuilder signal round-trip); the full window
         # renders in the browser (needs the musl/RAM/dev-shm fixes). → $out/bin/gtk3-widget-factory.
         widget-factory = widgetFactory;
+
+        # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
+        # → $out/bin/sommelier.
+        inherit sommelier;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;

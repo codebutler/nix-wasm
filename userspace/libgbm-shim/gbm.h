@@ -24,8 +24,15 @@ struct gbm_device;
 struct gbm_bo;
 struct gbm_import_fd_modifier_data;
 
-/* GBM_BO_IMPORT_FD_MODIFIER — the only import type Sommelier uses. */
+/* GBM_BO_IMPORT_* — the import types Sommelier references. */
+#define GBM_BO_IMPORT_FD          0x5503
 #define GBM_BO_IMPORT_FD_MODIFIER 0x5505
+
+/* BO usage flags (passed to gbm_bo_import / creation). */
+#define GBM_BO_USE_SCANOUT    (1 << 0)
+#define GBM_BO_USE_CURSOR     (1 << 1)
+#define GBM_BO_USE_RENDERING  (1 << 2)
+#define GBM_BO_USE_LINEAR     (1 << 4)
 
 /* BO transfer flags (used as map flags). */
 #define GBM_BO_TRANSFER_READ       (1 << 0)
@@ -36,6 +43,16 @@ struct gbm_import_fd_modifier_data;
 #define GBM_FORMAT_ARGB8888  0x34325241
 #define GBM_FORMAT_XRGB8888  0x34325258
 
+/* Plain single-fd import (used by sl_drm_prime_mmap_create). */
+struct gbm_import_fd_data {
+    int      fd;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t format;
+};
+
+/* Multi-fd + modifier import (linux-dmabuf path, gated by ctx->gbm != null). */
 struct gbm_import_fd_modifier_data {
     uint32_t width;
     uint32_t height;
