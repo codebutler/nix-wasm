@@ -14,7 +14,7 @@ DATE="$(date -u +%Y-%m-%d)"
 rm -rf "$DEST"
 mkdir -p "$DEST/ninep" "$DEST/virtio"
 # Engine files only (including make-worker.js):
-cp "$SRC"/{index.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js} "$DEST/"
+cp "$SRC"/{index.js,abi.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js} "$DEST/"
 cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # Wayland Phase 1 (1a/1b/1c/1d): the virtio_wasm transport device models + the
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
