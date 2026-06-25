@@ -106,15 +106,16 @@ jobs:
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       # guest-clang/kernel now substitute from Cachix (pushed by the toolchain
-      # job). These artifacts are wl-eyes-free; the initramfs / linux-image pull
-      # the local-only wl-eyes input (git+file:///home/...), so they build locally
-      # until that source is vendored — tracked in the issue follow-up.
+      # job); the rest builds on top. wl-eyes is vendored into the repo (#62/#63),
+      # so the initramfs and the full linux-image boot bundle build in CI too.
       - name: Build substitutable artifacts
         run: |
           nix build -L --keep-going \
             '.#nix-wasm' \
             '.#wasm-binary-cache' \
             '.#wasm-base-squashfs' \
+            '.#wasm-initramfs' \
+            '.#linux-image' \
             --print-out-paths --no-link
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce

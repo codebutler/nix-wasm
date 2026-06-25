@@ -276,9 +276,9 @@ system). Three workflows:
   (`nix-wasm`/`wasm-binary-cache`/`wasm-base-squashfs`) **substitutes** them from
   Cachix. Cold cache pays the LLVM rebuild once; warm reruns are minutes.
   Content-addressed — a `flake.lock`/`patches/` change self-invalidates (no
-  manual cache key). Initramfs/linux-image are **not** built in CI yet: they pull
-  the local-only `wl-eyes` input (`git+file:///home/...`), which must be vendored
-  first.
+  manual cache key). The `artifacts` job also builds `wasm-initramfs` + the full
+  `linux-image` boot bundle (wl-eyes is vendored in-repo — #62/#63 — so the whole
+  guest is reproducible from a fresh checkout).
 - `.github/workflows/publish-wasm-artifacts.yml` — on master, substitutes the
   closure from Cachix and uploads `base.squashfs` + the `nix-cache/` tree to R2
   (`scripts/publish-to-r2.sh`).
@@ -662,9 +662,10 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
 - **#2** — Phase 5: CI + binary cache. **Cachix is wired** as the host build
   cache (`nix-wasm.cachix.org`) and the flake builds on x86_64-linux; the three
   workflows + the two-tier (Cachix host / R2 guest) design are documented under
-  the Caching section above. Remaining to fully close: add the `CACHIX_AUTH_TOKEN`
-  repo secret, run the cold-cache build once to populate Cachix, and vendor the
-  `wl-eyes` input so initramfs/linux-image can build in CI too.
+  the Caching section above. `wl-eyes` is vendored (#62/#63) so initramfs +
+  linux-image build in CI too. Remaining to fully close: add the
+  `CACHIX_AUTH_TOKEN` repo secret and run the cold-cache build once to populate
+  Cachix.
 - **#3** — DONE (2026-06-24): the `cc`/`c++` shell wrappers are retired; clang is
   its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
   approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
