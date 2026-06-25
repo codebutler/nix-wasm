@@ -78,6 +78,13 @@ pkgs.stdenv.mkDerivation {
     # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
     # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
     ./patches/kernel/0018-wasm-virtio-9p-device.patch
+    # Issue #10 (option 2): register a virtio-console device (VIRTIO_ID_CONSOLE
+    # = 3) on the wasm virtio transport so the stock mainline virtio-console
+    # driver (CONFIG_VIRTIO_CONSOLE) can carry a guest TTY, ALONGSIDE the
+    # existing bespoke hvc_wasm backend (patches 0002/0003) for an A/B. Single
+    # port (no MULTIPORT), VW_DEV_CONSOLE = 6, irq 14; the host serves it via
+    # runtime/virtio/console-device.js. hvc_wasm retirement is a later change.
+    ./patches/kernel/0019-wasm-virtio-console-device.patch
     # Issue #10 option 3 (the vsock piece): register a virtio-vsock device
     # (VIRTIO_ID_VSOCK = 19) on the wasm virtio transport so the stock mainline
     # virtio-vsock transport (CONFIG_VIRTIO_VSOCKETS riding CONFIG_VSOCKETS)
@@ -162,6 +169,14 @@ pkgs.stdenv.mkDerivation {
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
+      `# Issue #10 (option 2): stock mainline virtio-console driver` \
+      `# (drivers/char/virtio_console.c) over the virtio_wasm transport` \
+      `# (patch 0019, VW_DEV_CONSOLE = 6). It binds a single console port to a` \
+      `# receiveq/transmitq vq pair and wires it to hvc — a standard virtualized` \
+      `# Linux console path ALONGSIDE the bespoke hvc_wasm backend, for an A/B` \
+      `# during the bridge consolidation. CONFIG_VIRTIO_CONSOLE selects` \
+      `# HVC_DRIVER (already on for hvc_wasm) and depends on VIRTIO + TTY.` \
+      --enable CONFIG_VIRTIO_CONSOLE \
       `# Guest networking (Phase 1): stock drivers/net/virtio_net.c over the` \
       `# virtio_wasm transport (dev 2, VW_DEV_NET), IPv4+ICMP, and AF_PACKET raw` \
       `# sockets (busybox udhcpc/ping). CONFIG_NET is already on above.` \
