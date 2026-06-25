@@ -1,0 +1,23 @@
+userspace/init.nix
+  s_b3600ff8167073::t_ba7abd68634d1b 22-34
+  s_b3600ff8167073::t_d77af8cec63965 40
+runtime/demo/node/wl-autostart-smoke.mjs
+  s_b3600ff8167073::t_22a472fac703bc 44-46,49-51,56-58
+  s_b3600ff8167073::t_9c783fbbd8effd 1-43,47-48,52-55,59-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "d6564d7cbe28e2ba7627e48e86da9fab1f9ac760",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
