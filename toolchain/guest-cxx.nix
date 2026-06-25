@@ -18,6 +18,10 @@ let
   clang = "${guestClang}/bin/clang";
   ld = "${guestClang}/bin/wasm-ld";
   sr = "${ccSysroot}/sys";
+  # Shared no-undef allow-list (#52): the only symbols the `c++`-driven link may
+  # leave undefined (host-provided imports incl. the __cpp_exception EH tag). A
+  # stray fork/exec then fails the link instead of becoming a dangling env.* import.
+  allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
 in
 pkgs.writeTextFile {
   name = "guest-cxx";
@@ -48,13 +52,18 @@ pkgs.writeTextFile {
       -Xclang -target-feature -Xclang +atomics -Xclang -target-feature -Xclang +bulk-memory \
       -fwasm-exceptions -D__USING_WASM_EXCEPTIONS__ \
       -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS -D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS"
-    # --allow-undefined (vs cc's --import-undefined alone): C++ wasm-EH references
-    # the host-provided __cpp_exception tag, which --import-undefined doesn't import
-    # (it's an exception tag, not a function); --allow-undefined imports it, exactly
-    # as nix.wasm's own C++ link does. The remaining env imports are the standard
-    # runtime ABI (memory/table/bases, __wasm_abort, __wasm_syscall_*, logAPIs).
+    # No-undef contract (#52): allow ONLY the host-provided imports in the shared
+    # allow-list — which includes the __cpp_exception EH tag that C++ wasm-EH
+    # references (an exception tag, not a function, so --import-undefined alone
+    # wouldn't import it; that's why this driver needed more than cc's). Using
+    # --allow-undefined-file (NOT a blanket --allow-undefined or --import-undefined)
+    # means any OTHER undefined symbol — a missing function, a stray fork — fails
+    # the link loudly instead of becoming a dangling env.* import that traps at
+    # instantiation. The host satisfies the listed imports (memory/table/bases come
+    # from --import-memory/--import-table; __wasm_abort/__wasm_syscall_*/logAPIs etc.
+    # from the bridge), exactly as nix.wasm's own C++ link does.
     LDADD="-shared --gc-sections --no-merge-data-segments --no-entry --export-all \
-      --import-memory --shared-memory --max-memory=4294967296 --import-undefined --allow-undefined --import-table"
+      --import-memory --shared-memory --max-memory=4294967296 --allow-undefined-file=${allowUndefined} --import-table"
 
     compile_only=0
     out=

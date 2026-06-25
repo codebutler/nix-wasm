@@ -313,6 +313,21 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **crt `int main`**: a weak 2-arg crt `main` wrapper (`musl.nix`) so all of
   `int main(void)` / `(int,char**)` link — else autoconf's "C compiler cannot
   create executables" aborts every autoconf dep.
+- **No-undef contract = `--allow-undefined-file`, NEVER blanket `--allow-undefined`**
+  (`toolchain/wasm-host-imports.nix`; #52): every guest dylink link — the crossSystem
+  cc-wrapper (`wasm-cross.nix`), `guest-clang`/`guest-cxx`/`guest-cc`, and nix.wasm's
+  `wcxx` (`nix-wasm.nix`) — allows undefined ONLY the documented host-provided imports
+  via the **one shared allow-list file** (`__wasm_abort`, `__cpp_exception`, `logAPIs`,
+  `__dlsym_time64`, `__cxa_thread_atexit_impl`, `__wasm_syscall_0..6` — empirically the
+  exact superset of every guest binary's `env.*` imports). A **blanket
+  `--allow-undefined` (or `--import-undefined`) silently turns ANY unresolved symbol
+  into an `env.*` import** — exactly how #36's removal of `fork` from musl became the
+  #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
+  #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
+  loudly. `.#nofork-linkcheck` is the gate; memory/table/base come from
+  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds only
+  guest-clang + nix.wasm; the cross.* set is keyed on the byte-identical store path so
+  it stays cached.)
 - **libffi raw wasm backend** (`deps-overlay.nix` / `patches/libffi/`): the
   upstream `src/wasm/ffi.c` is emscripten-only; we drop in `wasm32-raw-ffi.c`
   which dispatches `ffi_call` through a build-time generated trampoline table

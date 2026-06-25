@@ -18,6 +18,12 @@ let
   wasmld = "${bt}/bin/wasm-ld";
   builtins_a = "${compilerRt}/lib/wasm32-unknown-unknown/libclang_rt.builtins.a";
 
+  # Shared no-undef allow-list (#52): the host-provided imports the nix.wasm link
+  # may leave undefined (incl. the __cpp_exception EH tag and the __wasm_syscall_*
+  # bridge). Passed to wasm-ld via --allow-undefined-file instead of a blanket
+  # --allow-undefined, so an accidental fork/exec reference fails the link.
+  allowUndefined = import ./toolchain/wasm-host-imports.nix { inherit pkgs; };
+
   # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
   # builtins from its DEFAULT resource dir, which has no wasm builtins → the final
   # link fails opening .../clang/21/lib/wasm32-unknown-unknown/libclang_rt.builtins.a.
@@ -134,7 +140,7 @@ pkgs.stdenv.mkDerivation {
         -nostdlib++ -L${libcxx}/lib -lc++ -lc++abi -lunwind ${depLib} \
         -Wl,-shared -Wl,-Bsymbolic \
         -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \
-        -Wl,--import-table -Wl,--allow-undefined -Wl,--export=_start \
+        -Wl,--import-table -Wl,--allow-undefined-file=${allowUndefined} -Wl,--export=_start \
         -Wl,--export-if-defined=__wasm_apply_data_relocs -Wl,--export-if-defined=__wasm_call_ctors \
         -Wl,--export-if-defined=__set_tls_base -Wl,--export-if-defined=__libc_clone_callback \
         -Wl,--export-if-defined=__libc_handle_signal ${cxxWarn}

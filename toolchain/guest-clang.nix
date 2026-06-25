@@ -26,6 +26,13 @@ let
   lib = pkgs.lib;
   llvm = pkgs.llvmPackages_21;
 
+  # The shared no-undef contract (#52): clang/wasm-ld may leave undefined ONLY
+  # the host-provided imports in this allow-list (the same file the crossSystem
+  # cc-wrapper, guest-cxx and nix.wasm use). Any other unresolved symbol — e.g.
+  # a stray `fork` — fails the link instead of becoming a dangling `env.*`
+  # import that traps at instantiation (that was the #50 in-guest-cc crash).
+  allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
+
   # cmake's COMPILER_LAUNCHER prefixes ccache onto each compile command. The
   # trailing space + inline prepend means that when OFF this expands to "" and the
   # cmake invocation (and thus the derivation hash) is byte-for-byte the default —
@@ -85,12 +92,14 @@ let
     + "-Wl,--strip-all -Wl,--import-memory -Wl,--shared-memory "
     + "-Wl,--max-memory=4294967296 -Wl,--import-table "
     + "-Wl,--no-merge-data-segments "
-    # Blanket --allow-undefined (matches nix-wasm.nix's wcxx link): any unresolved
-    # symbol becomes a wasm import the guest runtime satisfies at instantiate time.
-    # clang/lld pull libc imports (__dlsym_time64 via musl's time64 dlsym redirect,
-    # __cxa_thread_atexit_impl from libc++abi) that aren't worth enumerating; the
-    # guest model resolves them as imports exactly like nix.wasm and busybox do.
-    + "-Wl,--allow-undefined";
+    # No-undef contract (#52): allow ONLY the host-provided imports enumerated in
+    # the shared allow-list — the libc imports clang/lld legitimately pull
+    # (__dlsym_time64 via musl's time64 dlsym redirect, __cxa_thread_atexit_impl
+    # from libc++abi, __cpp_exception, the __wasm_syscall_* bridge). Any OTHER
+    # unresolved symbol (a stray `fork`/`exec`/`system`) fails the link loudly
+    # rather than becoming a dangling `env.*` import — replacing the old blanket
+    # --allow-undefined that let #36's removed `fork` slip through as the #50 crash.
+    + "-Wl,--allow-undefined-file=${allowUndefined}";
 in
 pkgs.stdenv.mkDerivation ({
   pname = "guest-clang-wasm32";

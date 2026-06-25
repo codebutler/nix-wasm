@@ -13,6 +13,10 @@ let
   clang = "${guestClang}/bin/clang";
   ld = "${guestClang}/bin/wasm-ld";
   sr = "${ccSysroot}/sys";
+  # Shared no-undef allow-list (#52): the only symbols a `cc`-driven link may
+  # leave undefined are the host-provided imports. A stray fork/exec then fails
+  # the link instead of becoming a dangling env.* import.
+  allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
 in
 pkgs.writeTextFile {
   name = "guest-cc";
@@ -44,8 +48,14 @@ pkgs.writeTextFile {
     # that forwarder's reference dangles into an unsatisfied `env.__main_argc_argv`
     # import and the module fails to instantiate (SIGILL at startup). GC'ing the dead
     # forwarder removes the dangling import while keeping all exported entry points.
+    # No-undef contract (#52): allow ONLY the host-provided imports in the shared
+    # allow-list (NOT a blanket --import-undefined, which made EVERY undefined
+    # symbol an import — so a missing function or a stray fork silently became a
+    # dangling env.* import that trapped at instantiation). Any other undefined
+    # symbol now fails the link loudly. Memory/table/bases come from
+    # --import-memory/--import-table; the rest from the kernel/runtime bridge.
     LDADD="-shared --gc-sections --no-merge-data-segments --no-entry --export-all \
-      --import-memory --shared-memory --max-memory=4294967296 --import-undefined --import-table"
+      --import-memory --shared-memory --max-memory=4294967296 --allow-undefined-file=${allowUndefined} --import-table"
 
     compile_only=0
     out=
