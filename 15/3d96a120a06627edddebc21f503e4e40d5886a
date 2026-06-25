@@ -1,0 +1,22 @@
+runtime/boot-nix-system.test.js
+  s_21419a5db8af1c::t_feb523bc41fe61 1
+  s_21419a5db8af1c::t_c8f131974a6326 2-56
+runtime/boot-nix-system.js
+  s_21419a5db8af1c::t_6c243afa4f61a1 1-9,11-13,20-25,30-31,36,39-54,62-65,67-68,75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "153d96a120a06627edddebc21f503e4e40d5886a",
+  "prompts": {},
+  "sessions": {
+    "s_21419a5db8af1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959963a1-433c-4e2b-9aea-1b890ee5c25e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
