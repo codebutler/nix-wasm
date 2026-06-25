@@ -62,6 +62,7 @@ const dec = new TextDecoder();
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
+ *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
@@ -156,6 +157,10 @@ export async function bootLinux(opts) {
     // Absent on a --no-nix / busybox-only boot (the blk device mounts empty).
     squashfs: opts.squashfs,
     wayland,
+    // Issue #10 option 3: the virtio-vsock /Ctl bridge hook (passed straight
+    // through). The host VsockVirtioDevice runs the vsock protocol; `vsock.onReady`
+    // hands it to the caller so it can listen()/connect() over AF_VSOCK.
+    vsock: opts.vsock,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
 

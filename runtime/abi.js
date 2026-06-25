@@ -9,4 +9,4 @@
 //
 // `userspace/linux-image.nix` parses this exact line, so keep the form
 // `export const ENGINE_ABI = <int>;` on one line.
-export const ENGINE_ABI = 2;
+export const ENGINE_ABI = 3;

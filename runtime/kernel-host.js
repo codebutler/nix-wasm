@@ -26,6 +26,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 
 /// Create a Linux machine and run it.
 // pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
@@ -44,6 +45,12 @@ export const linux = async ({
   // handle(frame, cid)); the per-connection cid keeps each mount's state
   // isolated. Absent → no virtio-9p host servicing.
   ninep_server,
+  // Issue #10 option 3: optional host hook for the virtio-vsock /Ctl bridge.
+  // `onReady(device)` is called once with the main-thread VsockVirtioDevice so a
+  // caller (the future pc /Ctl consumer) can `device.listen(port, conn => …)`.
+  // Absent → the vsock device still exists (config/features answered) but no
+  // host listener is registered, so guest connect attempts are RST'd.
+  vsock,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
   // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
@@ -221,6 +228,41 @@ export const linux = async ({
     return d;
   };
 
+  // Issue #10 option 3: virtio-vsock — a MAIN-thread device that runs the vsock
+  // protocol (handshake / RW / credit / shutdown) and exposes the host socket
+  // API for the /Ctl bridge. The guest's vq kick lands on a task worker (which
+  // forwards it here as virtiovsock_notify); the worker can't run the async
+  // socket callbacks. The completion/host→guest IRQ uses the SAME raised_irqs
+  // self-wake virtio-wl/net/9p use (raiseHostWlIrq). dev MUST match
+  // kernel-worker's VW_DEV_VSOCK + kernel patch 0020: index 7.
+  const VW_DEV_VSOCK = 7;
+  let hostVsockDevice = null;
+  let vsockReadyFired = false;
+  const hostVsock = () => {
+    if (wlRaisedIrqsAddr == null) return null;
+    if (!hostVsockDevice) {
+      hostVsockDevice = new VsockVirtioDevice({
+        dev: VW_DEV_VSOCK,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_VSOCK,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net/9p
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+      });
+      // Hand the device to the caller (pc /Ctl consumer) so it can listen().
+      if (!vsockReadyFired && vsock && typeof vsock.onReady === "function") {
+        vsockReadyFired = true;
+        try {
+          vsock.onReady(hostVsockDevice);
+        } catch (e) {
+          log("[vsock] onReady threw: " + (e && e.stack ? e.stack : e));
+        }
+      }
+    }
+    return hostVsockDevice;
+  };
+
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -354,6 +396,14 @@ export const linux = async ({
     // the R-message back, and raises the completion IRQ (raised_irqs self-wake).
     virtio9p_notify: (message) => {
       void hostNineP(message.dev)?.service(message.q >>> 0);
+    },
+
+    // Issue #10 option 3: a guest virtio-vsock kick the task worker forwarded.
+    // The vsock protocol + host socket callbacks are main-thread-bound, so the
+    // worker can't service it — the host drives the kicked vq (tx drain / rx
+    // refill / event) and raises the IRQ via the raised_irqs self-wake.
+    virtiovsock_notify: (message) => {
+      hostVsock()?.onNotify(message.q >>> 0);
     },
 
     // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on
