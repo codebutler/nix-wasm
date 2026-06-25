@@ -1,0 +1,29 @@
+flake.nix
+  s_b3600ff8167073::t_344b087897f3d9 162-167
+  s_b3600ff8167073::t_b84f398a45bf3f 458-461
+runtime/demo/node/sigalrm-smoke.mjs
+  s_b3600ff8167073::t_860b945407e79f 1-6,27
+  s_b3600ff8167073::t_bbee447489d09d 7-26,28-35
+userspace/sigalrm-test.c
+  s_b3600ff8167073::t_056cdbf047f8b3 1-20,22-32,93-100,133,142-143,146-147,149,151
+  s_b3600ff8167073::t_14ff5fdfc5a924 108-112,123-124,132
+  s_b3600ff8167073::t_73d14c7fc9bd98 33,39
+  s_b3600ff8167073::t_8c306ed1a04a89 118,121,125,128-131,134
+  s_b3600ff8167073::t_35c27704f90d1f 21,35,41-92,101-107,113-117,119-120,122,126-127,135,138-141,145,148,150,152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "462bf59060a53d24026175a35ee5e94f1d8d3525",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
