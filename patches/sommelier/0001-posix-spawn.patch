@@ -1,5 +1,5 @@
---- a/sommelier.cc	2026-06-25 11:00:31.663678888 -0400
-+++ b/sommelier.cc	2026-06-25 11:07:53.146436414 -0400
+--- a/sommelier.cc
++++ b/sommelier.cc
 @@ -38,6 +38,7 @@
  #include <sys/socket.h>
  #include <sys/stat.h>
@@ -8,18 +8,25 @@
  #include <sys/wait.h>
  #include <unistd.h>
  #include <vector>
-@@ -3489,19 +3490,41 @@
+@@ -3489,19 +3490,130 @@
    return 1;
  }
  
 -static void sl_execvp(const char* file,
-+/* wasm/NOMMU: musl has no fork(). Spawn via posix_spawn (fork+exec atomically),
-+ * mirroring sl_execvp's WAYLAND_SOCKET fd hand-off and SOMMELIER_VERSION env.
-+ * wayland_socket_fd >= 0: the fd is exposed to the child as WAYLAND_SOCKET=<fd>
-+ * (its CLOEXEC flag is cleared so it survives across exec); pass -1 when no
-+ * Wayland socket hand-off is needed.
-+ * fa: optional pre-built file_actions (e.g. to close fds in the child); pass
-+ * NULL for the common case. */
++/* wasm/NOMMU: musl has no fork(). Spawn via posix_spawnp, building a
++ * child-only envp so the parent environment is never mutated.
++ *
++ * wayland_socket_fd >= 0: the fd is added to the child env as
++ *   WAYLAND_SOCKET=<fd>; its CLOEXEC flag is cleared so it survives exec.
++ *   Pass -1 when no Wayland socket hand-off is needed.
++ * add_env: NULL-terminated list of "VAR=value" strings to add/override in
++ *   the child environment (applied after the base environ copy).
++ * unset_vars: NULL-terminated list of variable names to omit from the
++ *   child environment.
++ * fa: optional pre-built file_actions (e.g. to close fds); pass NULL for
++ *   the common case.
++ *
++ * Returns the child pid on success, -1 on error (errno set). */
 +static pid_t sl_spawn(const char* file,
                        char* const argv[],
 -                      int wayland_socked_fd) {
@@ -28,29 +35,110 @@
 -    fd = dup(wayland_socked_fd);
 -    putenv(sl_xasprintf("WAYLAND_SOCKET=%d", fd));
 +                      int wayland_socket_fd,
++                      const char* const* add_env,
++                      const char* const* unset_vars,
 +                      posix_spawn_file_actions_t* fa) {
++  extern char** environ;
++
++  /* Count base environ entries. */
++  int base_count = 0;
++  for (char** e = environ; *e; ++e)
++    ++base_count;
++
++  /* Count add_env entries. */
++  int add_count = 0;
++  if (add_env)
++    for (const char* const* a = add_env; *a; ++a)
++      ++add_count;
++
++  /* Allocate generous upper bound: base + add + WAYLAND_SOCKET +
++   * SOMMELIER_VERSION + NULL sentinel. */
++  char** child_env = (char**)malloc(
++      (base_count + add_count + 2 + 1) * sizeof(char*));
++  if (!child_env) {
++    errno = ENOMEM;
++    return -1;
++  }
++
++  /* Helper: extract var name length from "NAME=..." or "NAME". */
++  auto var_name_len = [](const char* s) -> size_t {
++    const char* eq = strchr(s, '=');
++    return eq ? (size_t)(eq - s) : strlen(s);
++  };
++
++  /* Copy environ, skipping entries overridden by add_env, unset_vars,
++   * WAYLAND_SOCKET (we always supply it when wayland_socket_fd >= 0), and
++   * SOMMELIER_VERSION (we always supply it). */
++  int n = 0;
++  for (char** e = environ; *e; ++e) {
++    size_t elen = var_name_len(*e);
++
++    /* Skip if in unset_vars. */
++    bool skip = false;
++    if (unset_vars) {
++      for (const char* const* u = unset_vars; *u && !skip; ++u)
++        if (strlen(*u) == elen && memcmp(*e, *u, elen) == 0)
++          skip = true;
++    }
++    /* Skip if overridden by add_env. */
++    if (!skip && add_env) {
++      for (const char* const* a = add_env; *a && !skip; ++a) {
++        size_t alen = var_name_len(*a);
++        if (alen == elen && memcmp(*e, *a, elen) == 0)
++          skip = true;
++      }
++    }
++    /* Skip WAYLAND_SOCKET and SOMMELIER_VERSION — we always write them. */
++    if (!skip && (strncmp(*e, "WAYLAND_SOCKET=", 15) == 0 ||
++                  strncmp(*e, "SOMMELIER_VERSION=", 18) == 0))
++      skip = true;
++
++    if (!skip)
++      child_env[n++] = *e; /* borrow pointer; we own the array, not the strings */
++  }
++
++  /* Append add_env entries. */
++  if (add_env) {
++    for (const char* const* a = add_env; *a; ++a)
++      child_env[n++] = const_cast<char*>(*a);
++  }
++
++  /* Append WAYLAND_SOCKET if requested. */
++  char* ws_str = nullptr;
++  if (wayland_socket_fd >= 0) {
++    /* Clear CLOEXEC so the fd survives into the child. */
++    fcntl(wayland_socket_fd, F_SETFD, 0);
++    ws_str = sl_xasprintf("WAYLAND_SOCKET=%d", wayland_socket_fd);
++    child_env[n++] = ws_str;
+   }
+ 
+-  setenv("SOMMELIER_VERSION", SOMMELIER_VERSION, 1);
++  /* Always append SOMMELIER_VERSION. */
++  char* sv_str = sl_xasprintf("SOMMELIER_VERSION=%s", SOMMELIER_VERSION);
++  child_env[n++] = sv_str;
+ 
+-  execvp(file, argv);
+-  perror(file);
++  child_env[n] = nullptr;
++
++  /* Use caller-supplied file_actions if provided, else an empty local one. */
 +  posix_spawn_file_actions_t local_fa;
 +  posix_spawn_file_actions_t* fap = fa;
 +  if (!fap) {
 +    posix_spawn_file_actions_init(&local_fa);
 +    fap = &local_fa;
 +  }
-+  if (wayland_socket_fd >= 0) {
-+    /* Clear CLOEXEC so the fd survives into the child. */
-+    fcntl(wayland_socket_fd, F_SETFD, 0);
-+    putenv(sl_xasprintf("WAYLAND_SOCKET=%d", wayland_socket_fd));
-   }
--
-   setenv("SOMMELIER_VERSION", SOMMELIER_VERSION, 1);
--
--  execvp(file, argv);
--  perror(file);
++
 +  pid_t pid = -1;
-+  extern char** environ;
-+  int rv = posix_spawnp(&pid, file, fap, NULL, argv, environ);
-+  if (!fa) {
++  int rv = posix_spawnp(&pid, file, fap, NULL, argv, child_env);
++
++  if (!fa)
 +    posix_spawn_file_actions_destroy(&local_fa);
-+  }
++
++  free(ws_str);
++  free(sv_str);
++  free(child_env);
++
 +  if (rv != 0) {
 +    errno = rv;
 +    perror(file);
@@ -60,7 +148,7 @@
  }
  
  static void sl_calculate_scale_for_xwayland(struct sl_context* ctx) {
-@@ -3624,17 +3647,13 @@
+@@ -3624,17 +3736,14 @@
    putenv(sl_xasprintf("XCURSOR_SIZE=%d",
                        static_cast<int>(XCURSOR_SIZE_BASE * ctx->scale + 0.5)));
  
@@ -69,8 +157,9 @@
 +  // valid wayland compositor socket name. Unsetting WAYLAND_DISPLAY is
 +  // insufficient as some clients may attempt to connect to wayland-0 as a
 +  // default fallback.
-+  setenv("WAYLAND_DISPLAY", ".", 1);
-+  pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, NULL);
++  const char* const wm_add_env[] = {"WAYLAND_DISPLAY=.", nullptr};
++  pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, wm_add_env, nullptr,
++                 nullptr);
    errno_assert(pid >= 0);
 -  if (pid == 0) {
 -    // Set WAYLAND_DISPLAY to a value that is guaranteed to not point to a
@@ -84,13 +173,16 @@
  
    ctx->child_pid = pid;
  
-@@ -3932,13 +3951,9 @@
+@@ -3932,13 +4041,12 @@
    // to accept connections. WAYLAND_DISPLAY will be set but any attempt to
    // connect to this socket at this time will fail.
    if (ctx->runprog && ctx->runprog[0]) {
 -    int pid = fork();
-+    setenv("WAYLAND_DISPLAY", socket_name, 1);
-+    int pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, NULL);
++    char* wd_str = sl_xasprintf("WAYLAND_DISPLAY=%s", socket_name);
++    const char* const rp_add_env[] = {wd_str, nullptr};
++    int pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, rp_add_env, nullptr,
++                       nullptr);
++    free(wd_str);
      errno_assert(pid != -1);
 -    if (pid == 0) {
 -      setenv("WAYLAND_DISPLAY", socket_name, 1);
@@ -100,7 +192,7 @@
      while (waitpid(-1, nullptr, WNOHANG) != pid) {
        continue;
      }
-@@ -3969,56 +3984,56 @@
+@@ -3969,56 +4077,57 @@
      length = sizeof(ucred);
      rv = getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &ucred, &length);
  
@@ -196,13 +288,14 @@
 +    posix_spawn_file_actions_init(&fa);
 +    posix_spawn_file_actions_addclose(&fa, sock_fd);
 +    posix_spawn_file_actions_addclose(&fa, lock_fd);
-+    int pid = sl_spawn(args[0], const_cast<char* const*>(args), -1, &fa);
++    int pid = sl_spawn(args[0], const_cast<char* const*>(args), -1, nullptr,
++                       nullptr, &fa);
 +    posix_spawn_file_actions_destroy(&fa);
 +    errno_assert(pid != -1);
      close(client_fd);
    }
  
-@@ -4053,68 +4068,77 @@
+@@ -4053,68 +4162,83 @@
  
    ctx->wm_fd = wm[0];
  
@@ -211,10 +304,14 @@
 -  if (pid == 0) {
 -    char const* args[64];
 -    int i = 0;
--
++  char const* args[64];
++  int i = 0;
+ 
 -    if (xwayland_cmd_prefix) {
 -      char* xwayland_cmd_prefix_str = sl_xasprintf("%s", xwayland_cmd_prefix);
--
++  if (xwayland_cmd_prefix) {
++    char* xwayland_cmd_prefix_str = sl_xasprintf("%s", xwayland_cmd_prefix);
+ 
 -      i = sl_parse_cmd_prefix(xwayland_cmd_prefix_str, 32, args);
 -      if (i > 32) {
 -        LOG(ERROR) << "too many arguments in cmd prefix: " << i;
@@ -253,9 +350,7 @@
 -      args[i++] = sl_xasprintf("%s", xfont_path);
 -    }
 -    args[i++] = nullptr;
-+  char const* args[64];
-+  int i = 0;
- 
+-
 -    // If a path is explicitly specified via command line or environment
 -    // use that instead of the compiled in default.  In either case, only
 -    // set the environment variable if the value specified is non-empty.
@@ -266,9 +361,7 @@
 -    } else if (XWAYLAND_GL_DRIVER_PATH && *XWAYLAND_GL_DRIVER_PATH) {
 -      setenv("LIBGL_DRIVERS_PATH", XWAYLAND_GL_DRIVER_PATH, 1);
 -    }
-+  if (xwayland_cmd_prefix) {
-+    char* xwayland_cmd_prefix_str = sl_xasprintf("%s", xwayland_cmd_prefix);
- 
+-
 -    sl_execvp(args[0], const_cast<char* const*>(args), wayland_socket_fd);
 -    _exit(EXIT_FAILURE);
 -  }
@@ -284,9 +377,9 @@
 +  /* Use well-known target fds for the display-ready and wm sockets so we
 +   * can pass them by number in the argument list without relying on dup(). */
 +  int display_fd = ds[1];
-+  int wm_fd = wm[1];
++  int wm_fd_child = wm[1];
 +  char* display_fd_str = sl_xasprintf("%d", display_fd);
-+  char* wm_fd_str = sl_xasprintf("%d", wm_fd);
++  char* wm_fd_str = sl_xasprintf("%d", wm_fd_child);
 +
 +  if (xdisplay > 0) {
 +    args[i++] = sl_xasprintf(":%d", xdisplay);
@@ -316,17 +409,22 @@
 +  // If a path is explicitly specified via command line or environment
 +  // use that instead of the compiled in default.  In either case, only
 +  // set the environment variable if the value specified is non-empty.
++  // Build as child-only env entry (not a parent setenv).
++  char* libgl_str = nullptr;
 +  if (xwayland_gl_driver_path) {
-+    if (*xwayland_gl_driver_path) {
-+      setenv("LIBGL_DRIVERS_PATH", xwayland_gl_driver_path, 1);
-+    }
++    if (*xwayland_gl_driver_path)
++      libgl_str = sl_xasprintf("LIBGL_DRIVERS_PATH=%s", xwayland_gl_driver_path);
 +  } else if (XWAYLAND_GL_DRIVER_PATH && *XWAYLAND_GL_DRIVER_PATH) {
-+    setenv("LIBGL_DRIVERS_PATH", XWAYLAND_GL_DRIVER_PATH, 1);
++    libgl_str = sl_xasprintf("LIBGL_DRIVERS_PATH=%s", XWAYLAND_GL_DRIVER_PATH);
 +  }
++
++  /* Build child-only add_env: LIBGL_DRIVERS_PATH if needed. */
++  const char* xw_add_env[2] = {libgl_str, nullptr};
++  const char* const* xw_add_env_ptr = libgl_str ? xw_add_env : nullptr;
 +
 +  /* Clear CLOEXEC on the child-facing ends so they survive posix_spawn. */
 +  fcntl(display_fd, F_SETFD, 0);
-+  fcntl(wm_fd, F_SETFD, 0);
++  fcntl(wm_fd_child, F_SETFD, 0);
 +
 +  posix_spawn_file_actions_t fa;
 +  posix_spawn_file_actions_init(&fa);
@@ -334,22 +432,24 @@
 +  posix_spawn_file_actions_addclose(&fa, ds[0]);
 +  posix_spawn_file_actions_addclose(&fa, wm[0]);
 +  int pid = sl_spawn(args[0], const_cast<char* const*>(args),
-+                     wayland_socket_fd, &fa);
++                     wayland_socket_fd, xw_add_env_ptr, nullptr, &fa);
 +  posix_spawn_file_actions_destroy(&fa);
++  free(libgl_str);
 +  errno_assert(pid != -1);
    close(wm[1]);
    ctx->xwayland_pid = pid;
  }
-@@ -4604,15 +4628,12 @@
+@@ -4604,15 +4728,13 @@
                            xwayland_path, xdisplay, xauth_path, xfont_path,
                            xwayland_gl_driver_path, glamor);
        } else {
 -        pid = fork();
 +        // Unset DISPLAY to prevent X clients from connecting to an existing X
 +        // server when X forwarding is not enabled.
-+        unsetenv("DISPLAY");
++        const char* const sc_unset_vars[] = {"DISPLAY", nullptr};
 +        /* sv[1] CLOEXEC is cleared inside sl_spawn via WAYLAND_SOCKET path. */
-+        pid = sl_spawn(ctx.runprog[0], ctx.runprog, sv[1], NULL);
++        pid = sl_spawn(ctx.runprog[0], ctx.runprog, sv[1], nullptr,
++                       sc_unset_vars, nullptr);
          errno_assert(pid != -1);
 -        if (pid == 0) {
 -          // Unset DISPLAY to prevent X clients from connecting to an existing X
