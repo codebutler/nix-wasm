@@ -88,13 +88,12 @@ jobs:
   artifacts:
     name: build wasm artifacts
     needs: toolchain
-    # Namespace heavy runner for now: the FIRST run compiles nix.wasm's whole
-    # cross-dependency closure (boost/openssl/curl/libgit2/sqlite/… → wasm) + the
-    # nix.wasm C++ + a second nix.wasm compile for the --rebuild determinism check,
-    # none of it cached yet — CPU-heavy, wants cores. Once Cachix is populated this
-    # job is just substitution (I/O-bound) and can drop back to namespace-profile-
-    # default. Stays off GitHub-hosted minutes either way (private repo).
-    runs-on: namespace-profile-nix-heavy
+    # Namespace small runner: with the toolchain + cross closure cached in Cachix,
+    # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
+    # C++ + squashfs/initramfs/image), so the default profile suffices. (Use
+    # nix-heavy for the FIRST cold run that has to compile the whole cross closure
+    # from source.) Stays off GitHub-hosted minutes (private repo).
+    runs-on: namespace-profile-default
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
