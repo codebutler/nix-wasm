@@ -8,14 +8,14 @@
 // VFS backends, transparent to this server).
 //
 // Multi-mount (Phase E/N1): the server exports one or more backends, selected
-// at Tattach time by `aname` (what `aname` is for). Because several guest
-// mounts share ONE trans_cb ring, the host can't tell them apart from the 9P
-// frame alone — each `p9_client` is tagged with a connection id (`cid`) by the
-// kernel transport and threaded through `handle(bytes, cid)`. Per-connection
-// state (negotiated msize + the fid namespace) is keyed by `cid`, so a second
-// mount no longer clobbers the first's msize (Tversion) or collides on fid
-// numbers (both clients allocate low fids). `cid` defaults to 0, so a single
-// mount behaves exactly as before and existing callers/tests are unaffected.
+// at Tattach time by `aname` (what `aname` is for). Multiple guest mounts share
+// ONE 9P server, so each `p9_client` is tagged with a connection id (`cid`) —
+// supplied by the caller (the virtio-9p host device passes one per device, #10)
+// and threaded through `handle(bytes, cid)`. Per-connection state (negotiated
+// msize + the fid namespace) is keyed by `cid`, so a second mount no longer
+// clobbers the first's msize (Tversion) or collides on fid numbers (both clients
+// allocate low fids). `cid` defaults to 0, so a single mount behaves exactly as
+// before and existing callers/tests are unaffected.
 //
 // Identity: the VFS already has stable string inodes (`rec.id`, used elsewhere
 // as window instanceKeys). We intern each into a small integer qid.path, so the

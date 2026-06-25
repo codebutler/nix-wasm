@@ -27,7 +27,6 @@ pkgs.stdenv.mkDerivation {
   src = kernelSrc;
 
   patches = [
-    ./patches/kernel/0001-9p-trans_cb.patch
     ./patches/kernel/0002-hvc-wasm-multi-console.patch
     ./patches/kernel/0003-hvc-wasm-winsize.patch
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
@@ -72,6 +71,13 @@ pkgs.stdenv.mkDerivation {
     # the wasm virtio transport so CONFIG_VIRTIO_BLK can drive a squashfs image
     # served via a host-side virtio-blk device (VIRTIO_ID_BLOCK = 2).
     ./patches/kernel/0017-wasm-virtio-blk-device.patch
+    # Issue #10 (host<->guest bridge consolidation onto virtio): register
+    # virtio-9p channels (VIRTIO_ID_9P = 9) on the wasm virtio transport so the
+    # stock mainline 9P-over-virtio transport (CONFIG_NET_9P_VIRTIO) can carry
+    # the guest's filesystem mounts, replacing the bespoke trans_cb SAB-ring
+    # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
+    # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
+    ./patches/kernel/0018-wasm-virtio-9p-device.patch
   ];
 
   nativeBuildInputs = [
@@ -133,7 +139,12 @@ pkgs.stdenv.mkDerivation {
     # but the working overlay upper is RAMFS (always built in, backs the
     # initramfs). CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
     bash ./scripts/config --file build/.config \
-      --enable CONFIG_NET --enable CONFIG_NET_9P --enable CONFIG_NET_9P_CB --enable CONFIG_9P_FS \
+      `# 9P rides the stock mainline 9P-over-virtio transport (NET_9P_VIRTIO) on` \
+      `# the virtio_wasm transport (patch 0018) — the guest looks like a standard` \
+      `# virtualized Linux at the 9P layer. The bespoke trans_cb (NET_9P_CB)` \
+      `# SAB-ring transport it replaced is gone (#10).` \
+      --enable CONFIG_NET --enable CONFIG_NET_9P \
+      --enable CONFIG_NET_9P_VIRTIO --enable CONFIG_9P_FS \
       --enable CONFIG_DEVTMPFS --enable CONFIG_DEVTMPFS_MOUNT \
       --enable CONFIG_FILE_LOCKING \
       `# Wayland Phase 1 (1a/1b): virtio core + the Wasm host-callback transport` \

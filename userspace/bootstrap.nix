@@ -8,9 +8,20 @@
 # Run-in-place: no switch_root (NOMMU; the initramfs ramfs stays the root, so the
 # baked /bin/sh persists).
 #
-# 9P: trans=cb -> net/9p/trans_cb.c -> the JS 9P server. msize 512K = the kernel
-# transport cap (P9_CB_MAXSIZE). Exports (boot.js): "/"=pc VFS, nixcache.
-# /nix is now a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
+# 9P: trans=virtio -> stock mainline net/9p/trans_virtio.c -> a host-side
+# virtio-9p device (runtime/virtio/ninep-device.js) -> the JS 9P server. This is
+# the #10 consolidation: the guest now looks like a standard virtualized Linux
+# at the 9P layer (stock v9fs over a stock carrier), replacing the bespoke
+# trans_cb SAB-ring transport. The device is selected by MOUNT TAG (the first
+# `mount` arg: "pcroot" / "nixcache" — kernel patch 0018 + the host devices);
+# aname still selects the server export. Exports (boot.js): "/"=pc VFS, nixcache.
+# msize ~500K: 9pnet_virtio caps it at PAGE_SIZE*(VIRTQUEUE_NUM-3) (VIRTQUEUE_NUM
+# is the driver's fixed 128), so requesting 512K negotiates to ~500K — on par
+# with trans_cb's 512K (no regression). The 9P virtqueues are sized to 128
+# entries (patch 0018) so a single msize-sized request's ~125-page scatter-gather
+# list fits in one descriptor chain; the default 64-entry ring would overflow
+# (-ENOSPC) on large reads like a nix-env NAR fetch.
+# /nix is a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
 { pkgs }:
 pkgs.writeText "init" ''
   #!/bin/sh
@@ -32,7 +43,7 @@ pkgs.writeText "init" ''
   # shmem/tmpfs lacks reliable shared-writable mmap on NOMMU.
   mkdir -p /dev/shm && mount -t ramfs none /dev/shm 2>/dev/null
 
-  M="trans=cb,version=9p2000.L,msize=524288"
+  M="trans=virtio,version=9p2000.L,msize=524288"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
   # of netfs UNBUFFERED/direct reads. Direct reads call iov_iter_extract_pages /
   # get_user_pages on the user buffer, which fails EFAULT on this NOMMU/wasm guest
@@ -44,11 +55,11 @@ pkgs.writeText "init" ''
 
   # pc's VFS (user files) at /mnt/pc.
   mkdir -p /mnt/pc
-  mount -t 9p -o "$M,aname=/" cb /mnt/pc 2>/dev/null || echo "pc: /mnt/pc 9p mount failed"
+  mount -t 9p -o "$M,aname=/" pcroot /mnt/pc 2>/dev/null || echo "pc: /mnt/pc 9p mount failed"
 
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
-  mount -t 9p -o "$RO,aname=nixcache" cb /nix-cache 2>/dev/null || true
+  mount -t 9p -o "$RO,aname=nixcache" nixcache /nix-cache 2>/dev/null || true
 
   # The served base-system closure: a read-only squashfs on virtio-blk ->
   # overlay lower; ramfs upper makes /nix writable for nix-env. NOMMU has no

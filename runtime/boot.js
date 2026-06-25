@@ -2,14 +2,14 @@
 //
 // Wiring:
 //   - compile vmlinux.wasm + load the initramfs (BusyBox + pc-init),
-//   - create the SAB 9P ring and run the 9P server ON THIS THREAD via
-//     transport.run() (an Atomics.waitAsync loop — non-blocking), so it can use
-//     the real VFS (which may be window-bound or Node-side). The kernel's
-//     task-workers are the ones that block (on the ring's reply word), not the
-//     host thread,
-//   - hand the ring into the kernel host, which spawns a Web Worker per
-//     CPU/task over a shared WebAssembly.Memory. Each task worker's
-//     wasm_driver_9p_request drives the ring → our 9P server.
+//   - create the 9P server (createNinePServer) bound to the real VFS (which may
+//     be window-bound or Node-side) and hand it to the kernel host as
+//     `ninep_server`. The guest mounts it over the stock virtio-9p transport
+//     (issue #10): the main-thread virtio-9p host devices run server.handle()
+//     and raise the completion IRQ; the kernel's task-workers park in
+//     p9_client_rpc until woken. No SAB ring / no synchronous host import.
+//   - the kernel host spawns a Web Worker per CPU/task over a shared
+//     WebAssembly.Memory; a worker forwards each 9P vq kick to the main thread.
 //
 // Multi-tty: the kernel registers HVC_CONSOLES hvc lines (hvc0..hvc{N-1});
 // pc-init respawns a shell on each. `bootLinux()` returns a handle exposing
@@ -20,9 +20,7 @@
 
 import { linux } from "./kernel-host.js";
 import { makeSharedQueues } from "./virtio/shared-queues.js";
-import { Ring } from "./ninep/ring.js";
 import { createNinePServer } from "./ninep/server.js";
-import { createNinePTransport } from "./ninep/transport.js";
 
 // Number of hvc consoles the kernel registers (hvc0..hvc{N-1}) — one per Linux
 // terminal window; hvc0 also carries the kernel boot log. MUST match the
@@ -110,25 +108,18 @@ export async function bootLinux(opts) {
     for (const cb of set) cb(bytes);
   }
 
-  // 9P transport: ring + server, serviced on this thread (real VFS lives here).
-  // msize is the max bytes per 9P request/reply. Each round-trip pays cooperative
-  // guest↔host Atomics-scheduling latency, so big file I/O is round-trip-bound:
-  // exec'ing the 25 MB nix.wasm at the old 64 KB took ~390 round-trips (~6 s);
-  // 512 KB cuts that to ~50 (~2.5 s). 512 KB is the kernel transport's cap
-  // (P9_CB_MAXSIZE, patches/0001-9p-trans_cb.patch) — the practical max here,
-  // and the remaining cost is the tool's own startup, not the read. The ring
-  // and the negotiated server msize must agree; pc-init mounts request it too.
+  // 9P server, driven by the virtio-9p host devices (kernel-host.js) over the
+  // virtio_wasm transport. msize is the max bytes per 9P request/reply; 512 KB
+  // matches what 9pnet_virtio negotiates (PAGE_SIZE*(VIRTQUEUE_NUM-3) ≈ 500 KB),
+  // so big reads (e.g. a nix-env NAR fetch) aren't round-trip-bound on tiny
+  // chunks. The server is transport-agnostic — it speaks bytes-in/bytes-out via
+  // handle(frame, cid); the per-mount cid keeps each connection's state isolated.
   const NINEP_MSIZE = 512 * 1024;
-  const ring = Ring.create(8, NINEP_MSIZE);
   // Register the user VFS at the root aname; the /nix-cache binary cache is
   // a second export when provided (#141).
   const exports = { "/": vfs };
   if (opts.nixCache) exports.nixcache = opts.nixCache; // read-only Nix binary cache, pc-init mounts at /nix-cache + substituters=file:///nix-cache (#141)
-  const transport = createNinePTransport({
-    ring,
-    server: createNinePServer({ exports, msize: NINEP_MSIZE }),
-  });
-  transport.run(); // Atomics.waitAsync server loop; self-driving, resolves on stop()
+  const ninepServer = createNinePServer({ exports, msize: NINEP_MSIZE });
 
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB), threaded
   // into every task worker so a queue set up on the boot worker is serviceable
@@ -157,7 +148,7 @@ export async function bootLinux(opts) {
     initrd,
     log: onLog,
     console_write: emit,
-    ninep_ring: ring.buffer,
+    ninep_server: ninepServer, // #10: main-thread virtio-9p host devices service this
     virtio_queues: virtioQueues,
     // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
     // An ArrayBuffer; kernel-host copies it once into a SharedArrayBuffer so
@@ -233,11 +224,12 @@ export async function bootLinux(opts) {
      */
     net: os.net,
 
-    /** Stop the 9P server loop. (Worker teardown is the caller's concern.) */
+    /** Mark this boot handle dead. The 9P server is passive (driven by the
+     *  guest's virtio-9p kicks — no background loop to stop); worker teardown is
+     *  the caller's concern. */
     kill() {
       if (!alive) return;
       alive = false;
-      transport.stop();
     },
   };
 }
