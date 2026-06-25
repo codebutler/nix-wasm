@@ -290,7 +290,12 @@ export const linux = async ({
           log("[wayland] sendOut rejected: " + (e && e.stack ? e.stack : e)),
         );
       } else {
-        log(`[wayland] OUT for client ${clientId} but no host bridge wired`);
+        // No external compositor bridge (the node smoke harness): serve the SEND
+        // with the in-process WlServer registry-handshake stub on the host-side
+        // WlDevice, which injects the reply over the SAME IN vring + raised_irqs
+        // self-wake the compositor path uses. This is what makes wl-handshake a
+        // real host→guest regression gate. fds (shm) are unused by the handshake.
+        hostWl()?.serveLocal(clientId, new Uint8Array(message.buffer));
       }
     },
 

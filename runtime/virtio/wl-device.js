@@ -215,6 +215,28 @@ export class WlDevice extends VirtioWasmDevice {
     this._flushPendingIn();
   }
 
+  /** Public: serve a guest VFD_SEND's wayland bytes through the in-process
+   *  WlServer (the registry-handshake stub — no compositor) and inject the reply
+   *  back over the IN queue. This is the host-side equivalent of the worker's
+   *  Phase-1 WlServer fallback, used when NO external compositor bridge (Greenfield)
+   *  is wired (the node smoke harness). It runs on the SAME host WlDevice that owns
+   *  the IN vring + the raised_irqs self-wake, so the reply travels the real
+   *  host→guest delivery path — making the node wl-handshake a true regression gate
+   *  rather than a stub bypass. With a compositor bridge present this is never
+   *  called (the host routes SENDs to the compositor instead).
+   *  @param {number} clientId  ctx vfd_id the SEND came from
+   *  @param {Uint8Array|ArrayBuffer} data  the client→server wire bytes */
+  serveLocal(clientId, data) {
+    const id = clientId >>> 0;
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const server = this._serverFor(id);
+    const reply = server.handle(bytes);
+    if (reply.length) {
+      this.log(`[virtio-wl] wl-server produced ${reply.length}B reply -> IN queue`);
+      this.injectIn(id, reply);
+    }
+  }
+
   /** Public: flush any IN messages deferred for lack of a free guest inbuf. The
    *  host calls this when the guest refills the IN avail ring (a VQ_IN kick the
    *  worker forwards) — the host owns the IN vring but the kick lands on the
