@@ -1,0 +1,24 @@
+--- a/sommelier-seat.cc	2026-06-25 22:19:42.611510452 -0400
++++ b/sommelier-seat.cc	2026-06-25 23:13:20.653848576 -0400
+@@ -304,7 +304,20 @@
+   if (format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+     void* data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+ 
+-    assert(data != MAP_FAILED);
++    // wasm/NOMMU: host->guest fds (the keymap) are NOT mmappable on this port —
++    // there is no MMU to map host-injected device pages, so the runtime delivers
++    // the keymap vfd with pfn=0 and mmap returns MAP_FAILED (see the host-arena
++    // dead-end note in runtime/virtio/wl-device.js). The keymap fd was ALREADY
++    // forwarded to the guest client via wl_keyboard_send_keymap() above; the mmap
++    // here is only for Sommelier's OWN xkb state (accelerator/keysym translation),
++    // and every downstream use of host->keymap/host->state is null-guarded
++    // (they init to nullptr). So skip building the internal xkb state instead of
++    // aborting the per-client worker. (Full in-guest keyboard input needs a
++    // separate host->guest mmappable-fd mechanism.)
++    if (data == MAP_FAILED) {
++      close(fd);
++      return;
++    }
+ 
+     if (host->keymap) {
+       xkb_keymap_unref(host->keymap);

@@ -46,7 +46,14 @@ cross.stdenv.mkDerivation {
 
   # Remove all fork/execvp sites; replace with posix_spawnp (the only spawn
   # mechanism available on the NOMMU wasm guest — fork/vfork absent from musl).
-  patches = [ ../patches/sommelier/0001-posix-spawn.patch ];
+  patches = [
+    ../patches/sommelier/0001-posix-spawn.patch
+    # Gracefully handle the non-mmappable host->guest keymap fd on NOMMU (the
+    # keymap is already forwarded to the client; the mmap is only for Sommelier's
+    # own null-guarded xkb state) instead of asserting — else keyboard-using GTK
+    # apps abort the per-client worker on wl_keyboard.keymap.
+    ../patches/sommelier/0002-keymap-mmap-graceful.patch
+  ];
 
   nativeBuildInputs = [
     cross.buildPackages.meson
