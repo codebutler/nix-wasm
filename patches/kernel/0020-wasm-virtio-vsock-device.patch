@@ -49,21 +49,21 @@ diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 index c0ffee123..d15eaf456 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -371,6 +371,16 @@ enum {
- #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
- 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
- 	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
-+#endif
+@@ -381,5 +381,16 @@ enum {
+ #if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
+ 	VW_DEV_CONSOLE,		/* virtio-console: a guest TTY (stock virtio_console.c) */
+ #endif
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock: AF_VSOCK socket channel for the /Ctl bridge (issue #10
 +	 * option 3). Pinned to host index 7 (WL=0..9P_NIXCACHE=5, CONSOLE=6)
 +	 * with an explicit value so it stays stable regardless of which
 +	 * CONFIG-guarded earlier slots are built; the host (VW_DEV_VSOCK = 7)
-+	 * must agree on this index.
++	 * must agree on this index. MUST sit AFTER VW_DEV_CONSOLE in the enum so
++	 * CONSOLE keeps index 6 and VW_DEV_COUNT stays 8 (issue #83).
 +	 */
 +	VW_DEV_VSOCK = 7,
- #endif
++#endif
  	VW_DEV_COUNT,
  };
 @@ -426,6 +436,18 @@ static int __init virtio_wasm_transport_init(void)
