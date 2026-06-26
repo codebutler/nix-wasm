@@ -77,3 +77,33 @@ test("bare /pr-<N> redirects to /pr-<N>/", async () => {
   assert.equal(res.status, 308);
   assert.equal(res.headers.get("location"), "https://preview.example/pr-7/");
 });
+
+test("bare /pr-<N> redirect carries isolation headers (Fix 3)", async () => {
+  const res = await call(fakeEnv({}), "/pr-7");
+  assert.equal(res.headers.get("cross-origin-opener-policy"), "same-origin");
+  assert.equal(res.headers.get("cross-origin-embedder-policy"), "require-corp");
+  assert.equal(res.headers.get("cross-origin-resource-policy"), "cross-origin");
+});
+
+test("extensionless directory path redirects 308 to trailing-slash URL (Fix 4)", async () => {
+  const env = fakeEnv({ "pr-7/demo/web/index.html": "<html>" });
+  const res = await call(env, "/pr-7/demo/web");
+  assert.equal(res.status, 308);
+  assert.equal(res.headers.get("location"), "https://preview.example/pr-7/demo/web/");
+  assert.equal(res.headers.get("cross-origin-opener-policy"), "same-origin");
+  assert.equal(res.headers.get("cross-origin-embedder-policy"), "require-corp");
+  assert.equal(res.headers.get("cross-origin-resource-policy"), "cross-origin");
+});
+
+test("extensionless directory path WITHOUT index.html still 404s (Fix 4 no-loop guard)", async () => {
+  const env = fakeEnv({});
+  const res = await call(env, "/pr-7/demo/web");
+  assert.equal(res.status, 404);
+});
+
+test("directory path WITH trailing slash still serves index.html (Fix 4 unchanged path)", async () => {
+  const env = fakeEnv({ "pr-7/demo/web/index.html": "<html>" });
+  const res = await call(env, "/pr-7/demo/web/");
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "<html>");
+});

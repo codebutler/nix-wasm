@@ -14,7 +14,7 @@ nix-wasm-previews
 - The Worker stamps `COOP/COEP/CORP` on every response → cross-origin isolated
   (SharedArrayBuffer, which the wasm kernel needs); a bare R2 URL can't.
 - Boot artifacts are content-addressed (`buildhash` = sha256 of the three nix
-  store-path hashes), uploaded with `--ignore-existing`, so a guest-unchanged
+  store-path basenames), uploaded with `--ignore-existing`, so a guest-unchanged
   push uploads ~zero artifact bytes and many PRs share one `cas/` prefix.
 - The guest binary cache (`nix-cache/`, in-guest `nix-env -iA`) is **not** part
   of previews — that is issue #2's substituter.

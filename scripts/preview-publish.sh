@@ -70,11 +70,11 @@ RCLONE_FLAGS=(--s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeou
 # 4. Dry-run guard: no R2 credentials → print the commands and exit.
 if [ -z "${R2_ACCESS_KEY_ID:-}" ]; then
   echo "==> DRY-RUN (R2_ACCESS_KEY_ID unset) — commands that WOULD run:"
-  echo "  rclone copy '$STAGE' 'r2:$BUCKET/cas/$BUILDHASH' --ignore-existing ${RCLONE_FLAGS[*]}"
+  echo "  rclone copy '$STAGE' 'r2:$BUCKET/cas/$BUILDHASH' --ignore-existing ${RCLONE_FLAGS[@]}"
   echo "  rclone sync '$ROOT/runtime' 'r2:$BUCKET/pr-$PR' --delete \\"
   echo "    --exclude 'node_modules/**' --exclude 'demo/node/**' --exclude '*.test.js' \\"
-  echo "    --exclude '.git/**' --transfers 16 --checkers 32 ${RCLONE_FLAGS[*]}"
-  echo "  printf '%s' '<preview.json>' | rclone rcat 'r2:$BUCKET/pr-$PR/demo/web/preview.json' ${RCLONE_FLAGS[*]}"
+  echo "    --exclude '.git/**' --transfers 16 --checkers 32 ${RCLONE_FLAGS[@]}"
+  echo "  printf '%s' '<preview.json>' | rclone rcat 'r2:$BUCKET/pr-$PR/demo/web/preview.json' ${RCLONE_FLAGS[@]}"
   echo "==> preview URL would be \${PREVIEW_BASE_URL}/pr-$PR/demo/web/"
   exit 0
 fi

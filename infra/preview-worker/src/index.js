@@ -75,7 +75,7 @@ export default {
     if (/^pr-\d+$/.test(layer) && segs.length === 1) {
       return new Response(null, {
         status: 308,
-        headers: { Location: `${url.origin}/${layer}/${url.search}` },
+        headers: { Location: `${url.origin}/${layer}/${url.search}`, ...ISOLATION_HEADERS },
       });
     }
 
@@ -83,13 +83,16 @@ export default {
     if (key.endsWith("/")) key += "index.html";
 
     let obj = await env.PREVIEWS.get(key);
-    // Extension-less directory request -> try its index.html.
+    // Extension-less directory request -> redirect to trailing-slash URL so
+    // relative imports (./main.js, ./vendor/…) resolve against the correct base.
     if (!obj && !key.split("/").pop().includes(".")) {
       const idx = `${key}/index.html`;
-      const alt = await env.PREVIEWS.get(idx);
-      if (alt) {
-        obj = alt;
-        key = idx;
+      const idxExists = await env.PREVIEWS.get(idx);
+      if (idxExists) {
+        return new Response(null, {
+          status: 308,
+          headers: { Location: `${url.origin}/${key}/${url.search}`, ...ISOLATION_HEADERS },
+        });
       }
     }
     if (!obj) return withHeaders(`Not found: ${key}\n`, { status: 404 }, "x.txt");
