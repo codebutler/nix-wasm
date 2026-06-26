@@ -114,7 +114,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "    --file \"$ISO\" --content-type application/x-iso9660-image --remote"
   echo ""
   echo "  # toolchain cache tree → packages/linux/$VERSION/nix-cache/<rel>"
-  ( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
+  ( cd "$CACHE" && find -L . -type f -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
       echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/nix-cache/$REL\" --file … --remote"
     done | head -5 )
@@ -150,8 +150,14 @@ echo "==> Uploading linux.iso → $BUCKET/packages/linux/$VERSION/linux.iso …"
 bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/linux.iso" \
   --file "$ISO" --content-type application/x-iso9660-image --remote
 
+# `find -L` FOLLOWS symlinks: the .#wasm-binary-cache tree stores its nar/narinfo/
+# nix-cache-info entries as symlinks into the store, and a plain `find -type f`
+# skips them — run #2 uploaded only the 2 real files (pkgs.nix, manifest.json),
+# leaving the cache un-installable (nix-cache-info 404). `-L` enumerates the
+# symlink targets so the full cache is published; `wrangler --file` reads through
+# the symlink to the real bytes.
 echo "==> Uploading toolchain cache → $BUCKET/packages/linux/$VERSION/nix-cache/ …"
-( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
+( cd "$CACHE" && find -L . -type f -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
     bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/nix-cache/$REL" \
