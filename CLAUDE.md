@@ -810,6 +810,23 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
+- **GTK needs a cursor theme + `XCURSOR_PATH`/`XCURSOR_THEME`** (`userspace/
+  gtk-assets.nix` + `system.nix`). GDK's wayland backend draws pointer shapes
+  from an Xcursor theme on disk via libwayland-cursor; the guest's default search
+  path (`/usr/share/icons`, …) is empty, so EVERY cursor request fails with
+  `Gdk-Message: Unable to load <name> from the cursor theme`
+  (default/text/pointer/`*-resize`/col-resize) and widgets show no hover/resize/
+  text cursors. The failing `default` line is the tell that NO theme is found at
+  all (not individual missing cursors). Fix: bake the **Adwaita** Xcursor theme
+  into `gtk-assets` (it lives under `gnome-themes-extra`'s `share/icons/Adwaita`,
+  NOT `adwaita-icon-theme`; taken native from `buildPackages` like hicolor — pure
+  data, the `cp` into the fresh derivation leaves no store ref) + a `default`
+  theme that `Inherits=Adwaita`, then set `XCURSOR_PATH=/run/current-system/sw/
+  share/icons` + `XCURSOR_THEME=Adwaita` (+ `XCURSOR_SIZE=24`) in `system.nix`'s
+  `environment.variables` (reaches apps via `/etc/profile`→`/etc/set-environment`,
+  same as `FONTCONFIG_FILE`/`GSETTINGS_SCHEMA_DIR`). The `default`-inherits-Adwaita
+  fallback covers libwayland-cursor's NULL-theme-name → "default" path. Rebuild
+  `.#wasm-base-squashfs` (system-profile data change).
 - **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
   DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
   generic path does a native stack-pointer switch (`CRTJMP`) to `munmap` its own
