@@ -190,6 +190,16 @@
         inherit cross;
       };
 
+      # Faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends
+      # one packet then hangs): a one-shot setitimer(ITIMER_REAL) re-armed from
+      # inside its own SIGALRM handler, with an async echo-host thread so the
+      # blocking recv() is woken by I/O, re-blocks, and the NEXT one-shot timer
+      # must fire — the sequence sigalrm-test case 3 does not cover. See
+      # userspace/ping-pace-test.c.
+      pingPaceTest = import ./userspace/ping-pace-test.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -352,7 +362,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -501,6 +511,11 @@
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
         kill-wake-test = killWakeTest;
+
+        # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-
+        # hang): one-shot itimer re-armed in its handler across an I/O-woken,
+        # re-blocked recv → $out/bin/ping-pace-test.
+        ping-pace-test = pingPaceTest;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;

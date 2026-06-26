@@ -138,6 +138,9 @@ jobs:
   #   • sigalrm-smoke   — the kernel self-armed SIGALRM/itimer/alarm path (#55).
   #   • kill-wake-smoke — the cross-process kill() async-signal wake reproducer
   #     for the `timeout 2 sleep 10` hang (#35), no busybox/networking.
+  #   • ping-pace-smoke — #75 DIAGNOSTIC (non-gating): busybox `ping`'s one-shot-
+  #     itimer-re-armed-in-handler pacing across an async-I/O-woken, re-blocked
+  #     recv, no busybox/networking. Reported, never reds CI (bug still open).
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
@@ -184,7 +187,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Run a smoke up to 3 times, treating exit 2 (boot panic) as retryable.
-      - name: Boot smokes (sigalrm + kill-wake + timeout)
+      - name: Boot smokes (sigalrm + kill-wake + timeout + ping-pace #75 diag)
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/
@@ -213,3 +216,23 @@ jobs:
           # #35 regression: `timeout 2 sleep 10` must terminate sleep (now fixed
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
+
+          # #75 DIAGNOSTIC (NON-gating — the bug is still OPEN). Faithful
+          # no-network reproducer of busybox `ping`'s pacing: a one-shot itimer
+          # re-armed in its own handler across an async-I/O-woken, re-blocked
+          # recv (the gap sigalrm-test case 3 leaves). Reported, not gated: a
+          # PASS means the kernel/runtime timer path handles ping's sequence
+          # (bug is elsewhere — busybox ICMP internals or pc vnet); a FAIL
+          # means we've reproduced #75 at the kernel/runtime level. Either
+          # verdict is informational until #75 is fixed, so it never reds CI.
+          echo "::group::ping-pace-smoke (#75 diagnostic, non-gating)"
+          set +e
+          node demo/node/ping-pace-smoke.mjs
+          pp_rc=$?
+          set -e
+          echo "::endgroup::"
+          if [ "$pp_rc" -eq 0 ]; then
+            echo "::notice::#75 ping-pace-smoke PASSED — ping's one-shot-itimer-re-armed-in-handler + I/O-woken-recv sequence works at the kernel/runtime level; the bug is elsewhere (busybox ICMP socket internals or pc vnet)."
+          else
+            echo "::warning::#75 ping-pace-smoke FAILED (rc=$pp_rc) — reproduced the one-packet-then-hang at the kernel/runtime timer level (a pending one-shot ITIMER_REAL does not fire after an I/O-woken recv re-blocks). Fix belongs in arch/wasm timer/idle reprogramming."
+          fi

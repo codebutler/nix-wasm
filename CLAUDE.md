@@ -191,12 +191,25 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 #   timeout-repro-smoke — the actual busybox `timeout 2 sleep 10` (the #35
 #                     headline command). PASS = sleep is killed at ~2s (busybox
 #                     exit 143 = 128+SIGTERM, NOT GNU's 124).
-# These three are wired into the nix-wasm.yml `boot-smoke` CI job (substitutes the
-# artifacts from Cachix and boots them on x86_64) — the first CI job that BOOTS
-# the guest rather than just building images.
+#   ping-pace-smoke — #75 DIAGNOSTIC (non-gating). Faithful no-network repro of
+#                     busybox FANCY `ping`'s pacing: a one-shot setitimer re-armed
+#                     from INSIDE its own SIGALRM handler, with an async echo-host
+#                     thread so the blocking recv() is I/O-woken, re-blocks, and
+#                     the NEXT one-shot timer must fire — the sequence sigalrm-
+#                     test case 3 leaves UNtested (case 3 fires once during a
+#                     single traffic-less recv). PASS = ping's sequence works at
+#                     the kernel level (bug is elsewhere: busybox ICMP internals
+#                     or pc vnet); FAIL/hang at "sent=1" = #75 reproduced at the
+#                     kernel/runtime timer-reprogram level.
+# The first three are GATING (their bugs are fixed). ping-pace-smoke is wired in
+# NON-gating (bug still open — it reports a ::notice/::warning verdict, never reds
+# CI). All are in the nix-wasm.yml `boot-smoke` CI job (substitutes the artifacts
+# from Cachix and boots them on x86_64) — the first CI job that BOOTS the guest
+# rather than just building images.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/sigalrm-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/kill-wake-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/timeout-repro-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-smoke.mjs
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]

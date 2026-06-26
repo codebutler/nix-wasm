@@ -16,8 +16,16 @@
  *   1. alarm(1) + pause()                    — one-shot timeout while blocked.
  *   2. setitimer(ITIMER_REAL) periodic       — N ticks, blocked in nanosleep.
  *   3. setitimer + recvfrom AFTER a spawn     — one-shot timer must interrupt a
- *      (busybox-ping's exact pattern)           single timer-less blocking wait
+ *      (busybox-ping's pacing skeleton)         single timer-less blocking wait
  *                                               in a process that has spawned.
+ *
+ * NB (issue #75): case 3 fires a one-shot timer ONCE during a SINGLE recv that
+ * never receives traffic, and the handler does NOT re-arm. Continuous busybox
+ * `ping` does more: each interval the handler RE-ARMS another one-shot timer AND
+ * a reply asynchronously I/O-wakes recv, so the next one-shot must fire after an
+ * I/O-woken recv RE-BLOCKS. That extra "async-I/O wakeup + re-block, then the
+ * pending one-shot fires" step is NOT covered here — it is exercised by
+ * ping-pace-test.c (the #75 reproducer).
  *
  * Background — #35's premise vs. reality: #35 reported busybox `ping` sending
  * only one packet and hypothesized "no async interval-timer source raises
