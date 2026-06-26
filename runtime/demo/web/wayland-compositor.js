@@ -264,9 +264,30 @@ async function boot() {
       } catch {}
     });
     canvas.addEventListener("pointerenter", focus);
-    canvas.addEventListener("pointerdown", () => {
+    // Map browser MouseEvent.button (0 left / 1 middle / 2 right) to Greenfield's
+    // ButtonCode enum (MAIN/AUX/SECONDARY = 0/1/2). Ignore other buttons.
+    const toButtonCode = (b) => (b === 0 || b === 1 || b === 2 ? b : null);
+    canvas.addEventListener("pointerdown", (ev) => {
       focus();
       canvas.focus();
+      const code = toButtonCode(ev.button);
+      if (code === null) return;
+      try {
+        canvas.setPointerCapture(ev.pointerId);
+      } catch {}
+      try {
+        actions.pointerButton(cs, code, false);
+      } catch {}
+    });
+    canvas.addEventListener("pointerup", (ev) => {
+      const code = toButtonCode(ev.button);
+      if (code === null) return;
+      try {
+        canvas.releasePointerCapture(ev.pointerId);
+      } catch {}
+      try {
+        actions.pointerButton(cs, code, true);
+      } catch {}
     });
     canvas.addEventListener("pointerleave", () => {
       try {
