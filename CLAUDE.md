@@ -177,13 +177,17 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 
 # #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
 #   sigalrm-smoke   — self-armed SIGALRM/itimer/alarm (kernel mechanism, #55).
-#   kill-wake-smoke — cross-process kill() async-signal wake (the `timeout 2
-#                     sleep 10` hang reproducer, #35; no busybox, no networking).
-# These two are wired into the nix-wasm.yml `boot-smoke` CI job (substitutes the
+#   kill-wake-smoke — cross-process kill() async-signal wake (a reduced C
+#                     reproducer for #35; no busybox, no networking).
+#   timeout-repro-smoke — the actual busybox `timeout 2 sleep 10` (the #35
+#                     headline command). PASS = sleep is killed at ~2s (busybox
+#                     exit 143 = 128+SIGTERM, NOT GNU's 124).
+# These three are wired into the nix-wasm.yml `boot-smoke` CI job (substitutes the
 # artifacts from Cachix and boots them on x86_64) — the first CI job that BOOTS
 # the guest rather than just building images.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/sigalrm-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/kill-wake-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/timeout-repro-smoke.mjs
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
@@ -601,6 +605,24 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   busybox + ash + glib carry the spawn-port patches. Holdouts follow one documented
   rule (don't-build an unused CLI / port a library to `posix_spawn` / compile out an
   unused return-twice symbol). **Full contract: `docs/process-model.md`.**
+- **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
+  (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
+  itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),
+  then the parent execs PROG. Stock busybox builds the re-exec argv by overwriting
+  the SHARED argv (`argv[optind]="-pPID"` → `["timeout","SECS","-pPID"]`) and relies
+  on **glibc getopt PERMUTING** that trailing option back past the `SECS` operand.
+  **musl's getopt does NOT permute** — the leading operand stops option scanning, so
+  `-pPID` is never parsed, the watcher runs with `parent==0`, treats `-pPID` as PROG
+  (`can't execute '-p50'`) and never fires → `timeout 2 sleep 10` runs the full 10s
+  and exits 0. #35 was filed as an async-SIGALRM/signal gap; it is **not** — the
+  kernel async-signal path is proven by `.#sigalrm-test` + `.#kill-wake-test` (the
+  latter a reduced C cross-process-kill reproducer). Fix: the clone child builds a
+  PRIVATE argv (don't mutate the CLONE_VM-shared parent argv) with `-pPID` **before**
+  the operands. busybox `timeout` replaces itself with PROG, so a fired timeout exits
+  **128+SIGTERM = 143**, NOT GNU's 124 — the `timeout-repro-smoke` gate asserts 143.
+  (DEAD-END: the first 0008 only stopped the parent-argv mutation — necessary but not
+  sufficient; the watcher-side getopt order was the real bug, found via an in-guest
+  `TMODBG` argv trace over the ~3-min Cachix-substituted boot-smoke CI loop.)
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.

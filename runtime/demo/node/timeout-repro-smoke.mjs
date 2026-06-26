@@ -1,20 +1,26 @@
-// timeout-repro-smoke.mjs — DIAGNOSTIC (non-gating) for issue #35. Boots the
-// guest and runs the ACTUAL busybox command that hangs: `timeout 2 sleep 10`.
+// timeout-repro-smoke.mjs — regression smoke for issue #35. Boots the guest and
+// runs the busybox command that used to fail: `timeout 2 sleep 10`.
 //
-// Correct behavior: busybox `timeout` clones a watcher that re-execs itself
-// (bb_daemonize_or_rexec), sleeps 2s, then kill(parent, SIGTERM) — so the
-// command should terminate `sleep 10` at ~2s and exit 124. The standalone C
-// kill-wake-test (single posix_spawn + cross-process SIGTERM, default action AND
-// handler) PASSES on the guest, so this smoke isolates whether the failure is in
-// busybox's *double-spawn / re-exec* watcher path specifically.
+// busybox `timeout` spawns a watcher that re-execs itself with `-pPID`
+// (bb_daemonize_or_rexec), waits the timeout, then kill(parent, SIGTERM); the
+// parent meanwhile execs PROG (so it IS PROG by the time it's signalled).
 //
-// No networking needed (unlike `ping`), so it runs in the busybox-only boot.
-// Exit: 0 = timeout worked (bug NOT reproduced); 3 = #35 reproduced (hang or a
-// wrong/again exit); 2 = inconclusive (boot panic — re-run).
+// #35: on the wasm/NOMMU guest the watcher's `-pPID` landed AFTER the SECONDS
+// operand in the re-exec argv, and musl's getopt (unlike glibc) does not permute
+// options past the first operand, so `-p` was never parsed — the watcher died
+// with "can't execute '-p50'" and `sleep 10` ran to completion (exit 0). Fixed
+// by patches/busybox/0008 (insert `-pPID` before the operands).
+//
+// Correct busybox behavior: `sleep 10` is TERMINATED by the watcher at ~2s.
+// busybox `timeout` replaces itself with PROG and is killed directly, so the
+// shell sees the signal exit 128+SIGTERM = 143 (NOT GNU coreutils' 124). Either
+// 143 or 124 means the timeout fired; exit 0 (ran the full 10s) or the "-p50"
+// error means #35 is back. No networking needed (runs in the busybox-only boot).
+// Exit: 0 = timeout fired (PASS); 1 = #35 (ran full / errored); 2 = boot panic.
 import { bootNode } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: false });
-let verdict = 3; // assume reproduced until we see a clean 124
+let verdict = 1; // assume failure until we see the timeout actually fire
 try {
   let reached;
   try {
@@ -34,23 +40,24 @@ try {
   const got = await s.waitForOutput(/TIMEOUT_REPRO_EXIT=(\d+)/, 20000);
   if (!got) {
     console.log("[timeout-repro] HANG — `timeout 2 sleep 10` never returned in 20s (this IS #35)");
-    verdict = 3;
+    verdict = 1;
   } else {
     const m = /TIMEOUT_REPRO_EXIT=(\d+)/.exec(s.snapshot());
     const code = m ? Number(m[1]) : NaN;
-    if (code === 124) {
-      console.log("[timeout-repro] timeout fired correctly (exit 124) — #35 NOT reproduced");
+    // 143 = 128+SIGTERM (busybox: PROG is signalled directly); 124 = GNU style.
+    if (code === 143 || code === 124) {
+      console.log(`[timeout-repro] timeout fired (exit ${code}) — sleep was killed, #35 fixed`);
       verdict = 0;
     } else {
       console.log(
-        `[timeout-repro] returned exit ${code} (expected 124) — anomalous, treating as #35`,
+        `[timeout-repro] returned exit ${code} (expected 143/124) — sleep was NOT killed, #35`,
       );
-      verdict = 3;
+      verdict = 1;
     }
   }
 } finally {
   console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
   s.kill();
 }
-console.log("\n[timeout-repro] " + (verdict === 0 ? "timeout OK" : "REPRODUCED (#35)"));
+console.log("\n[timeout-repro] " + (verdict === 0 ? "PASS" : "FAIL"));
 process.exit(verdict);
