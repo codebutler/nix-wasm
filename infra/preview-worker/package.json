@@ -1,0 +1,14 @@
+{
+  "name": "nix-wasm-preview-worker",
+  "private": true,
+  "description": "Cloudflare Worker serving nix-wasm PR previews from R2",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "test": "node --test src/index.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.42.0"
+  }
+}
