@@ -1,0 +1,65 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: deliver queued SA_RESTART handler, report EINTR (no hang) (#75)
+
+A blocking syscall interrupted by a signal whose handler was installed with
+SA_RESTART (e.g. via signal(), which musl maps to SA_RESTART) returns
+-ERESTARTSYS; handle_signal() keeps -ERESTARTSYS (so the syscall will restart)
+and setup_rt_frame() queues the handler by setting _TIF_DELIVER_SIGNAL.
+
+The queued handler is only ever run by _user_mode_tail in the syscall asm FOOT,
+which executes AFTER __wasm_syscall_N returns. But the C restart do/while in
+WASM_SYSCALL_N re-enters the syscall in-place on -ERESTARTSYS and never returns
+to the FOOT, so the handler is never delivered and the restarted syscall blocks
+forever. With sa_flags=0, handle_signal() rewrites -ERESTARTSYS to -EINTR
+(restart=false) and the loop exits, so the FOOT delivers the handler -- which is
+why every signal test (all sigaction sa_flags=0) passes and only SA_RESTART
+users hang. Headline symptom: busybox FANCY `ping` sends one ICMP echo then
+hangs (its interval SIGALRM handler sendping4, armed via signal(), never runs);
+`ping -c1` works. See issue #75.
+
+This wasm arch cannot re-run the syscall instruction, so it cannot transparently
+restart a syscall after running a signal handler (the handler runs only at the
+FOOT, which an in-loop restart never reaches). So when a handler is queued for a
+would-be restart, stop looping and report -EINTR instead: the FOOT then delivers
+the handler on return and the caller observes an ordinary interrupted syscall.
+busybox ping (and other EINTR-aware loops: `if (errno != EINTR) ...; continue;`)
+then pace correctly. This makes SA_RESTART behave like the already-working
+sa_flags=0 path (the only difference being callers see EINTR rather than a
+transparent restart) -- a documented platform limitation in the same class as
+this arch's no-fork contract.
+
+NOTE: a previous attempt to deliver the handler in-loop by calling
+_user_mode_tail() from inside __wasm_syscall_N crashed (RuntimeError: null
+function or function signature mismatch in __libc_handle_signal -> kernel panic):
+handler delivery only works at the FOOT context (top of the kernel frame, kernel
+SP reset), not nested mid-C-frame. Fully-transparent SA_RESTART would require
+lifting the restart loop to the FOOT (an entry.S + traps.c change); this EINTR
+behavior is the correct, low-risk fix for the hang and is validated by the
+ping-pace smokes flipping to PASS. In-kernel change only -- no host/engine ABI
+change, so ENGINE_ABI is unchanged and no pc sync is needed.
+
+--- a/arch/wasm/kernel/traps.c	2026-06-26 13:01:06.397969189 +0000
++++ b/arch/wasm/kernel/traps.c	2026-06-26 13:01:38.867272755 +0000
+@@ -64,6 +64,22 @@
+ 				default:					\
+ 					restart = false;			\
+ 				}						\
++				/* #75: this wasm arch cannot re-run the syscall	\
++				 * instruction, so it cannot transparently restart a	\
++				 * syscall AFTER running a signal handler -- the handler	\
++				 * only runs at the asm FOOT, which an in-loop restart	\
++				 * never reaches.  So when handle_signal() queued a	\
++				 * handler (SA_RESTART left us on a restart path), stop	\
++				 * looping and report -EINTR: the FOOT then delivers the	\
++				 * handler on return and the caller sees an interrupted	\
++				 * syscall (busybox ping & other EINTR-aware loops retry).	\
++				 * Transparent SA_RESTART would need the restart loop	\
++				 * lifted to the FOOT (entry.S); see issue #75. */	\
++				if (restart && (current_thread_info()->flags &		\
++					_TIF_DELIVER_SIGNAL)) {		\
++					regs->syscall_ret = -EINTR;		\
++					restart = false;			\
++				}						\
+ 			} while (restart);					\
+ 		} else {							\
+ 			irqentry_state_t state = irqentry_nmi_enter(regs);	\
