@@ -63,6 +63,14 @@ const VIRTWL_VQ_OUT = 1;
 //   12 u32 vfd_count   (number of trailing __le32 vfd ids; 0 for the handshake)
 //   16 .. vfd ids (vfd_count * 4), then raw wayland data
 const SEND_HDR_SIZE = 16;
+// Private flag (NOT in the upstream virtio_wl ABI): tells the kernel virtwl
+// driver to back this host→guest vfd with GUEST-allocated RAM and copy the
+// streamed VFD_RECV chunks into it, so the client's mmap works on NOMMU (host
+// pages can't be mmapped). Keep in sync with VIRTIO_WL_VFD_FILL in patch 0013.
+const VIRTIO_WL_VFD_FILL = 0x1000;
+// IN buffers are PAGE_SIZE; a fill VFD_RECV is SEND_HDR_SIZE(16) + data, so a
+// single chunk's data is capped at 4080 B. Keymaps (~30–64 KiB) span several.
+const MAX_FILL_CHUNK = 4096 - SEND_HDR_SIZE;
 
 // struct virtio_wl_ctrl_vfd_new layout (little-endian):
 //   0  u32 hdr.type
@@ -391,16 +399,13 @@ export class WlDevice extends VirtioWasmDevice {
   //
   // Greenfield ships some events with an fd (wl_keyboard.keymap carries the xkb
   // keymap). On a guest connection that fd must become a virtio_wl vfd the client
-  // receives over SCM_RIGHTS. The protocol: emit a host→guest VFD_NEW for each fd
-  // (registering it in the driver's idr under a HOST-bit id), then a VFD_RECV
-  // whose trailing vfd ids reference them — vq_handle_recv queues it on the ctx
-  // and the client's RECV ioctl surfaces the bytes + the new fds together. The
-  // VFD_NEW we send has the keymap byte length as `size` so the client's mmap
-  // length check passes; we do NOT inject a backing pfn (this NOMMU port has no
-  // host-arena path), so the client's mmap of the keymap fails gracefully with
-  // EACCES — which the toytoolkit keymap handler tolerates (it closes the fd and
-  // continues; weston-flowers never uses the keyboard). That is enough to satisfy
-  // the wire contract and unblock the attach/commit → flower render.
+  // receives over SCM_RIGHTS. The protocol: emit a host→guest VFD_NEW(READ|FILL)
+  // for each fd (the FILL flag makes the kernel allocate GUEST-owned backing —
+  // host pages aren't mmappable on NOMMU), then stream the fd's bytes as chunked
+  // VFD_RECV messages the kernel copies INTO that backing, then a final VFD_RECV
+  // whose trailing vfd ids reference the now-filled fds. The client's mmap of the
+  // keymap then SUCCEEDS (guest RAM via remap_pfn_range), so Sommelier builds xkb
+  // and its GTK client gets a working keymap → keyboard input produces characters.
 
   /** Build the ordered [VFD_NEW..., VFD_RECV(bytes + vfd ids)] control messages
    *  for a server→client reply carrying fds. */
@@ -413,6 +418,11 @@ export class WlDevice extends VirtioWasmDevice {
         0;
       ids.push(id);
       msgs.push(this._vfdNewHost(id, payload.length));
+      // Stream the fd's bytes into the guest-allocated backing in ≤PAGE_SIZE
+      // chunks; the kernel copies each into shm_buf (see VIRTIO_WL_VFD_FILL).
+      for (let off = 0; off < payload.length; off += MAX_FILL_CHUNK) {
+        msgs.push(this._vfdRecv(id, payload.subarray(off, off + MAX_FILL_CHUNK)));
+      }
     }
     msgs.push(this._vfdRecvWithFds(ctxVfdId, bytes || new Uint8Array(0), ids));
     return msgs;
@@ -426,8 +436,10 @@ export class WlDevice extends VirtioWasmDevice {
     dv.setUint32(0, VIRTIO_WL_CMD_VFD_NEW, true); // hdr.type
     dv.setUint32(4, 0, true); // hdr.flags
     dv.setUint32(8, id >>> 0, true); // vfd_id (HOST bit set)
-    dv.setUint32(12, VIRTIO_WL_VFD_READ, true); // flags: client reads the keymap
-    dv.setBigUint64(16, 0n, true); // pfn = 0 (no host backing; mmap fails gracefully)
+    // READ (the client reads the keymap) | FILL (the guest allocates the
+    // backing; the kernel copies the streamed bytes into it so mmap succeeds).
+    dv.setUint32(12, VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_FILL, true);
+    dv.setBigUint64(16, 0n, true); // pfn=0: the GUEST allocates (host pages aren't mmappable)
     dv.setUint32(24, size >>> 0, true); // size = keymap byte length
     return b;
   }
