@@ -35,8 +35,19 @@ async function boot() {
   });
 
   const vfs = MemVfs.from({ Home: {} });
-  // Artifacts served from the same origin as this page.
-  const baseUrl = new URL("./artifacts/", document.baseURI).href;
+  // Artifacts served from the same origin as this page. A PR preview ships a
+  // ./preview.json that points at its content-addressed cas/<buildhash>/ prefix;
+  // local dev has no preview.json and uses the ./artifacts/ symlink.
+  let baseUrl = new URL("./artifacts/", document.baseURI).href;
+  try {
+    const r = await fetch("./preview.json", { cache: "no-store" });
+    if (r.ok) {
+      const { artifactsBase } = await r.json();
+      if (artifactsBase) baseUrl = new URL(artifactsBase, document.baseURI).href;
+    }
+  } catch {
+    // no preview.json (local dev) — keep ./artifacts/
+  }
   const handle = await bootNixSystem({
     vfs,
     baseUrl,
