@@ -210,3 +210,22 @@ jobs:
           }
           run_smoke demo/node/sigalrm-smoke.mjs
           run_smoke demo/node/kill-wake-smoke.mjs
+
+      # DIAGNOSTIC (non-gating): boot the guest and run the ACTUAL busybox
+      # command that hangs — `timeout 2 sleep 10` — to reproduce #35 in CI and
+      # give a fast bisect loop over busybox's double-spawn/re-exec watcher path.
+      # Never fails the job: the outcome (works / REPRODUCED / panic) is printed
+      # for diagnosis while we investigate, so a known-failing repro does not
+      # mask real regressions in the gating smokes above.
+      - name: Diagnostic — busybox timeout repro (#35, non-gating)
+        if: ${{ always() }}
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/
+        run: |
+          set +e
+          node demo/node/timeout-repro-smoke.mjs
+          rc=$?
+          set -e
+          echo "::notice title=#35 timeout repro::exit=$rc (0=works, 3=REPRODUCED hang, 2=boot panic)"
+          exit 0
