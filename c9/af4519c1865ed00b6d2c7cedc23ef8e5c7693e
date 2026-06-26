@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-06-26-sommelier-pointer-button.md
+  s_cd1a77be509bb9::t_eeb0145875e179 1-283,285-358
+  s_cd1a77be509bb9::t_ff6b8ea3defdc2 284
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "c9af4519c1865ed00b6d2c7cedc23ef8e5c7693e",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
