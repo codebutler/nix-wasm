@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-06-26-sommelier-pointer-button-design.md
+  s_cd1a77be509bb9::t_ad0e80c1c5aa49 1-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "47450163677be741286178fafd8353f41dcb85ea",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
