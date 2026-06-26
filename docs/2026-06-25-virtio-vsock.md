@@ -10,6 +10,12 @@ notify) can move off the 9P `aname` mount onto a standard socket. It mirrors the
 more stock virtio driver on the no-DMA shared-memory carrier, with the same
 worker→main inversion the Wayland/9P paths already solved.
 
+**Update (issue #60 Phase 2):** the migration's guest half now lives here too —
+the **guest `/Ctl` agent (`pcctl`) + an end-to-end node smoke** that exercises
+the substrate. See "Guest /Ctl agent + end-to-end smoke" below. The original
+"Scope" note (transport-only; consumer in pc) still holds for the substrate; the
+guest *binary* has to live here because pc can't cross-compile a wasm32 guest.
+
 **Scope (important):** this is the transport SUBSTRATE only. The `/Ctl` protocol
 *consumer* — the code that interprets launch-app/clipboard/notify messages —
 lives downstream in the **pc** repo and is OUT OF SCOPE here. This change exposes
@@ -108,21 +114,53 @@ deployed; until then a higher `minEngine` correctly shows "reload pc".
   configured dev box — `ninep-device.test.js`/`wl-device.test.js` share it).
   `kernel-host.js`/`kernel-worker.js` are `@ts-nocheck`+`oxlint-disable`.
 
+## Guest /Ctl agent + end-to-end smoke (issue #60 Phase 2 — landed here)
+
+The transport substrate above is necessary but not sufficient to *migrate* `/Ctl`
+— the guest still needs a client that opens `AF_VSOCK` and speaks the `/Ctl`
+protocol (vsock is a byte stream, not a 9P file tree, so the guest can't drive
+the desktop with `echo … > /Ctl/open` anymore). That guest binary must live
+here (pc can't cross-compile a wasm32 guest binary), so this repo now ships it:
+
+- **`userspace/pcctl.c` + `userspace/pcctl.nix`** — `pcctl`, a tiny guest CLI:
+  `socket(AF_VSOCK, SOCK_STREAM)` + `connect(VMADDR_CID_HOST=2, CTL_PORT=1024)`,
+  sends one length-prefixed request, reads the one reply, exits. Verbs:
+  `pcctl open <app-or-path>` / `notify <text>` / `clipget` / `clipset <text>` —
+  the standard-socket replacement for the 9P `/Ctl/{open,clipboard,notify}`
+  files. No fork/threads (links clean under the NOMMU posix_spawn-only musl).
+  Baked into the initramfs as `/bin/pcctl` (`flake.nix` `extraBins`); exposed as
+  the `.#pcctl` package.
+- **`runtime/demo/node/vsock-ctl-smoke.mjs`** — boots busybox-only, registers a
+  host `/Ctl` listener on `CTL_PORT` via the `vsock.onReady(device)` hook (now
+  threaded through `demo/node/boot-node.mjs`), runs `pcctl` for each verb, and
+  asserts open/notify/clipset reach the host seams and `clipget` round-trips the
+  reply back to the guest's stdout. Wired into the `nix-wasm.yml` `boot-smoke`
+  CI job alongside the #35 smokes. The host framing in the smoke mirrors pc's
+  `js/linux/ctl-vsock.js` (the authoritative consumer) — if the guest binary and
+  that wire protocol drift, the smoke fails.
+
+The `/Ctl` wire protocol (length-prefixed `<VERB> <len>\n` + payload;
+OPEN/NOTIFY/CLIPGET/CLIPSET) is **owned by pc** (`js/linux/ctl-vsock.js`); `pcctl`
+implements the guest half of it. **No ABI bump:** `pcctl` is guest userspace and
+the smoke is host tooling — the kernel↔engine contract (device index 7 +
+`virtiovsock_notify`) is unchanged from the substrate landing above.
+
 ## Boot-validation TODO (run on a nix host)
 
 1. `sudo -E nix build .#kernel .#wasm-initramfs --print-out-paths`
    (also `.#wasm-base-squashfs` / `.#wasm-binary-cache` for a full smoke).
    Boot log should show `virtio_wasm: registered dev=7 id=0x13` and the
    `vmw_vsock_virtio_transport` driver binding (guest CID 3).
-2. Re-run **`runtime/sync-to-pc.sh <pc-checkout>`** — `kernel-worker.js`,
-   `kernel-host.js`, `boot.js`, `abi.js`, `shared-queues.js`, and the new
-   `virtio/vsock-device.js` are engine files; pc boots a stale engine otherwise.
-3. In-guest smoke: a tiny guest program `socket(AF_VSOCK, SOCK_STREAM, 0)` +
-   `connect({.svm_cid=2 (VMADDR_CID_HOST), .svm_port=<P>})`, with the harness
-   registering `device.listen(P, conn => conn.onData(echo))` — assert a byte
-   round-trip both ways. (No existing demo harness wires `vsock.onReady` yet; a
-   `demo/node/vsock-smoke.mjs` is the natural place, paired with the in-guest
-   client. Deferred to the pc-side follow-up since the consumer lives there.)
+2. Run the end-to-end smoke against the freshly-built artifacts:
+   `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs`
+   → expect `[vsock-ctl-smoke] PASS` (the four-verb round-trip). This is the
+   in-guest `socket(AF_VSOCK)+connect(2,1024)` proof the substrate landing
+   deferred, now concrete via `pcctl`.
+3. **pc-side retirement (gated):** once the smoke is green AND a republished
+   `linux` channel image (carrying `/bin/pcctl`) boots in a real browser with pc
+   flipping `vsockCtl` on, retire the 9P `/Ctl` path (pc `js/linux/ctl-mount.js`
+   + `js/vfs/backends/ctl-device.js`) — mirroring how `trans_cb` was retired only
+   after virtio-9p booted. Until then both transports coexist.
 
 ## pc-side /Ctl follow-up (downstream, OUT OF SCOPE here)
 

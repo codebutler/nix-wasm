@@ -138,6 +138,8 @@ jobs:
   #   • sigalrm-smoke   — the kernel self-armed SIGALRM/itimer/alarm path (#55).
   #   • kill-wake-smoke — the cross-process kill() async-signal wake reproducer
   #     for the `timeout 2 sleep 10` hang (#35), no busybox/networking.
+  #   • vsock-ctl-smoke — the guest /Ctl agent (pcctl) ↔ host listener over
+  #     virtio-vsock, open/notify/clipset/clipget round-trip (issue #60 Phase 2).
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
@@ -213,3 +215,6 @@ jobs:
           # #35 regression: `timeout 2 sleep 10` must terminate sleep (now fixed
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
+          # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
+          # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
+          run_smoke demo/node/vsock-ctl-smoke.mjs
