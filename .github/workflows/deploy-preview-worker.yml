@@ -24,6 +24,10 @@ jobs:
     runs-on: namespace-profile-default
     steps:
       - uses: actions/checkout@v4
+      # wrangler needs Node >= 22; the Namespace runner ships v20 by default.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: oven-sh/setup-bun@v2
       - name: Run Worker unit tests
         working-directory: infra/preview-worker
