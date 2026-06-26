@@ -1,26 +1,25 @@
 // profile-install-e2e.mjs — issue #1 validator: `nix profile install` (the new
 // CLI, not just `nix-env -iA`) of the compiler toolchain from the binary cache.
 //
-// STATUS: FIXED — expected to PASS. Two real-NixOS pieces, no hacks / no nix
-// source patch:
+// STATUS: FIXED — expected to PASS. The new CLI installs the package's OUTPUT
+// PATH (Opaque), source-free and substitute-only — no .drv, no sources. Two real
+// pieces, no hacks / no nix source patch:
 //   • `substitute = true` in the guest nix.conf (userspace/system.nix). The new
 //     CLI probes for Internet (src/nix/main.cc) and, finding none on the
 //     network-less guest, sets `useSubstitutes = false` unless overridden —
 //     silently disabling substitution even for `file:///nix-cache` (which needs
-//     no network). Marking it overridden leaves substitution ON. Necessary but
-//     NOT sufficient on its own.
-//   • the catalog (pkgs.nix) entries are REAL derivations (carry the real drvPath),
-//     so the new CLI forms a Built{drvPath}; and the deriver (.drv) closures are
-//     SEEDED VALID into the guest store at boot (flake.nix wasmDrvSeed →
-//     base-squashfs.nix → bootstrap.nix `nix-store --load-db`). Nix NEVER fetches
-//     a .drv from a cache — src/libstore/misc.cc queryMissing marks a non-local
-//     .drv "unknown", which was the original "failed to obtain derivation of
-//     …guest-cc.drv" error — so the .drv must be present LOCALLY, exactly like a
-//     real system's store after eval. With the .drv local, Nix reads it and
-//     substitutes the cache-valid OUTPUT without building. (Publishing .drv
-//     closures in the binary cache was a dead end — Nix never fetches them.)
-// `nix-env -iA` is a separate entry point that realises the OUTPUT directly
-// (Opaque), never touching the .drv — which is why it worked all along.
+//     no network). Marking it overridden leaves substitution ON.
+//   • the install uses the paths.nix catalog: `nix profile install -f
+//     /nix-cache/paths.nix guest-cc`, where guest-cc = `builtins.storePath
+//     "<outPath>"`. That resolves to a DerivedPath::Opaque (a store path), so Nix
+//     substitutes the prebuilt OUTPUT (+ its closure, incl. guest-clang) — exactly
+//     like `nix profile install /nix/store/<hash>-guest-cc`. It does NOT go through
+//     the deriver, sidestepping the .drv wall: Nix NEVER substitutes a .drv from a
+//     cache (src/libstore/misc.cc queryMissing marks a non-local .drv "unknown" —
+//     the original "failed to obtain derivation of …guest-cc.drv" error), and
+//     seeding the full .drv closure pulls ~6.7 GB of sources (a real system has no
+//     sources). Installing the output path needs neither. `nix-env -iA` likewise
+//     realises the OUTPUT directly (Opaque) via pkgs.nix — the smoke-test path.
 //
 // Like smoke.mjs, a full nix:true boot is heavy; run manually after building the
 // artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
@@ -28,16 +27,15 @@
 //
 // Steps:
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
-//   2. Assert `clang` is NOT in $PATH (toolchain removed from base).
-//   3. `nix profile install -f /nix-cache/pkgs.nix guest-cc`.
-//   4. Assert `clang` is now in $PATH.
+//   2. Assert `cc` is NOT in $PATH (toolchain removed from base).
+//   3. `nix profile install -f /nix-cache/paths.nix guest-cc`.
+//   4. Assert `cc` is now in $PATH (guest-cc ships /bin/cc, which execs guest-clang).
 //   5. Compile `int main(){return 42;}` with `cc`, run it, assert exit 42.
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
-// where nix-cache/ is the .#wasm-binary-cache tree (package OUTPUTS) and
-// base.squashfs carries the guest nix.conf with `substitute = true` AND the
-// seeded .drv closure (+ /nix/.drv-registration loaded by the guest /init).
+// where nix-cache/ is the .#wasm-binary-cache tree (package OUTPUTS + pkgs.nix +
+// paths.nix) and base.squashfs carries the guest nix.conf with `substitute = true`.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
 import { bootNode } from "./boot-node.mjs";
@@ -71,14 +69,14 @@ try {
     process.exit(1);
   }
 
-  // Step 2: assert clang is NOT present (toolchain removed from base)
-  s.send("which clang 2>/dev/null || echo CLANG_ABSENT_OK\n");
-  const clangAbsent = await s.waitForOutput(/CLANG_ABSENT_OK/, 15000);
-  check(clangAbsent, "clang absent from base system (CLANG_ABSENT_OK)");
+  // Step 2: assert cc is NOT present (toolchain removed from base)
+  s.send("which cc 2>/dev/null || echo CC_ABSENT_OK\n");
+  const ccAbsent = await s.waitForOutput(/CC_ABSENT_OK/, 15000);
+  check(ccAbsent, "cc absent from base system (CC_ABSENT_OK)");
 
-  // Step 3: `nix profile install` guest-cc from the derivation-aware cache.
+  // Step 3: `nix profile install` the guest-cc OUTPUT path (Opaque) from paths.nix.
   console.log("  [nix profile install guest-cc from nix-cache — may take a while…]");
-  s.send("nix profile install -f /nix-cache/pkgs.nix guest-cc 2>&1; echo NIX_PROFILE_RC=$?\n");
+  s.send("nix profile install -f /nix-cache/paths.nix guest-cc 2>&1; echo NIX_PROFILE_RC=$?\n");
   const installed = await s.waitForOutput(/NIX_PROFILE_RC=[0-9]/, 300000);
   const installOk = installed && /NIX_PROFILE_RC=0\b/.test(s.snapshot());
   check(installOk, "nix profile install guest-cc from /nix-cache");
@@ -92,11 +90,11 @@ try {
     );
   }
 
-  // Step 4: assert clang is now present (nix profile install puts it on
+  // Step 4: assert cc is now present (nix profile install puts guest-cc/bin on
   // ~/.nix-profile/bin, which /etc/profile already has on PATH).
-  s.send("which clang 2>&1; echo WHICH_CLANG_RC=$?\n");
-  const clangPresent = await s.waitForOutput(/WHICH_CLANG_RC=0\b/, 15000);
-  check(clangPresent, "clang now in PATH after nix profile install");
+  s.send("which cc 2>&1; echo WHICH_CC_RC=$?\n");
+  const ccPresent = await s.waitForOutput(/WHICH_CC_RC=0\b/, 15000);
+  check(ccPresent, "cc now in PATH after nix profile install");
 
   // Step 5: compile and run a C program that exits 42
   s.send("printf 'int main(){return 42;}' > /tmp/h.c\n");
