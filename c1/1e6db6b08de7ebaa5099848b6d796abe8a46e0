@@ -1,0 +1,19 @@
+runtime/demo/node/sommelier-keyboard-smoke.mjs
+  s_cd1a77be509bb9::t_65945a120c83b2 1-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "c11e6db6b08de7ebaa5099848b6d796abe8a46e0",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
