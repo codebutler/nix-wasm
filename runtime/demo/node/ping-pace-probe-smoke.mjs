@@ -1,18 +1,21 @@
 // ping-pace-probe-smoke.mjs — #75 localizer. Boots once and runs the three
 // ping-pace-probe cases in-guest, printing a diagnostic matrix:
-//   control — a one-shot ITIMER_REAL must interrupt a single traffic-less recv
-//             (= sigalrm-test case 3). Expected PASS — baseline.
-//   xcpu    — a pending one-shot must fire after a cross-CPU reply wakes recv and
-//             recv RE-BLOCKS (no handler re-arm). This is the discriminator.
-//   repro   — the full busybox-ping shape (one-shot re-armed in the handler).
+//   control — one-shot, NO SA_RESTART, single traffic-less recv (= sigalrm-test
+//             case 3). Baseline — expected PASS.
+//   restart — one-shot, SA_RESTART (signal()), SINGLE-THREADED self-pipe. The
+//             discriminator: isolates SA_RESTART with no second thread / no
+//             cross-CPU. Expected FAIL on the guest.
+//   xcpu    — one-shot, NO SA_RESTART, cross-CPU reply wakes recv then re-blocks.
+//             Confirms cross-CPU wakeup is NOT the bug — expected PASS.
+//   repro   — full busybox-ping shape (SA_RESTART + re-arm + echo). Expected FAIL.
 //
-// Reading the matrix:
-//   control OK, xcpu FAIL  → the bug is "a pending one-shot timer is lost after a
-//                            cross-CPU wakeup re-blocks the wait" — independent of
-//                            ping's handler re-arm (fix in arch/wasm timer/idle).
-//   control OK, xcpu OK, repro FAIL → the handler re-arm is implicated.
-//   control FAIL           → even the baseline one-shot is broken in this harness
-//                            (would contradict sigalrm-test; investigate harness).
+// Reading the matrix (the CI run on this branch showed exactly this):
+//   control PASS, xcpu PASS, restart FAIL, repro FAIL
+//     → the bug is SA_RESTART, NOT cross-CPU and NOT the handler re-arm: a
+//       SIGALRM handler installed with SA_RESTART is never delivered when it
+//       interrupts a blocking syscall. Fix belongs in the wasm syscall-restart
+//       path (arch/wasm/kernel/traps.c WASM_SYSCALL_N + entry.S _user_mode_tail):
+//       the restart loop must deliver the queued handler before/with the restart.
 //
 // Each probe self-bounds with an in-guest watchdog thread, so a lost-timer hang
 // becomes an explicit "FAIL (watchdog)" line rather than blocking this smoke.
@@ -36,7 +39,7 @@ try {
   }
   if (!reached) throw new Error("no prompt");
 
-  for (const c of ["control", "xcpu", "repro"]) {
+  for (const c of ["control", "restart", "xcpu", "repro"]) {
     s.send(`/bin/ping-pace-probe ${c}\n`);
     const ok = await s.waitForOutput(new RegExp(`PROBE ${c}: OK `), 15000).catch(() => false);
     verdict[c] = ok ? "PASS" : "FAIL";
