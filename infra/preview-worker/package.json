@@ -1,6 +1,7 @@
 {
   "name": "nix-wasm-preview-worker",
   "private": true,
+  "type": "module",
   "description": "Cloudflare Worker serving nix-wasm PR previews from R2",
   "scripts": {
     "deploy": "wrangler deploy",
