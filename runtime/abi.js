@@ -9,4 +9,9 @@
 //
 // `userspace/linux-image.nix` parses this exact line, so keep the form
 // `export const ENGINE_ABI = <int>;` on one line.
-export const ENGINE_ABI = 4;
+//
+// ABI 5: virtwl VIRTIO_WL_VFD_FILL keymap protocol — a host→guest VFD_NEW may
+// carry the FILL flag, making the kernel allocate guest-owned backing and copy
+// streamed VFD_RECV chunks into it (so the wl_keyboard keymap fd is mmappable on
+// NOMMU). Old engines lack the device-side fill streaming → keyboard won't work.
+export const ENGINE_ABI = 5;
