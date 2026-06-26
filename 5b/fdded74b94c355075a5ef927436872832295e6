@@ -1,0 +1,25 @@
+runtime/virtio/wl-device.test.js
+  s_cd1a77be509bb9::t_2a758e55b953a3 137,140-147,153,155-165,170,173-198
+  s_cd1a77be509bb9::t_8c1bae67d7f38f 199
+runtime/virtio/wl-device.js
+  s_cd1a77be509bb9::t_f08c2fc2ba6766 439-442
+  s_cd1a77be509bb9::t_0a04e471717c53 402-408
+  s_cd1a77be509bb9::t_a6b16363bcd2fc 66-73
+  s_cd1a77be509bb9::t_d207e5965bbe10 421-425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "5bfdded74b94c355075a5ef927436872832295e6",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
