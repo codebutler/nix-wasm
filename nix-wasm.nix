@@ -89,7 +89,13 @@ pkgs.stdenv.mkDerivation {
   version = "2.34.7";
   src = nixSrc;
 
-  patches = [ ./patches/nix-2.34.7-wasm32-port.patch ];
+  patches = [
+    ./patches/nix-2.34.7-wasm32-port.patch
+    # nix-wasm#1: let `nix profile install` substitute a drvPath-less catalog
+    # entry (the substitute-only guest binary cache) instead of throwing
+    # "'<name>' is not a derivation". See the patch header for the full rationale.
+    ./patches/nix-2.34.7-profile-substitute-install.patch
+  ];
 
   # Versioned replacement for the old shell build's sed/perl meson hacks (#141):
   #  - AT_SYMLINK_NOFOLLOW probes false in the cross (has_header_symbol fails), so

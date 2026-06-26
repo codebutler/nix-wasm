@@ -1,28 +1,32 @@
-// profile-install-e2e.mjs — issue #1 reproducer: attempt `nix profile install`
-// (not just `nix-env -iA`) of the compiler toolchain from the binary cache.
+// profile-install-e2e.mjs — issue #1 validator: `nix profile install` (not just
+// `nix-env -iA`) of the compiler toolchain from the substitute-only binary cache.
 //
-// STATUS: BLOCKED (documented, not in any CI gate). `nix profile install`
-// resolves an installable to a `Built{drv, outputs}` derived path and records
-// the DERIVER in the profile manifest, so it must obtain + REALISE the `.drv`.
-// Realising an input-addressed derivation whose output is not already valid
-// forces nix to BUILD it from its input-derivation OUTPUTS (xgcc, perl, bash,
-// stdenv, python, zstd, zlib-ng — the NATIVE x86_64 build toolchain). On the
-// network-less NOMMU wasm guest those native outputs are neither substitutable
-// (the cache ships only the wasm output closures + the .drv NARs, not the native
-// build-input outputs) nor runnable (x86_64 binaries can't execute on wasm), so
-// the build fails with "Cannot build '…xgcc-15.2.0.drv'. … 1 dependency failed".
-// Even pre-substituting BOTH the .drv AND the output into the local store does
-// not help: `nix profile install -f` still re-obtains the deriver and walks the
-// build graph. There is no flag to make `nix profile` substitute-the-output and
-// skip the deriver build for an input-addressed drv. Conversely, MAKING the
-// deriver resolvable (shipping the .drv NARs + a drvPath in pkgs.nix) REGRESSES
-// the working `nix-env -iA` path — it then also follows the deriver and tries to
-// build xgcc. So the output-only cache (no .drv, no Deriver) is kept; #1 stays
-// open. See .superpowers/sdd/task-10-report.md for the full transcript.
+// STATUS: FIXED (patches/nix-2.34.7-profile-substitute-install.patch). Expected
+// to PASS once the artifacts are built/substituted with that patch in nix.wasm.
 //
-// This script is the reproducer for that diagnosis; it is EXPECTED TO FAIL on
-// the current guest. It is intentionally NOT named *.test.mjs and is not run by
-// `node --test demo/node/` — run it manually to reproduce the #1 blocker.
+// Background — why the obvious fix did NOT work: `nix profile install` used to
+// resolve a catalog entry to a `Built{drv, outputs}` derived path, which it
+// realises by BUILDING the deriver from its input-derivation OUTPUTS (xgcc, perl,
+// bash, stdenv, … — the NATIVE x86_64 build toolchain). On the network-less NOMMU
+// wasm guest those native outputs are neither substitutable nor runnable, so it
+// failed with "Cannot build '…xgcc-15.2.0.drv'". Shipping a real `drvPath` was a
+// dead-end: `nix profile` re-walks the deriver even when the output is already
+// cache-valid, and a `drvPath` REGRESSES the working `nix-env -iA` the same way.
+//
+// The fix (ticket option 1, "trust the already-cache-valid output"): the guest
+// catalog entries stay drvPath-less (substitute-only), and InstallableAttrPath::
+// toDerivedPaths() now emits a `DerivedPath::Opaque{outPath}` for a derivation
+// that has an `outPath` but no `drvPath`. An Opaque path is realised purely by
+// substitution (buildPathsWithResults pulls it from the binary cache, never
+// walking a deriver), so `nix profile install -f /nix-cache/pkgs.nix <attr>` now
+// substitutes the prebuilt output exactly like `nix-env -iA`. Native/host Nix is
+// untouched (only the drvPath-less branch changed), and `nix-env -iA` (a separate
+// code path in src/nix-env/) is untouched too.
+//
+// It is intentionally NOT named *.test.mjs and is not run by `node --test
+// demo/node/` — like smoke.mjs (nix-env -iA sl), a full nix:true boot is too
+// heavy for the static gates; run it manually after building the artifacts:
+//   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/profile-install-e2e.mjs
 //
 // Steps:
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
@@ -33,7 +37,9 @@
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
-// where nix-cache/ is the DERIVATION-AWARE cache from build-artifacts.sh.
+// where nix-cache/ is the standard substitute-only cache (.#wasm-binary-cache);
+// base.squashfs must embed the patched nix.wasm (.#nix-wasm with the
+// profile-substitute-install patch).
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
 import { bootNode } from "./boot-node.mjs";

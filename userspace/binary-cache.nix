@@ -18,9 +18,14 @@ let
   # Build the binary cache using the nixpkgs-blessed builder. It uses
   # exportReferencesGraph to compute full closures inside the sandbox — no
   # in-sandbox `nix copy` needed. Produces: nix-cache-info + *.narinfo + nar/*.nar.zst.
-  # NOTE: mkBinaryCache's make-binary-cache.py does NOT emit a Deriver: line,
-  # so narinfo will NOT carry Deriver fields (known gap; `nix profile install` won't
-  # accept these paths, but `nix-env -iA` works fine — see codebutler/nix-wasm#1).
+  # NOTE: mkBinaryCache's make-binary-cache.py does NOT emit a Deriver: line, so
+  # the narinfo carries no Deriver field — correct for a substitute-only guest:
+  # the cache ships prebuilt OUTPUTS, never derivers (the guest can't build). Both
+  # install commands work against this: `nix-env -iA` reads outPath directly, and
+  # `nix profile install` substitutes the output as a DerivedPath::Opaque thanks to
+  # patches/nix-2.34.7-profile-substitute-install.patch (codebutler/nix-wasm#1).
+  # Do NOT add a Deriver/drvPath to "fix" nix profile: realising the deriver pulls
+  # the unbuildable native x86_64 toolchain AND regresses nix-env -iA (#1).
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
     rootPaths = devPaths;

@@ -285,10 +285,17 @@ follows.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
-One known wrinkle folded into Phase 5: in-guest installs use `nix-env -iA` (the
-cache index is `outPath`-only "fake derivations"); `nix profile install` rejects
-those for lacking a `drvPath` — shipping real `.drv`s in the published closure
-fixes it (codebutler/nix-wasm#1). Archive ops work: `tar` (czf/xzf, patched) is
+In-guest installs work via BOTH `nix-env -iA` and `nix profile install`: the
+cache index is `outPath`-only "fake derivations" (substitute-only — the guest
+can't build, so no `drvPath`/Deriver). `nix-env -iA` reads `outPath` directly;
+`nix profile install` used to reject these for lacking a `drvPath`, but
+`patches/nix-2.34.7-profile-substitute-install.patch` makes
+`InstallableAttrPath::toDerivedPaths()` emit a `DerivedPath::Opaque{outPath}` for
+a drvPath-less catalog entry, so it substitutes the prebuilt output instead of
+walking an (unbuildable, native-toolchain) deriver (codebutler/nix-wasm#1).
+Shipping real `.drv`s is a tested DEAD-END — `nix profile` realises the deriver
+even when the output is cache-valid AND a `drvPath` regresses `nix-env -iA`.
+Archive ops work: `tar` (czf/xzf, patched) is
 validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
 internet fetch), so the disabled network/service vfork applets aren't needed.
@@ -633,6 +640,19 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   the served closure to ~258 MB / 18k files; strip them post-build.
 - **sqlite `-DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0`**: WAL's `-shm` shared-memory
   file is unsupported on the NOMMU guest fs → `SQLITE_IOERR` on the store DB.
+- **`nix profile install` over a substitute-only cache → `DerivedPath::Opaque`**
+  (`patches/nix-2.34.7-profile-substitute-install.patch`; #1). The guest catalog
+  (`pkgs.nix`) lists `outPath`-only "fake derivations" (no `drvPath` — the guest
+  can't build). `nix-env -iA` reads `outPath` directly and works; the new
+  `nix profile install` CLI went through `InstallableAttrPath::toDerivedPaths()`,
+  which threw `'<name>' is not a derivation` without a `drvPath`. The patch makes
+  the drvPath-less branch emit `DerivedPath::Opaque{queryOutPath()}` — realised by
+  pure SUBSTITUTION (`buildPathsWithResults`), never walking a deriver. DEAD-END
+  (tested, do NOT retry): shipping real `.drv`s + a `drvPath` — `nix profile`
+  realises the deriver (native x86_64 `xgcc`/`perl`/`stdenv`, unbuildable on the
+  guest) even when the output is already cache-valid, AND a `drvPath` regresses
+  `nix-env -iA` the same way. Only the drvPath-less branch changes; host/native
+  Nix and `nix-env -iA` (in `src/nix-env/`) are untouched.
 
 **Guest runtime / kernel:**
 - **No fork/vfork — clone-with-fn only.** A fresh wasm instance can't resume the
@@ -754,8 +774,13 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
   approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
   satisfied (#48/#50). See the "clang is its own driver" note in Current state.
-- **#1** — `nix profile install` rejects the `outPath`-only guest index (use
-  `nix-env -iA`); fix folds into #2.
+- **#1** — DONE: `nix profile install` accepts the `outPath`-only guest index.
+  `patches/nix-2.34.7-profile-substitute-install.patch` emits a
+  `DerivedPath::Opaque{outPath}` for a drvPath-less catalog entry so the new CLI
+  substitutes the prebuilt output (never realising the unbuildable native
+  deriver), matching `nix-env -iA`. Validator: `runtime/demo/node/
+  profile-install-e2e.mjs` (manual nix:true boot, expected PASS — like smoke.mjs,
+  too heavy for the static gates). Shipping `.drv`s was the rejected dead-end.
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
