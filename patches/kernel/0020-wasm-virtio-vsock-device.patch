@@ -56,17 +56,18 @@ uses by default).
 Part of issue #10 (host<->guest bridge consolidation onto virtio) —
 the vsock transport for /Ctl (option 3).
 ---
- drivers/virtio/virtio_wasm.c | 22 ++++++++++++++++++++++
- 1 file changed, 22 insertions(+)
+  drivers/virtio/virtio_wasm.c | 22 ++++++++++++++++++++++
+  1 file changed, 22 insertions(+)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
-index c0ffee123..d15eaf456 100644
+index 321ab14..989bfae 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -374,6 +374,16 @@ enum {
+@@ -380,6 +380,16 @@ enum {
+ #endif
  #if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
  	VW_DEV_CONSOLE,		/* virtio-console: a guest TTY (stock virtio_console.c) */
- #endif
++#endif
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock: AF_VSOCK socket channel for the /Ctl bridge (issue #10
@@ -76,16 +77,13 @@ index c0ffee123..d15eaf456 100644
 +	 * must agree on this index.
 +	 */
 +	VW_DEV_VSOCK = 7,
-+#endif
+ #endif
  	VW_DEV_COUNT,
  };
-
-@@ -428,6 +438,18 @@ static int __init virtio_wasm_transport_init(void)
- 	vw = virtio_wasm_register(VW_DEV_CONSOLE, VIRTIO_ID_CONSOLE);
- 	if (IS_ERR(vw))
+@@ -441,6 +451,18 @@ static int __init virtio_wasm_transport_init(void)
  		pr_warn("virtio_wasm: console register failed: %ld\n", PTR_ERR(vw));
  #endif
-+
+ 
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock channel for the host /Ctl bridge (stock
@@ -97,8 +95,9 @@ index c0ffee123..d15eaf456 100644
 +	if (IS_ERR(vw))
 +		pr_warn("virtio_wasm: vsock register failed: %ld\n", PTR_ERR(vw));
 +#endif
-
++
  	return 0;
  }
+ 
 --
 2.53.0
