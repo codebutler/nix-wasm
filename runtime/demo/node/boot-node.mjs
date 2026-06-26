@@ -17,7 +17,6 @@ export async function bootNode(opts = {}) {
     vfs,
     baseUrl: opts.baseUrl || ARTIFACTS,
     nix: opts.nix !== false,
-    consoleCount: opts.consoleCount,
     cmdline: opts.cmdline,
     onLog: opts.onLog,
     // Issue #10 option 3: the virtio-vsock /Ctl bridge hook. Passed straight

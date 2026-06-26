@@ -10,8 +10,16 @@
 // `userspace/linux-image.nix` parses this exact line, so keep the form
 // `export const ENGINE_ABI = <int>;` on one line.
 //
-// ABI 5: virtwl VIRTIO_WL_VFD_FILL keymap protocol — a host→guest VFD_NEW may
-// carry the FILL flag, making the kernel allocate guest-owned backing and copy
-// streamed VFD_RECV chunks into it (so the wl_keyboard keymap fd is mmappable on
-// NOMMU). Old engines lack the device-side fill streaming → keyboard won't work.
-export const ENGINE_ABI = 5;
+// 5: virtwl VIRTIO_WL_VFD_FILL keymap protocol — a host→guest VFD_NEW may carry
+// the FILL flag, making the kernel allocate guest-owned backing and copy streamed
+// VFD_RECV chunks into it (so the wl_keyboard keymap fd is mmappable on NOMMU).
+// Old engines lack the device-side fill streaming → keyboard won't work.
+//
+// 6 (#83): the console moved off the bespoke hvc_wasm backend onto stock
+// virtio-console — 8 featureless single-port devices (one synchronous hvc line
+// each, host idx 8..15), NOT one multiport device (its async control-vq port
+// handshake races init to death on single-CPU wasm boot). The kernel↔engine
+// contract changed incompatibly — the wasm_driver_hvc_put/get/winsize host
+// imports are gone, replaced by per-console virtio receiveq/transmitq vrings the
+// host drives via runtime/virtio/console-device.js.
+export const ENGINE_ABI = 6;

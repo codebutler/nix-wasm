@@ -11,22 +11,26 @@
 //   - the kernel host spawns a Web Worker per CPU/task over a shared
 //     WebAssembly.Memory; a worker forwards each 9P vq kick to the main thread.
 //
-// Multi-tty: the kernel registers HVC_CONSOLES hvc lines (hvc0..hvc{N-1});
-// pc-init respawns a shell on each. `bootLinux()` returns a handle exposing
-// every console as an independent byte duplex —
-// `console(vtermno) → { write, onData, resize, reset }` — plus `consoleCount`
-// and `kill()`. Output that arrives before a renderer attaches is buffered PER
-// CONSOLE so no boot/prompt bytes are lost.
+// Multi-tty: the guest exposes HVC_CONSOLES consoles (hvc0..hvc{N-1}); pc-init
+// respawns a shell on each. These ride N stock SINGLE-PORT virtio-console devices
+// (issue #83): the kernel's virtio_console driver registers one hvc line per
+// device SYNCHRONOUSLY at probe (so the console exists before init), replacing the
+// retired bespoke hvc_wasm backend. `bootLinux()` returns a handle exposing every
+// console as an independent byte duplex — `console(vtermno) → { write, onData,
+// resize, reset }` — plus `consoleCount` and `kill()`. Output that arrives before
+// a renderer attaches is buffered PER CONSOLE so no boot/prompt bytes are lost.
 
 import { linux } from "./kernel-host.js";
 import { makeSharedQueues } from "./virtio/shared-queues.js";
+import { CONSOLE_DEVICES } from "./virtio/console-device.js";
 import { createNinePServer } from "./ninep/server.js";
 
-// Number of hvc consoles the kernel registers (hvc0..hvc{N-1}) — one per Linux
-// terminal window; hvc0 also carries the kernel boot log. MUST match the
-// kernel's HVC_WASM_NR (patches/0002-hvc-wasm-multi-console.patch). hvc caps at
-// 16 (MAX_NR_HVC_CONSOLES).
-export const HVC_CONSOLES = 8;
+// Number of guest consoles (hvc0..hvc{N-1}) — one per Linux terminal window;
+// hvc0 also carries the kernel boot log. One stock single-port virtio-console
+// device per console (issue #83), so the count IS CONSOLE_DEVICES (which the
+// kernel transport registers and the guest inittab's getty count must match).
+// Exported under the historical name for the pc app that imports it.
+export const HVC_CONSOLES = CONSOLE_DEVICES;
 
 // maxcpus=1: a terminal needs no SMP parallelism, and single-CPU sidesteps the
 // linux-wasm secondary-CPU bringup fragility. Paired with patches/0004 (which
@@ -41,11 +45,15 @@ export const HVC_CONSOLES = 8;
 // slab page (the captured wild pid->numbers[].ns). Fixed by patches/0005 (16K
 // stacks) + CONFIG_SCHED_STACK_END_CHECK (a future overflow BUGs loudly at the
 // culprit instead of corrupting silently). Repro: scripts/linux-demo/stress8.mjs.
+// `console=hvc` binds the kernel console to hvc0, which is now the first
+// single-port virtio-console device's hvc line (issue #83) instead of the retired
+// hvc_wasm line. That device registers its console SYNCHRONOUSLY at probe (before
+// init), so hvc0 exists when PID 1 opens /dev/console; early printk before the
+// virtio probe is buffered by the kernel log and flushed once hvc0 registers.
 const DEFAULT_CMDLINE =
   "maxcpus=1 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0";
 
 const enc = new TextEncoder();
-const dec = new TextDecoder();
 
 /**
  * Boot a linux-wasm kernel with a VFS mounted at /mnt/pc over 9P.
@@ -56,13 +64,11 @@ const dec = new TextDecoder();
  *   vmlinuxUrl: string,               // URL of the kernel wasm (required)
  *   initrdUrl: string,                // URL of the initramfs.cpio.gz (required)
  *   cmdline?: string,                 // kernel command line
- *   consoleCount?: number,            // hvc consoles to expose (default HVC_CONSOLES)
  *   onLog?: (text: string) => void,   // host/diagnostic log sink
  *   squashfs?: ArrayBuffer,           // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
- *   onVirtioConsole?: (bytes: Uint8Array) => void,  // #10 option 2: sink for the stock virtio-console's guest output (the A/B counterpart of the hvc console). Absent → logged.
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
  * }} opts
  * @returns {Promise<{
@@ -70,14 +76,16 @@ const dec = new TextDecoder();
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
- *   virtioConsoleInput(data: Uint8Array|string): void,
  *   kill(): void,
  * }>}
  */
 export async function bootLinux(opts) {
   const vfs = opts.vfs;
   const variant = opts.variant || "wasm32_nommu";
-  const consoleCount = opts.consoleCount || HVC_CONSOLES;
+  // Console count is a fixed property of the transport (how many single-port
+  // virtio-console devices it registers), not a caller knob — it must match the
+  // guest inittab's getty count and CONSOLE_DEVICES.
+  const consoleCount = HVC_CONSOLES;
   const vmlinuxUrl = opts.vmlinuxUrl;
   const initrdUrl = opts.initrdUrl;
   if (!vmlinuxUrl || !initrdUrl) {
@@ -97,10 +105,10 @@ export async function bootLinux(opts) {
   /** @type {Map<number, Uint8Array[]>} */
   const backlog = new Map();
 
-  // The kernel host calls this as (vtermno, text) for every console write.
-  function emit(vtermno, text) {
-    const vt = vtermno | 0;
-    const bytes = enc.encode(text);
+  // The main-thread virtio-console device calls this as (port, bytes) for every
+  // chunk of guest console output (port = hvc/vtermno index; bytes = Uint8Array).
+  function emit(port, bytes) {
+    const vt = port | 0;
     const set = sinks.get(vt);
     if (!set || set.size === 0) {
       const q = backlog.get(vt) || [];
@@ -150,14 +158,11 @@ export async function bootLinux(opts) {
     boot_cmdline: opts.cmdline || DEFAULT_CMDLINE,
     initrd,
     log: onLog,
-    console_write: emit,
-    // Issue #10 (option 2): the virtio-console output sink — guest bytes drained
-    // from the stock virtio_console transmitq. This is the A/B counterpart to the
-    // hvc_wasm console (console_write/emit above), NOT a replacement: both probe
-    // and run. Funnel it to the caller's onVirtioConsole hook if provided, else
-    // the host log so the path is observable rather than silently dropped.
-    console_sink:
-      opts.onVirtioConsole || ((bytes) => onLog("[virtio-console] " + dec.decode(bytes))),
+    // The virtio-console output sink (issue #83): each single-port console
+    // device's main-thread ConsoleVirtioDevice drains its transmitq and calls this
+    // as (consoleIndex, bytes); emit fans out to that console's onData subscribers
+    // (buffering per-console until one attaches). The guest's only console path.
+    console_sink: emit,
     ninep_server: ninepServer, // #10: main-thread virtio-9p host devices service this
     virtio_queues: virtioQueues,
     // #43: the read-only base-system squashfs served as /dev/vdX (virtio-blk).
@@ -182,13 +187,13 @@ export async function bootLinux(opts) {
     /** How many hvc consoles this kernel exposes (hvc0..hvc{N-1}). */
     consoleCount,
 
-    /** A byte duplex bound to one hvc console (vtermno = console index). */
+    /** A byte duplex bound to one console port (vtermno = port/hvc index). */
     console(vtermno) {
       const vt = vtermno | 0;
       return {
-        /** Feed bytes/text to this console's tty (stdin). */
+        /** Feed bytes/text to this console's tty (stdin) over its receiveq. */
         write(data) {
-          os.key_input(vt, typeof data === "string" ? data : dec.decode(data));
+          os.console_input(vt, typeof data === "string" ? enc.encode(data) : data);
         },
         /** Subscribe to this console's output; replays any pre-attach backlog. */
         onData(cb) {
@@ -202,9 +207,11 @@ export async function bootLinux(opts) {
           }
           return () => set.delete(cb);
         },
-        /** Set this console's window size (TIOCSWINSZ → __hvc_resize). */
+        /** Set this console's window size. NOTE (#83): not yet propagated for
+         *  single-port consoles (needs VIRTIO_CONSOLE_F_SIZE + a transport
+         *  config-change path — a follow-up); currently a no-op host-side. */
         resize(cols, rows) {
-          os.set_winsize(vt, cols, rows);
+          os.console_resize(vt, cols, rows);
         },
         /** Drop this console's buffered pre-attach output, so a recycled
          *  console doesn't replay the previous tenant's bytes on reuse. */
@@ -237,18 +244,6 @@ export async function bootLinux(opts) {
      *   - `setLinkUp(up)`: flips the reported link-status config bit.
      */
     net: os.net,
-
-    /**
-     * Issue #10 (option 2): feed host input bytes to the guest over the stock
-     * virtio-console (the A/B counterpart of console(vt).write's hvc path). Bytes
-     * posted before the guest sets up the receiveq stay pending and are delivered
-     * on the next refill. No-op until a virtio-console device exists (a
-     * console_sink was wired AND the self-wake address is published post-boot).
-     * @param {Uint8Array|string} data
-     */
-    virtioConsoleInput(data) {
-      os.virtio_console_input(typeof data === "string" ? enc.encode(data) : data);
-    },
 
     /** Mark this boot handle dead. The 9P server is passive (driven by the
      *  guest's virtio-9p kicks — no background loop to stop); worker teardown is

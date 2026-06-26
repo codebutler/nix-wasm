@@ -196,7 +196,14 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Run a smoke up to 3 times, treating exit 2 (boot panic) as retryable.
-      - name: Boot smokes (sigalrm + kill-wake + timeout + ping-pace #75 diag)
+      # NOTE (#83): every smoke below boots busybox-only and reads its shell over
+      # hvc0, which now rides the stock virtio-console driver over 8 single-port
+      # virtio-console devices (the bespoke hvc_wasm backend is retired). So this
+      # job doubles as the primary-console regression gate: if the console's hvc0
+      # registration / input / output broke, none of these smokes would reach a
+      # prompt. Multi-tty (hvc1+) needs the full-nix inittab (8 getty lines live in
+      # base.squashfs, not the initramfs) and is validated on the PR preview boot.
+      - name: Boot smokes (sigalrm + kill-wake + timeout + ping-pace #75 + vsock)
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/

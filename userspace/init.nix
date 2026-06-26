@@ -5,8 +5,13 @@
 # the system profile, so the guest needs NO `busybox --install` and NO FHS-path
 # population. This is the busyrc pattern (systemd-free NixOS prior art).
 #
-# nrConsoles MUST match the kernel's HVC_WASM_NR_CONSOLES and the JS host's
-# HVC_CONSOLES (both 8). Changing it here without the others desyncs consoles.
+# nrConsoles MUST match the count of single-port virtio-console DEVICES the
+# transport registers — CONSOLE_DEVICES in runtime/virtio/console-device.js (also
+# exported as the JS host's HVC_CONSOLES) and VW_DEV_CONSOLE_BASE..+8 in kernel
+# patch 0019: the stock virtio_console driver registers one hvc line per device,
+# so a getty count below the device count leaves consoles idle and above it fails
+# to open (/dev/hvcN absent). Both are 8; changing this without the device count
+# desyncs.
 { lib, pkgs, nrConsoles ? 8 }:
 let
   sw = "/run/current-system/sw/bin";

@@ -219,6 +219,12 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-probe-s
 # round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
 
+# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
+# (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
+# vsock.onReady hook. PASS = open/notify/clipset reach the host seams and clipget
+# round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
+
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
@@ -715,7 +721,16 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   the post-patch enum order + every device registration, failing the build LOUDLY in
   `patchPhase` instead of shipping a subtly-broken kernel. Runtime gate: the
   `nix-boot-smoke` CI job (`smoke.mjs` — reads `/mnt/pc` + `nix-env -iA`) exercises
-  both 9P channels end to end.
+  both 9P channels end to end. **NOTE (#83 single-port console pivot):** the
+  canonical layout changed — the console is now **8 single-port virtio-console
+  devices** at an explicit `VW_DEV_CONSOLE_BASE = 8` (host idx 8..15, registered by a
+  `for (i<8) virtio_wasm_register(VW_DEV_CONSOLE_BASE + i, …)` loop), with
+  `VW_DEV_VSOCK = 7` BEFORE them (index 6 unused). So the assertion now enforces the
+  OPPOSITE order from #87's "bug" framing above — `VW_DEV_VSOCK(7) < CONSOLE_BASE(8)`
+  is CORRECT now — and checks the `VW_DEV_CONSOLE_BASE + i` loop (not a single
+  `VW_DEV_CONSOLE` call) plus the pinned `=7`/`=8` values. Multiport was abandoned:
+  its async control-vq port handshake races init to death on single-CPU wasm boot
+  (the single-port probe path registers each hvc line synchronously instead).
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

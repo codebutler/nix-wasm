@@ -128,7 +128,7 @@ index 0000000..5e2bcc0
 +extern void wasm_virtio_reset(u32 dev);
 +
 +#define VIRTIO_WASM_VENDOR	0x000000CBu	/* "cb" */
-+#define VIRTIO_WASM_MAX_VQS	8
++#define VIRTIO_WASM_MAX_VQS	8		/* max vqs/device: vsock 3 (rx/tx/event), single-port console 2, 9p <=2 */
 +#define VIRTIO_WASM_VRING_ALIGN	4096
 +#define VIRTIO_WASM_IRQ_BASE	8		/* first free irq (2..63) used */
 +

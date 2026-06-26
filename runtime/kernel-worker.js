@@ -13,7 +13,7 @@ import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
-import { ConsoleVirtioDevice } from "./virtio/console-device.js";
+import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
@@ -93,9 +93,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 
   /// Flag that a clone callback should be called instead of _start().
   let should_call_clone_callback = false;
-
-  /// A messenger to synchronize with the main thread, as well as communicate how many bytes were read on the console.
-  let console_read_messenger = new Int32Array(new SharedArrayBuffer(4));
 
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
@@ -248,14 +245,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     { dev: 5, tag: "nixcache", cid: 2 }, // VW_DEV_9P_NIXCACHE — nix binary cache
   ];
   const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
-  // Issue #10 (option 2): virtio-console — a guest TTY on the stock mainline
-  // virtio-console driver, ADDED alongside the bespoke hvc_wasm backend for an
-  // A/B. Index 6 MUST match kernel patch 0019's enum (after the 9P channels) and
-  // kernel-host.js. Like virtio-9p, the worker instance only answers the
-  // synchronous transport probes and FORWARDS the kick; the main-thread instance
-  // owns the console sink (guest output) + input buffer (host input) and raises
-  // the completion IRQ via the raised_irqs self-wake.
-  const VW_DEV_CONSOLE = 6;
+  // Issue #10 (option 2) / #83: virtio-console — the guest's consoles on the
+  // stock mainline virtio-console driver (now the SOLE console path; hvc_wasm is
+  // retired). The transport registers CONSOLE_DEVICES single-port console devices
+  // at host indices CONSOLE_BASE..CONSOLE_BASE+CONSOLE_DEVICES-1 (kernel patch
+  // 0019), one synchronous hvc line each. Like virtio-9p, the worker instance only
+  // answers the synchronous transport probes and FORWARDS the kick (with the dev
+  // index); the main-thread instance owns the sink (guest output) + input buffer
+  // (host input) per console and raises the completion IRQ via the raised_irqs
+  // self-wake.
+  const isConsoleDev = (id) => id >= CONSOLE_BASE && id < CONSOLE_BASE + CONSOLE_DEVICES;
 
   // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
   // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
@@ -348,15 +347,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           forwardNotify: (dev, q) => port.postMessage({ method: "virtio9p_notify", dev, q }),
         });
         publish_raised_irqs_addr();
-      } else if (id === VW_DEV_CONSOLE) {
-        // Issue #10 (option 2): virtio-console. Like virtio-9p, the console sink
-        // (guest output) + input buffer (host input) are on the MAIN thread, but
-        // this kick lands on a task worker — so the worker-side device only
-        // answers the synchronous transport probes (getFeatures/config/setup via
-        // the base ctor) and FORWARDS the notify to the main thread, where the
-        // host instance drains the transmitq to the sink / delivers receiveq
-        // input and raises the completion IRQ via the raised_irqs self-wake.
-        // Publish that wake address (the console needs it for host->guest input).
+      } else if (isConsoleDev(id)) {
+        // Issue #83: a single-port virtio-console console device. Like virtio-9p,
+        // the sink (guest output) + input buffer (host input) are on the MAIN
+        // thread, but this kick lands on a task worker — so the worker-side device
+        // only answers the synchronous transport probes (getFeatures = 0 → the
+        // guest's non-multiport path registers hvc SYNCHRONOUSLY at probe; queue
+        // setup via the base ctor) and FORWARDS the notify (with the dev index) to
+        // the main thread, where the host instance drains the transmitq / delivers
+        // receiveq input and raises the completion IRQ via the raised_irqs
+        // self-wake. Publish the wake address (the console needs it for host->guest
+        // input).
         d = new ConsoleVirtioDevice({
           ...common,
           forwardNotify: (dev, q) => port.postMessage({ method: "virtioconsole_notify", dev, q }),
@@ -401,9 +402,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     }
     return d;
   };
-
-  /// Per-console window size (SAB), polled by wasm_driver_hvc_winsize. ticket #74.
-  let winsizes = null;
 
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
   const host_callbacks = {
@@ -592,51 +590,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       return count;
     },
 
-    // Host callbacks used by the Wasm-default console driver.
-
-    // pc (ticket #74, multi-tty): the kernel's hvc_wasm driver threads a
-    // `vtermno` (console index) as the FIRST arg so several terminals can share
-    // one kernel — hvc0 plus hvc1..N, one per window. The pre-multi-console
-    // kernel called these with just (buffer, count); we stay tolerant of both
-    // arities (vtermno defaults to 0) so this runtime drives either artifact
-    // during the rollout.
-    wasm_driver_hvc_put: (...args) => {
-      const [vtermno, buffer, count] = args.length >= 3 ? args : [0, args[0], args[1]];
-      const memory_u8 = new Uint8Array(memory.buffer);
-
-      port.postMessage({
-        method: "console_write",
-        vtermno,
-        message: text_decoder.decode(memory_u8.slice(buffer, buffer + count)),
-      });
-
-      return count;
-    },
-
-    wasm_driver_hvc_get: (...args) => {
-      const [vtermno, buffer, count] = args.length >= 3 ? args : [0, args[0], args[1]];
-      // Reset lock. Using .store() for the memory barrier.
-      Atomics.store(console_read_messenger, 0, -1);
-
-      // Tell the main thread to write any input into memory, up to count bytes.
-      port.postMessage({
-        method: "console_read",
-        vtermno,
-        buffer: buffer,
-        count: count,
-        console_read_messenger: console_read_messenger,
-      });
-
-      // Wait for a response from the main thread about how many bytes were actually written, could be 0.
-      Atomics.wait(console_read_messenger, 0, -1);
-      let console_read_count = Atomics.load(console_read_messenger, 0);
-      return console_read_count;
-    },
-
-    // pc (ticket #74, TIOCSWINSZ): the hvc driver polls this for a console's
-    // window size, packed (rows<<16)|cols (0 = unset), read straight from the
-    // shared winsize array the main thread writes via set_winsize.
-    wasm_driver_hvc_winsize: (vtermno) => (winsizes ? Atomics.load(winsizes, vtermno | 0) : 0),
+    // The guest console is N stock single-port virtio-console devices (issue #83),
+    // serviced via the virtio_wasm transport host imports below — there are no
+    // bespoke hvc console host callbacks anymore (the hvc_wasm backend is retired).
 
     // Wayland Phase 1 (1a/1b): the `virtio_wasm` transport's host imports. Every
     // call leads with the host device index `dev`. setup_queue hands us a vq's
@@ -697,9 +653,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       locks = message.locks;
       switch_to_last_task = message.last_task; // Only defined for tasks and CPU 0 (init task).
 
-      if (message.winsize_buf) {
-        winsizes = new Int32Array(message.winsize_buf);
-      }
       // Wayland Phase 1 (1b): attach the shared virtio queue-layout store.
       if (message.virtio_queues) {
         virtio_queues = new SharedQueues(message.virtio_queues);

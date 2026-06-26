@@ -1,58 +1,77 @@
-// console-device.js — host (JS) model of a virtio-console device on the
-// `virtio_wasm` transport. This is the device the guest's STOCK mainline
+// console-device.js — host (JS) model of a SINGLE-PORT virtio-console device on
+// the `virtio_wasm` transport. This is the device the guest's STOCK mainline
 // virtio-console driver (drivers/char/virtio_console.c, CONFIG_VIRTIO_CONSOLE)
-// talks to, providing a guest TTY ALONGSIDE the existing bespoke hvc_wasm
-// backend (issue #10 option 2: "everything is a virtio device" — console
-// edition). It is added next to hvc_wasm so the two console paths can be A/B'd;
-// hvc_wasm is NOT removed by this change.
+// talks to. It is the guest's SOLE console transport: it replaced the bespoke
+// `hvc_wasm` backend (kernel patches 0002/0003, retired) — the guest console is
+// now a standard virtualized-Linux path (virtio-console → hvc), the same way the
+// filesystem moved to stock virtio-9p and /Ctl to stock virtio-vsock.
 //
-// SINGLE PORT (no VIRTIO_CONSOLE_F_MULTIPORT). Mainline virtio_console binds a
-// port to a (receiveq, transmitq) virtqueue pair; a featureless device gets one
-// port (port 0) wired to hvc as a console line. So this device has exactly two
-// vqs, mirroring virtio-net's directionality:
+// ONE DEVICE = ONE CONSOLE; MULTI-TTY = N DEVICES (issue #83). Each device is a
+// featureless single-port virtio-console. The crucial property is SYNCHRONOUS
+// console registration: in the non-multiport probe path, virtcons_probe calls
+// add_port(0) → init_port_console → hvc_alloc DURING the device probe (a
+// device_initcall, before userspace init runs), so the hvc line exists before
+// PID 1 opens /dev/console. A MULTIPORT device instead adds its console ports
+// ASYNCHRONOUSLY via the control-vq handshake (DEVICE_READY → PORT_ADD →
+// PORT_READY → CONSOLE_PORT), which the single-CPU wasm boot RACES — init runs
+// and dies ("Attempted to kill init") before hvc0 registers. So multiport is a
+// dead end here; instead the transport registers N single-port console devices
+// (CONSOLE_DEVICES), and the stock driver registers one hvc line per device
+// SYNCHRONOUSLY → hvc0..hvc{N-1}, one per pc Terminal window. hvc line index ===
+// device registration order === the engine's `vtermno`.
+//
+// Two virtqueues per device (mainline single-port layout):
 //   vq[0] = receiveq  (host -> guest): the guest posts WRITABLE inbufs; the host
 //           fills them with input bytes (keystrokes) and pushes them used.
-//   vq[1] = transmitq (guest -> host): the guest posts READABLE outbufs holding
-//           console output; the host drains them to the console sink and pushes
-//           them used (len 0 — transmit buffers are read-only).
-// This is the hvc-equivalent of one console (hvc0). MULTIPORT (the hvc0..hvc7
-// model the existing hvc_wasm path exposes via HVC_WASM_NR=8) is a DOCUMENTED
-// GAP, not stubbed: extending it means adding the control vq + per-port queues
-// here and offering VIRTIO_CONSOLE_F_MULTIPORT in the kernel registration
-// (patch 0019). Until then a single port is the correct minimal console.
+//   vq[1] = transmitq (guest -> host): the guest posts READABLE outbufs of
+//           console output; the host drains them to the `sink` and pushes them
+//           used (len 0 — transmit buffers are read-only).
 //
-// WORKER->MAIN INVERSION (the same reason virtio-9p/wl/net aren't a free swap):
-// the console sink + input buffer live on the MAIN thread (where bootLinux's
-// per-console fan-out and key_input run), but the guest's vq kick lands on
-// whichever task worker issued the syscall. So the worker-side instance only
-// answers the synchronous transport probes (features / config / queue setup)
-// and FORWARDS the notify to the main thread; the main-thread instance (given a
-// `sink`) drains the transmitq to the sink. Host input (host -> guest) is
-// delivered by the MAIN-thread instance too (pushRx), waking a parked idle CPU
-// via the SAME raised_irqs self-wake path virtio-wl/net/9P use (raiseHostWlIrq):
-// the OR-into-raised_irqs[0] + notify happens after the receiveq write, so there
-// is no lost-wakeup race.
+// NO RESIZE YET. Single-port resize needs VIRTIO_CONSOLE_F_SIZE + a config-change
+// interrupt (the multiport RESIZE control message isn't available without the
+// control vq), and the wasm transport has no config-change path yet — a
+// documented follow-up, not stubbed. Until then the guest tty keeps its boot
+// winsize (TIOCSWINSZ does not propagate).
+//
+// WORKER→MAIN INVERSION (the same reason virtio-9p/wl/net/vsock aren't a free
+// swap): the output sink + input buffer live on the MAIN thread (where bootLinux's
+// per-console fan-out runs), but the guest's vq kick lands on whichever task
+// worker issued the syscall. So the worker-side instance only answers the
+// synchronous transport probes (features / config / queue setup) and FORWARDS the
+// notify to the main thread; the main-thread instance (given a `sink`) drains the
+// transmitq / delivers receiveq input. Host→guest input wakes a parked idle CPU
+// via the SAME raised_irqs self-wake path virtio-wl/net/9P/vsock use
+// (raiseHostWlIrq): the receiveq write happens before the OR-into-raised_irqs[0] +
+// notify, so there is no lost-wakeup race.
 
 import { VirtioWasmDevice } from "./device.js";
 
-// virtio-console queue indices for a single (non-multiport) port: the receiveq
-// is queue 0, the transmitq is queue 1 (uapi/linux/virtio_console.h port-0
-// convention; virtio_console.c's pdev->in_vqs[0]/out_vqs[0]).
+// Number of single-port console devices the transport registers = number of hvc
+// lines the guest exposes (hvc0..hvc{N-1}). MUST match the kernel transport's
+// console-device registration (kernel patch 0019, VW_DEV_CONSOLE_BASE..+8) and
+// the guest inittab's getty count (userspace/init.nix nrConsoles). 8 keeps parity
+// with the retired hvc_wasm's HVC_WASM_NR.
+export const CONSOLE_DEVICES = 8;
+
+// Host device index of the FIRST console device; the transport registers
+// CONSOLE_DEVICES consecutive single-port virtio-console devices at
+// CONSOLE_BASE..CONSOLE_BASE+CONSOLE_DEVICES-1. Console index N (hvcN) === device
+// CONSOLE_BASE+N. MUST match kernel patch 0019 (VW_DEV_CONSOLE_BASE = 8). Index 6
+// is unused and 7 is virtio-vsock (VW_DEV_VSOCK), so the consoles sit at 8..15.
+export const CONSOLE_BASE = 8;
+
+// virtio-console queue indices for a single (non-multiport) port: receiveq is
+// queue 0, transmitq is queue 1 (uapi/linux/virtio_console.h port-0 convention;
+// virtio_console.c's pdev->in_vqs[0]/out_vqs[0]).
 const RECEIVEQ = 0; // host -> guest (guest posts writable inbufs)
 const TRANSMITQ = 1; // guest -> host (guest posts readable outbufs)
-
-// virtio-console feature bits (uapi/linux/virtio_console.h). We offer NONE: no
-// VIRTIO_CONSOLE_F_SIZE (cols/rows config — TIOCSWINSZ stays on hvc_wasm for
-// now) and no VIRTIO_CONSOLE_F_MULTIPORT (single port — see the header note).
-// VIRTIO_F_VERSION_1 (bit 32) is OR'd in by the transport itself (vw_get_features
-// in virtio_wasm.c), so the device need not advertise it here.
 
 export class ConsoleVirtioDevice extends VirtioWasmDevice {
   /**
    * Extends the base VirtioWasmDevice opts with:
-   * - `sink` ((bytes: Uint8Array) => void): MAIN-thread only — receives guest
-   *   console output drained from the transmitq. In bootLinux this funnels into
-   *   the per-console output fan-out (tagged as the single virtio console).
+   * - `sink` ((bytes: Uint8Array) => void): MAIN-thread only — receives this
+   *   console's output drained from the transmitq. In bootLinux each device's
+   *   sink is wired to its console (hvc/vtermno) index's output fan-out.
    * - `forwardNotify` ((dev, q) => void): WORKER only — forwards the kick to the
    *   main thread (where the sink + input buffer live) instead of servicing here.
    *
@@ -69,16 +88,17 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
   }
 
   getFeatures() {
-    // No optional console features (single port, no size); the transport adds
-    // VIRTIO_F_VERSION_1 on top.
+    // No optional console features → the guest takes the non-multiport probe
+    // path (add_port(0) → init_port_console → hvc_alloc SYNCHRONOUSLY, before
+    // init), so the console exists when PID 1 opens /dev/console. The transport
+    // adds VIRTIO_F_VERSION_1 on top.
     return 0n;
   }
 
-  // virtio_console_config is only read when VIRTIO_CONSOLE_F_SIZE /
-  // _MULTIPORT are offered; we offer neither, so config space is unused. Keep
-  // the base zero-fill behaviour (defensive: a spec-conformant driver won't read
-  // it without the gating feature).
-  // configRead inherited from VirtioWasmDevice (zero-fill).
+  // virtio_console_config is only read when VIRTIO_CONSOLE_F_SIZE / _MULTIPORT
+  // are offered; we offer neither, so config space is unused. Keep the base
+  // zero-fill behaviour (a spec-conformant driver won't read it without the
+  // gating feature). configRead inherited from VirtioWasmDevice (zero-fill).
 
   onNotify(q) {
     const qi = q >>> 0;
@@ -121,9 +141,9 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
   /**
    * Queue host->guest input bytes for delivery on the receiveq, then flush as
    * many as fit into currently-posted inbufs. Bytes that don't fit (no free
-   * inbuf) stay pending and are delivered on the next flushRx (a receiveq
-   * refill kick or a later pushRx). Mirrors NetDevice.pushRx, but a console is a
-   * byte stream (no framing), so partial inbufs are fine and leftovers are kept.
+   * inbuf) stay pending and are delivered on the next flushRx (a receiveq refill
+   * kick or a later pushRx). A console is a byte stream (no framing), so partial
+   * inbufs are fine and leftovers are kept.
    * @param {Uint8Array} bytes
    */
   pushRx(bytes) {
@@ -141,9 +161,9 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
   }
 
   /**
-   * Deliver pending input bytes into the guest's posted receiveq inbufs,
-   * one chain at a time, until either the pending buffer is empty or the guest
-   * has no more inbufs. Raises the device IRQ once if anything was delivered.
+   * Deliver pending input bytes into the guest's posted receiveq inbufs, one
+   * chain at a time, until either the pending buffer is empty or the guest has
+   * no more inbufs. Raises the device IRQ once if anything was delivered.
    */
   flushRx() {
     if (this._pending.length === 0) return;

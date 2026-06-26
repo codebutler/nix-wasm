@@ -23,7 +23,6 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   squashfs?: ArrayBuffer | (() => Promise<ArrayBuffer>),
  *   nixCacheBaseUrl?: string,         // bytes-mode: the lazy nix-cache base URL
  *   onModuleCached?: () => void,
- *   consoleCount?: number,
  *   cmdline?: string,
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
@@ -67,7 +66,6 @@ export async function bootNixSystem(opts) {
     vfs: opts.vfs,
     vmlinuxUrl,
     initrdUrl,
-    consoleCount: opts.consoleCount,
     cmdline: opts.cmdline,
     onLog: opts.onLog,
     onModuleCached: opts.onModuleCached,

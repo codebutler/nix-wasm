@@ -18,10 +18,14 @@
 const SLOT_WORDS = 9;
 // Device-index capacity of the cross-worker table. Must cover every VW_DEV_*
 // the transport registers: WL=0, ECHO=1, NET=2, BLK=3, the virtio-9p channels
-// 9P_ROOT=4 / 9P_NIXCACHE=5 (issue #10), CONSOLE=6, and VSOCK=7 (issue #10
-// option 3). 8 covers indices 0..7 exactly; the SAB is MAX_DEVS*MAX_QS*9*4 bytes
-// (1152 B at 8×4), threaded into every worker.
-const MAX_DEVS = 8;
+// 9P_ROOT=4 / 9P_NIXCACHE=5, VSOCK=7, and the issue-#83 block of CONSOLE_DEVICES=8
+// single-port virtio-console devices at indices 8..15 (CONSOLE_BASE=8). 16 covers
+// indices 0..15.
+const MAX_DEVS = 16;
+// Per-device queue capacity. A single-port virtio-console uses 2 vqs (rx/tx);
+// virtio-vsock uses 3 (rx/tx/event), the ceiling here. 4 is a small safety
+// margin. The SAB is MAX_DEVS*MAX_QS*9*4 bytes (2304 B at 16×4), threaded into
+// every worker.
 const MAX_QS = 4;
 const TOTAL_WORDS = MAX_DEVS * MAX_QS * SLOT_WORDS;
 

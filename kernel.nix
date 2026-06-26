@@ -27,8 +27,11 @@ pkgs.stdenv.mkDerivation {
   src = kernelSrc;
 
   patches = [
-    ./patches/kernel/0002-hvc-wasm-multi-console.patch
-    ./patches/kernel/0003-hvc-wasm-winsize.patch
+    # NOTE: the bespoke hvc_wasm console backend (formerly patches 0002/0003) is
+    # RETIRED (issue #83). The guest console is now the stock virtio-console
+    # driver (CONFIG_VIRTIO_CONSOLE, patch 0019) over 8 single-port virtio-console
+    # devices; CONFIG_HVC_WASM is disabled in configurePhase below so the first
+    # virtio-console device owns hvc0.
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
     ./patches/kernel/0005-wasm-enlarge-kernel-stack.patch
     ./patches/kernel/0006-wasm-force-max-order.patch
@@ -78,12 +81,16 @@ pkgs.stdenv.mkDerivation {
     # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
     # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
     ./patches/kernel/0018-wasm-virtio-9p-device.patch
-    # Issue #10 (option 2): register a virtio-console device (VIRTIO_ID_CONSOLE
-    # = 3) on the wasm virtio transport so the stock mainline virtio-console
-    # driver (CONFIG_VIRTIO_CONSOLE) can carry a guest TTY, ALONGSIDE the
-    # existing bespoke hvc_wasm backend (patches 0002/0003) for an A/B. Single
-    # port (no MULTIPORT), VW_DEV_CONSOLE = 6, irq 14; the host serves it via
-    # runtime/virtio/console-device.js. hvc_wasm retirement is a later change.
+    # Issue #10 (option 2) / #83: register a virtio-console device
+    # (VIRTIO_ID_CONSOLE = 3) on the wasm virtio transport so the stock mainline
+    # virtio-console driver (CONFIG_VIRTIO_CONSOLE) carries the guest's consoles.
+    # This is now the SOLE console path (the bespoke hvc_wasm backend is retired):
+    # the transport registers 8 featureless single-port virtio-console devices
+    # (VW_DEV_CONSOLE_BASE..+8, host idx 8..15; the host serves each via
+    # runtime/virtio/console-device.js), so the stock driver registers hvc0..hvc7
+    # SYNCHRONOUSLY at probe (one per pc Terminal window). Single-port (not
+    # multiport) because multiport adds its ports async via the control vq, which
+    # races init to death on single-CPU wasm boot.
     ./patches/kernel/0019-wasm-virtio-console-device.patch
     # Issue #10 option 3 (the vsock piece): register a virtio-vsock device
     # (VIRTIO_ID_VSOCK = 19) on the wasm virtio transport so the stock mainline
@@ -107,11 +114,15 @@ pkgs.stdenv.mkDerivation {
   # nix:true boot regression). Patches 0017-0020 each insert into the same enum +
   # virtio_wasm_transport_init() regions; `patch`'s fuzzy matching can mis-apply a
   # stacked hunk WITHOUT failing the build — which is exactly what dropped the
-  # VW_DEV_9P_ROOT/9P_NIXCACHE virtio_wasm_register() calls and put VW_DEV_VSOCK
-  # before VW_DEV_CONSOLE (CONSOLE shifted 6->8), so `9pnet_virtio` found "no
-  # channels available for device pcroot/nixcache" and /nix-cache never mounted.
-  # Assert the post-patch source is correct; runs in patchPhase (minutes), so a
-  # re-fuzz fails fast and loud instead of producing a subtly-broken kernel.
+  # VW_DEV_9P_ROOT/9P_NIXCACHE virtio_wasm_register() calls. Assert the post-patch
+  # source is correct; runs in patchPhase (minutes), so a re-fuzz fails fast and
+  # loud instead of producing a subtly-broken kernel.
+  #
+  # Layout (issue #83 single-port console pivot): WL=0..9P_NIXCACHE=5, VSOCK=7,
+  # then 8 single-port virtio-console devices at VW_DEV_CONSOLE_BASE=8..15 (index 6
+  # unused). The console registrations are a `for (i<8) virtio_wasm_register(
+  # VW_DEV_CONSOLE_BASE + i, …)` loop, so the assertion checks VW_DEV_CONSOLE_BASE
+  # (the enum + the loop), not a per-device VW_DEV_CONSOLE call.
   postPatch = ''
     vw=drivers/virtio/virtio_wasm.c
     echo "== virtio_wasm.c device enum (post-patch) =="
@@ -119,27 +130,39 @@ pkgs.stdenv.mkDerivation {
     echo "== virtio_wasm_register() calls (post-patch) =="
     grep -nE 'virtio_wasm_register\(VW_DEV_' "$vw" || true
 
-    # 1) Every device the host serves MUST keep its registration call.
-    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_CONSOLE VW_DEV_VSOCK; do
+    # 1) Every non-console device the host serves MUST keep its registration call.
+    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_VSOCK; do
       grep -q "virtio_wasm_register($d," "$vw" || {
         echo "ERROR: $vw is missing virtio_wasm_register($d, …) — a kernel patch" \
              "(0017-0020) applied with fuzz and dropped a device registration." >&2
         exit 1
       }
     done
+    # The 8 single-port consoles register via a VW_DEV_CONSOLE_BASE + i loop.
+    grep -qE 'virtio_wasm_register\(VW_DEV_CONSOLE_BASE \+ i,' "$vw" || {
+      echo "ERROR: $vw is missing the VW_DEV_CONSOLE_BASE + i console registration" \
+           "loop — patch 0019 (console) applied with fuzz." >&2
+      exit 1
+    }
 
-    # 2) Enum order must be ...9P_NIXCACHE(5) < CONSOLE(6) < VSOCK(7) < COUNT so the
-    #    indices match runtime/kernel-host.js + kernel-worker.js (VW_DEV_CONSOLE=6,
-    #    VW_DEV_VSOCK=7). A fuzzy apply that puts VSOCK before CONSOLE is rejected.
+    # 2) Enum order must be ...9P_NIXCACHE(5) < VSOCK(7) < CONSOLE_BASE(8) < COUNT so
+    #    the indices match runtime/virtio/console-device.js (CONSOLE_BASE=8) +
+    #    kernel-host.js/kernel-worker.js (VW_DEV_VSOCK=7). A fuzzy apply that puts
+    #    CONSOLE_BASE before VSOCK is rejected.
     enum=$(awk '/^enum \{/{f=1} f{print} f&&/VW_DEV_COUNT/{exit}' "$vw")
-    con=$(printf '%s\n' "$enum" | grep -n 'VW_DEV_CONSOLE\b' | head -1 | cut -d: -f1)
+    con=$(printf '%s\n' "$enum" | grep -n 'VW_DEV_CONSOLE_BASE\b' | head -1 | cut -d: -f1)
     vso=$(printf '%s\n' "$enum" | grep -n 'VW_DEV_VSOCK\b' | head -1 | cut -d: -f1)
-    if [ -n "$con" ] && [ -n "$vso" ] && [ "$con" -ge "$vso" ]; then
-      echo "ERROR: virtio device enum has VW_DEV_VSOCK before VW_DEV_CONSOLE" \
-           "(fuzzy patch apply). CONSOLE must be index 6, VSOCK index 7." >&2
+    if [ -n "$con" ] && [ -n "$vso" ] && [ "$vso" -ge "$con" ]; then
+      echo "ERROR: virtio device enum has VW_DEV_CONSOLE_BASE before VW_DEV_VSOCK" \
+           "(fuzzy patch apply). VSOCK must be index 7, CONSOLE_BASE index 8." >&2
       exit 1
     fi
-    echo "virtio_wasm.c device enum + registrations OK (9P/console/vsock present, order correct)"
+    # 3) The explicit pinned indices must be exactly VSOCK=7, CONSOLE_BASE=8.
+    grep -qE 'VW_DEV_VSOCK[[:space:]]*=[[:space:]]*7,' "$vw" || {
+      echo "ERROR: VW_DEV_VSOCK is not pinned to 7 in $vw" >&2; exit 1; }
+    grep -qE 'VW_DEV_CONSOLE_BASE[[:space:]]*=[[:space:]]*8,' "$vw" || {
+      echo "ERROR: VW_DEV_CONSOLE_BASE is not pinned to 8 in $vw" >&2; exit 1; }
+    echo "virtio_wasm.c device enum + registrations OK (9P/vsock/8-console present, order correct)"
   '';
 
   nativeBuildInputs = [
@@ -217,14 +240,22 @@ pkgs.stdenv.mkDerivation {
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
-      `# Issue #10 (option 2): stock mainline virtio-console driver` \
+      `# Issue #10 (option 2) / #83: stock mainline virtio-console driver` \
       `# (drivers/char/virtio_console.c) over the virtio_wasm transport` \
-      `# (patch 0019, VW_DEV_CONSOLE = 6). It binds a single console port to a` \
-      `# receiveq/transmitq vq pair and wires it to hvc — a standard virtualized` \
-      `# Linux console path ALONGSIDE the bespoke hvc_wasm backend, for an A/B` \
-      `# during the bridge consolidation. CONFIG_VIRTIO_CONSOLE selects` \
-      `# HVC_DRIVER (already on for hvc_wasm) and depends on VIRTIO + TTY.` \
+      `# (patch 0019) is the guest's SOLE console. The transport registers 8` \
+      `# featureless single-port virtio-console devices (VW_DEV_CONSOLE_BASE..+8,` \
+      `# host idx 8..15); each takes the SYNCHRONOUS non-multiport probe path so the` \
+      `# driver registers hvc0..hvc7 (one per Terminal window) before init runs —` \
+      `# multiport adds ports async via the control vq and races init to death on` \
+      `# single-CPU wasm boot. CONFIG_VIRTIO_CONSOLE selects HVC_DRIVER and depends` \
+      `# on VIRTIO + TTY.` \
       --enable CONFIG_VIRTIO_CONSOLE \
+      `# Issue #83: retire the bespoke hvc_wasm backend (patches 0002/0003 dropped).` \
+      `# Disabling it removes its device_initcall (which else claimed hvc0 and the` \
+      `# wasm_driver_hvc_* host imports), so virtio-console's first console port` \
+      `# becomes hvc0 and carries 'console=hvc'. HVC_DRIVER stays on (selected by` \
+      `# VIRTIO_CONSOLE above), so the hvc framework remains for virtio-console.` \
+      --disable CONFIG_HVC_WASM \
       `# Guest networking (Phase 1): stock drivers/net/virtio_net.c over the` \
       `# virtio_wasm transport (dev 2, VW_DEV_NET), IPv4+ICMP, and AF_PACKET raw` \
       `# sockets (busybox udhcpc/ping). CONFIG_NET is already on above.` \
