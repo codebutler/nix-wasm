@@ -655,7 +655,7 @@ new file mode 100644
 index 0000000..a4c90ac
 --- /dev/null
 +++ b/drivers/virtio/virtio_wl.c
-@@ -0,0 +1,1616 @@
+@@ -0,0 +1,1678 @@
 +/*
 + *  Wayland Virtio Driver
 + *  Copyright (C) 2017 Google, Inc.
@@ -733,6 +733,8 @@ index 0000000..a4c90ac
 +
 +#define VFD_ILLEGAL_SIGN_BIT 0x80000000
 +#define VFD_HOST_VFD_ID_BIT 0x40000000
++/* Cap a FILL vfd's guest-allocated backing (keymap is ~tens of KiB). */
++#define VIRTWL_MAX_FILL_SIZE (4 * 1024 * 1024)
 +
 +struct virtwl_vfd_qentry {
 +	struct list_head list;
@@ -766,6 +768,15 @@ index 0000000..a4c90ac
 +	 */
 +	void *shm_buf;
 +	size_t shm_size;
++
++	/*
++	 * Fill-backing (keymap path): set when this host→guest vfd was created with
++	 * VIRTIO_WL_VFD_FILL. The backing is shm_buf/shm_size (guest RAM, mmappable);
++	 * incoming VFD_RECV data is memcpy'd into it at fill_offset instead of being
++	 * queued for read().
++	 */
++	bool fill_backing;
++	size_t fill_offset;
 +
 +	struct list_head in_queue; /* list of virtwl_vfd_qentry */
 +	wait_queue_head_t in_waitq;
@@ -921,6 +932,35 @@ index 0000000..a4c90ac
 +	vfd->pfn = new->pfn;
 +	vfd->flags = new->flags;
 +
++	/*
++	 * FILL: back the vfd with GUEST RAM so mmap works on nommu (host pages can't
++	 * be mapped). The host streams the fd's bytes as VFD_RECV chunks that
++	 * vq_handle_recv copies into shm_buf. On failure leave pfn=0 → mmap fails
++	 * gracefully (no keymap, no crash). shm_buf is freed in virtwl_vfd teardown.
++	 */
++	if (new->flags & VIRTIO_WL_VFD_FILL) {
++		size_t alloc_size = PAGE_ALIGN(new->size);
++
++		if (alloc_size && new->size <= VIRTWL_MAX_FILL_SIZE) {
++			vfd->shm_buf = alloc_pages_exact(alloc_size,
++							 GFP_KERNEL | __GFP_ZERO);
++			if (vfd->shm_buf) {
++				vfd->shm_size = alloc_size;
++				vfd->pfn = (u64)virt_to_phys(vfd->shm_buf) >>
++					   PAGE_SHIFT;
++				vfd->fill_backing = true;
++				vfd->fill_offset = 0;
++			} else {
++				pr_warn("virtwl: fill backing alloc failed (size=%u)\n",
++					new->size);
++				vfd->pfn = 0;
++			}
++		} else {
++			pr_warn("virtwl: fill size %u rejected\n", new->size);
++			vfd->pfn = 0;
++		}
++	}
++
 +	return true; /* return the inbuf to vq */
 +}
 +
@@ -939,6 +979,28 @@ index 0000000..a4c90ac
 +
 +	if (!vfd) {
 +		pr_warn("virtwl: recv for unknown vfd_id %u\n", recv->vfd_id);
++		return true; /* return the inbuf to vq */
++	}
++
++	/*
++	 * Fill-backing vfd (keymap): copy this chunk into the guest RAM backing at
++	 * the running offset (clamped to the allocation) instead of queuing it for
++	 * read(). The data is the mmap backing, not a stream. Return the inbuf.
++	 */
++	if (vfd->fill_backing) {
++		size_t hdr_sz = sizeof(*recv) +
++				(size_t)recv->vfd_count * sizeof(__le32);
++
++		if (vfd->shm_buf && len > hdr_sz) {
++			size_t data_len = len - hdr_sz;
++			size_t space = vfd->shm_size - vfd->fill_offset;
++			size_t n = min(data_len, space);
++
++			memcpy((u8 *)vfd->shm_buf + vfd->fill_offset,
++			       (u8 *)recv + hdr_sz, n);
++			vfd->fill_offset += n;
++		}
++		mutex_unlock(&vfd->lock);
 +		return true; /* return the inbuf to vq */
 +	}
 +
@@ -2289,7 +2351,7 @@ new file mode 100644
 index 0000000..0db532d
 --- /dev/null
 +++ b/include/uapi/linux/virtio_wl.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,162 @@
 +#ifndef _LINUX_VIRTIO_WL_H
 +#define _LINUX_VIRTIO_WL_H
 +/*
@@ -2353,6 +2415,14 @@ index 0000000..0db532d
 +enum virtio_wl_vfd_flags {
 +	VIRTIO_WL_VFD_WRITE = 0x1, /* intended to be written by guest */
 +	VIRTIO_WL_VFD_READ = 0x2, /* intended to be read by guest */
++	/*
++	 * Private to this NOMMU/Wasm port (NOT upstream virtio_wl): a host→guest
++	 * VFD_NEW with this flag makes the guest driver allocate the vfd's backing
++	 * in its OWN RAM (alloc_pages_exact) and copy subsequent VFD_RECV data into
++	 * it, so the vfd is mmappable (host-injected pages are not, on nommu). Used
++	 * for the wl_keyboard keymap fd.
++	 */
++	VIRTIO_WL_VFD_FILL = 0x1000,
 +};
 +
 +struct virtio_wl_ctrl_vfd {

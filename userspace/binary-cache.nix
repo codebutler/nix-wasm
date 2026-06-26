@@ -46,11 +46,13 @@ let
     }
   '';
 in
-# Wrap mkBinaryCache's output: symlink its entire tree into $out, add pkgs.nix,
-# and generate manifest.json — the file index consumed by runtime/nix-cache.js.
-# Without manifest.json, nix-cache.js falls back to an empty index (only the
-# seeded log/nar/realisations dirs), so pkgs.nix is never visible to the guest
-# and `nix-env -iA` fails with "attribute not found".
+# Wrap mkBinaryCache's output: symlink its entire tree into $out and add pkgs.nix.
+# This is a PLAIN STANDARD Nix cache (nix-cache-info + *.narinfo + nar/ + pkgs.nix)
+# — there is NO bespoke `manifest.json` file index. runtime/nix-cache.js resolves
+# files by on-demand HEAD probe (404 → ENOENT), exactly as it would against any
+# standard cache, so nothing here enumerates the tree for it (epic #60, Phase 1).
+# pkgs.nix is reachable by its exact path (the guest reads /nix-cache/pkgs.nix
+# directly at boot — bootstrap.nix copies it to ~/.nix-defexpr).
 pkgs.runCommand "wasm-binary-cache" { } ''
   # Symlink the cache content (nix-cache-info + narinfo + nar/ + realisations/ + …)
   # into our $out so the caller gets a single store path for the whole cache.
@@ -60,15 +62,4 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   done
   # Add the pkgs.nix index so the guest's ~/.nix-defexpr resolves `nix-env -iA`.
   cp ${pkgsNix} "$out/pkgs.nix"
-  # Generate manifest.json: a JSON array of all relative file paths in the cache.
-  # nix-cache.js fetches this on first access to build its file index; a missing
-  # manifest degrades to an empty cache (nothing served, no pkgs.nix copy in guest).
-  cd "$out"
-  # Collect flat files + files under nar/, realisations/, log/ subdirs
-  (
-    for f in *; do [ -f "$f" ] && printf '"%s"\n' "$f"; done
-    for sub in nar realisations log; do
-      [ -d "$sub" ] && for f in "$sub"/*; do [ -f "$f" ] && printf '"%s"\n' "$f"; done
-    done
-  ) | paste -sd ',' - | sed 's/^/[/;s/$/]/' > "$out/manifest.json"
 ''

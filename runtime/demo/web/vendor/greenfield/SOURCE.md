@@ -8,7 +8,8 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `5217f3b` ("UserShellApi: add requestSurfaceClose action"), on top
+- **Commit:** `d09af6b` ("fix(Pointer): sendFrame after forwardLocalButton — wl_pointer.frame required by GTK (wl_pointer v5+)"), on top
+  of `e21db22` ("UserShellApi/Pointer: add pointerButton + forwardLocalButton (DOM-windows click injection)") on top
   of `5bf2e35` ("wayland-wasm: in-browser Wayland apps on Greenfield (extended fork)").
 - **Local patch (pc Wayland Phase 4f):** `src/UserShellApi.ts` adds a
   `requestSurfaceClose(compositorSurface)` action — sends `xdg_toplevel.close` to
@@ -16,6 +17,9 @@ in cb-windows.
   Wayland window-close path. DOM-windows mode (pc's cb-windows) calls it from the
   window × button so the guest client exits cleanly; `closeClient` only tears down
   the server side, which never reaches the guest over the message-passing bridge.
+- **Local patch (input):** `src/Pointer.ts` + `src/UserShellApi.ts` add
+  `forwardLocalButton` / `pointerButton` — the DOM-windows-mode button-injection
+  entry point (the upstream local-input API had motion+leave but no button).
 - **Local patch (pc Wayland Phase 4b):** `src/Shm.ts` `createPool` now clamps the
   pool mapping to the wire-declared `size` instead of the backing fd's
   `byteLength`. The guest virtio_wl shm fd is page-rounded LARGER than the

@@ -142,7 +142,9 @@ jobs:
   #     a one-shot SIGALRM handler installed with SA_RESTART (busybox ping via
   #     signal()) must run when it interrupts a blocking syscall. No networking.
   #   • ping-pace-probe-smoke — #75 localizer (non-gating): control/restart/xcpu/
-  #     repro matrix, the detailed breakdown behind ping-pace-smoke.
+  #     repro/transparent matrix, the detailed breakdown behind ping-pace-smoke.
+  #   • vsock-ctl-smoke — the guest /Ctl agent (pcctl) ↔ host listener over
+  #     virtio-vsock, open/notify/clipset/clipget round-trip (issue #60 Phase 2).
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
@@ -221,18 +223,21 @@ jobs:
 
           # #75 regression (now fixed by patches/kernel/0021): busybox-ping's
           # pacing — a one-shot SIGALRM handler installed with SA_RESTART must run
-          # when it interrupts a blocking syscall (the kernel delivers it at the
-          # FOOT and returns -EINTR; EINTR-aware loops retry). Gating — a
-          # regression (the one-packet-then-hang) fails the job.
+          # when it interrupts a blocking syscall. The kernel delivers the handler
+          # at the FOOT and TRANSPARENTLY restarts the syscall (real result, no
+          # -EINTR). Gating — a regression (the one-packet-then-hang) fails the job.
           run_smoke demo/node/ping-pace-smoke.mjs
 
-          # #75 LOCALIZER (NON-gating diagnostic). Runs control/restart/xcpu/repro
-          # in one boot and prints the matrix. All four PASS with the fix; kept
-          # non-gating since it's the detailed breakdown behind the gating
-          # ping-pace-smoke above (and tolerant of the guest's "PROBE ?:" label
-          # quirk for the threaded cases).
+          # #75 LOCALIZER (NON-gating diagnostic). Runs control/restart/xcpu/repro/
+          # transparent in one boot and prints the matrix. All PASS with the fix;
+          # kept non-gating as the detailed breakdown behind the gating
+          # ping-pace-smoke above (tolerant of the guest's "PROBE ?:" label quirk).
           echo "::group::ping-pace-probe matrix (#75 localizer, non-gating)"
           set +e
           node demo/node/ping-pace-probe-smoke.mjs
           set -e
           echo "::endgroup::"
+
+          # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
+          # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
+          run_smoke demo/node/vsock-ctl-smoke.mjs
