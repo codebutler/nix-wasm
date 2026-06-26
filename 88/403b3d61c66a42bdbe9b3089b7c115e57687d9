@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-06-25-pr-previews.md
+  s_2aa74a3a6bc0ab::t_2e7a54e5373249 154-155
+  s_2aa74a3a6bc0ab::t_f339a64f92b492 1-153,156-847
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "88403b3d61c66a42bdbe9b3089b7c115e57687d9",
+  "prompts": {},
+  "sessions": {
+    "s_2aa74a3a6bc0ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b039c2b-8c6b-4a70-ab07-4b05782ad9d5",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
