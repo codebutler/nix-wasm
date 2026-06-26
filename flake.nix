@@ -190,6 +190,22 @@
         inherit cross;
       };
 
+      # Faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends
+      # one packet then hangs): a one-shot SIGALRM handler (installed via signal()
+      # = SA_RESTART) re-armed from inside itself, with an async echo-host thread —
+      # exercises the SA_RESTART syscall-restart path the fix repairs. See
+      # userspace/ping-pace-test.c.
+      pingPaceTest = import ./userspace/ping-pace-test.nix {
+        inherit cross;
+      };
+
+      # #75 localizer (argv-selected cases): control / restart / xcpu / repro /
+      # transparent — isolates the SA_RESTART bug and proves the restart is
+      # transparent (returns data, not -EINTR). See userspace/ping-pace-probe.c.
+      pingPaceProbe = import ./userspace/ping-pace-probe.nix {
+        inherit cross;
+      };
+
       # Guest-side agent for pc's /Ctl desktop-control bridge over AF_VSOCK
       # (issue #60 Phase 2 / nix-wasm#10 option 3): a tiny CLI that connects to
       # VMADDR_CID_HOST:1024 and speaks the length-prefixed open/notify/clipget/
@@ -361,7 +377,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -510,6 +526,14 @@
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
         kill-wake-test = killWakeTest;
+
+        # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-
+        # hang): SA_RESTART one-shot handler re-armed in itself → $out/bin/ping-pace-test.
+        ping-pace-test = pingPaceTest;
+
+        # #75 localizer (control / restart / xcpu / repro / transparent) →
+        # $out/bin/ping-pace-probe.
+        ping-pace-probe = pingPaceProbe;
 
         # Guest /Ctl desktop-control agent over AF_VSOCK (issue #60 Phase 2) →
         # $out/bin/pcctl.

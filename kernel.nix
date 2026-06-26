@@ -92,6 +92,15 @@ pkgs.stdenv.mkDerivation {
     # socket channel. VW_DEV_VSOCK is pinned to host index 7; the host serves
     # the guest CID + drives the rx/tx/event vqs (runtime/virtio/vsock-device.js).
     ./patches/kernel/0020-wasm-virtio-vsock-device.patch
+    # #75: a SIGALRM handler installed with SA_RESTART (busybox ping via signal())
+    # was never delivered when it interrupted a blocking syscall — the C restart
+    # loop in WASM_SYSCALL_N re-entered the syscall before the asm FOOT could run
+    # the queued handler, so the syscall hung (one packet then hang). Fix: lift
+    # the restart loop to the asm FOOT (entry.S) — deliver the queued handler at
+    # the FOOT (the only safe context) and then re-invoke the syscall, so the
+    # restart happens AFTER the handler (transparent SA_RESTART, real replies, no
+    # -EINTR). In-kernel change only — no host/engine ABI change.
+    ./patches/kernel/0021-wasm-sa-restart-deliver-signal.patch
   ];
 
   # Guard against silent patch-fuzz corruption of the virtio device enum (the #84

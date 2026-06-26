@@ -16,8 +16,19 @@
  *   1. alarm(1) + pause()                    — one-shot timeout while blocked.
  *   2. setitimer(ITIMER_REAL) periodic       — N ticks, blocked in nanosleep.
  *   3. setitimer + recvfrom AFTER a spawn     — one-shot timer must interrupt a
- *      (busybox-ping's exact pattern)           single timer-less blocking wait
+ *      (busybox-ping's pacing skeleton)         single timer-less blocking wait
  *                                               in a process that has spawned.
+ *
+ * NB (issue #75): every case here installs the handler with sigaction(sa_flags=0)
+ * — i.e. NO SA_RESTART — so an interrupted syscall returns -EINTR and the kernel
+ * delivers the handler. busybox `ping` installs via signal() (musl → SA_RESTART),
+ * and THAT path was the #75 root cause: a SA_RESTART handler was never delivered
+ * when it interrupted a blocking syscall (the wasm syscall-restart loop re-entered
+ * the syscall before _user_mode_tail ran the queued handler). Fixed by
+ * patches/kernel/0021 (lift the restart loop to the asm FOOT: deliver the
+ * handler, then re-invoke the syscall — transparent SA_RESTART). So this test
+ * does NOT cover SA_RESTART; that path is covered by ping-pace-probe.c
+ * (`restart`/`repro` cases) and ping-pace-test.c.
  *
  * Background — #35's premise vs. reality: #35 reported busybox `ping` sending
  * only one packet and hypothesized "no async interval-timer source raises
