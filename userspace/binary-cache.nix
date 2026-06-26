@@ -104,7 +104,7 @@ pkgs.runCommand "wasm-binary-cache" { } ''
     h=$(basename "$d"); h=''${h%%-*}
     if [ ! -e "$out/$h.narinfo" ]; then
       echo "ERROR: deriver narinfo $h.narinfo ($d) is NOT in the cache — the .drv" \
-           "closure was not published; `nix profile install` cannot obtain it." >&2
+           "closure was not published; nix profile install cannot obtain it." >&2
       miss=1
     fi
   done
