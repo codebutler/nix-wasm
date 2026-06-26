@@ -12,27 +12,25 @@
 //     WebAssembly.Memory; a worker forwards each 9P vq kick to the main thread.
 //
 // Multi-tty: the guest exposes HVC_CONSOLES consoles (hvc0..hvc{N-1}); pc-init
-// respawns a shell on each. These ride the stock MULTIPORT virtio-console device
+// respawns a shell on each. These ride N stock SINGLE-PORT virtio-console devices
 // (issue #83): the kernel's virtio_console driver registers one hvc line per
-// console port, replacing the retired bespoke hvc_wasm backend. `bootLinux()`
-// returns a handle exposing every console as an independent byte duplex —
-// `console(vtermno) → { write, onData, resize, reset }` — plus `consoleCount`
-// and `kill()`. Output that arrives before a renderer attaches is buffered PER
-// CONSOLE so no boot/prompt bytes are lost.
+// device SYNCHRONOUSLY at probe (so the console exists before init), replacing the
+// retired bespoke hvc_wasm backend. `bootLinux()` returns a handle exposing every
+// console as an independent byte duplex — `console(vtermno) → { write, onData,
+// resize, reset }` — plus `consoleCount` and `kill()`. Output that arrives before
+// a renderer attaches is buffered PER CONSOLE so no boot/prompt bytes are lost.
 
 import { linux } from "./kernel-host.js";
 import { makeSharedQueues } from "./virtio/shared-queues.js";
-import { CONSOLE_PORTS } from "./virtio/console-device.js";
+import { CONSOLE_DEVICES } from "./virtio/console-device.js";
 import { createNinePServer } from "./ninep/server.js";
 
 // Number of guest consoles (hvc0..hvc{N-1}) — one per Linux terminal window;
-// hvc0 also carries the kernel boot log. These are the MULTIPORT virtio-console
-// device's ports (issue #83): the stock virtio_console driver registers one hvc
-// line per console port, so the count IS the device's CONSOLE_PORTS (which it
-// reports to the guest as max_nr_ports, and which the guest inittab's getty
-// count must match). Exported under the historical name for the pc app that
-// imports it.
-export const HVC_CONSOLES = CONSOLE_PORTS;
+// hvc0 also carries the kernel boot log. One stock single-port virtio-console
+// device per console (issue #83), so the count IS CONSOLE_DEVICES (which the
+// kernel transport registers and the guest inittab's getty count must match).
+// Exported under the historical name for the pc app that imports it.
+export const HVC_CONSOLES = CONSOLE_DEVICES;
 
 // maxcpus=1: a terminal needs no SMP parallelism, and single-CPU sidesteps the
 // linux-wasm secondary-CPU bringup fragility. Paired with patches/0004 (which
@@ -48,9 +46,10 @@ export const HVC_CONSOLES = CONSOLE_PORTS;
 // stacks) + CONFIG_SCHED_STACK_END_CHECK (a future overflow BUGs loudly at the
 // culprit instead of corrupting silently). Repro: scripts/linux-demo/stress8.mjs.
 // `console=hvc` binds the kernel console to hvc0, which is now the first
-// MULTIPORT virtio-console console port (issue #83) instead of the retired
-// hvc_wasm line. Early printk before the virtio probe is buffered by the kernel
-// log and flushed once hvc0 registers (standard for a virtualized console).
+// single-port virtio-console device's hvc line (issue #83) instead of the retired
+// hvc_wasm line. That device registers its console SYNCHRONOUSLY at probe (before
+// init), so hvc0 exists when PID 1 opens /dev/console; early printk before the
+// virtio probe is buffered by the kernel log and flushed once hvc0 registers.
 const DEFAULT_CMDLINE =
   "maxcpus=1 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0";
 
@@ -83,9 +82,9 @@ const enc = new TextEncoder();
 export async function bootLinux(opts) {
   const vfs = opts.vfs;
   const variant = opts.variant || "wasm32_nommu";
-  // Console count is a fixed property of the virtio-console device (its
-  // max_nr_ports), not a caller knob — it must match the guest inittab's getty
-  // count and the device's CONSOLE_PORTS.
+  // Console count is a fixed property of the transport (how many single-port
+  // virtio-console devices it registers), not a caller knob — it must match the
+  // guest inittab's getty count and CONSOLE_DEVICES.
   const consoleCount = HVC_CONSOLES;
   const vmlinuxUrl = opts.vmlinuxUrl;
   const initrdUrl = opts.initrdUrl;
@@ -159,10 +158,10 @@ export async function bootLinux(opts) {
     boot_cmdline: opts.cmdline || DEFAULT_CMDLINE,
     initrd,
     log: onLog,
-    // The MULTIPORT virtio-console output sink (issue #83): the main-thread
-    // ConsoleVirtioDevice drains each console port's transmitq and calls this as
-    // (port, bytes); emit fans out to that console's onData subscribers (buffering
-    // per-console until one attaches). This is the guest's only console path.
+    // The virtio-console output sink (issue #83): each single-port console
+    // device's main-thread ConsoleVirtioDevice drains its transmitq and calls this
+    // as (consoleIndex, bytes); emit fans out to that console's onData subscribers
+    // (buffering per-console until one attaches). The guest's only console path.
     console_sink: emit,
     ninep_server: ninepServer, // #10: main-thread virtio-9p host devices service this
     virtio_queues: virtioQueues,
@@ -208,8 +207,9 @@ export async function bootLinux(opts) {
           }
           return () => set.delete(cb);
         },
-        /** Set this console's window size — a virtio-console RESIZE control
-         *  message → hvc_resize → TIOCSWINSZ/SIGWINCH on the guest tty. */
+        /** Set this console's window size. NOTE (#83): not yet propagated for
+         *  single-port consoles (needs VIRTIO_CONSOLE_F_SIZE + a transport
+         *  config-change path — a follow-up); currently a no-op host-side. */
         resize(cols, rows) {
           os.console_resize(vt, cols, rows);
         },

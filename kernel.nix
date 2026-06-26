@@ -28,9 +28,10 @@ pkgs.stdenv.mkDerivation {
 
   patches = [
     # NOTE: the bespoke hvc_wasm console backend (formerly patches 0002/0003) is
-    # RETIRED (issue #83). The guest console is now the stock MULTIPORT
-    # virtio-console driver (CONFIG_VIRTIO_CONSOLE, patch 0019); CONFIG_HVC_WASM is
-    # disabled in configurePhase below so virtio-console's first port owns hvc0.
+    # RETIRED (issue #83). The guest console is now the stock virtio-console
+    # driver (CONFIG_VIRTIO_CONSOLE, patch 0019) over 8 single-port virtio-console
+    # devices; CONFIG_HVC_WASM is disabled in configurePhase below so the first
+    # virtio-console device owns hvc0.
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
     ./patches/kernel/0005-wasm-enlarge-kernel-stack.patch
     ./patches/kernel/0006-wasm-force-max-order.patch
@@ -84,10 +85,12 @@ pkgs.stdenv.mkDerivation {
     # (VIRTIO_ID_CONSOLE = 3) on the wasm virtio transport so the stock mainline
     # virtio-console driver (CONFIG_VIRTIO_CONSOLE) carries the guest's consoles.
     # This is now the SOLE console path (the bespoke hvc_wasm backend is retired):
-    # the host (runtime/virtio/console-device.js) offers VIRTIO_CONSOLE_F_MULTIPORT
-    # with CONSOLE_PORTS console ports, so the driver registers hvc0..hvc{N-1} (one
-    # per pc Terminal window + the wayland control console). VW_DEV_CONSOLE = 6,
-    # irq 14. Multiport is host-driven, so this registration needs no change.
+    # the transport registers 8 featureless single-port virtio-console devices
+    # (VW_DEV_CONSOLE_BASE..+8, host idx 8..15; the host serves each via
+    # runtime/virtio/console-device.js), so the stock driver registers hvc0..hvc7
+    # SYNCHRONOUSLY at probe (one per pc Terminal window). Single-port (not
+    # multiport) because multiport adds its ports async via the control vq, which
+    # races init to death on single-CPU wasm boot.
     ./patches/kernel/0019-wasm-virtio-console-device.patch
     # Issue #10 option 3 (the vsock piece): register a virtio-vsock device
     # (VIRTIO_ID_VSOCK = 19) on the wasm virtio transport so the stock mainline
@@ -175,10 +178,13 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
       `# Issue #10 (option 2) / #83: stock mainline virtio-console driver` \
       `# (drivers/char/virtio_console.c) over the virtio_wasm transport` \
-      `# (patch 0019, VW_DEV_CONSOLE = 6) is the guest's SOLE console. The host` \
-      `# offers VIRTIO_CONSOLE_F_MULTIPORT with CONSOLE_PORTS console ports, so the` \
-      `# driver registers hvc0..hvc{N-1} (one per Terminal window). CONFIG_VIRTIO_CONSOLE` \
-      `# selects HVC_DRIVER and depends on VIRTIO + TTY.` \
+      `# (patch 0019) is the guest's SOLE console. The transport registers 8` \
+      `# featureless single-port virtio-console devices (VW_DEV_CONSOLE_BASE..+8,` \
+      `# host idx 8..15); each takes the SYNCHRONOUS non-multiport probe path so the` \
+      `# driver registers hvc0..hvc7 (one per Terminal window) before init runs —` \
+      `# multiport adds ports async via the control vq and races init to death on` \
+      `# single-CPU wasm boot. CONFIG_VIRTIO_CONSOLE selects HVC_DRIVER and depends` \
+      `# on VIRTIO + TTY.` \
       --enable CONFIG_VIRTIO_CONSOLE \
       `# Issue #83: retire the bespoke hvc_wasm backend (patches 0002/0003 dropped).` \
       `# Disabling it removes its device_initcall (which else claimed hvc0 and the` \

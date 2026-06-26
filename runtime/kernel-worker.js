@@ -13,7 +13,7 @@ import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
-import { ConsoleVirtioDevice, CONSOLE_PORTS } from "./virtio/console-device.js";
+import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
@@ -247,13 +247,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
   // Issue #10 (option 2) / #83: virtio-console — the guest's consoles on the
   // stock mainline virtio-console driver (now the SOLE console path; hvc_wasm is
-  // retired). Index 6 MUST match kernel patch 0019's enum (after the 9P channels)
-  // and kernel-host.js. Like virtio-9p, the worker instance only answers the
-  // synchronous transport probes and FORWARDS the kick; the main-thread instance
-  // owns the per-port sinks (guest output) + input buffers (host input) + the
-  // control-plane handshake and raises the completion IRQ via the raised_irqs
+  // retired). The transport registers CONSOLE_DEVICES single-port console devices
+  // at host indices CONSOLE_BASE..CONSOLE_BASE+CONSOLE_DEVICES-1 (kernel patch
+  // 0019), one synchronous hvc line each. Like virtio-9p, the worker instance only
+  // answers the synchronous transport probes and FORWARDS the kick (with the dev
+  // index); the main-thread instance owns the sink (guest output) + input buffer
+  // (host input) per console and raises the completion IRQ via the raised_irqs
   // self-wake.
-  const VW_DEV_CONSOLE = 6;
+  const isConsoleDev = (id) => id >= CONSOLE_BASE && id < CONSOLE_BASE + CONSOLE_DEVICES;
 
   // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
   // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
@@ -346,20 +347,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           forwardNotify: (dev, q) => port.postMessage({ method: "virtio9p_notify", dev, q }),
         });
         publish_raised_irqs_addr();
-      } else if (id === VW_DEV_CONSOLE) {
-        // Issue #83: MULTIPORT virtio-console. Like virtio-9p, the per-port sink
-        // (guest output) + input buffers (host input) + control-plane handshake
-        // are on the MAIN thread, but this kick lands on a task worker — so the
-        // worker-side device only answers the synchronous transport probes
-        // (getFeatures = MULTIPORT, config = max_nr_ports, queue setup, via the
-        // base ctor + ports) and FORWARDS the notify to the main thread, where the
-        // host instance services every queue and raises the completion IRQ via the
-        // raised_irqs self-wake. `ports` MUST match the main instance (it drives
-        // the config max_nr_ports the synchronous probe returns). Publish the wake
-        // address (the console needs it for host->guest input/control).
+      } else if (isConsoleDev(id)) {
+        // Issue #83: a single-port virtio-console console device. Like virtio-9p,
+        // the sink (guest output) + input buffer (host input) are on the MAIN
+        // thread, but this kick lands on a task worker — so the worker-side device
+        // only answers the synchronous transport probes (getFeatures = 0 → the
+        // guest's non-multiport path registers hvc SYNCHRONOUSLY at probe; queue
+        // setup via the base ctor) and FORWARDS the notify (with the dev index) to
+        // the main thread, where the host instance drains the transmitq / delivers
+        // receiveq input and raises the completion IRQ via the raised_irqs
+        // self-wake. Publish the wake address (the console needs it for host->guest
+        // input).
         d = new ConsoleVirtioDevice({
           ...common,
-          ports: CONSOLE_PORTS,
           forwardNotify: (dev, q) => port.postMessage({ method: "virtioconsole_notify", dev, q }),
         });
         publish_raised_irqs_addr();
@@ -590,7 +590,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       return count;
     },
 
-    // The guest console is the stock MULTIPORT virtio-console device (issue #83),
+    // The guest console is N stock single-port virtio-console devices (issue #83),
     // serviced via the virtio_wasm transport host imports below — there are no
     // bespoke hvc console host callbacks anymore (the hvc_wasm backend is retired).
 
