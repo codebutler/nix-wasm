@@ -1,0 +1,27 @@
+runtime/demo/node/sommelier-click-smoke.mjs
+  s_cd1a77be509bb9::t_775de242be28d1 67,72-86
+  s_cd1a77be509bb9::t_38d3a790d67cab 117
+  s_cd1a77be509bb9::t_448b5496d10530 8,119,122,130
+  s_cd1a77be509bb9::t_65047d11ac72fe 132,135-136
+  s_cd1a77be509bb9::t_1eac1f0edce8f0 1-5,100-116,121,123-124,128,131,133-134
+  s_cd1a77be509bb9::t_8eae91d7d41b67 6-7,9-48,50-65,68,70-71,87-99,118,120,125-127,129,137-142
+  s_cd1a77be509bb9::t_6aa9212220ad9c 49,66,69
+runtime/demo/web/vendor/greenfield/greenfield.mjs
+  s_cd1a77be509bb9::t_5c05c85d7dbf85 19665
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "f41f77c81b61988ec153d6d528fe890d8c297b92",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
