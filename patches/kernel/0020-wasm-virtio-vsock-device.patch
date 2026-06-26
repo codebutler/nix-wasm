@@ -23,6 +23,20 @@ host-call. Guarded by IS_ENABLED(CONFIG_VIRTIO_VSOCKETS) so the enum slot
 and the init call are a no-op when the stock virtio-vsock transport is
 not built.
 
+This patch is sequenced AFTER 0019 (virtio-console) and ANCHORS ITS
+HUNKS ON THE CONSOLE BLOCK, inserting the vsock enum slot and init call
+*after* VW_DEV_CONSOLE — so VW_DEV_CONSOLE keeps index 6 and VSOCK is 7.
+The previous revision of this patch anchored on the 9P block (it was
+authored against the pre-0019 tree), so under `patch`'s fuzzy matching it
+landed the vsock slot BEFORE the console slot — pushing VW_DEV_CONSOLE to
+index 8 and (via the fuzzed registration hunk) dropping the 9P_ROOT /
+9P_NIXCACHE virtio_wasm_register() calls entirely. That silently broke
+the 9P transport: `9pnet_virtio: no channels available for device
+pcroot/nixcache`, so the pc VFS root and the /nix-cache binary cache
+never mounted (a nix:true boot reached a shell but `nix` could not read
+/nix-cache). kernel.nix now asserts the post-patch enum order + 9P
+registration so a future re-fuzz fails the build loudly instead.
+
 Mainline virtio_transport.c (the guest-side virtio-vsock driver) binds
 three virtqueues — rx (q0), tx (q1), event (q2) — and reads the 64-bit
 guest CID from config space (struct virtio_vsock_config { __le64
@@ -49,11 +63,10 @@ diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 index c0ffee123..d15eaf456 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -371,6 +371,16 @@ enum {
- #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
- 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
- 	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
-+#endif
+@@ -374,6 +374,16 @@ enum {
+ #if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
+ 	VW_DEV_CONSOLE,		/* virtio-console: a guest TTY (stock virtio_console.c) */
+ #endif
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock: AF_VSOCK socket channel for the /Ctl bridge (issue #10
@@ -63,13 +76,16 @@ index c0ffee123..d15eaf456 100644
 +	 * must agree on this index.
 +	 */
 +	VW_DEV_VSOCK = 7,
- #endif
++#endif
  	VW_DEV_COUNT,
  };
-@@ -426,6 +436,18 @@ static int __init virtio_wasm_transport_init(void)
- 		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
+
+@@ -428,6 +438,18 @@ static int __init virtio_wasm_transport_init(void)
+ 	vw = virtio_wasm_register(VW_DEV_CONSOLE, VIRTIO_ID_CONSOLE);
+ 	if (IS_ERR(vw))
+ 		pr_warn("virtio_wasm: console register failed: %ld\n", PTR_ERR(vw));
  #endif
- 
++
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock channel for the host /Ctl bridge (stock
@@ -81,9 +97,8 @@ index c0ffee123..d15eaf456 100644
 +	if (IS_ERR(vw))
 +		pr_warn("virtio_wasm: vsock register failed: %ld\n", PTR_ERR(vw));
 +#endif
-+
+
  	return 0;
  }
- 
 --
 2.53.0
