@@ -307,16 +307,21 @@ DIFFERENT paths through Nix. (1) `substitute = true` in the guest nix.conf
 finding none, sets `useSubstitutes = false` UNLESS overridden — silently disabling
 substitution even for our `file:///nix-cache`. Marking it overridden leaves it on.
 (2) TWO catalogs next to the cache (`userspace/binary-cache.nix`): `pkgs.nix`
-(REAL derivation entries) for `nix-env -iA <name>`, and `paths.nix`
-(`builtins.storePath "<outPath>"` entries) for
-`nix profile install -f /nix-cache/paths.nix <name>`. Two catalogs, not one,
+(REAL derivation entries) for `nix-env -iA <name>`, and `paths.nix` (a plain
+name → output-path map) for the new CLI: read the path (`nix eval --raw -f
+/nix-cache/paths.nix <name>`) and `nix profile install --option substitute true
+<outPath>` (positional Opaque install). Two catalogs, not one,
 because **`nix-env -iA` substitutes the `.drv` from the cache** (its realisation
 fetches the deriver, then the output) — so the cache MUST publish the `.drv`
 closures (`rootPaths = devPaths ++ map drvPath devPaths`) — whereas the **new CLI
 forms a `Built{drvPath}` and then can NOT obtain a non-local `.drv`**: its
 `queryMissing` marks it "unknown" (`src/libstore/misc.cc` → the "failed to obtain
 derivation of …guest-cc.drv" error), so it installs the OUTPUT path directly
-(Opaque, source-free) instead. **DEAD END (removed):** seeding the `.drv` closure
+(Opaque, source-free) instead. The new CLI install passes `--option substitute
+true` because its offline-Internet probe (`src/nix/main.cc`) sets
+`useSubstitutes = false` unless overridden, and the `nix.conf` form of the
+override isn't taking effect at the `getWorkerSettings()` level the check reads — a
+command-line `--option` overrides for certain. **DEAD END (removed):** seeding the `.drv` closure
 into the **base squashfs** (`wasmDrvSeed` + `nix-store --load-db`) — a `.drv`
 closure pulls ~6.7 GB of build sources (a real system has none), overflowing the
 boot harness's 2 GiB file cap. (The `.drv` closures DO belong in the binary cache,
@@ -848,12 +853,14 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   satisfied (#48/#50). See the "clang is its own driver" note in Current state.
 - **#1** — DONE: `nix profile install` (new CLI) works like a real NixOS system by
   installing the package's OUTPUT path (Opaque) — source-free, substitute-only. Two
-  real pieces, no nix patch / no fake derivation: (1) `substitute = true` in the
-  guest nix.conf (`system.nix`) — the new CLI disables substitution offline
-  (`src/nix/main.cc`) unless overridden; (2) a `paths.nix` catalog
-  (`builtins.storePath "<outPath>"` entries) next to the cache, so
-  `nix profile install -f /nix-cache/paths.nix <name>` resolves to a store path
-  (Opaque) and substitutes the prebuilt output (+ closure). `nix-env -iA` keeps
+  real pieces, no nix patch / no fake derivation: (1) substitution must stay ON —
+  the new CLI disables it offline (`src/nix/main.cc`) unless overridden, so the
+  install passes `--option substitute true` (a command-line override the offline
+  block honors; the `nix.conf substitute = true` form doesn't take effect at the
+  `getWorkerSettings()` level the check reads); (2) a `paths.nix` name → output-path
+  map, so `nix profile install <outPath>` (path read via `nix eval --raw -f
+  /nix-cache/paths.nix <name>`) installs a store path (Opaque) and substitutes the
+  prebuilt output (+ closure). `nix-env -iA` keeps
   using the derivation catalog `pkgs.nix`: its realisation SUBSTITUTES the `.drv`
   from the cache (then the output), so the cache publishes the `.drv` closures
   (`rootPaths = devPaths ++ map drvPath devPaths`). The new CLI can't use that path

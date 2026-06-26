@@ -4,22 +4,26 @@
 // STATUS: FIXED — expected to PASS. The new CLI installs the package's OUTPUT
 // PATH (Opaque), source-free and substitute-only — no .drv, no sources. Two real
 // pieces, no hacks / no nix source patch:
-//   • `substitute = true` in the guest nix.conf (userspace/system.nix). The new
-//     CLI probes for Internet (src/nix/main.cc) and, finding none on the
-//     network-less guest, sets `useSubstitutes = false` unless overridden —
-//     silently disabling substitution even for `file:///nix-cache` (which needs
-//     no network). Marking it overridden leaves substitution ON.
-//   • the install uses the paths.nix catalog: `nix profile install -f
-//     /nix-cache/paths.nix guest-cc`, where guest-cc = `builtins.storePath
-//     "<outPath>"`. That resolves to a DerivedPath::Opaque (a store path), so Nix
-//     substitutes the prebuilt OUTPUT (+ its closure, incl. guest-clang) — exactly
-//     like `nix profile install /nix/store/<hash>-guest-cc`. It does NOT go through
-//     the deriver, sidestepping the .drv wall: the NEW CLI forms a Built{drvPath}
-//     and can NOT obtain a non-local .drv (src/libstore/misc.cc queryMissing marks
-//     it "unknown" — the original "failed to obtain derivation of …guest-cc.drv"
-//     error). (nix-env -iA is different — its realisation DOES substitute the .drv
-//     from the cache; that is why the cache still publishes the .drv closures and
-//     why `smoke.mjs`'s `nix-env -iA make-wasm32` works. The new CLI just can't.)
+//   • substitution must stay ON. The new CLI probes for Internet (src/nix/main.cc)
+//     and, finding none on the network-less guest, sets `useSubstitutes = false`
+//     UNLESS overridden — disabling substitution even for `file:///nix-cache`
+//     (which needs no network). We pass `--option substitute true` on the install
+//     (a command-line override the offline block honors); `substitute = true` is
+//     also in the guest nix.conf.
+//   • install the OUTPUT path positionally. paths.nix is a plain name → output-path
+//     map; the test reads the path (`nix eval --raw -f /nix-cache/paths.nix
+//     guest-cc`, inert at eval) and runs `nix profile install <outPath>`. That is a
+//     DerivedPath::Opaque (a store path), so Nix substitutes the prebuilt OUTPUT
+//     (+ closure, incl. guest-clang) — exactly `nix profile install /nix/store/
+//     <hash>-guest-cc`. It does NOT go through the deriver, sidestepping the .drv
+//     wall: the new CLI forms a Built{drvPath} and can NOT obtain a non-local .drv
+//     (src/libstore/misc.cc queryMissing marks it "unknown" — the original "failed
+//     to obtain derivation of …guest-cc.drv" error). (nix-env -iA is different —
+//     its realisation DOES substitute the .drv from the cache; that is why the
+//     cache still publishes the .drv closures and why smoke.mjs's
+//     `nix-env -iA make-wasm32` works. The new CLI just can't.) An earlier attempt
+//     used `builtins.storePath` in paths.nix, but that realises at EVAL time, which
+//     the offline-disable turns into "no substituter that can build it".
 //
 // Like smoke.mjs, a full nix:true boot is heavy; run manually after building the
 // artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
@@ -28,7 +32,7 @@
 // Steps:
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
 //   2. Assert `cc` is NOT in $PATH (toolchain removed from base).
-//   3. `nix profile install -f /nix-cache/paths.nix guest-cc`.
+//   3. Read guest-cc's output path from paths.nix; `nix profile install <outPath>`.
 //   4. Assert `cc` is now in $PATH (guest-cc ships /bin/cc, which execs guest-clang).
 //   5. Compile `int main(){return 42;}` with `cc`, run it, assert exit 42.
 //
@@ -74,9 +78,21 @@ try {
   const ccAbsent = await s.waitForOutput(/CC_ABSENT_OK/, 15000);
   check(ccAbsent, "cc absent from base system (CC_ABSENT_OK)");
 
-  // Step 3: `nix profile install` the guest-cc OUTPUT path (Opaque) from paths.nix.
+  // Diagnostic: the new CLI's effective substitute config (the offline-disable
+  // sets useSubstitutes=false unless overridden — main.cc — so confirm what sticks).
+  s.send("nix config show 2>&1 | grep -iE 'substitut' ; echo CFG_DONE\n");
+  await s.waitForOutput(/CFG_DONE/, 15000);
+
+  // Step 3: install the guest-cc OUTPUT path (Opaque), substituted from the cache.
+  // Read the path out of paths.nix (plain string → no eval-time realisation) and
+  // install it positionally. `--option substitute true` is a command-line override
+  // that the new CLI's offline-substitute-disable honors (its nix.conf form isn't
+  // taking effect for the new CLI here); substituters come from the guest nix.conf.
   console.log("  [nix profile install guest-cc from nix-cache — may take a while…]");
-  s.send("nix profile install -f /nix-cache/paths.nix guest-cc 2>&1; echo NIX_PROFILE_RC=$?\n");
+  s.send(
+    "P=$(nix eval --raw -f /nix-cache/paths.nix guest-cc); echo \"GUESTCC_PATH=$P\"; " +
+      'nix profile install --option substitute true "$P" 2>&1; echo NIX_PROFILE_RC=$?\n',
+  );
   const installed = await s.waitForOutput(/NIX_PROFILE_RC=[0-9]/, 300000);
   const installOk = installed && /NIX_PROFILE_RC=0\b/.test(s.snapshot());
   check(installOk, "nix profile install guest-cc from /nix-cache");

@@ -17,14 +17,17 @@
 #     for `nix-env -iA <name>`. nix-env's realisation SUBSTITUTES the .drv from the
 #     cache (then the output) — so the .drv closures MUST be in the cache (that is
 #     why rootPaths below includes the drvPaths). This is the smoke-test path.
-#   • paths.nix — `builtins.storePath "<outPath>"` entries, for the NEW CLI
-#     (`nix profile install -f /nix-cache/paths.nix <name>`). The new CLI turns a
-#     *derivation* into a Built{drvPath} and then can NOT obtain a non-local .drv —
-#     its queryMissing marks it "unknown" (src/libstore/misc.cc → the #1 "failed to
-#     obtain derivation" error), UNLIKE nix-env which substitutes it. So the new
-#     CLI installs the OUTPUT path directly (Opaque), sidestepping the .drv: the
-#     genuine "install a prebuilt store path" operation, source-free.
-# Both require `substitute = true` in the guest nix.conf (userspace/system.nix):
+#   • paths.nix — a plain name → OUTPUT-path map, for the NEW CLI. The new CLI
+#     turns a *derivation* into a Built{drvPath} and then can NOT obtain a non-local
+#     .drv — its queryMissing marks it "unknown" (src/libstore/misc.cc → the #1
+#     "failed to obtain derivation" error), UNLIKE nix-env which substitutes it. So
+#     the new CLI installs the OUTPUT path directly (Opaque): read the path
+#     (`nix eval --raw -f /nix-cache/paths.nix <name>`) and `nix profile install
+#     <outPath>` — the genuine "install a prebuilt store path" operation, source-free.
+# Both require substitution ON despite the guest having no Internet: the new CLI's
+# offline probe sets useSubstitutes=false UNLESS overridden (src/nix/main.cc), so
+# installs pass `--option substitute true` (a command-line override the offline
+# block honors); `substitute = true` is also in the guest nix.conf (system.nix).
 # the new CLI disables substitution when its Internet probe fails unless the
 # setting is overridden, even for a `file://` cache that needs no network.
 {
@@ -73,16 +76,18 @@ let
     }
   '';
 
-  # paths.nix — the `nix profile install -f /nix-cache/paths.nix <name>` catalog.
-  # Each attr is the package's OUTPUT path wrapped in `builtins.storePath`, so it
-  # carries store-path context and the new CLI resolves it to a DerivedPath::Opaque
-  # (an output store path) — NOT a Built{drvPath}. That sidesteps the .drv wall
-  # entirely: the install just substitutes the prebuilt output (+ its closure) from
-  # the cache, exactly like `nix profile install /nix/store/<hash>-guest-cc`. No
-  # sources, no .drv, source-free and substitute-only. (`-f file` eval is impure,
-  # so `builtins.storePath` is permitted; it substitutes the output at eval via the
-  # same `file:///nix-cache` substituter nix-env uses.)
-  pathEntry = drv: ''  ${lib.getName drv} = builtins.storePath "${drv}";'';
+  # paths.nix — a plain name → OUTPUT-store-path map for the new CLI. The guest
+  # reads a package's output path out of it (`nix eval --raw -f /nix-cache/paths.nix
+  # <name>`) and installs it positionally: `nix profile install <outPath>`. That
+  # resolves to a DerivedPath::Opaque (an output store path), so Nix substitutes the
+  # prebuilt output (+ its closure) from the cache — exactly the "install a prebuilt
+  # store path" operation: NO sources, NO .drv, source-free and substitute-only.
+  # Plain strings (NOT `builtins.storePath`): storePath realises the path at EVAL
+  # time via ensurePath, which the new CLI's offline-substitute-disable turns into
+  # "no substituter that can build it"; a plain string is inert at eval and the
+  # substitution happens at install (build) time, where `--option substitute true`
+  # keeps it on. (The positional path is also exactly what a real user would pass.)
+  pathEntry = drv: ''  ${lib.getName drv} = "${drv}";'';
   pathsNix = pkgs.writeText "paths.nix" ''
     {
     ${lib.concatMapStringsSep "\n" pathEntry devPaths}
