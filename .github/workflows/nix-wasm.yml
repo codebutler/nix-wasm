@@ -218,3 +218,87 @@ jobs:
           # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
           # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
           run_smoke demo/node/vsock-ctl-smoke.mjs
+
+  # --- nix-boot-smoke: boot the FULL nix system and validate in-guest installs --
+  # The first CI job that boots nix:true (squashfs /nix overlay + the binary
+  # cache), so it ACTUALLY EXERCISES the issue #1 fix end to end rather than only
+  # building the patched nix.wasm. It substitutes all four nix:true artifacts from
+  # Cachix (kernel + initramfs + base.squashfs carrying the patched nix.wasm + the
+  # wasm-binary-cache tree) and runs profile-install-e2e.mjs:
+  #   `nix profile install -f /nix-cache/pkgs.nix guest-cc` over the substitute-only
+  #   catalog → substitutes the prebuilt output (DerivedPath::Opaque), puts clang on
+  #   PATH, then compiles + runs a C program. A regression (the old "'<name>' is not
+  #   a derivation" throw, or a deriver-build attempt pulling native x86_64 xgcc)
+  #   fails the job. `needs: artifacts` so nix.wasm/base.squashfs/binary-cache are
+  #   already built + pushed to Cachix → this job substitutes them (no double build).
+  nix-boot-smoke:
+    name: boot full nix system + validate nix profile install (#1)
+    needs: [toolchain, artifacts]
+    runs-on: namespace-profile-default
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Assemble the nix:true artifact dir the harness reads (vmlinux.wasm,
+      # initramfs.cpio.gz, base.squashfs, nix-cache/). base.squashfs embeds the
+      # patched .#nix-wasm; nix-cache/ is the .#wasm-binary-cache tree (served by
+      # nix-cache.js via on-demand file:// path fetches — readFile follows the
+      # store symlinks).
+      - name: Assemble nix:true artifacts (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts-nix
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-nix/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-nix/initramfs.cpio.gz
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+            .artifacts-nix/base.squashfs
+          ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
+            .artifacts-nix/nix-cache
+          ls -lL .artifacts-nix
+          echo "pkgs.nix present:"; test -e .artifacts-nix/nix-cache/pkgs.nix && echo yes
+
+      - name: Install runtime deps
+        working-directory: runtime
+        run: bun install --frozen-lockfile
+
+      # nix:true boots panic occasionally (exit 2) — retry; 0 pass / 1 fail are
+      # terminal. Gating: a real regression of the #1 fix fails the job.
+      - name: Validate nix profile install (#1)
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix/
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::profile-install-e2e (attempt $attempt)"
+            set +e
+            node demo/node/profile-install-e2e.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] && exit 0
+            [ "$rc" -eq 2 ] && { echo "inconclusive (boot panic) — retrying"; continue; }
+            exit "$rc"
+          done
+          echo "still inconclusive after 3 attempts"
+          exit 2
