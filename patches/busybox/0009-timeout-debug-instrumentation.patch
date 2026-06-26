@@ -1,0 +1,32 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] TEMP/DEBUG busybox: trace timeout argv flow (#35)
+
+TEMPORARY instrumentation to capture the real argv/optind/parent values of
+busybox `timeout` on the wasm guest (issue #35 — `timeout 2 sleep 10` fails
+with "can't execute '-p50'"). Prints one TMODBG line on entry (after option
+parsing) and one before the parent's BB_EXECVP_or_die. Revert once the true
+re-exec/getopt flow is understood and the real fix lands. Applies on top of 0008.
+
+diff -ruN a/coreutils/timeout.c b/coreutils/timeout.c
+--- a/coreutils/timeout.c
++++ b/coreutils/timeout.c
+@@ -122,6 +122,10 @@
+ 	timeout = parse_duration_str(argv[optind++]);
+ 	if (!argv[optind]) /* no PROG? */
+ 		bb_show_usage();
++	bb_error_msg("TMODBG enter pid=%d ppid=%d parent=%d optind=%d a0=%s a1=%s a2=%s a3=%s",
++		(int)getpid(), (int)getppid(), parent, optind,
++		argv[0] ? argv[0] : "(nil)", argv[1] ? argv[1] : "(nil)",
++		argv[2] ? argv[2] : "(nil)", argv[3] ? argv[3] : "(nil)");
+
+ 	/* We want to create a grandchild which will watch
+ 	 * and kill the grandparent. Other methods:
+@@ -170,6 +174,8 @@
+ 	argv[0] = sv1;
+ 	argv[1] = sv2;
+ #endif
++	bb_error_msg("TMODBG parent-exec pid=%d a0=%s a1=%s",
++		(int)getpid(), argv[0] ? argv[0] : "(nil)", argv[1] ? argv[1] : "(nil)");
+ 	BB_EXECVP_or_die(argv);
+
+  grandchild:

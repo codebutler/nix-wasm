@@ -49,7 +49,7 @@ try {
     }
   }
 } finally {
-  console.log("\n── transcript tail ──\n" + s.snapshot().slice(-1500));
+  console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
   s.kill();
 }
 console.log("\n[timeout-repro] " + (verdict === 0 ? "timeout OK" : "REPRODUCED (#35)"));
