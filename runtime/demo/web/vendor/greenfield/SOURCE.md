@@ -8,7 +8,8 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `e21db22` ("UserShellApi/Pointer: add pointerButton + forwardLocalButton (DOM-windows click injection)"), on top
+- **Commit:** `d09af6b` ("fix(Pointer): sendFrame after forwardLocalButton — wl_pointer.frame required by GTK (wl_pointer v5+)"), on top
+  of `e21db22` ("UserShellApi/Pointer: add pointerButton + forwardLocalButton (DOM-windows click injection)") on top
   of `5bf2e35` ("wayland-wasm: in-browser Wayland apps on Greenfield (extended fork)").
 - **Local patch (pc Wayland Phase 4f):** `src/UserShellApi.ts` adds a
   `requestSurfaceClose(compositorSurface)` action — sends `xdg_toplevel.close` to
