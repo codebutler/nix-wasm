@@ -28,7 +28,7 @@ async function boot() {
   fit.fit();
 
   // Pre-warm the Greenfield compositor in parallel with the kernel boot so it is
-  // ready before the guest's waylandproxyd starts up (compositor load is ~12 MB).
+  // ready before the guest's Sommelier starts up (compositor load is ~12 MB).
   const compositorPromise = getWaylandCompositor().catch((e) => {
     console.error("[wayland] compositor failed to init; Wayland surfaces disabled", e);
     return null;
@@ -70,18 +70,10 @@ async function boot() {
     if (c && handle.pushIn) c.setPushIn(handle.pushIn);
   });
 
-  // Mirror pc's ensureWaylandProxy(): use the last hvc console as a hidden
-  // control shell to start waylandproxyd. Fire-and-forget.
-  const wlConsole = handle.console(handle.consoleCount - 1);
-  const startProxy = () =>
-    new Promise((resolve) => {
-      // mkdir the dirs the redirect/socket need before using them (the squashfs
-      // base may not pre-create /var/log on a fresh boot).
-      wlConsole.write("mkdir -p /tmp /var/log\n");
-      wlConsole.write("export XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0\n");
-      wlConsole.write("waylandproxyd >/var/log/waylandproxyd.log 2>&1 &\n");
-      setTimeout(resolve, 1000);
-    });
+  // Sommelier --parent auto-starts from the guest inittab (::respawn entry in
+  // userspace/init.nix — issue #31). No JS-side launch choreography needed.
+  // startProxy is kept as a no-op so the boot-wait logic below stays intact.
+  const startProxy = () => Promise.resolve();
 
   const con = handle.console(0);
   let proxyStarted = false;

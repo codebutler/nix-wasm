@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="test_ffi">
+  <interface name="test_ffi" version="1">
+    <request name="ping">
+      <arg name="value" type="int"/>
+    </request>
+  </interface>
+</protocol>

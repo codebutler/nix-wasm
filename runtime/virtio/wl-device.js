@@ -22,9 +22,10 @@
 // host Wayland SERVER (wl-server.js — registry handshake only, no compositor),
 // and push the server's reply bytes BACK to the guest over the IN queue as a
 // VFD_RECV addressed to the same ctx vfd_id. The driver's vq_handle_recv routes
-// that to the ctx's read queue, waylandproxyd's VIRTWL_IOCTL_RECV reads it, and
-// forwards it to the client socket — completing wl_display_roundtrip(). Real
-// compositing (surfaces/buffers/pixels) is still Phase 2 / Greenfield.
+// that to the ctx's read queue; the guest-side Wayland bridge (Sommelier --parent,
+// formerly waylandproxyd) issues VIRTWL_IOCTL_RECV and forwards the bytes to the
+// client socket — completing wl_display_roundtrip(). Real compositing
+// (surfaces/buffers/pixels) is Phase 2 / Greenfield.
 
 import { VirtioWasmDevice } from "./device.js";
 import { WlServer } from "./wl-server.js";
@@ -306,7 +307,7 @@ export class WlDevice extends VirtioWasmDevice {
   //
   // Server->client wayland bytes are delivered as a VFD_RECV on the IN queue,
   // addressed to the same ctx vfd_id the SEND came from. The driver's
-  // vq_handle_recv routes it to the ctx's read queue; waylandproxyd's
+  // vq_handle_recv routes it to the ctx's read queue; Sommelier's
   // VIRTWL_IOCTL_RECV reads it and writes it to the client socket. The guest
   // prefills the IN queue with PAGE_SIZE write-only buffers; if none is free we
   // stash the reply and flush on the next IN refill notify.
@@ -513,7 +514,7 @@ export class WlDevice extends VirtioWasmDevice {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
         this.contexts.delete(vfdId);
         this.log(`[virtio-wl] CLOSE vfd_id=${vfdId} -> RESP_OK`);
-        // Tell the host bridge the guest closed this ctx — e.g. waylandproxyd
+        // Tell the host bridge the guest closed this ctx — e.g. Sommelier
         // closing a client's virtwl ctx after that Wayland client exited. The
         // compositor uses it to tear down the matching server-side client now,
         // instead of leaking it (and pumping events to a dead ctx) until a

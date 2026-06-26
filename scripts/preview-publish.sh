@@ -71,7 +71,7 @@ RCLONE_FLAGS=(--s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeou
 if [ -z "${R2_ACCESS_KEY_ID:-}" ]; then
   echo "==> DRY-RUN (R2_ACCESS_KEY_ID unset) — commands that WOULD run:"
   echo "  rclone copy '$STAGE' 'r2:$BUCKET/cas/$BUILDHASH' --ignore-existing ${RCLONE_FLAGS[@]}"
-  echo "  rclone sync '$ROOT/runtime' 'r2:$BUCKET/pr-$PR' --delete \\"
+  echo "  rclone sync '$ROOT/runtime' 'r2:$BUCKET/pr-$PR' --delete-during \\"
   echo "    --exclude 'node_modules/**' --exclude 'demo/node/**' --exclude '*.test.js' \\"
   echo "    --exclude '.git/**' --transfers 16 --checkers 32 ${RCLONE_FLAGS[@]}"
   echo "  printf '%s' '<preview.json>' | rclone rcat 'r2:$BUCKET/pr-$PR/demo/web/preview.json' ${RCLONE_FLAGS[@]}"
@@ -83,13 +83,13 @@ fi
 echo "==> rclone copy → cas/$BUILDHASH (skip-existing) …"
 rclone copy "$STAGE" "r2:$BUCKET/cas/$BUILDHASH" --ignore-existing --transfers 8 "${RCLONE_FLAGS[@]}" -v
 
-# 6. Sync the frontend tree (only changed files upload; --delete prunes removed).
+# 6. Sync the frontend tree (only changed files upload; --delete-during prunes removed).
 echo "==> rclone sync runtime/ → pr-$PR …"
-rclone sync "$ROOT/runtime" "r2:$BUCKET/pr-$PR" --delete \
+rclone sync "$ROOT/runtime" "r2:$BUCKET/pr-$PR" --delete-during \
   --exclude 'node_modules/**' --exclude 'demo/node/**' --exclude '*.test.js' --exclude '.git/**' \
   --transfers 16 --checkers 32 "${RCLONE_FLAGS[@]}" -v
 
-# 7. Write the per-PR pointer AFTER the sync (sync --delete would otherwise prune it).
+# 7. Write the per-PR pointer AFTER the sync (sync --delete-during would otherwise prune it).
 echo "==> writing pr-$PR/demo/web/preview.json …"
 printf '%s' "$PREVIEW_JSON" | rclone rcat "r2:$BUCKET/pr-$PR/demo/web/preview.json" "${RCLONE_FLAGS[@]}"
 

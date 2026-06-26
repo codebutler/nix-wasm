@@ -103,10 +103,40 @@ let
       bintools = wasmBintools;
       libc = libcWasm;
       libcxx = libcxxWasm;
+      # -fvisibility=hidden -fvisibility-inlines-hidden (in cc-cflags below) is a
+      # SHARED fix for C++ stream-class vtable env-imports — do NOT "clean it up".
+      # Background: every guest binary is a self-contained `-shared` dylink module
+      # (one wasm module; nothing is preempted across modules at runtime — the host
+      # provides only the documented allow-list imports). But wasm-ld's
+      # shouldImport() (lld/wasm/Writer.cpp) has a path that, in `--shared` mode,
+      # turns ANY symbol that is *weakly defined* AND *not hidden* into BOTH an
+      # `env.*` import and an export ("so it can be overridden by another module"):
+      #     if (ctx.arg.shared && sym->isWeak() && !sym->isUndefined()
+      #         && !sym->isHidden()) return true;  // import it
+      # C++ vague/COMDAT-linkage symbols (template-instantiated virtual destructors
+      # + their vtables/thunks) are weak. libc++ itself is built -fvisibility=hidden,
+      # so its copies are hidden — but when an APP TU instantiates e.g.
+      # std::basic_stringstream<char> (sommelier's logging holds a stringstream),
+      # the app's own instantiation has DEFAULT visibility and the merged symbol
+      # is non-hidden → wasm-ld imports the destructor as `env._ZNSt3__1...D1Ev`,
+      # and the module fails to instantiate (no host function of that name).
+      # `-Wl,-u,<sym>` does NOT help (the symbol IS defined — it's a weak-PIC
+      # preemption, not an undefined-symbol problem); `-Wl,-Bsymbolic` does NOT
+      # help either (it only gates requiresGOTAccess(), not this import path).
+      # Compiling guest TUs with hidden default visibility makes those app-side
+      # vague-linkage instantiations hidden → shouldImport()'s `!isHidden()` gate
+      # is false → no env import, the in-module definition is used. It is SAFE for
+      # our model: `--export-all` (in cc-ldflags) still exports every symbol
+      # (export count is unchanged — verified: _start/main/__set_tls_base/
+      # __libc_handle_signal/__wasm_apply_data_relocs/malloc all still exported),
+      # so the host↔guest export contract is untouched; hidden visibility only
+      # changes cross-MODULE dynamic preemption, which our single-module dylink
+      # binaries never use. This is the corollary-1 SHARED fix: it benefits every
+      # guest C++ binary (nix.wasm, GTK apps, sommelier), not a per-app rewrite.
       extraBuildCommands = ''
         ln -sf ${filteredLd}/bin/wasm-ld $out/bin/wasm-ld
         cat >> $out/nix-support/cc-cflags <<EOF
-         --target=wasm32-unknown-unknown -D__linux__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -fPIC -matomics -mbulk-memory -resource-dir=${resourceDir} -B$out/bin -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=unused-command-line-argument
+         --target=wasm32-unknown-unknown -D__linux__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -fPIC -matomics -mbulk-memory -resource-dir=${resourceDir} -B$out/bin -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=unused-command-line-argument -fvisibility=hidden -fvisibility-inlines-hidden
         EOF
         cat >> $out/nix-support/cc-ldflags <<EOF
          -shared -Bsymbolic --no-entry --export-all --import-memory --shared-memory --max-memory=4294967296 --import-table --no-merge-data-segments --export-if-defined=__set_tls_base --export-if-defined=__libc_handle_signal --allow-undefined-file=${allowUndefined}

@@ -480,6 +480,52 @@ in
     }))
     prev.libxkbcommon;
 
+  # --- minigbm: abort-stub libgbm.a + gbm.h shim for Sommelier (link-only) ----
+  # Sommelier links libgbm but NEVER calls it on the wl_shm/virtwl path:
+  # ctx->gbm stays null and every gbm call site is guarded by that check.
+  # We need libgbm.a + gbm.h only to satisfy the linker.
+  #
+  # minigbm (chromiumos's small-C gbm, what Sommelier targets) is NOT in the
+  # pinned nixpkgs (9ae611a). Mesa's libgbm IS in nixpkgs but is the full GL
+  # stack and must not be used. Fallback: a 3-file shim (gbm.h + gbm-shim.c
+  # + default.nix) in userspace/libgbm-shim/ — all symbols abort() so any
+  # accidental call fails loud rather than silently.
+  #
+  # isWasm-guarded: native packages never see this attr (it shadows nothing —
+  # minigbm is absent from this nixpkgs pin — but the guard keeps the overlay
+  # scoped to the wasm cross set, consistent with every other entry here).
+  minigbm = if isWasm
+    then final.callPackage ./userspace/libgbm-shim { }
+    else prev.minigbm or (throw "minigbm: only available in the wasm cross set");
+
+  # --- libdrm: link-only for Sommelier; dmabuf path is dead at runtime ----------
+  # Sommelier links libdrm for the GPU/dmabuf path, but that path is never taken
+  # on the wl_shm/virtwl route we use.  We need only the core ioctl wrappers
+  # (libdrm.a + xf86drm.h + libdrm/drm_fourcc.h) to satisfy the linker.
+  # All GPU-driver backends (intel/amdgpu/radeon/nouveau/vmwgfx) are disabled:
+  # they pull GPU-specific kernel uAPIs we don't have and tests call fork().
+  # -Dman-pages=disabled: man-pages need xsltproc, absent in the cross sandbox.
+  # -Dvalgrind=disabled:  valgrind headers not available in the wasm sysroot.
+  libdrm = whenWasm
+    (p: p.overrideAttrs (o: {
+      # Drop the `bin` output — it only carries test binaries and man-pages,
+      # both of which we disable below.  An empty declared output causes the
+      # Nix builder to error ("failed to produce output path for output 'bin'").
+      outputs = [ "out" "dev" ];
+      mesonFlags = (o.mesonFlags or [ ]) ++ [
+        "-Dintel=disabled"
+        "-Damdgpu=disabled"
+        "-Dradeon=disabled"
+        "-Dnouveau=disabled"
+        "-Dvmwgfx=disabled"
+        "-Dman-pages=disabled"
+        "-Dvalgrind=disabled"
+        "-Dtests=false"
+      ];
+      doCheck = false;
+    }))
+    prev.libdrm;
+
   # --- cairo: image + freetype + fontconfig backends for the M2 text stack ----
   # M2: cairo cross-built to wasm32 with the image surface (pixman+zlib) AND the
   # freetype + fontconfig font backends — required for the text rendering stack
@@ -929,4 +975,60 @@ in
   busybox = whenWasm
     (p: p.override { stdenv = final.stdenv; })
     prev.busybox;
+
+  # --- libxcb closure (link-only for Sommelier) ----------------------------------
+  # Sommelier links libxcb + the composite/shape/xfixes extension libs but NEVER
+  # executes them — all xcb calls are on the Xwayland path, which is never enabled
+  # (no -X / --x-display on the wasm guest; Xwayland is not built). We only need
+  # the static .a archives + headers to satisfy the linker.
+  #
+  # libxau + libxdmcp are pure autotools C with no tests; they cross-build cleanly
+  # after dropping unused doc/man outputs. libxcb drives Python codegen (xcb-proto's
+  # xcbgen module + python3) to emit the extension C sources at build time — those
+  # tools MUST be native (buildPackages), not wasm32. With strictDeps=true, moving
+  # xcb-proto to nativeBuildInputs and pulling xcbgen from buildPackages.xcb-proto
+  # is the correct cross fix. Docs/man are dropped (no doc toolchain in the cross
+  # closure; the .a + headers are all Sommelier needs). isWasm-guarded throughout —
+  # the native packages are stock nixpkgs (cached).
+
+  # libxau: no tests, "out"+"dev" only. No changes needed beyond the isWasm guard;
+  # override is a no-op except to confirm the attr composes with our stdenv.
+  libxau = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxau;
+
+  # libxdmcp: has a "doc" output (xmlto → xorg-docs build chain). Drop it — the
+  # host-side doc toolchain does not cross to wasm32, and we only need the .a + .h.
+  libxdmcp = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxdmcp;
+
+  # libxcb: xcb-proto is pure Python XML codegen that runs on the BUILD host.
+  # With strictDeps=true it must be in nativeBuildInputs (wasm32 Python can't run).
+  # Pull the native xcb-proto from buildPackages; also pull python3 from there (it
+  # already is in the upstream nativeBuildInputs, but xcb-proto carries xcbgen as a
+  # Python package so the native python3 must see it on PYTHONPATH — buildPackages
+  # handles that automatically). Drop "man"+"doc" outputs (no man-page or doc tools
+  # in the cross closure; Sommelier only needs .a + headers).
+  libxcb = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" "dev" ];
+      # xcb-proto in the upstream buildInputs provides xcbgen for the native Python
+      # codegen step. Move it to nativeBuildInputs so the build host's Python finds
+      # the xcbgen module. Remove it from buildInputs (wasm32 xcb-proto has no
+      # runtime presence — it is a pure-Python package; keeping it in buildInputs
+      # pulls it into the cross env where it is unused and can cause configure noise).
+      nativeBuildInputs = (o.nativeBuildInputs or [ ])
+        ++ [ final.buildPackages.xcb-proto ];
+      buildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "xcb-proto")
+        (o.buildInputs or [ ]);
+      doCheck = false;
+    }))
+    prev.libxcb;
 }
