@@ -134,26 +134,66 @@ test("injectIn (bytes only) queues ONE VFD_RECV addressed to the ctx vfd_id", ()
   expect([...entry.data]).toEqual([...bytes]);
 });
 
-test("injectIn with server→client fds builds VFD_NEW(host-id) per fd + one VFD_RECV", () => {
+test("injectIn with a server→client fd: VFD_NEW(FILL) + chunked fill VFD_RECVs + trailing VFD_RECV", () => {
   const dev = makeDevice();
   const bytes = new Uint8Array([1, 2, 3, 4]);
-  const keymap = new Uint8Array(1234); // an fd payload (only its length matters)
-  dev.injectIn(7, bytes, [keymap]); // → 2 raw ctrl messages: VFD_NEW then VFD_RECV
-  expect(dev._pendingIn.length).toBe(2);
-  // 1) a host→guest VFD_NEW with the HOST id bit and the keymap byte length.
+  // A keymap payload whose CONTENT now matters (the kernel copies it into the
+  // guest-allocated backing). 1234 B < MAX_FILL_CHUNK → exactly one fill recv.
+  const keymap = new Uint8Array(1234).map((_, i) => (i * 7) & 0xff);
+  dev.injectIn(7, bytes, [keymap]);
+  // → [VFD_NEW(FILL), VFD_RECV(fill chunk0), VFD_RECV(ctx + vfd id)]
+  expect(dev._pendingIn.length).toBe(3);
+
+  // 1) host→guest VFD_NEW with HOST id bit, READ|FILL flags, keymap length.
   const newMsg = dev._pendingIn[0].raw;
   const ndv = new DataView(newMsg.buffer, newMsg.byteOffset, newMsg.byteLength);
   expect(ndv.getUint32(0, true)).toBe(VFD_NEW);
   const newVfdId = ndv.getUint32(8, true);
   expect(newVfdId & VFD_HOST_ID_BIT).toBe(VFD_HOST_ID_BIT);
+  expect(ndv.getUint32(12, true)).toBe(0x2 | 0x1000); // READ | FILL
   expect(ndv.getUint32(24, true)).toBe(keymap.length); // size = keymap length
-  // 2) a VFD_RECV on the ctx vfd_id carrying vfd_count=1 referencing that id,
-  //    then the wayland bytes.
-  const recvMsg = dev._pendingIn[1].raw;
+
+  // 2) a fill VFD_RECV on the keymap vfd (vfd_count=0) carrying the bytes.
+  const fillMsg = dev._pendingIn[1].raw;
+  const fdv = new DataView(fillMsg.buffer, fillMsg.byteOffset, fillMsg.byteLength);
+  expect(fdv.getUint32(0, true)).toBe(VFD_RECV);
+  expect(fdv.getUint32(8, true)).toBe(newVfdId); // targets the keymap vfd
+  expect(fdv.getUint32(12, true)).toBe(0); // vfd_count = 0 (pure data)
+  expect([...fillMsg.subarray(SEND_HDR)]).toEqual([...keymap]);
+
+  // 3) trailing VFD_RECV on the ctx referencing the keymap vfd, then the bytes.
+  const recvMsg = dev._pendingIn[2].raw;
   const rdv = new DataView(recvMsg.buffer, recvMsg.byteOffset, recvMsg.byteLength);
   expect(rdv.getUint32(0, true)).toBe(VFD_RECV);
   expect(rdv.getUint32(8, true)).toBe(7); // ctx vfd_id
   expect(rdv.getUint32(12, true)).toBe(1); // vfd_count
-  expect(rdv.getUint32(SEND_HDR, true)).toBe(newVfdId); // the trailing vfd id
+  expect(rdv.getUint32(SEND_HDR, true)).toBe(newVfdId);
   expect([...recvMsg.subarray(SEND_HDR + 4)]).toEqual([...bytes]);
+});
+
+test("a keymap larger than MAX_FILL_CHUNK is split into multiple fill VFD_RECVs that reassemble", () => {
+  const dev = makeDevice();
+  const keymap = new Uint8Array(4080 * 2 + 100).map((_, i) => (i * 13) & 0xff);
+  dev.injectIn(9, new Uint8Array(0), [keymap]);
+  // VFD_NEW + ceil(8260/4080)=3 fill recvs + 1 trailing recv = 5
+  expect(dev._pendingIn.length).toBe(5);
+  const newVfdId = new DataView(dev._pendingIn[0].raw.buffer).getUint32(8, true);
+  // Reassemble the fill chunks (entries 1..3) and compare to the payload.
+  const chunks = [];
+  for (let i = 1; i <= 3; i++) {
+    const m = dev._pendingIn[i].raw;
+    const dv = new DataView(m.buffer, m.byteOffset, m.byteLength);
+    expect(dv.getUint32(0, true)).toBe(VFD_RECV);
+    expect(dv.getUint32(8, true)).toBe(newVfdId);
+    expect(dv.getUint32(12, true)).toBe(0);
+    chunks.push(m.subarray(SEND_HDR));
+  }
+  const reassembled = new Uint8Array(keymap.length);
+  let off = 0;
+  for (const c of chunks) {
+    reassembled.set(c, off);
+    off += c.length;
+  }
+  expect(off).toBe(keymap.length);
+  expect([...reassembled]).toEqual([...keymap]);
 });
