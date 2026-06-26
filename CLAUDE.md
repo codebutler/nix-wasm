@@ -198,6 +198,12 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/sigalrm-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/kill-wake-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/timeout-repro-smoke.mjs
 
+# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
+# (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
+# vsock.onReady hook. PASS = open/notify/clipset reach the host seams and clipget
+# round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
+
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):

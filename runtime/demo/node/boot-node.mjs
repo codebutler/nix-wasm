@@ -20,6 +20,10 @@ export async function bootNode(opts = {}) {
     consoleCount: opts.consoleCount,
     cmdline: opts.cmdline,
     onLog: opts.onLog,
+    // Issue #10 option 3: the virtio-vsock /Ctl bridge hook. Passed straight
+    // through so a smoke can register a host listener (device.listen(port, …))
+    // via vsock.onReady(device). Absent for boots that don't exercise vsock.
+    vsock: opts.vsock,
   });
 
   const transcripts = new Map();
