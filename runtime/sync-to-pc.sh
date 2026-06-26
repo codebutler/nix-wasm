@@ -21,8 +21,9 @@ cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # nix-wasm. wl-server.js is the Phase-1 in-worker stub; pc's Phase-2 inversion
 # (worker→main Greenfield bridge) lives in pc, not synced from here. ninep-device.js
 # is the virtio-9p host device (#10) — the 9P filesystem transport. console-device.js
-# is the virtio-console host device (#10 option 2) — a guest TTY on the stock
-# mainline virtio-console driver, added alongside the bespoke hvc_wasm path.
+# is the MULTIPORT virtio-console host device (#10 option 2 / #83) — the guest's
+# SOLE console (hvc0..hvcN) on the stock mainline virtio-console driver; it
+# replaced the bespoke hvc_wasm backend.
 # vsock-device.js is the virtio-vsock host device (#10 option 3) — the AF_VSOCK
 # socket channel substrate for the guest→host /Ctl bridge.
 cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js,ninep-device.js,console-device.js,vsock-device.js} "$DEST/virtio/"

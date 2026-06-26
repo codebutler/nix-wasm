@@ -11,8 +11,8 @@
 # No `busybox --install`, no /bin/autologin copy, no blanket /etc symlink: the
 # inittab references /run/current-system/sw/bin/{getty,login,syslogd,autologin},
 # all present in `sw` (system.path); /etc is a per-file symlink tree (activate).
-# nrConsoles=8 is baked into inittab — keep kernel HVC_WASM_NR_CONSOLES and host
-# HVC_CONSOLES in lockstep (see init.nix).
+# nrConsoles=8 is baked into inittab — keep it in lockstep with the virtio-console
+# device's CONSOLE_PORTS / HVC_CONSOLES (see init.nix).
 { pkgs, busybox, etc, systemPath, passwd, group, inittab, activate }:
 pkgs.runCommand "wasm-system" { } ''
   mkdir -p $out

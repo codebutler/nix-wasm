@@ -1,13 +1,25 @@
 import { describe, it, expect } from "bun:test";
-import { ConsoleVirtioDevice } from "./console-device.js";
+import { ConsoleVirtioDevice, CONSOLE_PORTS } from "./console-device.js";
 import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
 import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.js";
 
-// virtio-console single-port queue indices (mirrors console-device.js).
-const RECEIVEQ = 0; // host -> guest
-const TRANSMITQ = 1; // guest -> host
+// virtio-console multiport queue layout (mirrors console-device.js):
+//   port 0: rx=0 tx=1 ; control rx=2 tx=3 ; port i≥1: rx=2+2i tx=3+2i.
+const CONTROL_RX = 2; // host -> guest control
+const CONTROL_TX = 3; // guest -> host control
+const portRx = (i) => (i === 0 ? 0 : 2 + 2 * i);
+const portTx = (i) => (i === 0 ? 1 : 3 + 2 * i);
+
+// virtio_console_control events.
+const DEVICE_READY = 0;
+const PORT_ADD = 1;
+const PORT_READY = 3;
+const CONSOLE_PORT = 4;
+const RESIZE = 5;
+const PORT_OPEN = 6;
 
 // Minimal split-vring builder in flat memory (mirrored from ninep-device.test.js).
+// Each queue gets its own ring region + data region so multiple queues coexist.
 function makeVq(memory, base, num) {
   const dv = new DataView(memory.buffer);
   const desc = base;
@@ -46,8 +58,10 @@ function makeVq(memory, base, num) {
   };
 }
 
-function makeDev({ sink, forwardNotify } = {}) {
-  const memory = { buffer: new ArrayBuffer(64 * 1024) };
+// A multiport console rig: a device + a per-queue vq factory with separate ring
+// and data regions, so the handshake + several ports can be exercised at once.
+function makeRig({ ports = 4, sink, forwardNotify } = {}) {
+  const memory = { buffer: new ArrayBuffer(1 << 20) };
   const shared = new SharedQueues(makeSharedQueues());
   const irqs = [];
   const dev = new ConsoleVirtioDevice({
@@ -56,133 +70,231 @@ function makeDev({ sink, forwardNotify } = {}) {
     memory,
     raiseInterrupt: (cpu, irq) => irqs.push([cpu, irq]),
     sharedQueues: shared,
+    ports,
     sink,
     forwardNotify,
   });
-  return { dev, memory, shared, irqs };
+  const vqs = new Map();
+  // Lay each queue's ring at 0x1000*q+0x1000 and its data area at 0x40000+0x2000*q.
+  function vq(q, num = 8) {
+    if (vqs.has(q)) return vqs.get(q);
+    const v = makeVq(memory, 0x1000 + q * 0x1000, num);
+    dev.setupQueue(q, v.desc, v.avail, v.used, v.num);
+    const dataBase = 0x40000 + q * 0x2000;
+    let head = 0;
+    const obj = {
+      ...v,
+      // Post a writable inbuf (host -> guest); returns its addr.
+      postInbuf(cap = 0x200) {
+        const h = head++;
+        const addr = dataBase + h * cap;
+        new Uint8Array(memory.buffer, addr, cap).fill(0);
+        v.setDesc(h, addr, cap, true, null);
+        v.pushAvail(h);
+        return { head: h, addr };
+      },
+      // Submit a readable outbuf (guest -> host) holding `bytes`.
+      submitOut(bytes) {
+        const h = head++;
+        const addr = dataBase + h * 0x200;
+        new Uint8Array(memory.buffer, addr, bytes.length).set(bytes);
+        v.setDesc(h, addr, bytes.length, false, null);
+        v.pushAvail(h);
+        return h;
+      },
+      read(addr, len) {
+        return Array.from(new Uint8Array(memory.buffer, addr, len));
+      },
+    };
+    vqs.set(q, obj);
+    return obj;
+  }
+  return { dev, memory, shared, irqs, vq };
 }
 
-// A transmitq chain: one READABLE (out) segment holding guest console output.
-function makeTxRing(opts) {
-  const ctx = makeDev(opts);
-  const { dev, memory } = ctx;
-  const vq = makeVq(memory, 0x1000, 8);
-  dev.setupQueue(TRANSMITQ, vq.desc, vq.avail, vq.used, vq.num);
-  const OUT = 0x4000;
-  const STRIDE = 0x200; // per-head buffer so concurrent chains don't alias
-  function submit(bytes, head = 0) {
-    const addr = OUT + head * STRIDE;
-    new Uint8Array(memory.buffer, addr, bytes.length).set(bytes);
-    vq.setDesc(head, addr, bytes.length, false, null);
-    vq.pushAvail(head);
-  }
-  return { ...ctx, vq, submit };
+// Encode a guest->host control message (id, event, value) into a port's queue.
+function ctrl(id, event, value) {
+  const b = new Uint8Array(8);
+  const dv = new DataView(b.buffer);
+  dv.setUint32(0, id >>> 0, true);
+  dv.setUint16(4, event, true);
+  dv.setUint16(6, value & 0xffff, true);
+  return b;
 }
 
-// A receiveq chain: one WRITABLE (in) segment the host fills with host input.
-function makeRxRing(opts) {
-  const ctx = makeDev(opts);
-  const { dev, memory } = ctx;
-  const vq = makeVq(memory, 0x1000, 8);
-  dev.setupQueue(RECEIVEQ, vq.desc, vq.avail, vq.used, vq.num);
-  const IN = 0x4000;
-  const CAP = 0x100;
-  function postInbuf(head, cap = CAP, addr = IN + head * CAP) {
-    new Uint8Array(memory.buffer, addr, cap).fill(0);
-    vq.setDesc(head, addr, cap, true, null);
-    vq.pushAvail(head);
-    return addr;
-  }
-  function rdata(addr, len) {
-    return new Uint8Array(memory.buffer, addr, len);
-  }
-  return { ...ctx, vq, postInbuf, rdata };
+// Decode a host->guest control message written into a control-rx inbuf.
+function decodeCtrl(bytes) {
+  const dv = new DataView(new Uint8Array(bytes).buffer);
+  return { id: dv.getUint32(0, true), event: dv.getUint16(4, true), value: dv.getUint16(6, true) };
 }
 
-describe("ConsoleVirtioDevice", () => {
-  it("advertises no optional console features (single port, no size)", () => {
-    const { dev } = makeDev();
-    expect(dev.getFeatures()).toBe(0n);
+describe("ConsoleVirtioDevice (multiport)", () => {
+  it("advertises VIRTIO_CONSOLE_F_MULTIPORT", () => {
+    const { dev } = makeRig();
+    expect(dev.getFeatures()).toBe(1n << 1n);
   });
 
-  it("drains the transmitq to the sink and pushes each chain used (len 0)", () => {
-    const seen = [];
-    const { dev, submit, vq, irqs } = makeTxRing({ sink: (b) => seen.push(Array.from(b)) });
-    submit(new Uint8Array([0x68, 0x69]), 0); // "hi"
-    submit(new Uint8Array([0x21]), 1); // "!"
-    dev.onNotify(TRANSMITQ);
-    expect(seen).toEqual([[0x68, 0x69], [0x21]]);
-    expect(vq.usedIdx()).toBe(2);
-    expect(vq.usedElem(0)).toEqual({ id: 0, len: 0 }); // transmit buffers are read-only
-    expect(vq.usedElem(1)).toEqual({ id: 1, len: 0 });
-    expect(irqs.length).toBe(1); // one IRQ for the drain
-    expect(irqs[0]).toEqual([0, 14]); // (cpu0, irq 14)
+  it("reports max_nr_ports in config space", () => {
+    const { dev } = makeRig({ ports: 4 });
+    const cfg = new Uint8Array(12);
+    dev.configRead(0, cfg);
+    // cols(0,2)=0, rows(2,2)=0, max_nr_ports(4,4)=4, emerg_wr(8,4)=0.
+    expect(new DataView(cfg.buffer).getUint32(4, true)).toBe(4);
+    // A windowed read at the max_nr_ports offset works too.
+    const win = new Uint8Array(4);
+    dev.configRead(4, win);
+    expect(new DataView(win.buffer).getUint32(0, true)).toBe(4);
   });
 
-  it("delivers host input into a posted receiveq inbuf and raises the IRQ", () => {
-    const { dev, postInbuf, rdata, vq, irqs } = makeRxRing();
-    const addr = postInbuf(0);
-    dev.pushRx(new Uint8Array([0x41, 0x42, 0x43])); // "ABC"
-    expect(Array.from(rdata(addr, 3))).toEqual([0x41, 0x42, 0x43]);
-    expect(vq.usedIdx()).toBe(1);
-    expect(vq.usedElem(0)).toEqual({ id: 0, len: 3 });
-    expect(irqs.length).toBe(1);
+  it("default port count is CONSOLE_PORTS", () => {
+    const memory = { buffer: new ArrayBuffer(1024) };
+    const dev = new ConsoleVirtioDevice({
+      dev: 6,
+      irq: 14,
+      memory,
+      raiseInterrupt: () => {},
+      sharedQueues: new SharedQueues(makeSharedQueues()),
+    });
+    expect(dev.nrPorts).toBe(CONSOLE_PORTS);
+  });
+
+  it("on DEVICE_READY, adds every port (PORT_ADD) in port order", () => {
+    const { dev, vq, irqs } = makeRig({ ports: 3 });
+    const crx = vq(CONTROL_RX);
+    const ctx = vq(CONTROL_TX);
+    // Guest posts control inbufs so the host can deliver PORT_ADDs.
+    const adds = [crx.postInbuf(), crx.postInbuf(), crx.postInbuf()];
+    // Guest sends DEVICE_READY.
+    ctx.submitOut(ctrl(0xffffffff, DEVICE_READY, 1));
+    dev.onNotify(CONTROL_TX);
+    const got = adds.map((b) => decodeCtrl(crx.read(b.addr, 8)));
+    expect(got).toEqual([
+      { id: 0, event: PORT_ADD, value: 1 },
+      { id: 1, event: PORT_ADD, value: 1 },
+      { id: 2, event: PORT_ADD, value: 1 },
+    ]);
+    expect(crx.usedIdx()).toBe(3);
+    expect(irqs.length).toBeGreaterThanOrEqual(1);
     expect(irqs[0]).toEqual([0, 14]);
   });
 
-  it("keeps input pending when no inbuf is posted, then flushes on refill", () => {
-    const { dev, postInbuf, rdata, vq, irqs } = makeRxRing();
-    // No inbuf yet — input must NOT be lost, no IRQ raised.
-    dev.pushRx(new Uint8Array([0x78, 0x79])); // "xy"
-    expect(vq.usedIdx()).toBe(0);
-    expect(irqs.length).toBe(0);
-    // Guest posts an inbuf and kicks the receiveq → pending bytes flush.
-    const addr = postInbuf(0);
-    dev.onNotify(RECEIVEQ);
-    expect(Array.from(rdata(addr, 2))).toEqual([0x78, 0x79]);
-    expect(vq.usedIdx()).toBe(1);
-    expect(irqs.length).toBe(1);
+  it("on PORT_READY, marks the port a console and opens it (CONSOLE_PORT, PORT_OPEN)", () => {
+    const { dev, vq } = makeRig({ ports: 2 });
+    const crx = vq(CONTROL_RX);
+    const ctx = vq(CONTROL_TX);
+    const a = crx.postInbuf();
+    const b = crx.postInbuf();
+    ctx.submitOut(ctrl(1, PORT_READY, 1));
+    dev.onNotify(CONTROL_TX);
+    expect(decodeCtrl(crx.read(a.addr, 8))).toEqual({ id: 1, event: CONSOLE_PORT, value: 1 });
+    expect(decodeCtrl(crx.read(b.addr, 8))).toEqual({ id: 1, event: PORT_OPEN, value: 1 });
   });
 
-  it("spreads input across multiple inbufs when one is too small (byte stream)", () => {
-    const { dev, postInbuf, rdata, vq } = makeRxRing();
-    const a0 = postInbuf(0, 2); // capacity 2
-    const a1 = postInbuf(1, 4); // capacity 4
-    dev.pushRx(new Uint8Array([1, 2, 3, 4, 5])); // 5 bytes > first inbuf
-    expect(Array.from(rdata(a0, 2))).toEqual([1, 2]);
-    expect(Array.from(rdata(a1, 3))).toEqual([3, 4, 5]);
-    expect(vq.usedIdx()).toBe(2);
-    expect(vq.usedElem(0).len).toBe(2);
-    expect(vq.usedElem(1).len).toBe(3);
+  it("queues control messages when no inbuf is posted, flushes on refill", () => {
+    const { dev, vq, irqs } = makeRig({ ports: 2 });
+    const crx = vq(CONTROL_RX);
+    const ctx = vq(CONTROL_TX);
+    // No control inbufs yet — DEVICE_READY must not be lost, no delivery.
+    ctx.submitOut(ctrl(0xffffffff, DEVICE_READY, 1));
+    dev.onNotify(CONTROL_TX);
+    expect(crx.usedIdx()).toBe(0);
+    const before = irqs.length;
+    // Guest posts inbufs and kicks the control receiveq → pending PORT_ADDs flush.
+    const a = crx.postInbuf();
+    const b = crx.postInbuf();
+    dev.onNotify(CONTROL_RX);
+    expect(decodeCtrl(crx.read(a.addr, 8))).toEqual({ id: 0, event: PORT_ADD, value: 1 });
+    expect(decodeCtrl(crx.read(b.addr, 8))).toEqual({ id: 1, event: PORT_ADD, value: 1 });
+    expect(irqs.length).toBeGreaterThan(before);
+  });
+
+  it("drains a port's transmitq to the sink tagged with the port index", () => {
+    const seen = [];
+    const { dev, vq } = makeRig({ ports: 3, sink: (p, b) => seen.push([p, Array.from(b)]) });
+    const tx0 = vq(portTx(0)); // q1
+    const tx2 = vq(portTx(2)); // q7
+    tx0.submitOut(new Uint8Array([0x68, 0x69])); // "hi" on port 0
+    tx2.submitOut(new Uint8Array([0x7a])); // "z" on port 2
+    dev.onNotify(portTx(0));
+    dev.onNotify(portTx(2));
+    expect(seen).toEqual([
+      [0, [0x68, 0x69]],
+      [2, [0x7a]],
+    ]);
+  });
+
+  it("delivers host input into a port's receiveq inbuf (per-port isolation)", () => {
+    const { dev, vq, irqs } = makeRig({ ports: 3 });
+    const rx1 = vq(portRx(1)); // q4
+    const buf = rx1.postInbuf();
+    dev.pushRx(1, new Uint8Array([0x41, 0x42, 0x43])); // "ABC" to port 1
+    expect(rx1.read(buf.addr, 3)).toEqual([0x41, 0x42, 0x43]);
+    expect(rx1.usedElem(0)).toEqual({ id: buf.head, len: 3 });
+    expect(irqs.at(-1)).toEqual([0, 14]);
+  });
+
+  it("keeps per-port input pending until that port posts an inbuf", () => {
+    const { dev, vq } = makeRig({ ports: 2 });
+    const rx1 = vq(portRx(1));
+    dev.pushRx(1, new Uint8Array([0x78, 0x79])); // no inbuf yet
+    expect(rx1.usedIdx()).toBe(0);
+    const buf = rx1.postInbuf();
+    dev.onNotify(portRx(1));
+    expect(rx1.read(buf.addr, 2)).toEqual([0x78, 0x79]);
+    expect(rx1.usedIdx()).toBe(1);
+  });
+
+  it("resize sends a RESIZE control message with cols then rows", () => {
+    const { dev, vq } = makeRig({ ports: 2 });
+    const crx = vq(CONTROL_RX);
+    const buf = crx.postInbuf();
+    dev.resize(1, 80, 24);
+    const bytes = new Uint8Array(crx.read(buf.addr, 12));
+    const dv = new DataView(bytes.buffer);
+    expect(dv.getUint32(0, true)).toBe(1); // port id
+    expect(dv.getUint16(4, true)).toBe(RESIZE);
+    expect(dv.getUint16(8, true)).toBe(80); // cols first
+    expect(dv.getUint16(10, true)).toBe(24); // rows second
+  });
+
+  it("re-asserts a pending resize on PORT_READY (resize before the console is up)", () => {
+    const { dev, vq } = makeRig({ ports: 2 });
+    const crx = vq(CONTROL_RX);
+    const ctx = vq(CONTROL_TX);
+    // Resize port 1 before any inbuf exists — queued, not delivered.
+    dev.resize(1, 100, 40);
+    // Now the guest readies port 1; CONSOLE_PORT + PORT_OPEN + the resize flush.
+    const b0 = crx.postInbuf();
+    const b1 = crx.postInbuf();
+    const b2 = crx.postInbuf();
+    const b3 = crx.postInbuf();
+    ctx.submitOut(ctrl(1, PORT_READY, 1));
+    dev.onNotify(CONTROL_TX);
+    // First the queued resize (from before), then CONSOLE_PORT, PORT_OPEN, resize.
+    const msgs = [b0, b1, b2, b3].map((b) => decodeCtrl(crx.read(b.addr, 8)));
+    const events = msgs.map((m) => m.event);
+    expect(events).toContain(CONSOLE_PORT);
+    expect(events).toContain(PORT_OPEN);
+    expect(events.filter((e) => e === RESIZE).length).toBe(2); // pre-queued + PORT_READY re-assert
   });
 
   it("forwards the kick instead of servicing when forwardNotify is set (worker mode)", () => {
     const fwd = [];
-    const { dev } = makeDev({ forwardNotify: (d, q) => fwd.push([d, q]) });
-    dev.onNotify(TRANSMITQ);
-    dev.onNotify(RECEIVEQ);
+    const { dev } = makeRig({ forwardNotify: (d, q) => fwd.push([d, q]) });
+    dev.onNotify(CONTROL_TX);
+    dev.onNotify(portTx(0));
+    dev.onNotify(portRx(1));
     expect(fwd).toEqual([
-      [6, 1],
-      [6, 0],
+      [6, CONTROL_TX],
+      [6, portTx(0)],
+      [6, portRx(1)],
     ]);
   });
 
-  it("re-entrant onNotify(transmitq) drains chains that arrive between kicks", () => {
+  it("no-ops a transmitq kick before queue setup (no sink, no IRQ)", () => {
     const seen = [];
-    const { dev, submit, vq } = makeTxRing({ sink: (b) => seen.push(Array.from(b)) });
-    submit(new Uint8Array([0xaa]), 0);
-    dev.onNotify(TRANSMITQ);
-    // A new chain arrives after the first drain — a second kick services it.
-    submit(new Uint8Array([0xbb]), 1);
-    dev.onNotify(TRANSMITQ);
-    expect(seen).toEqual([[0xaa], [0xbb]]);
-    expect(vq.usedIdx()).toBe(2);
-  });
-
-  it("no-ops a transmitq kick before queue setup (no sink call, no IRQ)", () => {
-    const seen = [];
-    const { dev, irqs } = makeDev({ sink: (b) => seen.push(Array.from(b)) });
-    dev.onNotify(TRANSMITQ); // receiveq/transmitq never set up
+    const { dev, irqs } = makeRig({ sink: (p, b) => seen.push([p, Array.from(b)]) });
+    dev.onNotify(portTx(0)); // never set up
     expect(seen).toEqual([]);
     expect(irqs.length).toBe(0);
   });

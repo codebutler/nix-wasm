@@ -1,123 +1,110 @@
-# hvc → virtio-console (issue #10, option 2) — implementation + validation
+# hvc_wasm → stock MULTIPORT virtio-console (issues #10 option 2, #83)
 
-Status: **code complete, boot-validation pending on a nix host.** This adds a
-stock mainline virtio-console TTY path to the guest, riding the existing
-`virtio_wasm` transport, as a NEW host↔guest console alongside the bespoke
-`hvc_wasm` backend — the console edition of the "everything is a virtio device"
-consolidation. It does NOT remove `hvc_wasm`: the two paths coexist so they can
-be A/B'd, and deleting `hvc_wasm` (patches 0002/0003) is a separate follow-up
-gated on boot-validating virtio-console. At the console layer the guest now also
-looks like a standard virtualized Linux (stock `virtio_console` over a stock
-carrier).
+Status: **code complete, boot-validation in CI + PR preview.** The guest console
+moved off the bespoke `hvc_wasm` backend onto the stock mainline virtio-console
+driver (`drivers/char/virtio_console.c`), riding the existing `virtio_wasm`
+transport. This completes the "everything is a stock virtio device" set
+(filesystem → virtio-9p, /Ctl → virtio-vsock, console → virtio-console) and
+**retires `hvc_wasm`** — virtio-console is now the guest's SOLE console path.
 
-## Single port vs multiport (design decision)
+This supersedes the earlier single-port A/B (added in #65, which kept `hvc_wasm`
+as primary). The history of that A/B is in git; this doc describes the final
+state.
 
-**Single port.** Mainline `virtio_console` binds a port to a (receiveq,
-transmitq) virtqueue pair; a **featureless** device gets exactly ONE port
-(port 0) which the driver wires to hvc as a console line — the hvc-equivalent of
-one console. We offer **no feature bits**: no `VIRTIO_CONSOLE_F_SIZE` (cols/rows
-in config space; the TIOCSWINSZ path stays on `hvc_wasm`'s
-`wasm_driver_hvc_winsize` for now) and no `VIRTIO_CONSOLE_F_MULTIPORT` (the
-control vq + N extra ports = the hvc0..hvc7 model). `VIRTIO_F_VERSION_1` is OR'd
-in by the transport itself (`vw_get_features` in `virtio_wasm.c`).
+## Multiport (the design that makes the retire possible)
 
-**MULTIPORT GAP (documented, not stubbed):** the existing `hvc_wasm` path
-exposes 8 consoles (hvc0..hvc7, `HVC_WASM_NR`); this single-port virtio-console
-exposes ONE. Closing the gap is future work: the host device model
-(`runtime/virtio/console-device.js`) would grow a control vq + per-port queues
-and the kernel registration (patch 0019) would offer
-`VIRTIO_CONSOLE_F_MULTIPORT`. Until then, a single port is the correct, complete
-minimal console for the A/B — not a stub.
+`hvc_wasm` exposed 8 console lines (hvc0..hvc7, `HVC_WASM_NR`), one per pc
+Terminal window + the wayland control console. A **single-port** virtio-console
+gives only one tty, so retiring `hvc_wasm` without regressing multi-tty requires
+**`VIRTIO_CONSOLE_F_MULTIPORT`**: the host device offers the feature and N console
+ports, and the stock driver registers one hvc line per console port
+(hvc0..hvc{N-1}). The kernel side needs **no new code** — multiport is entirely
+host-driven (the feature bit + the control-plane handshake), so the stock
+`virtio_console.c` does the rest.
+
+Virtqueue layout for N ports (mainline `init_vqs`): port 0 → rx=vq[0], tx=vq[1];
+control → rx=vq[2], tx=vq[3]; port i≥1 → rx=vq[2+2i], tx=vq[3+2i]. With
+`CONSOLE_PORTS = 8` that is **18 vqs**, which is why the transport's
+`VIRTIO_WASM_MAX_VQS` (patch 0013) and the cross-worker `MAX_QS`
+(`shared-queues.js`) were both raised 8/4 → **18**.
 
 ## What changed
 
-- **Kernel** — `patches/kernel/0019-wasm-virtio-console-device.patch`: register
-  one virtio-console device on the wasm transport, `VW_DEV_CONSOLE` (index 6,
-  after the 9P channels), `VIRTIO_ID_CONSOLE` (3). `kernel.nix` enables
-  `CONFIG_VIRTIO_CONSOLE` (selects `HVC_DRIVER`, already on for `hvc_wasm`;
-  depends on `VIRTIO` + `TTY`). Guarded by `IS_ENABLED(CONFIG_VIRTIO_CONSOLE)`
-  so the enum slot + init call are a no-op when the stock driver isn't built.
-  - **Why index 6:** the device enum is positional (WL=0, ECHO=1, NET=2, BLK=3,
-    9P_ROOT=4, 9P_NIXCACHE=5), so CONSOLE registers after the 9P block → 6, irq
-    = `VIRTIO_WASM_IRQ_BASE(8) + 6 = 14`. Like the 9P channels, the index assumes
-    the preceding NET/BLK/9P slots are built (the production config enables all).
-  - **No per-id vq sizing:** unlike `VIRTIO_ID_9P` (patch 0018 bumps it to 128
-    for the 128-page msize chain), virtio-console moves a TTY byte stream in
-    small page-sized chunks, so the default 64-entry ring is correct.
-- **Runtime** — `runtime/virtio/console-device.js` (`ConsoleVirtioDevice`): host
-  model of the device. Two vqs, mirroring virtio-net's directionality:
-  - vq[0] = **receiveq** (host→guest): the guest posts WRITABLE inbufs; the host
-    fills them with input bytes (`pushRx`/`flushRx`) and pushes them used. Input
-    that arrives before an inbuf is posted is held **pending** (a byte stream, so
-    leftovers are kept and split across inbufs as they come) and flushed on the
-    next receiveq refill — input is never dropped.
-  - vq[1] = **transmitq** (guest→host): the guest posts READABLE outbufs of
-    console output; the host drains them to the `sink` (`drainTx`) and pushes
-    them used (len 0 — transmit buffers are read-only).
-  Offers no features; `configRead` keeps the base zero-fill (config space is
-  unread without `F_SIZE`/`F_MULTIPORT`).
-  - **Worker→main inversion** (same reason as virtio-9p/wl/net): the console sink
-    (guest output) + input buffer (host input) are MAIN-thread-bound, but the
-    guest's vq kick lands on a task worker. So the worker-side instance only
-    answers the synchronous transport probes (features/config/setup) and FORWARDS
-    the notify (`virtioconsole_notify`) to the main thread; the main-thread
-    instance (given a `sink`) drains TX / delivers RX. The completion IRQ uses the
-    SAME `raised_irqs` self-wake path virtio-wl/net/9P use (`raiseHostWlIrq`): the
-    OR-into-`raised_irqs[0]` + notify happens after the vring write, so there is
-    no lost-wakeup race — host input can wake a fully idle guest.
-- **Wiring** — `kernel-worker.js` (`VW_DEV_CONSOLE=6` device + forwarding notify
-  + publish `raised_irqs` addr), `kernel-host.js` (main-thread `hostConsole()`
-  device + `virtioconsole_notify` handler analogous to `virtio9p_notify` + a
-  `console_sink` opt + a `virtio_console_input` handle method), `boot.js`
-  (`console_sink` wired to an optional `onVirtioConsole` opt — else the host log
-  — and a `virtioConsoleInput(data)` handle method for host→guest input),
-  `abi.js` (`ENGINE_ABI` 2→**3** per the ABI-BUMP RULE — the virtio device set is
-  part of the kernel↔engine contract), `sync-to-pc.sh` (sync the new
-  `virtio/console-device.js` engine file).
-- **NOT changed / NOT deleted:** `hvc_wasm` (patches 0002/0003), its host
-  callbacks (`wasm_driver_hvc_put`/`_get`/`_winsize`), and `boot.js`'s per-hvc
-  `console(vtermno)` duplex all stay. This is an additive A/B path.
+- **Kernel**
+  - `patches/kernel/0019-…`: unchanged in code (registers the
+    `VIRTIO_ID_CONSOLE` device at `VW_DEV_CONSOLE=6`, irq 14); comment updated to
+    "sole console, multiport offered by the host."
+  - `patches/kernel/0013-…`: `VIRTIO_WASM_MAX_VQS` 8 → **18** so the transport
+    accepts the console's 18 vqs (`struct virtqueue *vqs[VIRTIO_WASM_MAX_VQS]`
+    grows with it).
+  - `kernel.nix`: `--disable CONFIG_HVC_WASM` — removes `hvc_wasm`'s
+    `device_initcall` (which otherwise claimed hvc0) and its
+    `wasm_driver_hvc_*` host imports, so virtio-console's first console port
+    becomes **hvc0** and carries `console=hvc`. `HVC_DRIVER` stays on (selected by
+    `CONFIG_VIRTIO_CONSOLE`), so the hvc framework remains. Patches **0002/0003
+    deleted**.
+- **Runtime** — `runtime/virtio/console-device.js` (`ConsoleVirtioDevice`): now a
+  MULTIPORT device. Beyond the per-port data queues (drainTx → `sink(port,
+  bytes)`; pushRx/flushRx per port, with input held pending until a port posts an
+  inbuf) it runs the control-plane handshake on the control vqs:
+  - guest→host (control transmitq): `DEVICE_READY`, per-port `PORT_READY`, and
+    `PORT_OPEN`;
+  - host→guest (control receiveq): per-port `PORT_ADD`, then for each console port
+    `CONSOLE_PORT` + `PORT_OPEN(1)`, and `RESIZE` (payload `{cols, rows}`, cols
+    first) to drive `hvc_resize` → TIOCSWINSZ/SIGWINCH.
+  Host→guest control messages are held pending (FIFO) until a control inbuf is
+  free, mirroring the data path. `getFeatures` returns `F_MULTIPORT`; `configRead`
+  returns `max_nr_ports = CONSOLE_PORTS`. Ports are added in index order, so the
+  guest allocates hvc0..hvc{N-1} to ports 0..N-1 deterministically (port index ===
+  hvc index === the engine's `vtermno`).
+  - **Worker→main inversion** (unchanged): the worker instance answers the
+    synchronous probes (features = MULTIPORT, config = max_nr_ports, queue setup)
+    and forwards every notify (`virtioconsole_notify`); the main-thread instance
+    services all queues and raises the IRQ via the `raised_irqs` self-wake.
+- **Engine wiring** — `boot.js` (`console(vtermno)` handle now drives the
+  multiport device: `write`→`console_input(port,bytes)`, `resize`→`console_resize`;
+  the per-port `console_sink` fans out to each console's `onData`),
+  `kernel-host.js` (multiport `hostConsole()` + `console_input`/`console_resize`
+  exports; the hvc `key_input`/`set_winsize`/`console_read`/`console_write`/
+  winsize-SAB/input-buffers all removed), `kernel-worker.js` (the
+  `wasm_driver_hvc_put`/`_get`/`_winsize` imports + the synchronous
+  `console_read_messenger` round-trip removed; device built with `ports:
+  CONSOLE_PORTS`). The external `console(vtermno)` handle shape is **unchanged**,
+  so pc needs no code change.
+- **ABI** — `abi.js` `ENGINE_ABI` 4 → **5** (the hvc host imports are gone and the
+  console device model + transport vq cap changed — an incompatible kernel↔engine
+  contract change).
+- **Guest** — `userspace/init.nix`/`toplevel.nix`: the inittab is unchanged
+  (hvc0..hvc7 getty lines — virtio-console registers as hvcN); only the comments
+  that named the gone `HVC_WASM_NR_CONSOLES` were updated to point at
+  `CONSOLE_PORTS`.
+
+## Early-boot console tradeoff
+
+`hvc_wasm` was also the kernel's **earlycon**. virtio-console only comes up after
+the virtio probe + the multiport handshake, so printk before that is buffered by
+the kernel log ring and flushed once hvc0 registers — standard for a virtualized
+console (qemu `console=hvc0` behaves identically). A panic *before* the virtio
+probe would have no console; acceptable, and a future kernel could add a
+virtio-console earlycon if needed.
 
 ## Validated here (no nix in this env)
 
-- `bun test virtio/ ninep/` → 83 pass (incl. 8 new `ConsoleVirtioDevice` tests:
-  no-features, TX drain→sink + used(len 0) + IRQ, RX inject→inbuf + IRQ, RX held
-  pending then flushed on refill, RX spread across multiple inbufs, worker-mode
-  forwarding of both queues, re-entrant TX drain across kicks, TX no-op before
-  queue setup). `bun run test` (the ninep/nix-store gate set) → 52 pass.
-- `oxfmt --check` clean on the new + edited files; `oxlint` clean on the new +
-  edited files (the repo-wide `bun run lint` has pre-existing warnings only in
-  the vendored `demo/web/vendor/greenfield/` tree — red on clean master too,
-  unrelated to this change).
-- `tsc` clean on the edited NON-test source (`boot.js` opts/return typedef
-  extended for `onVirtioConsole`/`virtioConsoleInput`; `kernel-host.js`/
-  `kernel-worker.js` are `@ts-nocheck`). The remaining `tsc` errors are all in
-  `.test.js` files and match the pre-existing master baseline (`bun:test` module
-  + the `{buffer: ArrayBuffer}` Memory-shape + the device-ctor opt-typedef
-  pattern — identical to `ninep-device.test.js`).
+- `bun run test` → 117 pass, incl. 13 rewritten `ConsoleVirtioDevice` multiport
+  tests (features, max_nr_ports config, DEVICE_READY→PORT_ADD ordering,
+  PORT_READY→CONSOLE_PORT+PORT_OPEN, pending control flush on refill, per-port
+  TX→sink tagging, per-port RX isolation + pending-until-inbuf, RESIZE cols/rows
+  order, resize re-assert on PORT_READY, worker-mode forwarding, TX no-op before
+  setup). `oxlint`/`oxfmt`/`tsc` clean.
 
-## Boot-validation TODO (run on a nix host)
+## Boot-validation (CI + preview — no nix host here)
 
-1. `sudo -E nix build .#kernel .#wasm-initramfs --print-out-paths`
-   (also `.#wasm-base-squashfs` / `.#wasm-binary-cache` for the full smoke).
-2. Re-run **`runtime/sync-to-pc.sh <pc-checkout>`** — `kernel-worker.js`,
-   `kernel-host.js`, `boot.js`, `abi.js` and the new `virtio/console-device.js`
-   are engine files; pc boots a stale engine otherwise. Note `ENGINE_ABI` is now
-   3 → a `master`-based `linux` channel can only ship AFTER the synced engine is
-   deployed to pc (else pc correctly shows "reload pc").
-3. Boot the guest and confirm the device probes: the boot log should show
-   `virtio_wasm: registered dev=6 id=0x3 irq=14` and `virtio_console` binding a
-   console port (hvc line). Drive the A/B by wiring `onVirtioConsole` (guest
-   output) + `virtioConsoleInput` (host input) on the boot handle and exchanging
-   bytes over the new path while the existing `hvc_wasm` console keeps working.
-   To make virtio-console the guest's console line, append `console=hvc0` (the
-   stock driver registers its port as an hvc console) — but keep `hvc_wasm`'s
-   console too until the A/B is confirmed.
-
-## Follow-up (separate change)
-
-Once virtio-console is boot-validated as the guest console, retire `hvc_wasm`:
-drop patches 0002/0003, the `wasm_driver_hvc_*` host callbacks, and the per-hvc
-`console(vtermno)` duplex, collapsing onto the virtio path. That likely needs the
-MULTIPORT gap closed first (to keep the hvc0..hvc7 multi-terminal model), or an
-explicit decision to ship a single guest console. Tracked under issue #10.
+1. CI `nix-wasm.yml` rebuilds `.#kernel` (the `CONFIG_HVC_WASM` disable + the
+   transport vq-cap bump invalidate the kernel derivation; the patched-LLVM pole
+   substitutes from Cachix, only the kernel C sources recompile) + the boot
+   artifacts, and the `boot-smoke` job boots the guest.
+2. The PR preview boots *that PR's* guest in the browser — confirm a shell prompt
+   on hvc0 and a second Terminal on hvc1 (multi-tty), plus resize (SIGWINCH).
+3. `runtime/sync-to-pc.sh <pc-checkout>` (engine files changed). `ENGINE_ABI` is
+   now **5**: a `master`-based `linux` channel can only ship AFTER the synced
+   engine is deployed to pc, else pc correctly shows "reload pc".

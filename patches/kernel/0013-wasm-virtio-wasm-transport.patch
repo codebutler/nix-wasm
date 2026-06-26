@@ -62,7 +62,7 @@ new file mode 100644
 index 0000000..5e2bcc0
 --- /dev/null
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,594 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * virtio_wasm.c - a virtio transport over Wasm host callbacks (Linux/Wasm, "pc"
@@ -128,7 +128,14 @@ index 0000000..5e2bcc0
 +extern void wasm_virtio_reset(u32 dev);
 +
 +#define VIRTIO_WASM_VENDOR	0x000000CBu	/* "cb" */
-+#define VIRTIO_WASM_MAX_VQS	8
++/*
++ * Max virtqueues per device. The MULTIPORT virtio-console (issue #83) is the
++ * driver of this ceiling: with 8 console ports the stock virtio_console.c uses
++ * 2*(8+1) = 18 vqs (port 0 rx/tx, control rx/tx, then 2 per extra port). Every
++ * other device on this transport uses ≤3. Kept in lockstep with the host's
++ * runtime/virtio/shared-queues.js MAX_QS.
++ */
++#define VIRTIO_WASM_MAX_VQS	18
 +#define VIRTIO_WASM_VRING_ALIGN	4096
 +#define VIRTIO_WASM_IRQ_BASE	8		/* first free irq (2..63) used */
 +

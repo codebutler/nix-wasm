@@ -9,4 +9,10 @@
 //
 // `userspace/linux-image.nix` parses this exact line, so keep the form
 // `export const ENGINE_ABI = <int>;` on one line.
-export const ENGINE_ABI = 4;
+//
+// 5 (#83): the console moved off the bespoke hvc_wasm backend onto the stock
+// MULTIPORT virtio-console. The kernel↔engine contract changed incompatibly —
+// the wasm_driver_hvc_put/get/winsize host imports are gone, the console device
+// gained the multiport control-plane + per-port queues, and the transport's
+// per-device vq cap (VIRTIO_WASM_MAX_VQS) + the cross-worker MAX_QS grew to 18.
+export const ENGINE_ABI = 5;

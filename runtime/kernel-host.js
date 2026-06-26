@@ -26,13 +26,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
-import { ConsoleVirtioDevice } from "./virtio/console-device.js";
+import { ConsoleVirtioDevice, CONSOLE_PORTS } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 
 /// Create a Linux machine and run it.
-// pc (ticket #74, multi-tty): `console_write` is now called `(vtermno, text)` —
-// output is tagged with its hvc console index — and the returned
-// `key_input(vtermno, data)` takes the same index.
+// The guest console is the stock MULTIPORT virtio-console device (issue #83):
+// `console_sink(port, bytes)` receives each console port's output (port = hvc
+// index), and the returned `console_input(port, data)` / `console_resize(port,
+// cols, rows)` feed input + window size to that port.
 export const linux = async ({
   worker_url,
   variant,
@@ -40,19 +41,16 @@ export const linux = async ({
   boot_cmdline,
   initrd,
   log,
-  console_write,
   // Issue #10: the 9P server (createNinePServer) the main-thread virtio-9p
   // devices service. The server is transport-agnostic (bytes-in/bytes-out via
   // handle(frame, cid)); the per-connection cid keeps each mount's state
   // isolated. Absent → no virtio-9p host servicing.
   ninep_server,
-  // Issue #10 (option 2): optional sink for the virtio-console's guest output.
-  // The main-thread ConsoleVirtioDevice drains the transmitq and calls this with
-  // each chunk of guest console bytes (a Uint8Array). Absent → no virtio-console
-  // host servicing (the guest's stock virtio_console still probes, but its
-  // transmitq output is dropped and no input is delivered). The bespoke
-  // hvc_wasm console (console_write/console_read) is unaffected — this is the
-  // parallel A/B path, not a replacement.
+  // Issue #83: per-port sink for the MULTIPORT virtio-console's guest output.
+  // The main-thread ConsoleVirtioDevice drains each console port's transmitq and
+  // calls this as (port, bytes) — port = hvc/vtermno index, bytes = Uint8Array.
+  // This is the guest's SOLE console path (the bespoke hvc_wasm backend is
+  // retired). Absent → guest console output is dropped and no input is delivered.
   console_sink,
   // Issue #10 option 3: optional host hook for the virtio-vsock /Ctl bridge.
   // `onReady(device)` is called once with the main-thread VsockVirtioDevice so a
@@ -106,17 +104,6 @@ export const linux = async ({
   /// from that range (see kernel-worker.js wasm_load_executable). exec reloads
   /// and clone()'d workers both read the same shared range, so there is nothing
   /// to cache or marshal across workers here.
-
-  /// Per-console input buffers (keyboard → tty), keyed by hvc vtermno. pc
-  /// (ticket #74, multi-tty): one buffer per console so N terminals can each
-  /// feed their own shell on hvc0..hvcN.
-  const input_buffers = Object.create(null); // vtermno → ArrayBuffer
-  const inbuf = (vt) => input_buffers[vt] || (input_buffers[vt] = new ArrayBuffer(0));
-
-  /// Per-console window size, packed (rows<<16)|cols, shared with the task
-  /// workers so the hvc driver can poll it (wasm_driver_hvc_winsize) and
-  /// __hvc_resize the tty. pc (ticket #74, TIOCSWINSZ). 16 = max hvc consoles.
-  const winsizes = new Int32Array(new SharedArrayBuffer(16 * 4));
 
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
@@ -237,13 +224,14 @@ export const linux = async ({
     return d;
   };
 
-  // Issue #10 (option 2): virtio-console — a MAIN-thread device that drains the
-  // guest's transmitq (output) to console_sink and delivers host input on the
-  // receiveq. The guest's vq kick lands on a task worker (which forwards it here
-  // as virtioconsole_notify); the sink + input buffer are main-thread-bound, so
-  // the host services the vrings here and raises the completion IRQ via the SAME
-  // raised_irqs self-wake virtio-wl/net/9P use (raiseHostWlIrq) — waking a parked
-  // idle CPU for host->guest input. dev MUST match kernel-worker's
+  // Issue #83: MULTIPORT virtio-console — a MAIN-thread device that runs the
+  // control-plane handshake, drains each console port's transmitq (output) to
+  // console_sink(port, bytes), and delivers host input on each port's receiveq.
+  // The guest's vq kick lands on a task worker (which forwards it here as
+  // virtioconsole_notify); the sink + input buffers are main-thread-bound, so the
+  // host services the vrings here and raises the completion IRQ via the SAME
+  // raised_irqs self-wake virtio-wl/net/9P/vsock use (raiseHostWlIrq) — waking a
+  // parked idle CPU for host->guest input/control. dev MUST match kernel-worker's
   // VW_DEV_CONSOLE + kernel patch 0019: index 6, irq 14. Built lazily once the
   // self-wake addr is published (and only if a console_sink was provided).
   const VW_DEV_CONSOLE = 6;
@@ -258,7 +246,8 @@ export const linux = async ({
         onlineCpus: [0], // maxcpus=1
         sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
         log,
-        sink: (bytes) => console_sink(bytes),
+        ports: CONSOLE_PORTS,
+        sink: (port, bytes) => console_sink(port, bytes),
       });
     }
     return hostConsoleDevice;
@@ -479,25 +468,6 @@ export const linux = async ({
       }
     },
 
-    console_read: (message, worker) => {
-      const memory_u8 = new Uint8Array(memory.buffer);
-      const vt = message.vtermno | 0;
-      const buffer = new Uint8Array(inbuf(vt));
-
-      const used = buffer.slice(0, message.count);
-      memory_u8.set(used, message.buffer);
-
-      input_buffers[vt] = buffer.slice(message.count).buffer;
-
-      // Tell the Worker that asked for input how many bytes (perhaps 0) were actually written.
-      Atomics.store(message.console_read_messenger, 0, used.length);
-      Atomics.notify(message.console_read_messenger, 0, 1);
-    },
-
-    console_write: (message) => {
-      console_write(message.vtermno | 0, message.message);
-    },
-
     log: (message) => {
       log(message.message);
     },
@@ -618,7 +588,6 @@ export const linux = async ({
       last_task: last_task,
       runner_name: name,
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
-      winsize_buf: winsizes.buffer, // ticket #74: per-console winsize (SAB)
       squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX
     };
     worker.postMessage(init_msg);
@@ -636,25 +605,20 @@ export const linux = async ({
   make_cpu(0);
 
   return {
-    // pc (ticket #74, multi-tty): feed bytes to one console's tty. `vtermno`
-    // selects the hvc line (which window/shell); defaults are the caller's job.
-    key_input: (vtermno, data) => {
-      const vt = vtermno | 0;
-      const key_buffer = text_encoder.encode(data); // Possibly UTF-8 (up to 16 bits).
-
-      // Append key_buffer to the end of this console's input buffer.
-      const old = inbuf(vt);
-      const merged = new Uint8Array(old.byteLength + key_buffer.byteLength);
-      merged.set(new Uint8Array(old), 0);
-      merged.set(key_buffer, old.byteLength);
-      input_buffers[vt] = merged.buffer;
+    // Issue #83: feed host input bytes to one console port's tty (stdin) over its
+    // virtio-console receiveq. `port` selects the hvc line (which window/shell);
+    // queued + flushed via the main-thread ConsoleVirtioDevice (raised_irqs
+    // self-wake), so bytes posted before the guest sets up the receiveq stay
+    // pending and are delivered on the next refill.
+    console_input: (port, data) => {
+      const bytes = data instanceof Uint8Array ? data : text_encoder.encode(data);
+      hostConsole()?.pushRx(port | 0, bytes);
     },
 
-    // pc (ticket #74, TIOCSWINSZ): record a console's window size; the hvc
-    // driver polls it via wasm_driver_hvc_winsize and __hvc_resize's the tty.
-    set_winsize: (vtermno, cols, rows) => {
-      const packed = (((rows | 0) & 0xffff) << 16) | ((cols | 0) & 0xffff);
-      Atomics.store(winsizes, vtermno | 0, packed);
+    // Issue #83: set a console port's window size — a virtio-console RESIZE
+    // control message → the guest's hvc_resize → TIOCSWINSZ/SIGWINCH on the tty.
+    console_resize: (port, cols, rows) => {
+      hostConsole()?.resize(port | 0, cols | 0, rows | 0);
     },
 
     // Wayland Phase 4f: the SINGLE host→guest delivery path. The main-thread
@@ -696,18 +660,6 @@ export const linux = async ({
         netLinkUp = !!up;
         hostNet()?.setLinkUp(up);
       },
-    },
-
-    // Issue #10 (option 2): feed host input bytes to the guest over the
-    // virtio-console receiveq (the A/B counterpart of key_input's hvc path).
-    // Queues + flushes via the main-thread ConsoleVirtioDevice's raised_irqs
-    // self-wake; bytes posted before the receiveq is set up stay pending and are
-    // delivered on the next guest refill. No-op until the console device exists
-    // (a console_sink was provided AND the self-wake addr is published).
-    // @param {Uint8Array|ArrayBuffer} bytes
-    virtio_console_input: (bytes) => {
-      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      hostConsole()?.pushRx(buf);
     },
   };
 };

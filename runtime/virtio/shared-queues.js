@@ -19,10 +19,15 @@ const SLOT_WORDS = 9;
 // Device-index capacity of the cross-worker table. Must cover every VW_DEV_*
 // the transport registers: WL=0, ECHO=1, NET=2, BLK=3, the virtio-9p channels
 // 9P_ROOT=4 / 9P_NIXCACHE=5 (issue #10), CONSOLE=6, and VSOCK=7 (issue #10
-// option 3). 8 covers indices 0..7 exactly; the SAB is MAX_DEVS*MAX_QS*9*4 bytes
-// (1152 B at 8×4), threaded into every worker.
+// option 3). 8 covers indices 0..7 exactly.
 const MAX_DEVS = 8;
-const MAX_QS = 4;
+// Per-device queue capacity. The MULTIPORT virtio-console (issue #83) is the
+// driver: with CONSOLE_PORTS=8 console ports it uses 18 vqs (port 0 rx/tx, the
+// control rx/tx, then 2 per extra port → 2*(8+1)). Every other device uses ≤3,
+// so 18 is the ceiling. MUST stay ≥ 2*(CONSOLE_PORTS+1) and match the kernel
+// transport's VIRTIO_WASM_MAX_VQS (kernel patch 0013). The SAB is
+// MAX_DEVS*MAX_QS*9*4 bytes (5184 B at 8×18), threaded into every worker.
+const MAX_QS = 18;
 const TOTAL_WORDS = MAX_DEVS * MAX_QS * SLOT_WORDS;
 
 export const VIRTIO_QUEUES_BYTES = TOTAL_WORDS * 4;
