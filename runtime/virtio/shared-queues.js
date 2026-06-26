@@ -27,7 +27,20 @@ const MAX_DEVS = 16;
 // margin. The SAB is MAX_DEVS*MAX_QS*9*4 bytes (2304 B at 16×4), threaded into
 // every worker.
 const MAX_QS = 4;
-const TOTAL_WORDS = MAX_DEVS * MAX_QS * SLOT_WORDS;
+const QUEUE_WORDS = MAX_DEVS * MAX_QS * SLOT_WORDS;
+
+// Per-device CONFIG region, appended after the queue region: one int32 per
+// device packing the virtio-console window size — cols in the low 16 bits, rows
+// in the high 16. WHY here: a single-port virtio-console's cols/rows are SET on
+// the main thread (console_resize) but READ by wasm_virtio_config_read on
+// whichever task worker the guest's config-change handler runs on (the same
+// worker/main inversion the queue layouts solve). Storing the size in this
+// already-cross-worker SAB lets the worker answer configRead with the value the
+// main thread last wrote, race-free (Atomics; the size is written before the
+// config-change irq is raised). Only console devices use it; others read 0.
+const CONFIG_BASE = QUEUE_WORDS; // first config word
+const CONFIG_WORDS = MAX_DEVS; // one per device
+const TOTAL_WORDS = QUEUE_WORDS + CONFIG_WORDS;
 
 export const VIRTIO_QUEUES_BYTES = TOTAL_WORDS * 4;
 
@@ -99,5 +112,23 @@ export class SharedQueues {
     const b = slotBase(dev, q);
     Atomics.store(this.i32, b + 8, 0);
     Atomics.store(this.i32, b + 7, 0);
+  }
+
+  /**
+   * Record a device's virtio-console window size (cols/rows), packed into one
+   * word so both fields update atomically. Read back by getConfigSize from any
+   * worker. cols/rows are clamped to u16.
+   */
+  setConfigSize(dev, cols, rows) {
+    if (dev >= MAX_DEVS) throw new Error(`[virtio] dev=${dev} exceeds config table`);
+    const packed = ((rows & 0xffff) << 16) | (cols & 0xffff);
+    Atomics.store(this.i32, CONFIG_BASE + dev, packed);
+  }
+
+  /** Read a device's window size. Returns {cols, rows} (0/0 if never set). */
+  getConfigSize(dev) {
+    if (dev >= MAX_DEVS) throw new Error(`[virtio] dev=${dev} exceeds config table`);
+    const packed = Atomics.load(this.i32, CONFIG_BASE + dev) >>> 0;
+    return { cols: packed & 0xffff, rows: (packed >>> 16) & 0xffff };
   }
 }

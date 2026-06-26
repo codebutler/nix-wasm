@@ -219,11 +219,11 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-probe-s
 # round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
 
-# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
-# (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
-# vsock.onReady hook. PASS = open/notify/clipset reach the host seams and clipget
-# round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
-LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
+# #83 follow-up terminal-resize smoke (busybox-only boot): console(0).resize(cols,
+# rows) writes the virtio-console F_SIZE config space + raises the device's
+# config-change irq; the stock driver hvc_resize()s the tty. PASS = `stty size`
+# in-guest reflects the new size. Also wired into nix-wasm.yml boot-smoke (gating).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/resize-smoke.mjs
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
@@ -730,7 +730,27 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   is CORRECT now — and checks the `VW_DEV_CONSOLE_BASE + i` loop (not a single
   `VW_DEV_CONSOLE` call) plus the pinned `=7`/`=8` values. Multiport was abandoned:
   its async control-vq port handshake races init to death on single-CPU wasm boot
-  (the single-port probe path registers each hvc line synchronously instead).
+  (the single-port probe path registers each hvc line synchronously instead). The
+  console loop now calls `virtio_wasm_register_cfg(…, VW_CONSOLE_CONFIG_IRQ_BASE + i)`
+  (the resize variant, next entry), so the assertion greps `register_cfg`.
+- **Terminal resize = virtio config-change interrupt + VIRTIO_CONSOLE_F_SIZE**
+  (`patches/kernel/0013` transport + `0019` console loop; `runtime/virtio/{console-device,shared-queues}.js`;
+  ENGINE_ABI 7). A single-port virtio-console has NO control vq, so the multiport
+  `VIRTIO_CONSOLE_RESIZE` message is unavailable — the ONLY size channel is the stock
+  driver's `F_SIZE` path: read cols/rows from config space at probe + on a **config-change
+  interrupt**, then `hvc_resize()`. The minimal `virtio_wasm` transport had no config-change
+  path, so resize was a no-op. Fix: (1) the transport grew a generic config-change irq — a
+  SECOND per-device irq whose handler calls `virtio_config_changed()`; consoles use
+  `VW_CONSOLE_CONFIG_IRQ_BASE + idx` (24..31, disjoint from used-buffer irqs 8..23, low
+  word of `raised_irqs` so the host self-wake is unchanged), wired via a
+  `virtio_wasm_register_cfg(dev,id,config_irq)` variant (the old `virtio_wasm_register`
+  is a `config_irq=0` wrapper, so 0017/0018/0020 are untouched). (2) the host console
+  device offers `F_SIZE` (getFeatures `1n`) and serves cols/rows from config space.
+  The size crosses the worker/main inversion (set on main by `console_resize`, read by
+  the worker's `configRead`) via a per-device word in the cross-worker shared-queues SAB
+  (`setConfigSize`/`getConfigSize`) — written before the irq is raised, race-free. Gated
+  by `resize-smoke.mjs` (boot → `console.resize` → `stty size`). It's a GENERAL transport
+  feature (any future config-change device can use it), console is just the first user.
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

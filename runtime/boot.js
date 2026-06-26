@@ -207,9 +207,9 @@ export async function bootLinux(opts) {
           }
           return () => set.delete(cb);
         },
-        /** Set this console's window size. NOTE (#83): not yet propagated for
-         *  single-port consoles (needs VIRTIO_CONSOLE_F_SIZE + a transport
-         *  config-change path — a follow-up); currently a no-op host-side. */
+        /** Set this console's window size (terminal resize). Propagated to the
+         *  guest tty via the device's VIRTIO_CONSOLE_F_SIZE config-change
+         *  interrupt, which drives hvc_resize() → SIGWINCH. */
         resize(cols, rows) {
           os.console_resize(vt, cols, rows);
         },

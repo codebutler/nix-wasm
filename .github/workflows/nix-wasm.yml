@@ -150,6 +150,8 @@ jobs:
   #     repro/transparent matrix, the detailed breakdown behind ping-pace-smoke.
   #   • vsock-ctl-smoke — the guest /Ctl agent (pcctl) ↔ host listener over
   #     virtio-vsock, open/notify/clipset/clipget round-trip (issue #60 Phase 2).
+  #   • resize-smoke   — terminal resize: console.resize() → virtio-console
+  #     config-change irq → hvc_resize(), read back via `stty size` (#83 follow-up).
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
@@ -253,6 +255,12 @@ jobs:
           # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
           # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
           run_smoke demo/node/vsock-ctl-smoke.mjs
+
+          # #83 follow-up: terminal RESIZE. console(0).resize() writes cols/rows
+          # to the virtio-console config space and raises the device's
+          # config-change irq; the stock driver hvc_resize()s the tty. Proven via
+          # `stty size`. Gating — a regression (resize not propagating) fails.
+          run_smoke demo/node/resize-smoke.mjs
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,

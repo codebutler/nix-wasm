@@ -128,7 +128,7 @@ pkgs.stdenv.mkDerivation {
     echo "== virtio_wasm.c device enum (post-patch) =="
     awk '/^enum \{/{f=1} f{print} f&&/VW_DEV_COUNT/{exit}' "$vw"
     echo "== virtio_wasm_register() calls (post-patch) =="
-    grep -nE 'virtio_wasm_register\(VW_DEV_' "$vw" || true
+    grep -nE 'virtio_wasm_register(_cfg)?\(VW_DEV_' "$vw" || true
 
     # 1) Every non-console device the host serves MUST keep its registration call.
     for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_VSOCK; do
@@ -138,10 +138,23 @@ pkgs.stdenv.mkDerivation {
         exit 1
       }
     done
-    # The 8 single-port consoles register via a VW_DEV_CONSOLE_BASE + i loop.
-    grep -qE 'virtio_wasm_register\(VW_DEV_CONSOLE_BASE \+ i,' "$vw" || {
+    # The 8 single-port consoles register via a VW_DEV_CONSOLE_BASE + i loop,
+    # using the config-irq-aware variant (terminal resize).
+    grep -qE 'virtio_wasm_register_cfg\(VW_DEV_CONSOLE_BASE \+ i,' "$vw" || {
       echo "ERROR: $vw is missing the VW_DEV_CONSOLE_BASE + i console registration" \
            "loop — patch 0019 (console) applied with fuzz." >&2
+      exit 1
+    }
+    # The console resize path (patch 0013): the config-change irq handler + the
+    # pinned config-irq base must survive a fuzzy apply, or resize silently dies.
+    grep -q 'vw_config_interrupt' "$vw" || {
+      echo "ERROR: $vw is missing vw_config_interrupt — patch 0013 config-change" \
+           "handler dropped (terminal resize would break)." >&2
+      exit 1
+    }
+    grep -qE 'VW_CONSOLE_CONFIG_IRQ_BASE[[:space:]]+24' "$vw" || {
+      echo "ERROR: VW_CONSOLE_CONFIG_IRQ_BASE is not pinned to 24 in $vw" \
+           "(must match CONSOLE_CONFIG_IRQ_BASE in runtime/virtio/console-device.js)." >&2
       exit 1
     }
 

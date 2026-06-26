@@ -57,10 +57,10 @@ Part of issue #10 / #83 (host<->guest bridge consolidation onto virtio).
  1 file changed, 29 insertions(+)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
-index d22cd22..7ec9114 100644
+index 0792fc6..204190e 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -377,6 +377,14 @@ enum {
+@@ -433,6 +433,14 @@ enum {
  #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
  	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
  	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
@@ -75,7 +75,7 @@ index d22cd22..7ec9114 100644
  #endif
  	VW_DEV_COUNT,
  };
-@@ -423,6 +431,27 @@ static int __init virtio_wasm_transport_init(void)
+@@ -479,6 +487,29 @@ static int __init virtio_wasm_transport_init(void)
  		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
  #endif
  
@@ -93,7 +93,9 @@ index d22cd22..7ec9114 100644
 +	 * runtime/virtio/console-device.js.
 +	 */
 +	for (int i = 0; i < 8; i++) {
-+		vw = virtio_wasm_register(VW_DEV_CONSOLE_BASE + i, VIRTIO_ID_CONSOLE);
++		vw = virtio_wasm_register_cfg(VW_DEV_CONSOLE_BASE + i,
++					      VIRTIO_ID_CONSOLE,
++					      VW_CONSOLE_CONFIG_IRQ_BASE + i);
 +		if (IS_ERR(vw))
 +			pr_warn("virtio_wasm: console %d register failed: %ld\n",
 +				i, PTR_ERR(vw));
@@ -103,5 +105,6 @@ index d22cd22..7ec9114 100644
  	return 0;
  }
  
+
 --
 2.53.0

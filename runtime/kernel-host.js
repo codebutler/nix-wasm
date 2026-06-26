@@ -26,14 +26,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
-import { ConsoleVirtioDevice, CONSOLE_BASE } from "./virtio/console-device.js";
+import {
+  ConsoleVirtioDevice,
+  CONSOLE_BASE,
+  CONSOLE_CONFIG_IRQ_BASE,
+} from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
 // `console_sink(idx, bytes)` receives each console's output (idx = hvc index),
 // and the returned `console_input(idx, data)` feeds input to that console
-// (`console_resize` is a no-op for now — see the device header).
+// (`console_resize(idx, cols, rows)` propagates a terminal winsize change to the
+// guest tty via the device's config-change interrupt — see the device header).
 export const linux = async ({
   worker_url,
   variant,
@@ -250,6 +255,9 @@ export const linux = async ({
         sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
         log,
         sink: (bytes) => console_sink(idx, bytes),
+        // Dedicated config-change irq for this console (resize). Distinct from the
+        // used-buffer irq above; raised by setSize() via the same self-wake path.
+        configIrq: CONSOLE_CONFIG_IRQ_BASE + idx,
       });
       hostConsoleDevices.set(idx, d);
     }
@@ -619,11 +627,13 @@ export const linux = async ({
       hostConsole(idx | 0)?.pushRx(bytes);
     },
 
-    // Issue #83: window-size propagation is NOT YET wired for single-port consoles
-    // (it needs VIRTIO_CONSOLE_F_SIZE + a transport config-change interrupt, a
-    // documented follow-up). Accepted for handle-API stability; currently a no-op,
-    // so the guest tty keeps its boot winsize.
-    console_resize: (_idx, _cols, _rows) => {},
+    // Propagate a terminal winsize change to the guest tty. The console device
+    // writes cols/rows into the shared config and raises its config-change irq;
+    // the stock virtio-console driver re-reads config and hvc_resize()s the tty
+    // (SIGWINCH). No-op before the console device exists (pre-attach).
+    console_resize: (idx, cols, rows) => {
+      hostConsole(idx | 0)?.setSize(cols | 0, rows | 0);
+    },
 
     // Wayland Phase 4f: the SINGLE host→guest delivery path. The main-thread
     // compositor calls this for EVERY server→client event — replies,
