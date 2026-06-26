@@ -103,6 +103,45 @@ pkgs.stdenv.mkDerivation {
     ./patches/kernel/0021-wasm-sa-restart-deliver-signal.patch
   ];
 
+  # Guard against silent patch-fuzz corruption of the virtio device enum (the #84
+  # nix:true boot regression). Patches 0017-0020 each insert into the same enum +
+  # virtio_wasm_transport_init() regions; `patch`'s fuzzy matching can mis-apply a
+  # stacked hunk WITHOUT failing the build — which is exactly what dropped the
+  # VW_DEV_9P_ROOT/9P_NIXCACHE virtio_wasm_register() calls and put VW_DEV_VSOCK
+  # before VW_DEV_CONSOLE (CONSOLE shifted 6->8), so `9pnet_virtio` found "no
+  # channels available for device pcroot/nixcache" and /nix-cache never mounted.
+  # Assert the post-patch source is correct; runs in patchPhase (minutes), so a
+  # re-fuzz fails fast and loud instead of producing a subtly-broken kernel.
+  postPatch = ''
+    vw=drivers/virtio/virtio_wasm.c
+    echo "== virtio_wasm.c device enum (post-patch) =="
+    awk '/^enum \{/{f=1} f{print} f&&/VW_DEV_COUNT/{exit}' "$vw"
+    echo "== virtio_wasm_register() calls (post-patch) =="
+    grep -nE 'virtio_wasm_register\(VW_DEV_' "$vw" || true
+
+    # 1) Every device the host serves MUST keep its registration call.
+    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_CONSOLE VW_DEV_VSOCK; do
+      grep -q "virtio_wasm_register($d," "$vw" || {
+        echo "ERROR: $vw is missing virtio_wasm_register($d, …) — a kernel patch" \
+             "(0017-0020) applied with fuzz and dropped a device registration." >&2
+        exit 1
+      }
+    done
+
+    # 2) Enum order must be ...9P_NIXCACHE(5) < CONSOLE(6) < VSOCK(7) < COUNT so the
+    #    indices match runtime/kernel-host.js + kernel-worker.js (VW_DEV_CONSOLE=6,
+    #    VW_DEV_VSOCK=7). A fuzzy apply that puts VSOCK before CONSOLE is rejected.
+    enum=$(awk '/^enum \{/{f=1} f{print} f&&/VW_DEV_COUNT/{exit}' "$vw")
+    con=$(printf '%s\n' "$enum" | grep -n 'VW_DEV_CONSOLE\b' | head -1 | cut -d: -f1)
+    vso=$(printf '%s\n' "$enum" | grep -n 'VW_DEV_VSOCK\b' | head -1 | cut -d: -f1)
+    if [ -n "$con" ] && [ -n "$vso" ] && [ "$con" -ge "$vso" ]; then
+      echo "ERROR: virtio device enum has VW_DEV_VSOCK before VW_DEV_CONSOLE" \
+           "(fuzzy patch apply). CONSOLE must be index 6, VSOCK index 7." >&2
+      exit 1
+    fi
+    echo "virtio_wasm.c device enum + registrations OK (9P/console/vsock present, order correct)"
+  '';
+
   nativeBuildInputs = [
     pkgs.gnumake
     pkgs.bison

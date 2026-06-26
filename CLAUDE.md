@@ -698,6 +698,24 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   sp/tls synced from pt_regs), NOT a nested mid-C-frame call. Gate: `ping-pace-smoke`
   (+ the `ping-pace-probe` control/restart/xcpu/repro matrix), no networking, in the
   boot-smoke job.
+- **virtio device-enum patches (0017-0020) must apply with ZERO fuzz** (`kernel.nix`
+  `postPatch` assertion). Patches 0018 (9p), 0019 (console), 0020 (vsock) each insert
+  into the SAME enum + `virtio_wasm_transport_init()` regions of
+  `drivers/virtio/virtio_wasm.c`. When `drivers/virtio/virtio_wasm.c` (created by
+  0013) drifts, `patch`'s fuzzy matching can SILENTLY mis-apply a stacked hunk — no
+  reject, no error. This bit hard: a ~65-line drift made `patch` silently DROP 0018's
+  `VW_DEV_9P_ROOT/9P_NIXCACHE` `virtio_wasm_register()` calls and (0020, authored
+  pre-0019) land `VW_DEV_VSOCK` before `VW_DEV_CONSOLE` (CONSOLE 6→8). The guest then
+  registered every virtio device EXCEPT 9P, so `9pnet_virtio: no channels available
+  for device pcroot/nixcache` — the pc VFS root + /nix-cache never mounted (a nix:true
+  boot reached a shell but `nix` couldn't read /nix-cache). It went unseen because no
+  CI booted nix:true headless (the wayland browser path differs). Fix: keep these
+  patches regenerated against the current tree (`patch -p1 --fuzz=0` must apply all of
+  0017-0020 cleanly), and the `kernel.nix` `postPatch` assertion now dumps + checks
+  the post-patch enum order + every device registration, failing the build LOUDLY in
+  `patchPhase` instead of shipping a subtly-broken kernel. Runtime gate: the
+  `nix-boot-smoke` CI job (`smoke.mjs` — reads `/mnt/pc` + `nix-env -iA`) exercises
+  both 9P channels end to end.
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

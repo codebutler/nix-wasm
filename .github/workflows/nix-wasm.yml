@@ -28,6 +28,10 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      # The boot-smoke / nix-boot-smoke jobs run the runtime engine + the
+      # demo/node smoke scripts, so a change to either must re-validate them
+      # (kernel/toolchain substitute from Cachix when their inputs are unchanged).
+      - 'runtime/**'
       - '.rebuild-request'
       - '.github/workflows/nix-wasm.yml'
   pull_request:
@@ -36,6 +40,7 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      - 'runtime/**'
       - '.github/workflows/nix-wasm.yml'
   workflow_dispatch:
 
@@ -241,3 +246,84 @@ jobs:
           # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
           # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
           run_smoke demo/node/vsock-ctl-smoke.mjs
+
+  # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
+  # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
+  # both carried over virtio-9p). It is the runtime regression gate for the
+  # virtio-device-enum patch fix: if patches 0017-0020 ever drop the 9P device
+  # registration again (a silent patch-fuzz hazard the kernel.nix build-time
+  # assertion already guards), `9pnet_virtio` finds "no channels available for
+  # device pcroot/nixcache" and this boot fails. smoke.mjs reads /mnt/pc (pcroot
+  # 9P) and runs `nix-env -iA make` (nixcache 9P substitution) — exercising BOTH
+  # 9P channels end to end. Needs the four nix:true artifacts (kernel + initramfs +
+  # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
+  # pushed to Cachix first and this job substitutes them.
+  nix-boot-smoke:
+    name: boot full nix system + 9P transport smoke
+    needs: [toolchain, artifacts]
+    runs-on: namespace-profile-default
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Assemble the nix:true artifact dir the harness reads (vmlinux.wasm,
+      # initramfs.cpio.gz, base.squashfs, nix-cache/). nix-cache/ is the
+      # .#wasm-binary-cache tree (served by nix-cache.js over file:// path fetches;
+      # readFile follows the store symlinks).
+      - name: Assemble nix:true artifacts (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts-nix
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-nix/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-nix/initramfs.cpio.gz
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+            .artifacts-nix/base.squashfs
+          ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
+            .artifacts-nix/nix-cache
+          ls -lL .artifacts-nix
+
+      - name: Install runtime deps
+        working-directory: runtime
+        run: bun install --frozen-lockfile
+
+      # nix:true boots panic occasionally (exit 2) — retry; 0 pass / 1 fail are
+      # terminal. Gating: a 9P-transport regression fails the job.
+      - name: Boot full nix system + 9P smoke
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix/
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::smoke.mjs (attempt $attempt)"
+            set +e
+            node demo/node/smoke.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] && exit 0
+            [ "$rc" -eq 2 ] && { echo "inconclusive (boot panic) — retrying"; continue; }
+            exit "$rc"
+          done
+          echo "still inconclusive after 3 attempts"
+          exit 2
