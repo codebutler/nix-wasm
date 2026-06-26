@@ -1,6 +1,6 @@
 // smoke.mjs — boots ONCE with the full nix-system wiring and runs the cheap
 // per-boot assertions:
-//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make.
+//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make-wasm32.
 // The LINUX_WASM_ARTIFACTS nix-cache/ must be the .#wasm-binary-cache output
 // (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
@@ -63,12 +63,15 @@ try {
   check(await s.waitForOutput(/smoke-wtest\.txt/), "ls lists the written file");
 
   // nix-system: substitute a package from the committed binary cache.
-  // Use `make` (lightweight; in .#wasm-binary-cache pkgs.nix) as the smoke
-  // substitution package — the full install+compile proof is in devtools-e2e.mjs.
-  s.send("nix-env -iA make 2>&1; echo NIX_MAKE_RC=$?\n");
+  // Use `make-wasm32` (lightweight pdpmake; in .#wasm-binary-cache pkgs.nix) as the
+  // smoke substitution package — the full install+compile proof is in devtools-e2e.mjs.
+  // The catalog attrs are `lib.getName`-derived (#79), so this is `make-wasm32`, not
+  // `make` (the stale `make` attr is what nix-boot-smoke caught when it was first run
+  // in CI — see #88).
+  s.send("nix-env -iA make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, 180000),
-    "nix-env -iA make substitutes from the cache",
+    "nix-env -iA make-wasm32 substitutes from the cache",
   );
 } finally {
   if (!pass) console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));
