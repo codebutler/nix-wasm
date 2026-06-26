@@ -1,0 +1,22 @@
+.superpowers/sdd/task-7-report.md
+  s_cd1a77be509bb9::t_a11f64f3be5056 1-162
+  s_cd1a77be509bb9::t_bc5e5040799f30 163-268
+patches/sommelier/0001-posix-spawn.patch
+  s_cd1a77be509bb9::t_59ace51bbe5731 1-2,11,16-29,38-39,41-97,99-107,111-112,114-119,122-131,133-135,137-141,151,160-162,176,181-185,195,291-292,298,307-309,312-314,353,364,380,382,412-413,415-416,418,421-424,427,435,437,442,449,451-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "6fd2b94e0c6104d65cd8bc09b6abd80797c58261",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
