@@ -1,0 +1,54 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] busybox: timeout — don't mutate the shared parent argv (#35)
+
+Applies on top of 0004 (which spawns timeout's watcher child clone-with-a-fn).
+
+busybox NOMMU `timeout` spawns a watcher child that re-execs itself as the
+grandchild with an extra `-pPID` arg, then the parent execs PROG. Stock busybox
+does this with a real vfork: the child mutates the SHARED argv to
+`["timeout","SECS","-pPID"]`, re-execs, and the (frozen-until-exec) parent then
+restores argv[optind]/[optind+1] and execs PROG. The ordering is exact because
+vfork suspends the parent until the child execs.
+
+0004 ported the watcher spawn to clone(CLONE_VM|CLONE_VFORK|SIGCHLD). CLONE_VM
+shares the argv array just like vfork, but the mutate-in-the-child /
+restore-in-the-parent dance does not survive the port: on the wasm guest the
+parent ends up running BB_EXECVP_or_die() on the still-mutated argv, so
+`timeout 2 sleep 10` fails immediately with
+
+    timeout: can't execute '-p50': No such file or directory
+
+(the parent execs the watcher's `-pPID` instead of `sleep`). This is issue #35's
+real failure — NOT the async-SIGALRM/signal-delivery gap it was first filed as
+(the kernel async-signal path is proven good by .#sigalrm-test and
+.#kill-wake-test).
+
+Fix: the clone child builds a PRIVATE argv copy for the re-exec and never writes
+the shared parent argv, so the parent's post-CLONE_VFORK exec of PROG is always
+correct regardless of CLONE_VM sharing or scheduling order. The parent's
+existing argv[0]=sv1/argv[1]=sv2 restore becomes a harmless no-op.
+
+diff -ruN a/coreutils/timeout.c b/coreutils/timeout.c
+--- a/coreutils/timeout.c
++++ b/coreutils/timeout.c
+@@ -57,9 +57,17 @@
+ static int timeout_child(void *arg)
+ {
+ 	struct timeout_child_args *a = arg;
+-	a->argv[a->optind] = xasprintf("-p%u", (unsigned)getppid());
+-	a->argv[a->optind + 1] = NULL;
+-	bb_daemonize_or_rexec(0, a->argv);
++	/* Build a PRIVATE argv for the watcher re-exec instead of mutating the
++	 * parent's. clone(CLONE_VM) shares the argv array, so overwriting
++	 * argv[optind] with "-pPID" also corrupts the PARENT's argv — and the
++	 * parent then BB_EXECVP_or_die()s "-pPID" instead of PROG ("can't execute
++	 * '-pNN'", issue #35) rather than the program it was asked to run. A copy
++	 * keeps the parent's argv pristine, so its post-CLONE_VFORK exec is correct. */
++	int n = a->optind;
++	char **cargv = xzalloc((n + 2) * sizeof(cargv[0]));
++	memcpy(cargv, a->argv, n * sizeof(cargv[0]));
++	cargv[n] = xasprintf("-p%u", (unsigned)getppid());
++	bb_daemonize_or_rexec(0, cargv);
+ 	return 0; /* not reached (bb_daemonize_or_rexec _exits this child) */
+ }
+ #endif
