@@ -1,13 +1,27 @@
 # binary-cache.nix — the on-demand packages (compiler toolchain + demo pkgs)
 # published as a STANDARD Nix binary cache (nix-cache-info + narinfo + nar/),
-# served by runtime/nix-cache.js and substituted in-guest via `nix-env -iA`
-# exactly as real Nix does (#43 / folds in #2 + #1). The compiler tools are NOT
-# in the base squashfs; they arrive here, on demand.
+# served by runtime/nix-cache.js and substituted in-guest, exactly as real Nix
+# does against cache.nixos.org. The compiler tools are NOT in the base squashfs;
+# they arrive here, on demand.
 #
 # pkgs     — the NATIVE host pkgs (mkBinaryCache, runCommand, writeText, lib)
 # devPaths — the wasm toolchain DERIVATIONS (guestClang, guestCc, guestCxx,
-#            makeWasm). The pkgs.nix index is GENERATED from these — one attr per
+#            makeWasm). The pkgs.nix catalog is GENERATED from these — one attr per
 #            package, named by its real `lib.getName` (no hand-written aliases).
+#
+# REAL-NIXOS MODEL (codebutler/nix-wasm#1): the catalog entries are REAL
+# derivations (they carry the real `drvPath`, not just an `outPath`), and the cache
+# serves both the OUTPUT closures AND the DERIVER (.drv) closures — so the guest's
+# Nix reads each package's actual derivation and substitutes its already-built
+# output, identical to how a normal machine installs from cache.nixos.org. The two
+# pieces that make this work on the network-less guest, neither of which is a
+# bespoke workaround:
+#   • `substitute = true` in the guest nix.conf (userspace/system.nix) — the new
+#     CLI (`nix profile`/`nix build`) otherwise disables substitution when its
+#     Internet probe fails, even for a `file://` cache that needs no network.
+#   • the .drv closures below — so `nix profile install` can read the deriver and
+#     the stock DerivationGoal substitutes the cache-valid output WITHOUT building.
+# `nix-env -iA <name>` and `nix profile install <name>` both work against this.
 {
   pkgs,
   devPaths,
@@ -18,27 +32,43 @@ let
   # Build the binary cache using the nixpkgs-blessed builder. It uses
   # exportReferencesGraph to compute full closures inside the sandbox — no
   # in-sandbox `nix copy` needed. Produces: nix-cache-info + *.narinfo + nar/*.nar.zst.
-  # NOTE: mkBinaryCache's make-binary-cache.py does NOT emit a Deriver: line,
-  # so narinfo will NOT carry Deriver fields (known gap; `nix profile install` won't
-  # accept these paths, but `nix-env -iA` works fine — see codebutler/nix-wasm#1).
+  #
+  # rootPaths includes BOTH the package OUTPUTS and their DERIVERS (`d.drvPath`), so
+  # the cache serves the .drv files (+ their input-derivation/source closure) as
+  # well as the outputs. `nix profile install` forms a Built{drvPath} from the
+  # catalog, substitutes the .drv to read it, then — since the output narinfo is
+  # also here — substitutes the prebuilt output instead of building (verified
+  # against the Nix 2.34 DerivationGoal: a cache-valid output short-circuits the
+  # build). On the host the .drvs are already instantiated, so adding them to the
+  # closure is just more paths to copy, not a build.
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
-    rootPaths = devPaths;
+    rootPaths = devPaths ++ map (drv: drv.drvPath) devPaths;
   };
 
-  # pkgs.nix — the guest's package catalog, i.e. its channel-substitute: the guest
-  # ships no nixpkgs and cannot build (substitute-only), so `nix-env -iA <name>`
-  # resolves against THIS list of the prebuilt, substitutable packages in the
-  # cache. bootstrap.nix copies /nix-cache/pkgs.nix to ~/.nix-defexpr at boot.
+  # pkgs.nix — the guest's package catalog (its channel substitute). The guest
+  # ships no nixpkgs to evaluate, so this generated attrset stands in for one:
+  # `nix-env -iA <name>` / `nix profile install -f /nix-cache/pkgs.nix <name>`
+  # resolve a package against it. bootstrap.nix copies it to ~/.nix-defexpr at boot.
   #
-  # GENERATED from devPaths — nothing is hand-declared: one attr per package,
-  # named by the package's real `lib.getName` (e.g. `guest-cc`, `make-wasm32`),
-  # as a "fake derivation" (type="derivation" + name + outPath) because a bare
-  # `builtins.storePath` is a path, not a derivation, and nix-env rejects it.
+  # GENERATED from devPaths — one attr per package, named by its real
+  # `lib.getName` (e.g. `guest-cc`, `make-wasm32`). Each entry is a REAL derivation
+  # value: `type = "derivation"` + name + system + the real `drvPath` + `outPath` +
+  # outputs — the same shape Nix's own generated channel/manifest expressions use.
+  # The earlier catalog omitted `drvPath` (an "outPath-only fake derivation"), which
+  # is exactly why `nix profile install` rejected it with "is not a derivation";
+  # carrying the real drvPath makes it a normal derivation both CLIs accept.
+  #
+  # drvPath/outPath are emitted as plain store-path strings (not `builtins.storePath`)
+  # so guest evaluation never has to realise them up front — Nix coerces + substitutes
+  # them lazily when it actually installs, the same way the outPath has always been
+  # carried. The paths come from the SAME drv objects the cache is built from, so the
+  # catalog and the cache can never disagree on a hash.
   entry =
     drv:
     "  ${lib.getName drv} = { "
     + ''type = "derivation"; name = "${drv.name}"; system = "wasm32-linux"; ''
+    + ''drvPath = "${drv.drvPath}"; ''
     + ''outPath = "${drv.outPath}"; out = { outPath = "${drv.outPath}"; }; outputs = [ "out" ]; };'';
   pkgsNix = pkgs.writeText "pkgs.nix" ''
     {
@@ -60,6 +90,6 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   for f in ${rawCache}/*; do
     ln -s "$f" "$out/$(basename "$f")"
   done
-  # Add the pkgs.nix index so the guest's ~/.nix-defexpr resolves `nix-env -iA`.
+  # Add the pkgs.nix catalog so the guest's ~/.nix-defexpr resolves installs.
   cp ${pkgsNix} "$out/pkgs.nix"
 ''

@@ -1,28 +1,29 @@
-// profile-install-e2e.mjs — issue #1 reproducer: attempt `nix profile install`
-// (not just `nix-env -iA`) of the compiler toolchain from the binary cache.
+// profile-install-e2e.mjs — issue #1 validator: `nix profile install` (the new
+// CLI, not just `nix-env -iA`) of the compiler toolchain from the binary cache.
 //
-// STATUS: BLOCKED (documented, not in any CI gate). `nix profile install`
-// resolves an installable to a `Built{drv, outputs}` derived path and records
-// the DERIVER in the profile manifest, so it must obtain + REALISE the `.drv`.
-// Realising an input-addressed derivation whose output is not already valid
-// forces nix to BUILD it from its input-derivation OUTPUTS (xgcc, perl, bash,
-// stdenv, python, zstd, zlib-ng — the NATIVE x86_64 build toolchain). On the
-// network-less NOMMU wasm guest those native outputs are neither substitutable
-// (the cache ships only the wasm output closures + the .drv NARs, not the native
-// build-input outputs) nor runnable (x86_64 binaries can't execute on wasm), so
-// the build fails with "Cannot build '…xgcc-15.2.0.drv'. … 1 dependency failed".
-// Even pre-substituting BOTH the .drv AND the output into the local store does
-// not help: `nix profile install -f` still re-obtains the deriver and walks the
-// build graph. There is no flag to make `nix profile` substitute-the-output and
-// skip the deriver build for an input-addressed drv. Conversely, MAKING the
-// deriver resolvable (shipping the .drv NARs + a drvPath in pkgs.nix) REGRESSES
-// the working `nix-env -iA` path — it then also follows the deriver and tries to
-// build xgcc. So the output-only cache (no .drv, no Deriver) is kept; #1 stays
-// open. See .superpowers/sdd/task-10-report.md for the full transcript.
+// STATUS: FIXED — expected to PASS. The ticket was misdiagnosed for a long time
+// (the "nix profile realises the deriver / builds xgcc" theory). The actual root
+// cause is in src/nix/main.cc: the NEW nix CLI probes for Internet and, finding
+// none on the network-less guest, sets `useSubstitutes = false` unless the setting
+// was explicitly overridden — silently disabling ALL substitution. Our only
+// substituter is `file:///nix-cache`, which needs no network, so that default is
+// wrong here. With substitution off, `nix profile install` could not substitute
+// the already-cached output and FELL BACK to building the deriver (hence the
+// xgcc-build symptom). `nix-env -iA` is a separate entry point that skips the
+// probe, which is why only the new CLI was ever affected.
 //
-// This script is the reproducer for that diagnosis; it is EXPECTED TO FAIL on
-// the current guest. It is intentionally NOT named *.test.mjs and is not run by
-// `node --test demo/node/` — run it manually to reproduce the #1 blocker.
+// The real-NixOS fix, no hacks / no nix source patch:
+//   • `substitute = true` in the guest nix.conf (userspace/system.nix) marks the
+//     setting overridden, so the offline path leaves substitution ON.
+//   • the catalog (pkgs.nix) entries are REAL derivations (carry the real drvPath),
+//     and the cache serves the .drv closures as well as the outputs — so
+//     `nix profile install` reads the deriver and the stock DerivationGoal
+//     substitutes the cache-valid output WITHOUT building. Exactly like installing
+//     from cache.nixos.org. (userspace/binary-cache.nix)
+//
+// Like smoke.mjs, a full nix:true boot is heavy; run manually after building the
+// artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
+//   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/profile-install-e2e.mjs
 //
 // Steps:
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
@@ -33,7 +34,8 @@
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
-// where nix-cache/ is the DERIVATION-AWARE cache from build-artifacts.sh.
+// where nix-cache/ is the .#wasm-binary-cache tree (real derivations + .drv
+// closures) and base.squashfs carries the guest nix.conf with `substitute = true`.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
 import { bootNode } from "./boot-node.mjs";
