@@ -9,22 +9,21 @@
 #            makeWasm). The catalogs below are GENERATED from these — one attr per
 #            package, named by its real `lib.getName` (no hand-written aliases).
 #
-# REAL-NIXOS MODEL (codebutler/nix-wasm#1): the cache serves package OUTPUTS only;
-# the guest substitutes a prebuilt output and never builds. NO sources and NO .drv
-# files are shipped — exactly like a real machine after it substitutes from
-# cache.nixos.org. Two catalogs sit next to the cache, one per install CLI:
-#   • pkgs.nix — REAL derivation entries (type="derivation" + drvPath + outPath).
-#     `nix-env -iA <name>` needs a derivation; it realises the OUTPUT directly
-#     (Opaque) and substitutes it. This is what the smoke test exercises.
-#   • paths.nix — `builtins.storePath "<outPath>"` entries. The NEW CLI
-#     (`nix profile install -f /nix-cache/paths.nix <name>`) installs a STORE PATH
-#     (Opaque) and substitutes the output. Two catalogs, not one, because the new
-#     CLI turns a derivation value into a Built{drvPath} that needs the .drv
-#     present locally — and Nix NEVER substitutes a .drv from a cache
-#     (src/libstore/misc.cc queryMissing marks a non-local .drv "unknown" → the
-#     #1 "failed to obtain derivation" error). Installing the output path sidesteps
-#     the .drv entirely: it's the genuine "install a prebuilt store path"
-#     operation, source-free and substitute-only.
+# REAL-NIXOS MODEL (codebutler/nix-wasm#1): the cache serves package OUTPUTS and
+# their DERIVER (.drv) closures — exactly like a real machine substituting from
+# cache.nixos.org. The guest never builds. The two install CLIs take DIFFERENT
+# paths through Nix, so there are two catalogs next to the cache:
+#   • pkgs.nix — REAL derivation entries (type="derivation" + drvPath + outPath),
+#     for `nix-env -iA <name>`. nix-env's realisation SUBSTITUTES the .drv from the
+#     cache (then the output) — so the .drv closures MUST be in the cache (that is
+#     why rootPaths below includes the drvPaths). This is the smoke-test path.
+#   • paths.nix — `builtins.storePath "<outPath>"` entries, for the NEW CLI
+#     (`nix profile install -f /nix-cache/paths.nix <name>`). The new CLI turns a
+#     *derivation* into a Built{drvPath} and then can NOT obtain a non-local .drv —
+#     its queryMissing marks it "unknown" (src/libstore/misc.cc → the #1 "failed to
+#     obtain derivation" error), UNLIKE nix-env which substitutes it. So the new
+#     CLI installs the OUTPUT path directly (Opaque), sidestepping the .drv: the
+#     genuine "install a prebuilt store path" operation, source-free.
 # Both require `substitute = true` in the guest nix.conf (userspace/system.nix):
 # the new CLI disables substitution when its Internet probe fails unless the
 # setting is overridden, even for a `file://` cache that needs no network.
@@ -39,25 +38,29 @@ let
   # exportReferencesGraph to compute full closures inside the sandbox — no
   # in-sandbox `nix copy` needed. Produces: nix-cache-info + *.narinfo + nar/*.nar.zst.
   #
-  # rootPaths = the package OUTPUTS (their full runtime closures). The cache
-  # substitutes outputs; no .drv files, no sources. Installing an output path
-  # (Opaque) pulls the package + its closure from here — e.g. `guest-cc`'s closure
-  # includes `guest-clang`, so `cc` finds clang after install.
+  # rootPaths = the package OUTPUTS *and* their DERIVERS (`drv.drvPath`). The
+  # output closures back the Opaque installs (paths.nix / nix profile install) AND
+  # nix-env's output substitution; the .drv closures back nix-env -iA, which
+  # substitutes the .drv from the cache before the output (the new CLI can't, so it
+  # never touches them — see the header). The .drv closures live ONLY here, served
+  # lazily over 9P — NOT baked into base.squashfs (that seeding was the ~6.7 GB
+  # blowup; the cache is fetched on demand, so its size is not a boot cost).
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
-    rootPaths = devPaths;
+    rootPaths = devPaths ++ map (drv: drv.drvPath) devPaths;
   };
 
   # pkgs.nix — the `nix-env -iA <name>` catalog (the guest ships no nixpkgs, so
   # this generated attrset is its channel substitute; bootstrap.nix copies it to
   # ~/.nix-defexpr at boot). One attr per package, named by `lib.getName`
   # (`guest-cc`, `make-wasm32`). Each is a REAL derivation value (type="derivation"
-  # + drvPath + outPath) — nix-env -iA needs a derivation, and realises its OUTPUT
-  # directly (Opaque), substituting it from the cache. (The new CLI can NOT use
-  # this file: it would form a Built{drvPath} and need the .drv locally, which Nix
-  # never substitutes — that is what paths.nix below is for.) Emitted as plain
-  # store-path strings (not builtins.storePath) so eval never realises them up
-  # front; the paths come from the SAME drv objects the cache is built from.
+  # + drvPath + outPath) — nix-env -iA needs a derivation, and its realisation
+  # SUBSTITUTES the .drv from the cache, then the output. (The new CLI can NOT use
+  # this file: it forms a Built{drvPath} and then can't obtain a non-local .drv —
+  # its queryMissing gives up where nix-env substitutes — so it uses paths.nix
+  # below instead.) Emitted as plain store-path strings (not builtins.storePath) so
+  # eval never realises them up front; the paths come from the SAME drv objects the
+  # cache is built from.
   entry =
     drv:
     "  ${lib.getName drv} = { "

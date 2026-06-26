@@ -14,12 +14,12 @@
 //     "<outPath>"`. That resolves to a DerivedPath::Opaque (a store path), so Nix
 //     substitutes the prebuilt OUTPUT (+ its closure, incl. guest-clang) — exactly
 //     like `nix profile install /nix/store/<hash>-guest-cc`. It does NOT go through
-//     the deriver, sidestepping the .drv wall: Nix NEVER substitutes a .drv from a
-//     cache (src/libstore/misc.cc queryMissing marks a non-local .drv "unknown" —
-//     the original "failed to obtain derivation of …guest-cc.drv" error), and
-//     seeding the full .drv closure pulls ~6.7 GB of sources (a real system has no
-//     sources). Installing the output path needs neither. `nix-env -iA` likewise
-//     realises the OUTPUT directly (Opaque) via pkgs.nix — the smoke-test path.
+//     the deriver, sidestepping the .drv wall: the NEW CLI forms a Built{drvPath}
+//     and can NOT obtain a non-local .drv (src/libstore/misc.cc queryMissing marks
+//     it "unknown" — the original "failed to obtain derivation of …guest-cc.drv"
+//     error). (nix-env -iA is different — its realisation DOES substitute the .drv
+//     from the cache; that is why the cache still publishes the .drv closures and
+//     why `smoke.mjs`'s `nix-env -iA make-wasm32` works. The new CLI just can't.)
 //
 // Like smoke.mjs, a full nix:true boot is heavy; run manually after building the
 // artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
@@ -34,8 +34,8 @@
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
-// where nix-cache/ is the .#wasm-binary-cache tree (package OUTPUTS + pkgs.nix +
-// paths.nix) and base.squashfs carries the guest nix.conf with `substitute = true`.
+// where nix-cache/ is the .#wasm-binary-cache tree (OUTPUTS + .drv closures +
+// pkgs.nix + paths.nix) and base.squashfs carries nix.conf with `substitute=true`.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
 import { bootNode } from "./boot-node.mjs";
