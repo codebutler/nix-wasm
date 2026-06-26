@@ -27,9 +27,7 @@ export class EchoDevice extends VirtioWasmDevice {
       const written = vr.writeIn(chain, inv);
       vr.pushUsed(chain.head, written);
       serviced++;
-      this.log(
-        `[virtio-echo] q=${q} head=${chain.head} echoed ${written}B (~tx)`,
-      );
+      this.log(`[virtio-echo] q=${q} head=${chain.head} echoed ${written}B (~tx)`);
     }
 
     if (serviced > 0) this.raiseIrq();
@@ -40,9 +38,25 @@ export class EchoDevice extends VirtioWasmDevice {
  * Back-compat factory used by 1a tests. Builds an EchoDevice and exposes the
  * old { setupQueue, notify } shape.
  */
-export function makeEchoDevice({ memory, raiseInterrupt, dev = 1, irq = 9, onlineCpus, sharedQueues, log }) {
+export function makeEchoDevice({
+  memory,
+  raiseInterrupt,
+  dev = 1,
+  irq = 9,
+  onlineCpus,
+  sharedQueues,
+  log,
+}) {
   const shared = sharedQueues || new SharedQueues(makeSharedQueues());
-  const d = new EchoDevice({ dev, irq, memory, raiseInterrupt, onlineCpus, sharedQueues: shared, log });
+  const d = new EchoDevice({
+    dev,
+    irq,
+    memory,
+    raiseInterrupt,
+    onlineCpus,
+    sharedQueues: shared,
+    log,
+  });
   return {
     device: d,
     setupQueue: (q, desc, avail, used, num) => d.setupQueue(q, desc, avail, used, num),

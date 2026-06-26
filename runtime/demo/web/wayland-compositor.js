@@ -15,10 +15,7 @@
 //     onClose:  (id)        => c.destroyGuestClient(id),
 //   }});
 //   c.setPushIn(handle.pushIn);
-import {
-  initWasm,
-  createCompositorSession,
-} from "./vendor/greenfield/greenfield.mjs";
+import { initWasm, createCompositorSession } from "./vendor/greenfield/greenfield.mjs";
 
 /** @type {Promise<WaylandCompositor> | null} */
 let sessionPromise = null;
@@ -79,13 +76,20 @@ async function boot() {
   // Each surface gets a floating <div class="wl-win"> with a draggable titlebar
   // and a <canvas> body. Windows stack by z-index (click to raise).
 
-  const container = document.getElementById("wl-windows") || (() => {
-    const el = document.createElement("div");
-    el.id = "wl-windows";
-    Object.assign(el.style, { position: "fixed", inset: "0", pointerEvents: "none", zIndex: "10" });
-    document.body.appendChild(el);
-    return el;
-  })();
+  const container =
+    document.getElementById("wl-windows") ||
+    (() => {
+      const el = document.createElement("div");
+      el.id = "wl-windows";
+      Object.assign(el.style, {
+        position: "fixed",
+        inset: "0",
+        pointerEvents: "none",
+        zIndex: "10",
+      });
+      document.body.appendChild(el);
+      return el;
+    })();
 
   // Inject minimal styles once.
   if (!document.getElementById("wl-win-style")) {
@@ -141,8 +145,8 @@ async function boot() {
   function mountSurfaceWindow(record, key) {
     const win = document.createElement("div");
     win.className = "wl-win";
-    win.style.left = (80 + (winCount % 5) * 30) + "px";
-    win.style.top  = (80 + (winCount % 5) * 30) + "px";
+    win.style.left = 80 + (winCount % 5) * 30 + "px";
+    win.style.top = 80 + (winCount % 5) * 30 + "px";
     win.style.zIndex = String(nextZ++);
     winCount++;
 
@@ -158,7 +162,10 @@ async function boot() {
     closeBtn.textContent = "×";
     closeBtn.title = "Close";
     closeBtn.addEventListener("click", () => {
-      if (record.destroying) { win.remove(); return; }
+      if (record.destroying) {
+        win.remove();
+        return;
+      }
       record.destroying = true;
       try {
         session.userShell.actions.requestSurfaceClose(record.cs);
@@ -168,7 +175,9 @@ async function boot() {
       // Safety net in case the guest ignores close.
       setTimeout(() => {
         if (!surfaces.has(key)) return;
-        try { session.userShell.actions.closeClient({ id: record.clientId }); } catch {}
+        try {
+          session.userShell.actions.closeClient({ id: record.clientId });
+        } catch {}
         win.remove();
       }, 2000);
     });
@@ -187,14 +196,20 @@ async function boot() {
     });
     titlebar.addEventListener("pointermove", (ev) => {
       if (!drag) return;
-      win.style.left = (ev.clientX - drag.x) + "px";
-      win.style.top  = (ev.clientY - drag.y) + "px";
+      win.style.left = ev.clientX - drag.x + "px";
+      win.style.top = ev.clientY - drag.y + "px";
     });
-    titlebar.addEventListener("pointerup",   () => { drag = null; });
-    titlebar.addEventListener("pointercancel", () => { drag = null; });
+    titlebar.addEventListener("pointerup", () => {
+      drag = null;
+    });
+    titlebar.addEventListener("pointercancel", () => {
+      drag = null;
+    });
 
     // Click anywhere on the window to raise it.
-    win.addEventListener("pointerdown", () => { win.style.zIndex = String(nextZ++); });
+    win.addEventListener("pointerdown", () => {
+      win.style.zIndex = String(nextZ++);
+    });
 
     // Surface canvas.
     const canvas = document.createElement("canvas");
@@ -227,8 +242,8 @@ async function boot() {
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
     return {
-      x: ((ev.clientX - rect.left) / rect.width)  * canvas.width,
-      y: ((ev.clientY - rect.top)  / rect.height) * canvas.height,
+      x: ((ev.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((ev.clientY - rect.top) / rect.height) * canvas.height,
     };
   }
 
@@ -237,23 +252,36 @@ async function boot() {
     if (!canvas) return;
     const actions = session.userShell.actions;
     const focus = () => {
-      try { actions.activateSurface?.(cs); } catch {}
+      try {
+        actions.activateSurface?.(cs);
+      } catch {}
     };
     canvas.addEventListener("pointermove", (ev) => {
       const p = surfaceCoords(record, ev);
       if (!p) return;
-      try { actions.pointerMotion(cs, p.x, p.y); } catch {}
+      try {
+        actions.pointerMotion(cs, p.x, p.y);
+      } catch {}
     });
     canvas.addEventListener("pointerenter", focus);
-    canvas.addEventListener("pointerdown",  () => { focus(); canvas.focus(); });
+    canvas.addEventListener("pointerdown", () => {
+      focus();
+      canvas.focus();
+    });
     canvas.addEventListener("pointerleave", () => {
-      try { actions.pointerLeave?.(cs); } catch {}
+      try {
+        actions.pointerLeave?.(cs);
+      } catch {}
     });
     canvas.addEventListener("keydown", (ev) => {
-      try { actions.notifyKey(ev, true);  } catch {}
+      try {
+        actions.notifyKey(ev, true);
+      } catch {}
     });
     canvas.addEventListener("keyup", (ev) => {
-      try { actions.notifyKey(ev, false); } catch {}
+      try {
+        actions.notifyKey(ev, false);
+      } catch {}
     });
   }
 
@@ -265,7 +293,10 @@ async function boot() {
     const key = keyOf(compositorSurface);
     if (surfaces.has(key)) return;
     const record = {
-      win: null, canvas: null, ctx: null, pending: [],
+      win: null,
+      canvas: null,
+      ctx: null,
+      pending: [],
       cs: compositorSurface,
       clientId: String(compositorSurface.client?.id),
       destroying: false,
@@ -375,7 +406,9 @@ async function boot() {
   function destroyGuestClient(clientId) {
     const key = String(clientId);
     guestClients.delete(key);
-    try { session.userShell.actions.closeClient({ id: key }); } catch {}
+    try {
+      session.userShell.actions.closeClient({ id: key });
+    } catch {}
     for (const [k, rec] of surfaces) {
       if (rec.clientId !== key) continue;
       surfaces.delete(k);
@@ -389,7 +422,9 @@ async function boot() {
   const compositor = {
     feedFromGuest,
     destroyGuestClient,
-    setPushIn(fn) { pushIn = fn; },
+    setPushIn(fn) {
+      pushIn = fn;
+    },
   };
   return compositor;
 }
@@ -405,7 +440,9 @@ function makeGuestInputOutput() {
       const bytes = new Uint8Array(await data.arrayBuffer());
       return makeCarrier(bytes);
     },
-    async mkfifo() { throw new Error("[wayland] mkfifo unsupported"); },
+    async mkfifo() {
+      throw new Error("[wayland] mkfifo unsupported");
+    },
     wrapFD(fd) {
       if (fd instanceof Uint8Array) return makeCarrier(fd);
       throw new Error("[wayland] wrapFD unsupported");
@@ -417,9 +454,15 @@ function makeCarrier(bytes) {
   const carrier = {
     [GUEST_FD_TAG]: bytes,
     async write() {},
-    async read()       { return new Blob([bytes]); },
-    async readBlob()   { return new Blob([bytes]); },
-    async readStream() { return new Blob([bytes]).stream(); },
+    async read() {
+      return new Blob([bytes]);
+    },
+    async readBlob() {
+      return new Blob([bytes]);
+    },
+    async readStream() {
+      return new Blob([bytes]).stream();
+    },
     async close() {},
   };
   carrier.fd = carrier;
