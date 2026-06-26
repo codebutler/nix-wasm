@@ -35,6 +35,7 @@ try {
   console.log("── wltest transcript ──");
   for (const l of out.split("\n")) {
     if (/wltest:|RESULT virtio_wl|WLDONE=/.test(l)) {
+      // eslint-disable-next-line no-control-regex -- intentional: strip ANSI escape sequences
       console.log("  " + l.replace(/\x1b\[[0-9;]*m/g, "").trim());
     }
   }
@@ -44,7 +45,9 @@ try {
 
   if (/RESULT virtio_wl PASS/.test(out)) {
     code = 0;
-    console.log("[virtio-wl-spike] PASS — /dev/wl0 NEW_CTX round-trip reached the JS device and returned");
+    console.log(
+      "[virtio-wl-spike] PASS — /dev/wl0 NEW_CTX round-trip reached the JS device and returned",
+    );
   } else if (/RESULT virtio_wl FAIL/.test(out)) {
     code = 1;
     console.log("[virtio-wl-spike] FAIL — see RESULT line above");

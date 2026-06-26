@@ -206,7 +206,11 @@ export class WlDevice extends VirtioWasmDevice {
    *    single VFD_RECV — the same wire contract the OUT path used to build. */
   injectIn(clientId, data, fds) {
     const id = clientId >>> 0;
-    const bytes = data ? (data instanceof Uint8Array ? data : new Uint8Array(data)) : new Uint8Array(0);
+    const bytes = data
+      ? data instanceof Uint8Array
+        ? data
+        : new Uint8Array(data)
+      : new Uint8Array(0);
     if (fds && fds.length) {
       for (const msg of this._buildFdDelivery(id, bytes, fds)) this._queueRaw(msg);
     } else {
@@ -359,7 +363,7 @@ export class WlDevice extends VirtioWasmDevice {
           const obj = ddv.getUint32(o, true);
           const so = ddv.getUint32(o + 4, true);
           parts.push(`obj=${obj} ev=${so & 0xffff} sz=${so >>> 16}`);
-          if ((so >>> 16) < 8) break;
+          if (so >>> 16 < 8) break;
           o += so >>> 16;
         }
         this.log(`[virtio-wl]   IN wire: ${parts.join(" | ")}`);
@@ -403,7 +407,9 @@ export class WlDevice extends VirtioWasmDevice {
     const msgs = [];
     const ids = [];
     for (const payload of fdPayloads) {
-      const id = (VFD_HOST_ID_BIT | (this._nextHostVfdId++ & ~(VFD_HOST_ID_BIT | VFD_ILLEGAL_SIGN_BIT))) >>> 0;
+      const id =
+        (VFD_HOST_ID_BIT | (this._nextHostVfdId++ & ~(VFD_HOST_ID_BIT | VFD_ILLEGAL_SIGN_BIT))) >>>
+        0;
       ids.push(id);
       msgs.push(this._vfdNewHost(id, payload.length));
     }

@@ -1,15 +1,10 @@
 name: runtime-gates
 
-# Phase 5 (#2): the runtime/ engine static gates. Fast (no Nix, no artifacts) —
-# runs on every change under runtime/. Covers the two gates that are green on a
-# clean checkout with the pinned tooling: the engine unit tests (bun:test, 72/0)
-# and the tsc typecheck.
-#
-# `lint` (oxlint) and `format:check` (oxfmt) are intentionally NOT wired here yet:
-# on a clean checkout they are red on pre-existing debt (vendored bundles under
-# demo/web/vendor/ aren't excluded, and several committed source files don't match
-# oxfmt 0.52.0 defaults — the repo ships no oxfmt/oxlint config). That cleanup is
-# separate from this issue; wiring a knowingly-red gate would just block every PR.
+# The runtime/ engine static gates. Fast (no Nix, no artifacts) — runs on every
+# change under runtime/. All four CLAUDE.md gates: engine unit tests (bun:test),
+# tsc typecheck, oxlint, and oxfmt --check. The vendored bundles under
+# demo/web/vendor/ are excluded via .prettierignore (oxfmt) and .oxlintrc.json
+# (oxlint); *.test.js are excluded from the tsc include (they import "bun:test").
 on:
   push:
     branches: [master, 'claude/**']
@@ -24,7 +19,7 @@ on:
 
 jobs:
   gates:
-    name: engine tests + typecheck
+    name: engine tests + typecheck + lint + format
     # Namespace small runner — keeps this off GitHub-hosted minutes (private repo).
     runs-on: namespace-profile-default
     timeout-minutes: 15
@@ -47,3 +42,11 @@ jobs:
       # (they import "bun:test", which tsc can't resolve) — see jsconfig.json.
       - name: Typecheck
         run: bun run typecheck
+
+      # oxlint --max-warnings 0 (vendored dirs excluded via .oxlintrc.json).
+      - name: Lint
+        run: bun run lint
+
+      # oxfmt --check (vendored dirs excluded via .prettierignore).
+      - name: Format check
+        run: bun run format:check

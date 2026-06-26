@@ -51,7 +51,13 @@ function makeDevice(extra = {}) {
     irq: 8,
     memory: new WebAssembly.Memory({ initial: 4, maximum: 4, shared: true }),
     raiseInterrupt: () => {},
-    sharedQueues: { set() {}, get: () => null, clear() {}, loadLastAvail: () => 0, storeLastAvail() {} },
+    sharedQueues: {
+      set() {},
+      get: () => null,
+      clear() {},
+      loadLastAvail: () => 0,
+      storeLastAvail() {},
+    },
     log: () => {},
     ...extra,
   });
@@ -95,7 +101,9 @@ test("without a bridge, VFD_SEND falls back to the WlServer stub (Phase 1, still
 
 test("NEW_ALLOC records a shm region; SEND with that vfd yields a Uint8Array fd view", () => {
   const out = [];
-  const dev = makeDevice({ waylandBridge: { sendOut: (cid, data, fds) => out.push({ cid, data, fds }) } });
+  const dev = makeDevice({
+    waylandBridge: { sendOut: (cid, data, fds) => out.push({ cid, data, fds }) },
+  });
   // Allocate a shm vfd. The guest passes its physical pfn (2 → offset 8192,
   // within the 4-page test memory); the host returns RESP_VFD_NEW and records a
   // region over pfn*4096. This is the driver's NEW_ALLOC pfn contract (2c).
