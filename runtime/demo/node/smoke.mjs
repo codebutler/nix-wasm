@@ -33,7 +33,21 @@ try {
     throw e;
   }
   check(reached, "shell prompt reached");
-  check(/9pnet: Installing 9P2000 support/.test(s.snapshot()), "9P core registered");
+  // The 9P-over-virtio transport negotiated a mount (printed per mount when the
+  // guest clamps msize to the device max). This gates the #87 regression — if the
+  // 9P virtio devices fail to register there is no mount and this line never prints
+  // — and it is robust to the #83 console change: stock virtio-console attaches
+  // hvc0 LATER than the retired hvc_wasm (no earlycon / hvc_instantiate, so the
+  // pre-attach boot-log buffer is not replayed), which drops the earlier
+  // "9pnet: Installing 9P2000 support" core-init line from the console. The
+  // msize-clamp line is printed at boot mount time, after hvc0 is up, so it is
+  // console-visible — and proves the *virtio* transport specifically, not just the
+  // 9P protocol core. (9P function is independently proven by the read/write checks
+  // below.)
+  check(
+    /9pnet:.*Limiting 'msize'.*supported by transport virtio/.test(s.snapshot()),
+    "9P-over-virtio transport mounted",
+  );
 
   // read path
   s.send("cat /mnt/pc/Home/pc-9p-proof.txt\n");
