@@ -1,0 +1,15 @@
+# nix-wasm PR-preview Worker. Deploy once with `wrangler deploy` (see README.md).
+# Serves the nix-wasm-previews R2 bucket with cross-origin-isolation headers.
+name = "nix-wasm-previews"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# workers.dev subdomain is fine; preview URL is
+# https://nix-wasm-previews.<subdomain>.workers.dev/pr-<N>/demo/web/
+# (Must stay above the [[r2_buckets]] table -- TOML tables capture every
+# top-level key that follows them.)
+workers_dev = true
+
+[[r2_buckets]]
+binding = "PREVIEWS"
+bucket_name = "nix-wasm-previews"

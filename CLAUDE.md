@@ -135,6 +135,15 @@ end-to-end republish runbook lives in pc's `vendor/linux-wasm/SOURCE.md` §
 (via `userspace/init.nix → toplevel.nix → base-squashfs.nix`), **not** the
 initramfs — an `init.nix` change republishes via `.#linux-image`'s squashfs member.
 
+**PR previews:** every same-repo PR gets a browser preview that boots *that PR's*
+guest — `.github/workflows/pr-preview.yml` builds the 3 boot artifacts (toolchain
+substituted from the `nix-wasm` Cachix cache), content-addresses them into the
+`nix-wasm-previews` R2 bucket's `cas/<buildhash>/`, rclone-syncs the `runtime/`
+frontend into `pr-<N>/`, and comments `${PREVIEW_BASE_URL}/pr-<N>/demo/web/`. The
+served Worker (`infra/preview-worker/`) stamps COOP/COEP. Boot artifacts only —
+the guest `nix-cache/` substituter stays #2's concern. Setup runbook:
+`infra/preview-worker/README.md`.
+
 Run these from the **runtime/** directory:
 
 ```sh

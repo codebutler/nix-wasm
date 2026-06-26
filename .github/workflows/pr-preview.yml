@@ -1,0 +1,119 @@
+name: Deploy PR preview
+
+# Boots this PR's freshly-built guest in the browser. The deploy job builds the
+# 3 boot artifacts (toolchain substituted from the nix-wasm Cachix cache),
+# content-addresses them into cas/<buildhash>/, syncs the runtime/ frontend into
+# pr-<N>/, and comments the URL. Teardown purges pr-<N>/ on close.
+#
+# pull_request_target (not pull_request) so the workflow runs from master's copy
+# with secrets available. Unlike pc, this job EXECUTES PR build code (nix build),
+# so the deploy job is fork-guarded to same-repo PRs (the repo is single-owner).
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed]
+
+concurrency:
+  group: pr-preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  PR: ${{ github.event.number }}
+  PREVIEW_BUCKET: nix-wasm-previews
+  RCLONE_CONFIG_R2_TYPE: s3
+  RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+  RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+  RCLONE_CONFIG_R2_ACL: private
+
+jobs:
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: namespace-profile-default
+    steps:
+      - name: Check provisioning
+        id: cfg
+        env:
+          KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$KEY" ]; then echo "configured=true" >> "$GITHUB_OUTPUT";
+          else echo "configured=false" >> "$GITHUB_OUTPUT"; echo "::notice::R2 secrets unset — skipping teardown."; fi
+      - name: Install rclone
+        if: steps.cfg.outputs.configured == 'true'
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+      - name: Purge pr-${{ env.PR }}/
+        if: steps.cfg.outputs.configured == 'true'
+        run: rclone purge "r2:${PREVIEW_BUCKET}/pr-${PR}" --s3-no-check-bucket --retries 1 --low-level-retries 1 --contimeout 15s || true
+      - name: Comment teardown
+        if: steps.cfg.outputs.configured == 'true'
+        uses: actions/github-script@v7.0.1
+        with:
+          script: |
+            const marker = '<!-- nix-wasm-preview -->';
+            const body = `${marker}\n🧹 Preview for this PR was torn down.`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: process.env.PR });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+
+  deploy:
+    # Skip on close; skip fork PRs (their build code must never run with secrets).
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: namespace-profile-default
+    timeout-minutes: 180
+    steps:
+      - name: Check provisioning
+        id: cfg
+        env:
+          KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$KEY" ]; then echo "configured=true" >> "$GITHUB_OUTPUT";
+          else echo "configured=false" >> "$GITHUB_OUTPUT"; echo "::notice::R2 secrets unset — skipping preview deploy. See infra/preview-worker/README.md."; fi
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v27
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v15
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      - name: Install rclone
+        if: steps.cfg.outputs.configured == 'true'
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+      - name: Build + publish preview
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          PR_COMMIT: ${{ github.event.pull_request.head.sha }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: bash scripts/preview-publish.sh "${PR}"
+      - name: Comment preview link
+        if: steps.cfg.outputs.configured == 'true'
+        uses: actions/github-script@v7.0.1
+        env:
+          PREVIEW_BASE_URL: ${{ vars.PREVIEW_BASE_URL }}
+          PR_COMMIT: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const base = process.env.PREVIEW_BASE_URL;
+            if (!base) { core.warning('PREVIEW_BASE_URL repo variable is unset'); return; }
+            const url = `${base.replace(/\/+$/,'')}/pr-${process.env.PR}/demo/web/`;
+            const marker = '<!-- nix-wasm-preview -->';
+            const sha = (process.env.PR_COMMIT || '').slice(0, 8);
+            const body = `${marker}\n🚀 **Preview ready:** ${url}\n\n<sub>Boots this PR's guest (commit \`${sha}\`) in the browser · updated on every push.</sub>`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: process.env.PR });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: process.env.PR, body });

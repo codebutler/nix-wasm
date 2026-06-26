@@ -1,0 +1,50 @@
+name: Deploy preview Worker
+
+# Deploys infra/preview-worker (the R2 preview server) to Cloudflare. Run once
+# manually to obtain the *.workers.dev URL (set it as the PREVIEW_BASE_URL repo
+# variable), then it re-deploys whenever the Worker source changes on master.
+# Requires CLOUDFLARE_API_TOKEN (Edit Workers) + CLOUDFLARE_ACCOUNT_ID.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "infra/preview-worker/**"
+      - ".github/workflows/deploy-preview-worker.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-preview-worker
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: namespace-profile-default
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Run Worker unit tests
+        working-directory: infra/preview-worker
+        run: node --test src/index.test.js
+      - name: Deploy Worker
+        working-directory: infra/preview-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set. Create an 'Edit Cloudflare Workers' token and add it as a repo secret."
+            exit 1
+          fi
+          bunx wrangler deploy 2>&1 | tee deploy.log
+          url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)"
+          {
+            echo "## Preview Worker deployed"
+            echo ""
+            echo "**Base URL:** \`${url:-<url not found>}\`"
+            echo ""
+            echo "Set this as the repo variable **\`PREVIEW_BASE_URL\`** (Settings → Secrets and variables → Actions → Variables)."
+          } >> "$GITHUB_STEP_SUMMARY"
