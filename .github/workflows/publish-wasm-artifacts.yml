@@ -7,9 +7,15 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest        # x86_64-linux: cache.nixos.org has full nixos-26.05 cache
+    # Namespace small runner (x86_64) — substitutes the closure from Cachix and
+    # uploads to R2, so the default profile suffices; stays off GitHub-hosted
+    # minutes (private repo). cache.nixos.org still serves the native deps.
+    runs-on: namespace-profile-default
     steps:
       - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
 
       # Install Nix with the nixos-26.05 channel pin. This matches the project's
       # CI caching strategy: 26.05 has a complete x86_64 binary cache (including
@@ -20,6 +26,14 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+
+      # Substitute the wasm artifacts (incl. guest-clang/kernel) from the Cachix
+      # cache the nix-wasm build CI populated — so this publish job copies prebuilt
+      # store paths instead of rebuilding LLVM from source (Phase 5 #2).
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       # Install bun so `bunx wrangler` is available in publish-to-r2.sh.
       - uses: oven-sh/setup-bun@v2

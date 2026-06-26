@@ -15,8 +15,14 @@
 
   outputs = { self, nixpkgs, weston }:
     let
-      system = "aarch64-linux";
-      pkgs = import nixpkgs { inherit system; };
+      # Phase 5 (#2): evaluate the whole package set per build host so CI can build
+      # on x86_64-linux (fully-cached nixpkgs + Cachix) while local dev stays on
+      # aarch64-linux. crossSystem targets wasm32 regardless of the build host, so
+      # every derivation below is host-agnostic; `localSystem` is threaded into the
+      # cross set (below) so the *native* tool builds match the CI runner.
+      packagesFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
 
       # ---- wasm32-linux-musl NOMMU toolchain, built from stock LLVM 21 -------
       # Build order: compiler-rt has no musl dep, so it comes first; musl links
@@ -61,6 +67,7 @@
       # ---- the wasm32-linux-musl cross package set (cross.zlib, cross.curl…) --
       cross = import ./wasm-cross.nix {
         inherit nixpkgs sysroot compilerRt libcxx;
+        localSystem = system;
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; muslWasm = musl; }) ];
       };
 
@@ -387,14 +394,14 @@
         initramfs = wasmInitramfs;
         squashfs = wasmBaseSquashfs;
       };
-    in
-    {
-      # The FULL wasm32 cross package set — exposing it as legacyPackages lets
-      # `nix build .#<anypkg>` work ad hoc (e.g. `.#wayland`, `.#pixman`) without
-      # enumerating it in `packages` below.
-      legacyPackages.${system} = cross;
+        in
+        {
+          # The FULL wasm32 cross package set — exposing it as legacyPackages lets
+          # `nix build .#<anypkg>` work ad hoc (e.g. `.#wayland`, `.#pixman`) without
+          # enumerating it in `packages` below.
+          legacyPackages = cross;
 
-      packages.${system} = {
+          packages = {
         # Sanity anchor: the stock-LLVM-21 pin the whole plan rests on.
         llvmCheck = pkgs.writeText "llvm-version" pkgs.llvmPackages_21.clang.version;
 
@@ -582,5 +589,15 @@
         # backs stock cairo+wl_shm clients like weston-flowers. See deps-overlay.nix.
         "cairo"
       ]);
+        };
+      # Phase 5 (#2): expose the package set for every supported build host.
+      # x86_64-linux is the CI/cache host (fully-cached nixpkgs + Cachix);
+      # aarch64-linux is local dev. `nix build .#<pkg>` selects the runner's
+      # system automatically.
+      perSystem = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] packagesFor;
+    in
+    {
+      packages = builtins.mapAttrs (_: v: v.packages) perSystem;
+      legacyPackages = builtins.mapAttrs (_: v: v.legacyPackages) perSystem;
     };
 }

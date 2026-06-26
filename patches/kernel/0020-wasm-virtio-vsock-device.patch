@@ -42,8 +42,8 @@ uses by default).
 Part of issue #10 (host<->guest bridge consolidation onto virtio) —
 the vsock transport for /Ctl (option 3).
 ---
- drivers/virtio/virtio_wasm.c | 21 +++++++++++++++++++++
- 1 file changed, 21 insertions(+)
+ drivers/virtio/virtio_wasm.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 index c0ffee123..d15eaf456 100644
@@ -66,10 +66,10 @@ index c0ffee123..d15eaf456 100644
  #endif
  	VW_DEV_COUNT,
  };
-@@ -426,6 +436,17 @@ static int __init virtio_wasm_transport_init(void)
+@@ -426,6 +436,18 @@ static int __init virtio_wasm_transport_init(void)
  		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
  #endif
-
+ 
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
 +	/*
 +	 * virtio-vsock channel for the host /Ctl bridge (stock
@@ -84,6 +84,6 @@ index c0ffee123..d15eaf456 100644
 +
  	return 0;
  }
-
+ 
 --
 2.53.0

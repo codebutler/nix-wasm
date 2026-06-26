@@ -1,0 +1,131 @@
+name: nix-wasm
+
+# Phase 5 (#2): build every wasm artifact from source on x86_64-linux and push the
+# results to the nix-wasm Cachix cache. This is the binary-cache backend decision
+# from the issue ("CI host + cache backend"): Cachix is the Nix *store* cache —
+# a substituter (warm reruns + the guest pulling prebuilt wasm) AND a push target
+# (every store path realised in a job is uploaded). It is content-addressed by
+# store-path hash, so there is no manual cache-key bookkeeping: a flake.lock or
+# patches/ change moves the hashes and self-invalidates.
+#
+# The two from-source LLVM builds (guest-clang and the kernel's patched LLVM,
+# ~1-2h each cold) are the long pole. They run on their own runners in the
+# `toolchain` matrix so each stays under the 6h hosted-runner job limit and the
+# two LLVMs compile in parallel; the cheaper `artifacts` job then SUBSTITUTES them
+# from Cachix instead of rebuilding. A cold cache pays the full LLVM rebuild once;
+# every run after substitutes in minutes.
+#
+# Cache backend: nix-wasm.cachix.org (public read; signing key
+# nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0=). Pushing
+# requires the CACHIX_AUTH_TOKEN repo secret; without it (e.g. fork PRs) the jobs
+# still substitute from the public cache, they just don't push.
+
+on:
+  push:
+    branches: [master, 'claude/**']
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - '**/*.nix'
+      - 'patches/**'
+      - '.rebuild-request'
+      - '.github/workflows/nix-wasm.yml'
+  pull_request:
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - '**/*.nix'
+      - 'patches/**'
+      - '.github/workflows/nix-wasm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: nix-wasm-${{ github.ref }}
+  # Supersede an in-flight run on a newer push. Safe for a cache-populating build:
+  # cachix-action pushes each derivation as it finishes (post-build-hook), so a
+  # cancelled run's completed paths are already in Cachix and the new run just
+  # substitutes them — no lost work, no double-building the slow poles.
+  cancel-in-progress: true
+
+jobs:
+  # --- the heavy from-source LLVM builds, one runner each, pushed to Cachix ----
+  toolchain:
+    name: build .#${{ matrix.attr }}
+    # Namespace large runner (x86_64). The from-source LLVM poles (guest-clang, the
+    # kernel's patched LLVM) are RAM/core-bound — they time out on a stock 4-core/
+    # 16 GB ubuntu-latest (kernel hit the 6h cap). The nix-heavy profile gives the
+    # cores/RAM/disk to land each in ~1-2h. cache.nixos.org still has the full
+    # nixos-26.05 x86_64 cache for the native deps.
+    runs-on: namespace-profile-nix-heavy
+    timeout-minutes: 350 # headroom under the 6h job limit; warm reruns substitute from Cachix
+    strategy:
+      fail-fast: false
+      matrix:
+        attr: [guest-clang, kernel]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Namespace profiles provision ample disk, so the ubuntu-latest preinstalled-
+      # toolchain reclaim hack isn't needed here — just record free space.
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Build .#${{ matrix.attr }}
+        run: nix build -L --keep-going '.#${{ matrix.attr }}' --print-out-paths --no-link
+
+  # --- the substitutable artifact set: reuses the cached toolchain via Cachix ---
+  artifacts:
+    name: build wasm artifacts
+    needs: toolchain
+    # Namespace small runner: with the toolchain + cross closure cached in Cachix,
+    # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
+    # C++ + squashfs/initramfs/image), so the default profile suffices. (Use
+    # nix-heavy for the FIRST cold run that has to compile the whole cross closure
+    # from source.) Stays off GitHub-hosted minutes (private repo).
+    runs-on: namespace-profile-default
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # guest-clang/kernel now substitute from Cachix (pushed by the toolchain
+      # job); the rest builds on top. wl-eyes is vendored into the repo (#62/#63),
+      # so the initramfs and the full linux-image boot bundle build in CI too.
+      - name: Build substitutable artifacts
+        run: |
+          nix build -L --keep-going \
+            '.#nix-wasm' \
+            '.#wasm-binary-cache' \
+            '.#wasm-base-squashfs' \
+            '.#wasm-initramfs' \
+            '.#linux-image' \
+            --print-out-paths --no-link
+
+      # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
+      # the same output. --rebuild rebuilds just the top derivation and compares.
+      - name: Determinism check (.#nix-wasm --rebuild)
+        run: nix build -L --rebuild '.#nix-wasm' --no-link
