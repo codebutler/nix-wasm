@@ -1,15 +1,14 @@
-// wl-handshake.mjs — Wayland Phase 1 sub-step 1d M2 runner: the PHASE 1
-// DELIVERABLE. Boots the busybox-only guest, launches /bin/waylandproxyd in the
-// background, then runs /bin/wlhandshake — a STOCK libwayland client — pointed at
-// wayland-0 (i.e. through the proxy). The client does:
+// wl-handshake.mjs — Wayland registry handshake through Sommelier (Task 11).
+// Boots the busybox-only guest, launches /bin/sommelier --parent, then runs
+// /bin/wlhandshake — a STOCK libwayland client — pointed at wayland-0. Client:
 //   wl_display_connect(NULL) -> get_registry -> roundtrip -> enumerate globals.
 //
 // Full path proven end-to-end:
-//   wlhandshake (libwayland) --AF_UNIX--> waylandproxyd --VIRTWL_IOCTL_SEND-->
-//   /dev/wl0 --OUT vq--> JS wl device --wl-server.js parses get_registry-->
-//   emits wl_registry.global x N + (sync) wl_callback.done + wl_display.delete_id
-//   --IN vq VFD_RECV--> virtio_wl routes to ctx --VIRTWL_IOCTL_RECV-->
-//   waylandproxyd --AF_UNIX--> wlhandshake demarshals -> sees globals.
+//   wlhandshake --AF_UNIX wayland-0--> sommelier --parent
+//     (accept) --posix_spawn--> sommelier --client-fd=N
+//       --VIRTWL_IOCTL_SEND--> /dev/wl0 --OUT vq--> JS wl device
+//       --wl-server.js: get_registry --> wl_registry.global x N + done
+//       --IN vq VFD_RECV--> sommelier --AF_UNIX--> wlhandshake sees globals.
 //
 //   RESULT wl-handshake PASS <n>  -> exit 0  (n = globals the client saw)
 //   RESULT wl-handshake FAIL ...  -> exit 1
@@ -34,16 +33,32 @@ try {
     process.exit(2);
   }
 
-  // Point libwayland at the proxy's socket: WAYLAND_DISPLAY=wayland-0 under
+  // Point libwayland at Sommelier's socket: WAYLAND_DISPLAY=wayland-0 under
   // XDG_RUNTIME_DIR. wl_display_connect(NULL) composes "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY".
   s.send("export XDG_RUNTIME_DIR=/tmp\n");
   s.send("export WAYLAND_DISPLAY=wayland-0\n");
-  s.send("/bin/waylandproxyd & sleep 1\n");
-  await s.waitForOutput(/RESULT waylandproxyd PASS .*listening/, 15000).catch(() => false);
+  // Redirect stderr to capture Sommelier's LOG(WARNING) dmabuf fallback line.
+  s.send("/bin/sommelier --parent 2>&1 &\n");
+
+  // Sommelier --parent binds wayland-0 silently; poll until the socket appears.
+  let socketReady = false;
+  for (let i = 0; i < 15; i++) {
+    s.send("ls /tmp/wayland-0 2>/dev/null && echo SOCKREADY || echo SOCKWAIT\n");
+    const found = await s.waitForOutput(/SOCKREADY|SOCKWAIT/, 3000).catch(() => false);
+    if (found && /SOCKREADY/.test(s.snapshot())) {
+      socketReady = true;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!socketReady) {
+    console.log("[wl-handshake] FAIL — /tmp/wayland-0 socket never appeared");
+    process.exit(1);
+  }
 
   s.send("/bin/wlhandshake; echo HSDONE=$?\n");
   await s.waitForOutput(/HSDONE=\d/, 30000).catch(() => false);
-  // Let the proxy poll loop flush any last host->client RECV.
+  // Let Sommelier's poll loop flush any last host->client RECV.
   s.send("sleep 1; echo FLUSHDONE\n");
   await s.waitForOutput(/FLUSHDONE/, 10000).catch(() => false);
 
@@ -51,7 +66,7 @@ try {
 
   console.log("── guest transcript ──");
   for (const l of out.split("\n")) {
-    if (/waylandproxyd:|wlhandshake:|RESULT (waylandproxyd|wl-handshake)|HSDONE=/.test(l)) {
+    if (/sommelier|wlhandshake:|RESULT wl-handshake|HSDONE=|SOCKREADY/.test(l)) {
       // eslint-disable-next-line no-control-regex -- strip ANSI SGR escapes
       console.log("  " + l.replace(/\x1b\[[0-9;]*m/g, "").trim());
     }
@@ -71,7 +86,7 @@ try {
     code = 0;
     console.log(
       `[wl-handshake] PASS — stock libwayland client completed the registry ` +
-        `handshake end-to-end through waylandproxyd + virtio_wl + the transport. ` +
+        `handshake end-to-end through Sommelier + virtio_wl + the transport. ` +
         `Globals seen: ${m[1]}.`,
     );
   } else if (anyFail) {

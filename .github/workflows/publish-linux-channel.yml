@@ -1,0 +1,61 @@
+name: publish-linux-channel
+
+# Republish the versioned `linux` guest channel pc resolves at runtime
+# (packages/linux/latest.json). Build the boot bundle (.#linux-image) + the
+# toolchain cache (.#wasm-binary-cache), upload them under a new immutable
+# version, then flip latest.json — see scripts/publish-linux-channel.sh and
+# vendor/linux-wasm/SOURCE.md §"Republish the guest".
+#
+# workflow_dispatch ONLY: a live-channel republish is a deliberate release step
+# (it must be ordered with the matching pc deploy when ENGINE_ABI/minEngine
+# moves), so it never fires automatically on push. Use the `dry_run` input to
+# build + print what WOULD upload without touching R2.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + print the wrangler commands, but upload nothing"
+        type: boolean
+        default: false
+
+# Serialize channel writes so two dispatches can't interleave the latest.json flip.
+concurrency:
+  group: publish-linux-channel
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Namespace small runner (x86_64) — substitutes the closure from Cachix and
+    # uploads to R2, so the default profile suffices (matches publish-wasm-artifacts).
+    runs-on: namespace-profile-default
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      # nixos-26.05 pin: complete x86_64 binary cache (incl. LLVM 21), so no
+      # heavy from-source rebuilds (matches the project's CI caching strategy).
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Substitute the prebuilt wasm closure (kernel/guest-clang/squashfs) from the
+      # Cachix cache the nix-wasm build CI populated — copy store paths, don't rebuild.
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # bun so `bunx wrangler` is available in the publish script.
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build + publish the linux channel to R2
+        env:
+          # DRY_RUN=true → the script builds + prints but uploads nothing.
+          DRY_RUN: ${{ inputs.dry_run }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: bash scripts/publish-linux-channel.sh | tee -a "$GITHUB_STEP_SUMMARY"

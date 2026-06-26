@@ -28,6 +28,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
  *   wayland?: { sendOut: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void, onClose?: (clientId:number)=>void },
+ *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: AF_VSOCK /Ctl bridge hook, passed through to bootLinux
  *   _bootLinux?: typeof bootLinux,    // test seam
  * }} opts
  * @returns {ReturnType<import('./boot.js').bootLinux>}
@@ -71,6 +72,7 @@ export async function bootNixSystem(opts) {
     onLog: opts.onLog,
     onModuleCached: opts.onModuleCached,
     wayland: opts.wayland,
+    vsock: opts.vsock,
     squashfs,
     nixCache: useNix && nixCacheBase ? createNixCacheExport(nixCacheBase) : undefined,
   });
