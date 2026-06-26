@@ -59,10 +59,10 @@ index eefcfe9..60df38e 100644
  virtio_pci-$(CONFIG_VIRTIO_PCI_LEGACY) += virtio_pci_legacy.o
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 new file mode 100644
-index 0000000..5e2bcc0
+index 0000000..ceef71e
 --- /dev/null
 +++ b/drivers/virtio/virtio_wasm.c
-@@ -0,0 +1,587 @@
+@@ -0,0 +1,643 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * virtio_wasm.c - a virtio transport over Wasm host callbacks (Linux/Wasm, "pc"
@@ -131,11 +131,21 @@ index 0000000..5e2bcc0
 +#define VIRTIO_WASM_MAX_VQS	8		/* max vqs/device: vsock 3 (rx/tx/event), single-port console 2, 9p <=2 */
 +#define VIRTIO_WASM_VRING_ALIGN	4096
 +#define VIRTIO_WASM_IRQ_BASE	8		/* first free irq (2..63) used */
++/*
++ * Console config-change irqs sit ABOVE the per-device used-buffer irqs.
++ * Used-buffer irqs are VIRTIO_WASM_IRQ_BASE + dev (dev 0..15 -> 8..23). Each of
++ * the 8 single-port consoles (host dev 8..15, patch 0019) ALSO gets a
++ * config-change irq at VW_CONSOLE_CONFIG_IRQ_BASE + console_index (24..31):
++ * disjoint from every used-buffer irq and below NR_IRQS (64). The host raises it
++ * on a VIRTIO_CONSOLE_F_SIZE cols/rows change (terminal resize).
++ */
++#define VW_CONSOLE_CONFIG_IRQ_BASE	24
 +
 +struct virtio_wasm_device {
 +	struct virtio_device vdev;
 +	u32 dev;			/* host device index */
-+	int irq;			/* one irq per device */
++	int irq;			/* one irq per device (used-buffer interrupts) */
++	int config_irq;			/* optional config-change interrupt (0 = none) */
 +	u8 status;
 +	unsigned int nvqs;
 +	struct virtqueue *vqs[VIRTIO_WASM_MAX_VQS];
@@ -255,6 +265,23 @@ index 0000000..5e2bcc0
 +	return ret;
 +}
 +
++/*
++ * Config-change IRQ handler: the host changed this device's config space (e.g. a
++ * virtio-console F_SIZE cols/rows update on terminal resize) and raised the
++ * device's SEPARATE config_irq. Hand it to the virtio core, which dispatches to
++ * the bound driver's .config_changed (virtio_console's config_intr, which reads
++ * the new cols/rows and calls hvc_resize). A distinct irq keeps the hot
++ * used-buffer path (vw_interrupt) free of config polling; only a rare resize
++ * raises it.
++ */
++static irqreturn_t vw_config_interrupt(int irq, void *opaque)
++{
++	struct virtio_wasm_device *vw = opaque;
++
++	virtio_config_changed(&vw->vdev);
++	return IRQ_HANDLED;
++}
++
 +static int vw_find_vqs(struct virtio_device *vdev, unsigned int nvqs,
 +		       struct virtqueue *vqs[],
 +		       struct virtqueue_info vqs_info[],
@@ -357,6 +384,8 @@ index 0000000..5e2bcc0
 +	}
 +	if (had_vqs)
 +		free_irq(vw->irq, vw);
++	if (vw->config_irq)
++		free_irq(vw->config_irq, vw);
 +	vw->nvqs = 0;
 +}
 +
@@ -381,11 +410,15 @@ index 0000000..5e2bcc0
 +}
 +
 +/*
-+ * Register one virtio_wasm device. dev_index is the host-side device index
-+ * (also the irq offset). Returns the new device or an ERR_PTR.
++ * Register one virtio_wasm device. dev_index is the host-side device index (also
++ * the used-buffer irq offset). config_irq is an OPTIONAL second irq the host
++ * raises when it changes the device's config space (0 = no config-change
++ * source); when set, it is hooked AFTER the driver binds so virtio_config_changed
++ * can reach the driver's .config_changed. Returns the new device or an ERR_PTR.
 + */
-+static struct virtio_wasm_device *virtio_wasm_register(u32 dev_index,
-+						      u32 device_id)
++static struct virtio_wasm_device *virtio_wasm_register_cfg(u32 dev_index,
++							  u32 device_id,
++							  int config_irq)
 +{
 +	struct virtio_wasm_device *vw;
 +	int err;
@@ -396,6 +429,7 @@ index 0000000..5e2bcc0
 +
 +	vw->dev = dev_index;
 +	vw->irq = VIRTIO_WASM_IRQ_BASE + dev_index;
++	vw->config_irq = config_irq;
 +	vw->vdev.dev.release = virtio_wasm_release;
 +	vw->vdev.config = &virtio_wasm_config_ops;
 +	vw->vdev.id.device = device_id;
@@ -409,9 +443,31 @@ index 0000000..5e2bcc0
 +		return ERR_PTR(err);
 +	}
 +
-+	pr_info("virtio_wasm: registered dev=%u id=%#x irq=%d\n",
-+		dev_index, device_id, vw->irq);
++	/*
++	 * register_virtio_device() probed + bound the driver synchronously (the
++	 * device drivers register at device_initcall, before this late_initcall),
++	 * so the driver's .config_changed is live. Hook the config-change irq last;
++	 * the host only raises it on an explicit config update (e.g. resize) well
++	 * after boot, so there is no pre-bind race.
++	 */
++	if (config_irq) {
++		err = request_irq(config_irq, vw_config_interrupt, 0,
++				  "virtio_wasm_cfg", vw);
++		if (err)
++			pr_warn("virtio_wasm: dev=%u config_irq(%d) request failed: %d\n",
++				dev_index, config_irq, err);
++	}
++
++	pr_info("virtio_wasm: registered dev=%u id=%#x irq=%d config_irq=%d\n",
++		dev_index, device_id, vw->irq, config_irq);
 +	return vw;
++}
++
++/* Register a device with no config-change source (the common case). */
++static struct virtio_wasm_device *virtio_wasm_register(u32 dev_index,
++						      u32 device_id)
++{
++	return virtio_wasm_register_cfg(dev_index, device_id, 0);
 +}
 +
 +/*

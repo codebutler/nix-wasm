@@ -22,4 +22,12 @@
 // contract changed incompatibly — the wasm_driver_hvc_put/get/winsize host
 // imports are gone, replaced by per-console virtio receiveq/transmitq vrings the
 // host drives via runtime/virtio/console-device.js.
-export const ENGINE_ABI = 6;
+//
+// 7 (#83 follow-up: terminal resize): each single-port console now offers
+// VIRTIO_CONSOLE_F_SIZE and the virtio_wasm transport grew a config-change
+// interrupt — a SECOND per-console irq (VW_CONSOLE_CONFIG_IRQ_BASE + idx, 24..31)
+// that the host raises on a winsize change, which the kernel turns into
+// virtio_config_changed() → hvc_resize(). New host↔guest surface (the config irq
+// + cols/rows in console config space), so an old engine can't drive a new
+// image's resize path: bump.
+export const ENGINE_ABI = 7;

@@ -46,7 +46,7 @@ function makeVq(memory, base, num) {
   };
 }
 
-function makeDev({ sink, forwardNotify } = {}) {
+function makeDev({ sink, forwardNotify, configIrq } = {}) {
   const memory = { buffer: new ArrayBuffer(64 * 1024) };
   const shared = new SharedQueues(makeSharedQueues());
   const irqs = [];
@@ -58,8 +58,17 @@ function makeDev({ sink, forwardNotify } = {}) {
     sharedQueues: shared,
     sink,
     forwardNotify,
+    configIrq,
   });
   return { dev, memory, shared, irqs };
+}
+
+// Read the device's struct virtio_console_config as {cols, rows} via configRead.
+function readSize(dev) {
+  const cfg = new Uint8Array(12);
+  dev.configRead(0, cfg);
+  const dv = new DataView(cfg.buffer);
+  return { cols: dv.getUint16(0, true), rows: dv.getUint16(2, true) };
 }
 
 // A transmitq chain: one READABLE (out) segment holding guest console output.
@@ -100,9 +109,40 @@ function makeRxRing(opts) {
 }
 
 describe("ConsoleVirtioDevice", () => {
-  it("advertises no optional console features (single port, no size)", () => {
+  it("advertises VIRTIO_CONSOLE_F_SIZE (bit 0) and nothing else", () => {
     const { dev } = makeDev();
-    expect(dev.getFeatures()).toBe(0n);
+    expect(dev.getFeatures()).toBe(1n); // 1 << VIRTIO_CONSOLE_F_SIZE; not F_MULTIPORT
+  });
+
+  it("configRead returns the 80x24 default before any resize", () => {
+    const { dev } = makeDev();
+    expect(readSize(dev)).toEqual({ cols: 80, rows: 24 });
+  });
+
+  it("setSize writes cols/rows into config and raises the config-change irq", () => {
+    const { dev, irqs } = makeDev({ configIrq: 24 });
+    dev.setSize(120, 40);
+    expect(readSize(dev)).toEqual({ cols: 120, rows: 40 });
+    expect(irqs).toEqual([[0, 24]]); // (cpu0, config irq), NOT the used-buffer irq 14
+  });
+
+  it("configRead honours offset/len (rows read at offset 2)", () => {
+    const { dev } = makeDev({ configIrq: 24 });
+    dev.setSize(0x0102, 0x0304);
+    const rows = new Uint8Array(2);
+    dev.configRead(2, rows); // rows field @offset 2, LE
+    expect(Array.from(rows)).toEqual([0x04, 0x03]);
+    // Reads past the 12-byte struct zero-fill.
+    const tail = new Uint8Array(4);
+    dev.configRead(10, tail);
+    expect(Array.from(tail)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("setSize without a configIrq updates config but raises nothing (worker side)", () => {
+    const { dev, irqs } = makeDev();
+    dev.setSize(90, 30);
+    expect(readSize(dev)).toEqual({ cols: 90, rows: 30 });
+    expect(irqs.length).toBe(0);
   });
 
   it("drains the transmitq to the sink and pushes each chain used (len 0)", () => {
