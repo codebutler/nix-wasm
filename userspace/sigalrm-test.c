@@ -25,9 +25,10 @@
  * and THAT path was the #75 root cause: a SA_RESTART handler was never delivered
  * when it interrupted a blocking syscall (the wasm syscall-restart loop re-entered
  * the syscall before _user_mode_tail ran the queued handler). Fixed by
- * patches/kernel/0021 (deliver at the FOOT, return -EINTR — no transparent
- * restart on this arch). So this test does NOT cover SA_RESTART; that path is
- * covered by ping-pace-probe.c (`restart`/`repro` cases) and ping-pace-test.c.
+ * patches/kernel/0021 (lift the restart loop to the asm FOOT: deliver the
+ * handler, then re-invoke the syscall — transparent SA_RESTART). So this test
+ * does NOT cover SA_RESTART; that path is covered by ping-pace-probe.c
+ * (`restart`/`repro` cases) and ping-pace-test.c.
  *
  * Background — #35's premise vs. reality: #35 reported busybox `ping` sending
  * only one packet and hypothesized "no async interval-timer source raises

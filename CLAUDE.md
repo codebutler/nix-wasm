@@ -197,9 +197,10 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 #                     installed with SA_RESTART (busybox ping uses signal()) was
 #                     never delivered when it interrupted a blocking syscall — the
 #                     wasm syscall-restart loop re-entered the syscall before
-#                     _user_mode_tail ran the queued handler. The fix delivers the
-#                     handler at the FOOT and returns -EINTR (no transparent
-#                     restart on this arch). ping-pace-probe runs a
+#                     _user_mode_tail ran the queued handler. The fix lifts the
+#                     restart loop to the asm FOOT: deliver the handler, then
+#                     re-invoke the syscall (transparent SA_RESTART, real replies,
+#                     no -EINTR). ping-pace-probe runs a
 #                     control/restart/xcpu/repro matrix (all PASS with the fix). No
 #                     networking — both run in the busybox-only boot-smoke.
 # ping-pace-smoke is GATING (regression guard); ping-pace-probe-smoke is the
@@ -652,39 +653,45 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   busybox + ash + glib carry the spawn-port patches. Holdouts follow one documented
   rule (don't-build an unused CLI / port a library to `posix_spawn` / compile out an
   unused return-twice symbol). **Full contract: `docs/process-model.md`.**
-- **SA_RESTART syscalls report `-EINTR` instead of transparently restarting; the
-  handler IS delivered** (`patches/kernel/0021-wasm-sa-restart-deliver-signal.patch`
-  on `arch/wasm/kernel/traps.c` `WASM_SYSCALL_N`; **#75, FIXED**). The bug: a
-  blocking syscall interrupted by a signal whose handler was installed with
-  `SA_RESTART` (e.g. `signal()`, which musl maps to `SA_RESTART`) returns
-  `-ERESTARTSYS`; `handle_signal()` (signal.c) keeps it (will restart) and
-  `setup_rt_frame()` queues the handler (`_TIF_DELIVER_SIGNAL`). But the queued
-  handler is only run by `_user_mode_tail` in the asm FOOT (`entry.S`), which runs
-  AFTER `__wasm_syscall_N` returns — and the C restart `do/while` re-entered the
-  syscall in-place on `-ERESTARTSYS`, re-blocking before the FOOT ever ran. So the
-  handler never fired and the syscall hung. With `sigaction(sa_flags=0)`,
-  `handle_signal` rewrites to `-EINTR` (`restart=false`) → loop exits → handler
-  delivered, which is why every signal test (`sigalrm-test`, `kill-wake-test`, all
-  `sa_flags=0`) passed and only `signal()`/`SA_RESTART` users hung. Headline
-  symptom: busybox FANCY `ping` sent one ICMP echo then hung (its interval SIGALRM
-  handler `sendping4`, armed via `signal()`, never ran). **Fix:** this wasm arch
-  cannot re-run the syscall instruction, so it can't transparently restart a
-  syscall after a handler runs. When a handler is queued for a would-be restart,
-  stop looping and report `-EINTR` — the FOOT then delivers the handler on return
-  and EINTR-aware callers (busybox ping: `if (errno != EINTR) …; continue;`) retry.
-  This routes `SA_RESTART` through the proven `sa_flags=0` FOOT-delivery path; the
-  only behavioral difference is callers observe `-EINTR` rather than a transparent
-  restart — a documented platform limitation in the same class as the no-fork
-  contract. In-kernel change only (no host/engine ABI change → no `ENGINE_ABI`
-  bump / no pc sync). **DEAD-END (CI panic, reverted):** delivering the handler
-  in-loop by calling `_user_mode_tail()` from inside `__wasm_syscall_N` faults
-  (`RuntimeError: null function or function signature mismatch` in
-  `__libc_handle_signal` → kernel panic) — handler delivery only works at the FOOT
-  context (top of the kernel frame, kernel SP reset), not nested mid-C-frame.
-  Fully-transparent `SA_RESTART` would require lifting the restart loop to the FOOT
-  (`entry.S` + `traps.c`, an ABI change) — a possible future enhancement, NOT done.
-  Gate: `ping-pace-smoke` (+ the `ping-pace-probe` control/restart/xcpu/repro
-  matrix), no networking, in the boot-smoke job.
+- **SA_RESTART: deliver the handler at the FOOT, then re-invoke the syscall
+  (transparent restart)** (`patches/kernel/0021-wasm-sa-restart-deliver-signal.patch`
+  on `arch/wasm/kernel/{traps.c,entry.S}`; **#75, FIXED**). The bug: a blocking
+  syscall interrupted by a signal whose handler was installed with `SA_RESTART`
+  (e.g. `signal()`, which musl maps to `SA_RESTART`) returns `-ERESTARTSYS`;
+  `handle_signal()` (signal.c) keeps it (will restart) and `setup_rt_frame()`
+  queues the handler (`_TIF_DELIVER_SIGNAL`). But the queued handler is only run by
+  `_user_mode_tail` in the asm FOOT (`entry.S`), which runs AFTER `__wasm_syscall_N`
+  returns — and the C restart `do/while` re-entered the syscall in-place on
+  `-ERESTARTSYS`, re-blocking before the FOOT ever ran. So the handler never fired
+  and the syscall hung. With `sigaction(sa_flags=0)`, `handle_signal` rewrites to
+  `-EINTR` (`restart=false`) → loop exits → handler delivered, which is why every
+  signal test (`sigalrm-test`, `kill-wake-test`, all `sa_flags=0`) passed and only
+  `signal()`/`SA_RESTART` users hung. Headline symptom: busybox FANCY `ping` sent
+  one ICMP echo then hung (its interval SIGALRM handler `sendping4`, armed via
+  `signal()`, never ran). **Fix:** the restart loop is lifted from C to the asm
+  FOOT. `traps.c` keeps its in-loop restart for the NO-handler cases (incl. the
+  `-ERESTART_RESTARTBLOCK → __NR_restart_syscall` nr-switch), but when a handler is
+  queued for a would-be restart it stops looping and RETURNS with `syscall_ret`
+  still holding the internal `ERESTART` code (-516..-512, never seen by userspace).
+  `entry.S` wraps `call __wasm_syscall_N` in a loop: after the call it runs
+  `WASM_SYSCALL_FOOT_SYNC` (sync user sp/tls from pt_regs, then `call
+  _user_mode_tail` to deliver the queued handler + its sigreturn at the FOOT — the
+  only safe context), and if the saved return is an `ERESTART` code it
+  re-establishes the kernel C-frame SP (`WASM_SYSCALL_RESET_SP`) and branches back
+  to re-run the syscall. So the restart happens AFTER the handler → full
+  transparent `SA_RESTART` (busybox ping's `recv` returns real replies, no
+  `-EINTR`; restartable syscalls restart and return their real result). In-kernel
+  change only (`__wasm_syscall_N` signatures + the kernel↔engine import surface are
+  unchanged) → no `ENGINE_ABI` bump / no pc sync. **DEAD-ENDS (both CI-validated):**
+  (1) returning `-EINTR` instead of restarting (an earlier accepted fix) works but
+  is NOT transparent — restartable syscalls leak `EINTR` to callers; superseded by
+  this FOOT-loop. (2) delivering the handler in-loop by calling `_user_mode_tail()`
+  from inside `__wasm_syscall_N` PANICS (`RuntimeError: null function or function
+  signature mismatch` in `__libc_handle_signal`): handler delivery + the nested
+  sigreturn need the FOOT context (kernel C frame popped, kernel SP reset, user
+  sp/tls synced from pt_regs), NOT a nested mid-C-frame call. Gate: `ping-pace-smoke`
+  (+ the `ping-pace-probe` control/restart/xcpu/repro matrix), no networking, in the
+  boot-smoke job.
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

@@ -94,12 +94,12 @@ pkgs.stdenv.mkDerivation {
     ./patches/kernel/0020-wasm-virtio-vsock-device.patch
     # #75: a SIGALRM handler installed with SA_RESTART (busybox ping via signal())
     # was never delivered when it interrupted a blocking syscall — the C restart
-    # loop in WASM_SYSCALL_N re-enters the syscall before the asm FOOT runs the
-    # queued handler, so the syscall hangs (one packet then hang). This arch can't
-    # re-run the syscall instruction (no transparent restart after a handler), so
-    # when a handler is queued for a would-be restart we stop looping and report
-    # -EINTR: the FOOT delivers the handler on return and EINTR-aware callers
-    # (busybox ping) retry. In-kernel change only — no host/engine ABI change.
+    # loop in WASM_SYSCALL_N re-entered the syscall before the asm FOOT could run
+    # the queued handler, so the syscall hung (one packet then hang). Fix: lift
+    # the restart loop to the asm FOOT (entry.S) — deliver the queued handler at
+    # the FOOT (the only safe context) and then re-invoke the syscall, so the
+    # restart happens AFTER the handler (transparent SA_RESTART, real replies, no
+    # -EINTR). In-kernel change only — no host/engine ABI change.
     ./patches/kernel/0021-wasm-sa-restart-deliver-signal.patch
   ];
 

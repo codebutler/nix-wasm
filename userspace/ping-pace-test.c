@@ -7,9 +7,10 @@
  * busybox) was never delivered when it interrupted a blocking syscall — the wasm
  * syscall-restart loop (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-entered the
  * syscall before _user_mode_tail could run the queued handler. FIXED by
- * patches/kernel/0021 (deliver the handler at the FOOT, return -EINTR — this arch
- * has no transparent restart); this is now a passing regression gate. The
- * rationale below is the pre-matrix hypothesis, kept for history.
+ * patches/kernel/0021 (lift the restart loop to the asm FOOT: deliver the handler,
+ * then re-invoke the syscall — transparent SA_RESTART, real replies, no -EINTR);
+ * this is now a passing regression gate. The rationale below is the pre-matrix
+ * hypothesis, kept for history.
  *
  * It mirrors busybox ping's EXACT pacing structure WITHOUT networking, so it
  * runs in the busybox-only boot-smoke (kernel + initramfs, nix:false):

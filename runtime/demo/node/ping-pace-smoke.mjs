@@ -3,10 +3,11 @@
 // handler installed with SA_RESTART (busybox ping via signal()) was never
 // delivered when it interrupted a blocking syscall — the wasm restart loop
 // (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-entered the syscall before
-// _user_mode_tail ran the queued handler. FIXED by patches/kernel/0021 (deliver
-// at the FOOT, return -EINTR — no transparent restart on this arch); this smoke
-// is now a GATING regression guard. The "I/O-woken recv re-blocks" framing below
-// was the pre-matrix hypothesis, kept for history.
+// _user_mode_tail ran the queued handler. FIXED by patches/kernel/0021 (lift the
+// restart loop to the asm FOOT: deliver the handler, then re-invoke the syscall —
+// transparent SA_RESTART, real replies, no -EINTR); this smoke is now a GATING
+// regression guard. The "I/O-woken recv re-blocks" framing below was the
+// pre-matrix hypothesis, kept for history.
 //
 // ping-pace-smoke.mjs — boots and runs /bin/ping-pace-test in-guest, the
 // faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends one

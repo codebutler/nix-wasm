@@ -1,65 +1,380 @@
 From: nix-wasm <eric@codebutler.com>
-Subject: [PATCH] wasm: deliver queued SA_RESTART handler, report EINTR (no hang) (#75)
+Subject: [PATCH] wasm: transparent SA_RESTART via FOOT-level syscall restart loop (#75)
 
 A blocking syscall interrupted by a signal whose handler was installed with
-SA_RESTART (e.g. via signal(), which musl maps to SA_RESTART) returns
--ERESTARTSYS; handle_signal() keeps -ERESTARTSYS (so the syscall will restart)
-and setup_rt_frame() queues the handler by setting _TIF_DELIVER_SIGNAL.
+SA_RESTART (e.g. signal(), which musl maps to SA_RESTART) returns -ERESTARTSYS;
+handle_signal() keeps it (will restart) and setup_rt_frame() queues the handler
+(_TIF_DELIVER_SIGNAL). The handler only runs in the syscall asm FOOT
+(_user_mode_tail), which executes AFTER __wasm_syscall_N returns; but the C
+restart do/while in WASM_SYSCALL_N re-entered the syscall in-place on -ERESTARTSYS
+and never returned to the FOOT, so the handler never ran and the syscall hung.
+Headline symptom: busybox FANCY `ping` sent one ICMP echo then hung (its interval
+SIGALRM handler sendping4, armed via signal(), never ran). `ping -c1` worked.
 
-The queued handler is only ever run by _user_mode_tail in the syscall asm FOOT,
-which executes AFTER __wasm_syscall_N returns. But the C restart do/while in
-WASM_SYSCALL_N re-enters the syscall in-place on -ERESTARTSYS and never returns
-to the FOOT, so the handler is never delivered and the restarted syscall blocks
-forever. With sa_flags=0, handle_signal() rewrites -ERESTARTSYS to -EINTR
-(restart=false) and the loop exits, so the FOOT delivers the handler -- which is
-why every signal test (all sigaction sa_flags=0) passes and only SA_RESTART
-users hang. Headline symptom: busybox FANCY `ping` sends one ICMP echo then
-hangs (its interval SIGALRM handler sendping4, armed via signal(), never runs);
-`ping -c1` works. See issue #75.
+Restart-after-signal must run the handler BETWEEN the failed attempt and the
+restart, and handler delivery only works at the FOOT context (top of the kernel
+frame, C syscall frame popped, so the nested sigreturn syscall can reuse the
+kernel stack) — calling _user_mode_tail from inside __wasm_syscall_N faults
+(null function / signature mismatch -> panic). So the restart loop is lifted to
+the asm FOOT:
 
-This wasm arch cannot re-run the syscall instruction, so it cannot transparently
-restart a syscall after running a signal handler (the handler runs only at the
-FOOT, which an in-loop restart never reaches). So when a handler is queued for a
-would-be restart, stop looping and report -EINTR instead: the FOOT then delivers
-the handler on return and the caller observes an ordinary interrupted syscall.
-busybox ping (and other EINTR-aware loops: `if (errno != EINTR) ...; continue;`)
-then pace correctly. This makes SA_RESTART behave like the already-working
-sa_flags=0 path (the only difference being callers see EINTR rather than a
-transparent restart) -- a documented platform limitation in the same class as
-this arch's no-fork contract.
+  - traps.c: the C keeps its in-loop restart for the NO-handler cases (incl. the
+    -ERESTART_RESTARTBLOCK -> __NR_restart_syscall nr-switch), unchanged. When a
+    handler IS queued for a would-be restart, it stops looping and RETURNS with
+    syscall_ret still holding the internal ERESTART code (-516..-512, which is
+    never returned to userspace).
+  - entry.S: each wasm_syscall_N now wraps `call __wasm_syscall_N` in a loop.
+    After the call it runs WASM_SYSCALL_FOOT_SYNC (syncs user sp/tls from pt_regs
+    and calls _user_mode_tail, delivering the queued handler + its sigreturn at
+    the FOOT). If the saved return value is an ERESTART code, it re-establishes
+    the kernel C-frame stack pointer (WASM_SYSCALL_RESET_SP) and branches back to
+    re-run the syscall — so the restart happens AFTER the handler. Any other
+    value is the real result and is returned.
 
-NOTE: a previous attempt to deliver the handler in-loop by calling
-_user_mode_tail() from inside __wasm_syscall_N crashed (RuntimeError: null
-function or function signature mismatch in __libc_handle_signal -> kernel panic):
-handler delivery only works at the FOOT context (top of the kernel frame, kernel
-SP reset), not nested mid-C-frame. Fully-transparent SA_RESTART would require
-lifting the restart loop to the FOOT (an entry.S + traps.c change); this EINTR
-behavior is the correct, low-risk fix for the hang and is validated by the
-ping-pace smokes flipping to PASS. In-kernel change only -- no host/engine ABI
-change, so ENGINE_ABI is unchanged and no pc sync is needed.
+Result: full transparent SA_RESTART. busybox ping's recv() runs sendping4 each
+interval and returns real replies (no -EINTR); restartable syscalls restart and
+return their real result exactly as on other arches. No host/engine ABI change
+(the kernel<->engine import surface and __wasm_syscall_N signatures are
+unchanged), so ENGINE_ABI is unchanged and no pc sync is needed.
 
---- a/arch/wasm/kernel/traps.c	2026-06-26 13:01:06.397969189 +0000
-+++ b/arch/wasm/kernel/traps.c	2026-06-26 13:01:38.867272755 +0000
-@@ -64,6 +64,22 @@
+--- a/arch/wasm/kernel/traps.c	2026-06-26 13:54:04.185612881 +0000
++++ b/arch/wasm/kernel/traps.c	2026-06-26 13:54:04.199580282 +0000
+@@ -64,6 +64,17 @@
  				default:					\
  					restart = false;			\
  				}						\
-+				/* #75: this wasm arch cannot re-run the syscall	\
-+				 * instruction, so it cannot transparently restart a	\
-+				 * syscall AFTER running a signal handler -- the handler	\
-+				 * only runs at the asm FOOT, which an in-loop restart	\
-+				 * never reaches.  So when handle_signal() queued a	\
-+				 * handler (SA_RESTART left us on a restart path), stop	\
-+				 * looping and report -EINTR: the FOOT then delivers the	\
-+				 * handler on return and the caller sees an interrupted	\
-+				 * syscall (busybox ping & other EINTR-aware loops retry).	\
-+				 * Transparent SA_RESTART would need the restart loop	\
-+				 * lifted to the FOOT (entry.S); see issue #75. */	\
++				/* #75: a signal handler queued for a would-be restart	\
++				 * must run BEFORE we restart, and it runs only at the	\
++				 * syscall asm FOOT after this function returns (calling	\
++				 * it here, mid-frame, faults). So leave the loop with	\
++				 * syscall_ret still holding the internal ERESTART code:	\
++				 * entry.S delivers the handler at the FOOT and re-invokes	\
++				 * us, so the restart happens AFTER the handler runs	\
++				 * (transparent SA_RESTART, no -EINTR to userspace). */	\
 +				if (restart && (current_thread_info()->flags &		\
-+					_TIF_DELIVER_SIGNAL)) {		\
-+					regs->syscall_ret = -EINTR;		\
++					_TIF_DELIVER_SIGNAL))			\
 +					restart = false;			\
-+				}						\
  			} while (restart);					\
  		} else {							\
  			irqentry_state_t state = irqentry_nmi_enter(regs);	\
+
+--- a/arch/wasm/kernel/entry.S	2026-06-26 13:54:11.165752249 +0000
++++ b/arch/wasm/kernel/entry.S	2026-06-26 13:54:11.167809888 +0000
+@@ -156,7 +156,23 @@
+ 	 */
+ .endm
+ 
+-.macro WASM_SYSCALL_ASM_FOOT
++.macro WASM_SYSCALL_RESET_SP
++	/*
++	 * (Re)establish the kernel C-frame stack pointer before each syscall
++	 * attempt. WASM_SYSCALL_ASM_HEAD already did this for the first attempt;
++	 * the #75 restart loop re-runs it because WASM_SYSCALL_FOOT_SYNC moves
++	 * __stack_pointer to the top of the kernel stack for signal delivery.
++	 */
++	global.get current
++	iLONG.const zeroptr+TASK_STRUCT_STACK
++	iLONG.add
++	iLONG.load 0
++	iLONG.const zeroptr+THREAD_STACK_START
++	iLONG.add
++	global.set __stack_pointer
++.endm
++
++.macro WASM_SYSCALL_FOOT_SYNC
+ 	/* (The cpuflags have already been restored in C.) */
+ 
+ 	/*  __user_stack_pointer = current_pt_regs()->stack_pointer */
+@@ -180,21 +196,12 @@
+ 	global.set __stack_pointer
+ 
+ 	/*
+-	* Note: we don't need to swap the __stack_pointer, it will happen
+-	* automatically when returning back into the user code Wasm instance (as
+-	* that instance has its own __stack_pointer).
+-	*
+-	* We can exploit this as we're basically in userland, but with the
+-	* kernel stack pointer loaded. This allows us to play tricks with
+-	* execution in userland without setting a program counter.
+-	*
+-	* This is where signal handlers are called, and returned, and exec()
+-	* calls stop the execution of the user program. In the case of exec()
+-	* and signal return, the call stack collapses (this call never returns).
+-	*/
++	 * Deliver any pending signal handler (and run its sigreturn) here at the
++	 * FOOT context: top of the kernel stack with the C syscall frame already
++	 * popped, so the nested sigreturn syscall can safely reuse the kernel
++	 * stack. (Calling this from inside __wasm_syscall_N faults — see #75.)
++	 */
+ 	call _user_mode_tail
+-
+-	end_function
+ .endm
+ 
+ .functype __wasm_syscall_0(iLONG) -> (iLONG)
+@@ -227,76 +234,223 @@
+ .globl wasm_syscall_0
+ wasm_syscall_0:
+ 	.functype wasm_syscall_0(iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	call __wasm_syscall_0
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		call __wasm_syscall_0
++		local.set 3
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_0 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 3
++		iLONG.const -512
++		iLONG.le_s
++		local.get 3
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 3
++	end_function
+ 
+ .globl wasm_syscall_1
+ wasm_syscall_1:
+ 	.functype wasm_syscall_1(iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	call __wasm_syscall_1
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		call __wasm_syscall_1
++		local.set 4
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_1 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 4
++		iLONG.const -512
++		iLONG.le_s
++		local.get 4
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 4
++	end_function
+ 
+ .globl wasm_syscall_2
+ wasm_syscall_2:
+ 	.functype wasm_syscall_2(iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	local.get 4
+-	call __wasm_syscall_2
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		local.get 4
++		call __wasm_syscall_2
++		local.set 5
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_2 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 5
++		iLONG.const -512
++		iLONG.le_s
++		local.get 5
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 5
++	end_function
+ 
+ .globl wasm_syscall_3
+ wasm_syscall_3:
+ 	.functype wasm_syscall_3(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	local.get 4
+-	local.get 5
+-	call __wasm_syscall_3
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		local.get 4
++		local.get 5
++		call __wasm_syscall_3
++		local.set 6
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_3 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 6
++		iLONG.const -512
++		iLONG.le_s
++		local.get 6
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 6
++	end_function
+ 
+ .globl wasm_syscall_4
+ wasm_syscall_4:
+ 	.functype wasm_syscall_4(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	local.get 4
+-	local.get 5
+-	local.get 6
+-	call __wasm_syscall_4
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		local.get 4
++		local.get 5
++		local.get 6
++		call __wasm_syscall_4
++		local.set 7
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_4 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 7
++		iLONG.const -512
++		iLONG.le_s
++		local.get 7
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 7
++	end_function
+ 
+ .globl wasm_syscall_5
+ wasm_syscall_5:
+ 	.functype wasm_syscall_5(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	local.get 4
+-	local.get 5
+-	local.get 6
+-	local.get 7
+-	call __wasm_syscall_5
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		local.get 4
++		local.get 5
++		local.get 6
++		local.get 7
++		call __wasm_syscall_5
++		local.set 8
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_5 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 8
++		iLONG.const -512
++		iLONG.le_s
++		local.get 8
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 8
++	end_function
+ 
+ .globl wasm_syscall_6
+ wasm_syscall_6:
+ 	.functype wasm_syscall_6(iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG, iLONG) -> (iLONG)
++	.local iLONG
+ 	WASM_SYSCALL_ASM_HEAD
+-	local.get 2
+-	local.get 3
+-	local.get 4
+-	local.get 5
+-	local.get 6
+-	local.get 7
+-	local.get 8
+-	call __wasm_syscall_6
+-	WASM_SYSCALL_ASM_FOOT
++	loop
++		WASM_SYSCALL_RESET_SP
++		local.get 2
++		local.get 3
++		local.get 4
++		local.get 5
++		local.get 6
++		local.get 7
++		local.get 8
++		call __wasm_syscall_6
++		local.set 9
++		WASM_SYSCALL_FOOT_SYNC
++		/*
++		 * #75 transparent restart: __wasm_syscall_6 returns an internal
++		 * ERESTART code (-516..-512, never seen by userspace) ONLY when a
++		 * handler was queued for a restart; we just delivered it, so loop
++		 * back and re-run the syscall. Any other value is the real result.
++		 */
++		local.get 9
++		iLONG.const -512
++		iLONG.le_s
++		local.get 9
++		iLONG.const -516
++		iLONG.ge_s
++		i32.and
++		br_if 0
++	end_loop
++	local.get 9
++	end_function
