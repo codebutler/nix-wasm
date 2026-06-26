@@ -172,6 +172,18 @@ let
         nix.settings.experimental-features = [ "nix-command" "flakes" ];
         nix.settings.substituters = lib.mkForce [ "file:///nix-cache" ];
         nix.settings.require-sigs = lib.mkForce false;
+        # Force `substitute` ON explicitly (codebutler/nix-wasm#1). The NEW nix CLI
+        # (`nix profile`, `nix build`, …) probes for Internet in src/nix/main.cc and,
+        # finding none on the network-less guest, sets `useSubstitutes = false`
+        # UNLESS it was explicitly overridden — silently disabling ALL substitution.
+        # Our only substituter is `file:///nix-cache`, which needs no network, so that
+        # default is wrong here: it makes `nix profile install` fail with "no
+        # substituter that can build it" (and made `nix profile` look like it was
+        # building derivers — it was actually just unable to substitute the cached
+        # output). `nix-env -iA` is a separate entry point that skips that probe, which
+        # is why only the new CLI was affected. Setting it here marks it `overridden`
+        # so the offline path leaves it alone.
+        nix.settings.substitute = true;
         nix.settings.sandbox = false;
         # Single-user guest: build/realize as the calling user (root). Empty
         # build-users-group disables build-user isolation — otherwise nix aborts
