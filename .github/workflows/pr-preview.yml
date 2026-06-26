@@ -104,13 +104,14 @@ jobs:
         uses: actions/github-script@v7.0.1
         env:
           PREVIEW_BASE_URL: ${{ vars.PREVIEW_BASE_URL }}
+          PR_COMMIT: ${{ github.event.pull_request.head.sha }}
         with:
           script: |
             const base = process.env.PREVIEW_BASE_URL;
             if (!base) { core.warning('PREVIEW_BASE_URL repo variable is unset'); return; }
             const url = `${base.replace(/\/+$/,'')}/pr-${process.env.PR}/demo/web/`;
             const marker = '<!-- nix-wasm-preview -->';
-            const sha = (process.env.GITHUB_SHA || '').slice(0, 8);
+            const sha = (process.env.PR_COMMIT || '').slice(0, 8);
             const body = `${marker}\n🚀 **Preview ready:** ${url}\n\n<sub>Boots this PR's guest (commit \`${sha}\`) in the browser · updated on every push.</sub>`;
             const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: process.env.PR });
             const existing = comments.find(c => c.body.includes(marker));
