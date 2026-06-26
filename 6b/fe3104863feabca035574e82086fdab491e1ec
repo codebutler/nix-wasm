@@ -1,0 +1,20 @@
+docs/superpowers/plans/2026-06-26-sommelier-keyboard.md
+  s_cd1a77be509bb9::t_17a1e4baf898ad 353,357-360,364
+  s_cd1a77be509bb9::t_6988e32d8e9262 1-352,354-356,361-363,365-601
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "6bfe3104863feabca035574e82086fdab491e1ec",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
