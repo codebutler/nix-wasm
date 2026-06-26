@@ -92,4 +92,22 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   done
   # Add the pkgs.nix catalog so the guest's ~/.nix-defexpr resolves installs.
   cp ${pkgsNix} "$out/pkgs.nix"
+
+  # Assert the cache actually SERVES each catalog package's deriver (.drv). The
+  # real-NixOS path is: `nix profile install` forms Built{drvPath} from the catalog
+  # and substitutes the .drv from the cache to read it. If the .drv narinfo isn't
+  # here, the guest fails with "failed to obtain derivation of …guest-cc.drv" — a
+  # 30-minutes-later boot failure. Catch it at build time instead (fast + loud).
+  # narinfo for /nix/store/<hash>-name.drv is <hash>.narinfo.
+  miss=0
+  for d in ${lib.concatMapStringsSep " " (drv: drv.drvPath) devPaths}; do
+    h=$(basename "$d"); h=''${h%%-*}
+    if [ ! -e "$out/$h.narinfo" ]; then
+      echo "ERROR: deriver narinfo $h.narinfo ($d) is NOT in the cache — the .drv" \
+           "closure was not published; `nix profile install` cannot obtain it." >&2
+      miss=1
+    fi
+  done
+  [ "$miss" = 0 ] || { echo "wasm-binary-cache: .drv closures missing — see above" >&2; exit 1; }
+  echo "wasm-binary-cache: all catalog .drv narinfos present (deriver closures published)"
 ''
