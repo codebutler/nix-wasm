@@ -88,7 +88,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
   echo "    \"pc-previews/packages/nix-wasm-base/$VERSION\" \\"
   echo "    --file \"$SQ\" --content-type application/octet-stream --remote"
   echo ""
-  echo "  # Upload binary-cache tree (nix-cache-info + *.narinfo + nar/* + pkgs.nix + manifest.json)"
+  echo "  # Upload binary-cache tree (nix-cache-info + *.narinfo + nar/* + pkgs.nix) — a plain standard Nix cache"
   ( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
       echo "  bunx wrangler r2 object put \"pc-previews/nix-cache/$REL\" \\"
@@ -113,8 +113,8 @@ bunx wrangler r2 object put \
   --file "$SQ" --content-type application/octet-stream --remote
 
 # 4b. Binary-cache tree → nix-cache/<relpath>
-# Uploads: nix-cache-info, *.narinfo, nar/*.nar.zst, pkgs.nix, manifest.json.
-# The runtime/nix-cache.js fetches manifest.json first to build its file index.
+# Uploads: nix-cache-info, *.narinfo, nar/*.nar.zst, pkgs.nix — a plain standard
+# Nix cache. runtime/nix-cache.js resolves files by on-demand HEAD probe (no index).
 echo "==> Uploading binary-cache tree to pc-previews/nix-cache/ …"
 ( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"

@@ -1,4 +1,4 @@
-// nix-cache.js — a lazy, read-only 9P export that serves a committed Nix binary
+// nix-cache.js — a lazy, read-only 9P export that serves a STANDARD Nix binary
 // cache (a `file://` store: nix-cache-info + <hash>.narinfo + nar/<hash>.nar) to
 // the Linux guest, so in-guest `nix` can SUBSTITUTE host-built wasm32-linux-musl
 // packages instead of building them (#141 / #139 task #5).
@@ -7,18 +7,21 @@
 // mounts it read-only at /nix-cache and points nix.conf's `substituters` at
 // `file:///nix-cache`. Nix's LocalBinaryCacheStore fetches files by exact path
 // (nix-cache-info, then <storehash>.narinfo, then the nar/ URL from it) — it does
-// NOT readdir — so this only needs stat + readBlob, but list is supported too.
+// NOT readdir — so this only needs stat + readBlob.
 //
 // This is a thin HTTP proxy: each guest file read over 9P becomes a fetch() of
 // `baseUrl + "/" + relpath`, so the cache can live anywhere reachable by URL —
 // a same-origin path, a CI-published dir, or a CORS/CORP-enabled bucket (a
 // different ORIGIN additionally needs cross-origin-isolation-compatible headers,
-// since the app runs under COEP: require-corp). `baseUrl` is the only knob.
+// since the app runs under COEP: require-corp).
 //
-// Lazy fetch: the per-file bytes are fetched (and cached) on first
-// access, and the file index (manifest.json — the cache's relative file paths)
-// is fetched on the first VFS call. An idle session, or one that never runs nix,
-// pays nothing.
+// ON-DEMAND probe (no preloaded index): existence is resolved per path by a
+// HEAD request (200 → file, 404 → ENOENT), and bytes by a GET, both cached.
+// There is NO `manifest.json` file index — the published store is therefore a
+// PLAIN STANDARD Nix cache the guest points at like any other (epic #60, Phase 1).
+// Trade-off: `readdir`/`ls` on a remote standard cache is not possible (you can't
+// enumerate a non-listable remote), but Nix never enumerates a binary cache, so
+// this is functionally free. Only the fixed standard-layout dirs are listable.
 //
 // Surface: the same async VFS the 9P server consumes — stat/list/readBlob, every
 // mutation rejected EROFS (a binary cache is immutable, content-addressed data).
@@ -31,48 +34,29 @@ function vfsError(code, path) {
 }
 
 const norm = (path) => (path || "/").replace(/^\/+/, "").replace(/\/+$/, "");
-const parent = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 
 // A fixed mtime: the committed cache is immutable per session, so a constant
 // keeps the derived 9P qid version stable (server.js derives it from modifiedAt).
 const MTIME = 1_700_000_000_000;
 
+// The standard binary-cache layout dirs. They are reported as existing WITHOUT a
+// network probe so that Nix's LocalBinaryCacheStore init — which does
+// `mkdir -p <cache>/{nar,realisations,log}` — sees them present and skips the
+// mkdir (which would EROFS on this read-only export and abort substitution). They
+// also let a Twalk to `nar/<hash>.nar` traverse the `nar` component without an
+// HTTP round-trip (no `nar/` object exists as a key, only `nar/<file>` objects).
+const SEEDED_DIRS = new Set(["", "nar", "realisations", "log"]);
+
 /**
- * @param {string} baseUrl  URL of the committed cache dir (serves manifest.json
- *   + the cache files at the same relative paths).
+ * @param {string} baseUrl  URL of the published standard Nix cache dir (serves
+ *   nix-cache-info + *.narinfo + nar/* at their relative paths).
  */
 export function createNixCacheExport(baseUrl) {
   const base = String(baseUrl).replace(/\/+$/, "");
-  /** @type {Map<string, Promise<Blob>>} relPath → in-flight/cached fetch */
+  /** @type {Map<string, Promise<Blob>>} relPath → in-flight/cached blob fetch */
   const blobCache = new Map();
-  /** @type {Promise<{files: Set<string>, dirs: Set<string>}>|null} */
-  let indexP = null;
-
-  const buildIndex = (list) => {
-    const files = new Set();
-    // Seed the standard binary-cache layout dirs so they exist even when empty:
-    // Nix's LocalBinaryCacheStore init does `mkdir -p <cache>/{nar,realisations,
-    // log}`, which on this READ-ONLY export would EROFS and abort substitution.
-    // Reporting them as existing dirs makes that mkdir a no-op (nix stats first).
-    const dirs = new Set(["", "nar", "realisations", "log"]);
-    for (const raw of list) {
-      const f = norm(raw);
-      if (!f) continue;
-      files.add(f);
-      for (let d = parent(f); d !== ""; d = parent(d)) dirs.add(d);
-    }
-    return { files, dirs };
-  };
-
-  // Fetch the file index. A missing manifest.json (e.g. no cache committed/
-  // published for this deploy) degrades to an EMPTY cache — the export still
-  // mounts, but offers nothing to substitute, with no error. So wiring the
-  // export in is always safe whether or not a cache is present.
-  const ensureIndex = () =>
-    (indexP ||= fetch(base + "/manifest.json")
-      .then((r) => (r.ok ? r.json() : []))
-      .catch(() => [])
-      .then(buildIndex));
+  /** @type {Map<string, Promise<object|null>>} relPath → in-flight/cached HEAD probe */
+  const statCache = new Map();
 
   const folderRec = (p) => ({
     id: "nix-cache:" + (p || "/"),
@@ -89,6 +73,24 @@ export function createNixCacheExport(baseUrl) {
     mime: "application/octet-stream",
     modifiedAt: MTIME,
   });
+
+  // Probe a path's existence with a HEAD. 200 → fileRec, 404 → null (ENOENT),
+  // any other status / network error → throw EIO (and evict so a retry re-probes).
+  // The result (file or not-found) is cached because the cache is immutable.
+  const probe = (p) => {
+    let entry = statCache.get(p);
+    if (!entry) {
+      entry = fetch(base + "/" + p, { method: "HEAD" }).then((r) => {
+        if (r.ok) return fileRec(p);
+        if (r.status === 404) return null;
+        throw vfsError("EIO", base + "/" + p + " (HTTP " + r.status + ")");
+      });
+      entry.catch(() => statCache.delete(p)); // evict failures so a later call retries
+      statCache.set(p, entry);
+    }
+    return entry;
+  };
+
   const rofs = (op) => async (path) => {
     throw vfsError("EROFS", "cannot " + op + " " + path + " (read-only nix cache)");
   };
@@ -96,46 +98,32 @@ export function createNixCacheExport(baseUrl) {
   return {
     async stat(path) {
       const p = norm(path);
-      const { files, dirs } = await ensureIndex();
-      if (dirs.has(p)) return folderRec(p);
-      if (files.has(p)) return fileRec(p);
-      return null;
+      if (SEEDED_DIRS.has(p)) return folderRec(p);
+      return probe(p);
     },
     async list(path) {
       const p = norm(path);
-      const { files, dirs } = await ensureIndex();
-      if (!dirs.has(p)) throw vfsError("ENOTDIR", path);
-      const out = [];
-      const seen = new Set();
-      const prefix = p === "" ? "" : p + "/";
-      for (const d of dirs) {
-        if (d !== "" && parent(d) === p && !seen.has(d)) {
-          seen.add(d);
-          out.push(folderRec(d));
-        }
-      }
-      for (const f of files) {
-        if (f.startsWith(prefix) && !f.slice(prefix.length).includes("/")) out.push(fileRec(f));
-      }
-      return out;
+      // A remote standard cache isn't enumerable; only the fixed layout dirs are
+      // known. Nix never readdirs a binary cache, so this is functionally complete.
+      if (!SEEDED_DIRS.has(p)) throw vfsError("ENOTDIR", path);
+      if (p === "") return ["nar", "realisations", "log"].map(folderRec);
+      return [];
     },
     async readBlob(path) {
       const p = norm(path);
-      const { files } = await ensureIndex();
-      if (!files.has(p)) throw vfsError("ENOENT", path);
-      if (!blobCache.has(p)) {
-        blobCache.set(
-          p,
-          fetch(base + "/" + p).then((r) => {
-            if (!r.ok) {
-              blobCache.delete(p); // allow a retry
-              throw vfsError("EIO", base + "/" + p + " (HTTP " + r.status + ")");
-            }
-            return r.blob();
-          }),
-        );
+      let blob = blobCache.get(p);
+      if (!blob) {
+        blob = fetch(base + "/" + p).then((r) => {
+          if (!r.ok) {
+            if (r.status === 404) throw vfsError("ENOENT", "/" + p);
+            throw vfsError("EIO", base + "/" + p + " (HTTP " + r.status + ")");
+          }
+          return r.blob();
+        });
+        blob.catch(() => blobCache.delete(p)); // evict failures so a later read re-fetches
+        blobCache.set(p, blob);
       }
-      return blobCache.get(p);
+      return blob;
     },
     write: rofs("write"),
     mkdir: rofs("mkdir"),
