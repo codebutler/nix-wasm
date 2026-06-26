@@ -6,9 +6,32 @@ As of 2026-06-25, Sommelier (`--parent` mode) is the guest Wayland bridge, auto-
 from the inittab. The previous `waylandproxyd` byte-splice proxy is retired.
 
 The `sommelier-smoke.mjs` and `sommelier-leak-smoke.mjs` headless gates (exit 0) prove
-the registry handshake and the wl_shm alloc/free lifecycle. The visual check below
-confirms the full render path: GTK window → wl_shm buffer → Greenfield compositor →
-browser canvas.
+the registry handshake and the wl_shm alloc/free lifecycle.
+
+**VERIFIED 2026-06-25 (headless Playwright + Greenfield):** `gtk3-widget-factory`
+renders its **full showcase** through Sommelier (Page 1/2/3, Adwaita theme, all
+widgets) **and survives** — the process stays alive (`ps` shows it), no
+`Error reading events from display: Broken pipe`, and `/var/log/sommelier.log` is
+clean (only the benign `virtwl-dmabuf … using virtwl instead` line). Verified by
+driving the local `demo/web/` (full `nix:true` artifacts) with system Chrome
+(`--enable-unsafe-swiftshader` for Greenfield's WebGL) and screenshotting the
+window (wf-final.png on PR #68).
+
+**Required fix:** this only works with `patches/sommelier/0002-keymap-mmap-graceful.patch`.
+Without it, a keyboard/seat client (which `wl-eyes` never exercises but GTK does)
+makes Greenfield send `wl_keyboard.keymap` with the xkb fd; Sommelier `mmap`s it,
+the mmap fails (host→guest fds are not mmappable on NOMMU — `wl-device.js` delivers
+them `pfn=0`), and `assert(data != MAP_FAILED)` aborts the per-client worker →
+broken pipe. The patch skips Sommelier's own (null-guarded) xkb state on MAP_FAILED;
+the keymap fd is still forwarded to the client.
+
+**KNOWN LIMITATION — keyboard INPUT does not work.** The window renders and is
+**mouse-usable**, but typing won't register: the guest client's own libxkbcommon
+also can't `mmap` the keymap fd (same NOMMU host→guest-fd limit), so it builds no
+keymap. In-guest keyboard input needs a separate mechanism for **host→guest
+mmappable fds** (the keymap content delivered into guest-allocated backing) — a real
+NOMMU feature the team previously hit a wall on (the host-arena dead-end note in
+`runtime/virtio/wl-device.js`). Tracked as follow-up, NOT part of this PR.
 
 ## Manual Browser Check: gtk3-widget-factory renders and survives
 
@@ -43,10 +66,14 @@ learnings: `/dev/shm` ramfs mount, `__unmapself` patch 0008, 1.75 GiB RAM).
    gtk3-widget-factory &
    ```
 
-5. Assert: A GTK3 widget-factory window appears as a floating draggable panel
-   in the browser page via Greenfield, showing buttons, sliders, comboboxes etc.
-   Click around — widgets respond. The app does NOT crash (no SIGILL/abort),
-   which was the pre-fix regression (detached GThreadPool worker SIGILL on exit).
+5. Assert: A GTK3 widget-factory window appears via Greenfield, showing the full
+   showcase (buttons, sliders, comboboxes, the Adwaita theme). The app does NOT
+   crash — no `Broken pipe`, the process stays alive, `/var/log/sommelier.log` has
+   no `Assertion failed`/`MAP_FAILED`. **Mouse** interaction works; **keyboard
+   input does not** (see the keyboard limitation above). (A headless equivalent of
+   this check: drive `demo/web/` with Playwright + Chrome `--enable-unsafe-swiftshader`,
+   run `gtk3-widget-factory >/tmp/wf.log 2>&1 &`, then assert `ps` still lists it,
+   `/tmp/wf.log` has no `Broken pipe`, and screenshot the window.)
 
 ## Engine-file changes and pc sync
 
