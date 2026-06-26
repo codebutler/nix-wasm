@@ -236,3 +236,14 @@ jobs:
           else
             echo "::warning::#75 ping-pace-smoke FAILED (rc=$pp_rc) — reproduced the one-packet-then-hang at the kernel/runtime timer level (a pending one-shot ITIMER_REAL does not fire after an I/O-woken recv re-blocks). Fix belongs in arch/wasm timer/idle reprogramming."
           fi
+
+          # #75 LOCALIZER (NON-gating). Runs control/xcpu/repro in one boot and
+          # prints the matrix so we can tell whether the bug needs ping's handler
+          # re-arm (repro-only) or is a plain "pending one-shot lost after a
+          # cross-CPU wakeup re-blocks the wait" (xcpu) with the baseline (control)
+          # still working. Drives where the arch/wasm fix goes.
+          echo "::group::ping-pace-probe matrix (#75 localizer, non-gating)"
+          set +e
+          node demo/node/ping-pace-probe-smoke.mjs
+          set -e
+          echo "::endgroup::"

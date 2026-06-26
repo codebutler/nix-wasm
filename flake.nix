@@ -200,6 +200,14 @@
         inherit cross;
       };
 
+      # #75 localizer (argv-selected cases): `control` (baseline one-shot fires),
+      # `xcpu` (a pending one-shot must fire after a cross-CPU reply wakes recv +
+      # re-blocks — isolates the bug from the handler re-arm), `repro` (full
+      # busybox-ping shape). See userspace/ping-pace-probe.c.
+      pingPaceProbe = import ./userspace/ping-pace-probe.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -362,7 +370,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -516,6 +524,9 @@
         # hang): one-shot itimer re-armed in its handler across an I/O-woken,
         # re-blocked recv → $out/bin/ping-pace-test.
         ping-pace-test = pingPaceTest;
+
+        # #75 localizer (control / xcpu / repro) → $out/bin/ping-pace-probe.
+        ping-pace-probe = pingPaceProbe;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;
