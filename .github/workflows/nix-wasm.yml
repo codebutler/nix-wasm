@@ -28,6 +28,10 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      # The boot-smoke / nix-boot-smoke jobs run the runtime engine + the
+      # demo/node smoke scripts, so a change to either must re-validate them
+      # (kernel/toolchain substitute from Cachix when their inputs are unchanged).
+      - 'runtime/**'
       - '.rebuild-request'
       - '.github/workflows/nix-wasm.yml'
   pull_request:
@@ -36,6 +40,7 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      - 'runtime/**'
       - '.github/workflows/nix-wasm.yml'
   workflow_dispatch:
 
@@ -138,6 +143,11 @@ jobs:
   #   • sigalrm-smoke   — the kernel self-armed SIGALRM/itimer/alarm path (#55).
   #   • kill-wake-smoke — the cross-process kill() async-signal wake reproducer
   #     for the `timeout 2 sleep 10` hang (#35), no busybox/networking.
+  #   • ping-pace-smoke — #75 regression (GATING; fixed by patches/kernel/0021):
+  #     a one-shot SIGALRM handler installed with SA_RESTART (busybox ping via
+  #     signal()) must run when it interrupts a blocking syscall. No networking.
+  #   • ping-pace-probe-smoke — #75 localizer (non-gating): control/restart/xcpu/
+  #     repro/transparent matrix, the detailed breakdown behind ping-pace-smoke.
   #   • vsock-ctl-smoke — the guest /Ctl agent (pcctl) ↔ host listener over
   #     virtio-vsock, open/notify/clipset/clipget round-trip (issue #60 Phase 2).
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
@@ -187,13 +197,13 @@ jobs:
 
       # Run a smoke up to 3 times, treating exit 2 (boot panic) as retryable.
       # NOTE (#83): every smoke below boots busybox-only and reads its shell over
-      # hvc0, which now rides the stock MULTIPORT virtio-console (the bespoke
-      # hvc_wasm backend is retired). So this job doubles as the primary-console
-      # regression gate: if the multiport console's hvc0 handshake / input / output
-      # broke, none of these smokes would reach a prompt. Multi-tty (hvc1+) and
-      # window resize need the full-nix inittab (8 getty lines live in
-      # base.squashfs, not the initramfs) and are validated on the PR preview boot.
-      - name: Boot smokes (sigalrm + kill-wake + timeout + vsock)
+      # hvc0, which now rides the stock virtio-console driver over 8 single-port
+      # virtio-console devices (the bespoke hvc_wasm backend is retired). So this
+      # job doubles as the primary-console regression gate: if the console's hvc0
+      # registration / input / output broke, none of these smokes would reach a
+      # prompt. Multi-tty (hvc1+) needs the full-nix inittab (8 getty lines live in
+      # base.squashfs, not the initramfs) and is validated on the PR preview boot.
+      - name: Boot smokes (sigalrm + kill-wake + timeout + ping-pace #75 + vsock)
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/
@@ -222,6 +232,105 @@ jobs:
           # #35 regression: `timeout 2 sleep 10` must terminate sleep (now fixed
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
+
+          # #75 regression (now fixed by patches/kernel/0021): busybox-ping's
+          # pacing — a one-shot SIGALRM handler installed with SA_RESTART must run
+          # when it interrupts a blocking syscall. The kernel delivers the handler
+          # at the FOOT and TRANSPARENTLY restarts the syscall (real result, no
+          # -EINTR). Gating — a regression (the one-packet-then-hang) fails the job.
+          run_smoke demo/node/ping-pace-smoke.mjs
+
+          # #75 LOCALIZER (NON-gating diagnostic). Runs control/restart/xcpu/repro/
+          # transparent in one boot and prints the matrix. All PASS with the fix;
+          # kept non-gating as the detailed breakdown behind the gating
+          # ping-pace-smoke above (tolerant of the guest's "PROBE ?:" label quirk).
+          echo "::group::ping-pace-probe matrix (#75 localizer, non-gating)"
+          set +e
+          node demo/node/ping-pace-probe-smoke.mjs
+          set -e
+          echo "::endgroup::"
+
           # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
           # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
           run_smoke demo/node/vsock-ctl-smoke.mjs
+
+  # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
+  # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
+  # both carried over virtio-9p). It is the runtime regression gate for the
+  # virtio-device-enum patch fix: if patches 0017-0020 ever drop the 9P device
+  # registration again (a silent patch-fuzz hazard the kernel.nix build-time
+  # assertion already guards), `9pnet_virtio` finds "no channels available for
+  # device pcroot/nixcache" and this boot fails. smoke.mjs reads /mnt/pc (pcroot
+  # 9P) and runs `nix-env -iA make` (nixcache 9P substitution) — exercising BOTH
+  # 9P channels end to end. Needs the four nix:true artifacts (kernel + initramfs +
+  # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
+  # pushed to Cachix first and this job substitutes them.
+  nix-boot-smoke:
+    name: boot full nix system + 9P transport smoke
+    needs: [toolchain, artifacts]
+    runs-on: namespace-profile-default
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Assemble the nix:true artifact dir the harness reads (vmlinux.wasm,
+      # initramfs.cpio.gz, base.squashfs, nix-cache/). nix-cache/ is the
+      # .#wasm-binary-cache tree (served by nix-cache.js over file:// path fetches;
+      # readFile follows the store symlinks).
+      - name: Assemble nix:true artifacts (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts-nix
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-nix/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-nix/initramfs.cpio.gz
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+            .artifacts-nix/base.squashfs
+          ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
+            .artifacts-nix/nix-cache
+          ls -lL .artifacts-nix
+
+      - name: Install runtime deps
+        working-directory: runtime
+        run: bun install --frozen-lockfile
+
+      # nix:true boots panic occasionally (exit 2) — retry; 0 pass / 1 fail are
+      # terminal. Gating: a 9P-transport regression fails the job.
+      - name: Boot full nix system + 9P smoke
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix/
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::smoke.mjs (attempt $attempt)"
+            set +e
+            node demo/node/smoke.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] && exit 0
+            [ "$rc" -eq 2 ] && { echo "inconclusive (boot panic) — retrying"; continue; }
+            exit "$rc"
+          done
+          echo "still inconclusive after 3 attempts"
+          exit 2

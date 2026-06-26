@@ -57,7 +57,7 @@ Part of issue #10 / #83 (host<->guest bridge consolidation onto virtio).
  1 file changed, 29 insertions(+)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
-index adbc202..4846de9 100644
+index d22cd22..7ec9114 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
 @@ -377,6 +377,14 @@ enum {
@@ -75,7 +75,7 @@ index adbc202..4846de9 100644
  #endif
  	VW_DEV_COUNT,
  };
-@@ -419,6 +427,27 @@ static int __init virtio_wasm_transport_init(void)
+@@ -423,6 +431,27 @@ static int __init virtio_wasm_transport_init(void)
  		pr_warn("virtio_wasm: 9p nixcache register failed: %ld\n", PTR_ERR(vw));
  #endif
  

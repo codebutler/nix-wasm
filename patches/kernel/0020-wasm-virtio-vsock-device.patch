@@ -46,7 +46,7 @@ the vsock transport for /Ctl (option 3).
  1 file changed, 20 insertions(+)
 
 diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
-index 4846de9..43cc445 100644
+index 7ec9114..15cae5d 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
 @@ -378,6 +378,14 @@ enum {
@@ -64,7 +64,7 @@ index 4846de9..43cc445 100644
  #if IS_ENABLED(CONFIG_VIRTIO_CONSOLE)
  	/*
  	 * 8 single-port virtio-console lines (hvc0..hvc7) at host index 8..15.
-@@ -448,6 +456,18 @@ static int __init virtio_wasm_transport_init(void)
+@@ -452,6 +460,18 @@ static int __init virtio_wasm_transport_init(void)
  	}
  #endif
  

@@ -191,12 +191,33 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 #   timeout-repro-smoke — the actual busybox `timeout 2 sleep 10` (the #35
 #                     headline command). PASS = sleep is killed at ~2s (busybox
 #                     exit 143 = 128+SIGTERM, NOT GNU's 124).
-# These three are wired into the nix-wasm.yml `boot-smoke` CI job (substitutes the
-# artifacts from Cachix and boots them on x86_64) — the first CI job that BOOTS
-# the guest rather than just building images.
+#   ping-pace-smoke / ping-pace-probe-smoke — #75 (busybox `ping` one-packet-then-
+#                     hang), now FIXED by patches/kernel/0021. ROOT CAUSE =
+#                     SA_RESTART (see the learnings entry below): a SIGALRM handler
+#                     installed with SA_RESTART (busybox ping uses signal()) was
+#                     never delivered when it interrupted a blocking syscall — the
+#                     wasm syscall-restart loop re-entered the syscall before
+#                     _user_mode_tail ran the queued handler. The fix lifts the
+#                     restart loop to the asm FOOT: deliver the handler, then
+#                     re-invoke the syscall (transparent SA_RESTART, real replies,
+#                     no -EINTR). ping-pace-probe runs a
+#                     control/restart/xcpu/repro matrix (all PASS with the fix). No
+#                     networking — both run in the busybox-only boot-smoke.
+# ping-pace-smoke is GATING (regression guard); ping-pace-probe-smoke is the
+# non-gating detailed breakdown behind it. All are in the nix-wasm.yml `boot-smoke`
+# CI job (substitutes the artifacts from Cachix and boots them on x86_64) — the
+# first CI job that BOOTS the guest rather than just building images.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/sigalrm-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/kill-wake-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/timeout-repro-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-probe-smoke.mjs
+
+# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
+# (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
+# vsock.onReady hook. PASS = open/notify/clipset reach the host seams and clipget
+# round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
 
 # #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
 # (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
@@ -644,6 +665,72 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   busybox + ash + glib carry the spawn-port patches. Holdouts follow one documented
   rule (don't-build an unused CLI / port a library to `posix_spawn` / compile out an
   unused return-twice symbol). **Full contract: `docs/process-model.md`.**
+- **SA_RESTART: deliver the handler at the FOOT, then re-invoke the syscall
+  (transparent restart)** (`patches/kernel/0021-wasm-sa-restart-deliver-signal.patch`
+  on `arch/wasm/kernel/{traps.c,entry.S}`; **#75, FIXED**). The bug: a blocking
+  syscall interrupted by a signal whose handler was installed with `SA_RESTART`
+  (e.g. `signal()`, which musl maps to `SA_RESTART`) returns `-ERESTARTSYS`;
+  `handle_signal()` (signal.c) keeps it (will restart) and `setup_rt_frame()`
+  queues the handler (`_TIF_DELIVER_SIGNAL`). But the queued handler is only run by
+  `_user_mode_tail` in the asm FOOT (`entry.S`), which runs AFTER `__wasm_syscall_N`
+  returns — and the C restart `do/while` re-entered the syscall in-place on
+  `-ERESTARTSYS`, re-blocking before the FOOT ever ran. So the handler never fired
+  and the syscall hung. With `sigaction(sa_flags=0)`, `handle_signal` rewrites to
+  `-EINTR` (`restart=false`) → loop exits → handler delivered, which is why every
+  signal test (`sigalrm-test`, `kill-wake-test`, all `sa_flags=0`) passed and only
+  `signal()`/`SA_RESTART` users hung. Headline symptom: busybox FANCY `ping` sent
+  one ICMP echo then hung (its interval SIGALRM handler `sendping4`, armed via
+  `signal()`, never ran). **Fix:** the restart loop is lifted from C to the asm
+  FOOT. `traps.c` keeps its in-loop restart for the NO-handler cases (incl. the
+  `-ERESTART_RESTARTBLOCK → __NR_restart_syscall` nr-switch), but when a handler is
+  queued for a would-be restart it stops looping and RETURNS with `syscall_ret`
+  still holding the internal `ERESTART` code (-516..-512, never seen by userspace).
+  `entry.S` wraps `call __wasm_syscall_N` in a loop: after the call it runs
+  `WASM_SYSCALL_FOOT_SYNC` (sync user sp/tls from pt_regs, then `call
+  _user_mode_tail` to deliver the queued handler + its sigreturn at the FOOT — the
+  only safe context), and if the saved return is an `ERESTART` code it
+  re-establishes the kernel C-frame SP (`WASM_SYSCALL_RESET_SP`) and branches back
+  to re-run the syscall. So the restart happens AFTER the handler → full
+  transparent `SA_RESTART` (busybox ping's `recv` returns real replies, no
+  `-EINTR`; restartable syscalls restart and return their real result). In-kernel
+  change only (`__wasm_syscall_N` signatures + the kernel↔engine import surface are
+  unchanged) → no `ENGINE_ABI` bump / no pc sync. **DEAD-ENDS (both CI-validated):**
+  (1) returning `-EINTR` instead of restarting (an earlier accepted fix) works but
+  is NOT transparent — restartable syscalls leak `EINTR` to callers; superseded by
+  this FOOT-loop. (2) delivering the handler in-loop by calling `_user_mode_tail()`
+  from inside `__wasm_syscall_N` PANICS (`RuntimeError: null function or function
+  signature mismatch` in `__libc_handle_signal`): handler delivery + the nested
+  sigreturn need the FOOT context (kernel C frame popped, kernel SP reset, user
+  sp/tls synced from pt_regs), NOT a nested mid-C-frame call. Gate: `ping-pace-smoke`
+  (+ the `ping-pace-probe` control/restart/xcpu/repro matrix), no networking, in the
+  boot-smoke job.
+- **virtio device-enum patches (0017-0020) must apply with ZERO fuzz** (`kernel.nix`
+  `postPatch` assertion). Patches 0018 (9p), 0019 (console), 0020 (vsock) each insert
+  into the SAME enum + `virtio_wasm_transport_init()` regions of
+  `drivers/virtio/virtio_wasm.c`. When `drivers/virtio/virtio_wasm.c` (created by
+  0013) drifts, `patch`'s fuzzy matching can SILENTLY mis-apply a stacked hunk — no
+  reject, no error. This bit hard: a ~65-line drift made `patch` silently DROP 0018's
+  `VW_DEV_9P_ROOT/9P_NIXCACHE` `virtio_wasm_register()` calls and (0020, authored
+  pre-0019) land `VW_DEV_VSOCK` before `VW_DEV_CONSOLE` (CONSOLE 6→8). The guest then
+  registered every virtio device EXCEPT 9P, so `9pnet_virtio: no channels available
+  for device pcroot/nixcache` — the pc VFS root + /nix-cache never mounted (a nix:true
+  boot reached a shell but `nix` couldn't read /nix-cache). It went unseen because no
+  CI booted nix:true headless (the wayland browser path differs). Fix: keep these
+  patches regenerated against the current tree (`patch -p1 --fuzz=0` must apply all of
+  0017-0020 cleanly), and the `kernel.nix` `postPatch` assertion now dumps + checks
+  the post-patch enum order + every device registration, failing the build LOUDLY in
+  `patchPhase` instead of shipping a subtly-broken kernel. Runtime gate: the
+  `nix-boot-smoke` CI job (`smoke.mjs` — reads `/mnt/pc` + `nix-env -iA`) exercises
+  both 9P channels end to end. **NOTE (#83 single-port console pivot):** the
+  canonical layout changed — the console is now **8 single-port virtio-console
+  devices** at an explicit `VW_DEV_CONSOLE_BASE = 8` (host idx 8..15, registered by a
+  `for (i<8) virtio_wasm_register(VW_DEV_CONSOLE_BASE + i, …)` loop), with
+  `VW_DEV_VSOCK = 7` BEFORE them (index 6 unused). So the assertion now enforces the
+  OPPOSITE order from #87's "bug" framing above — `VW_DEV_VSOCK(7) < CONSOLE_BASE(8)`
+  is CORRECT now — and checks the `VW_DEV_CONSOLE_BASE + i` loop (not a single
+  `VW_DEV_CONSOLE` call) plus the pinned `=7`/`=8` values. Multiport was abandoned:
+  its async control-vq port handshake races init to death on single-CPU wasm boot
+  (the single-port probe path registers each hvc line synchronously instead).
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

@@ -1,0 +1,5 @@
+# Touch this file to force the nix-wasm.yml workflow to run when a change
+# doesn't touch a .nix / patches/** path (the workflow's paths filter).
+#
+# 2026-06-26: validate the #75 `transparent` ping-pace-probe case on the guest
+# (added in 8c4afa8 — proves SA_RESTART read() returns data, not -EINTR).
