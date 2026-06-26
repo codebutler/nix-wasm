@@ -133,6 +133,19 @@ fi
 #    Order matters: upload the immutable image + cache FIRST, flip latest.json
 #    LAST, so a client never resolves a pointer to bytes that aren't up yet.
 # ---------------------------------------------------------------------------
+
+# Preflight: wrangler must actually RUN. On too-old Node it prints a "requires
+# Node >= 22" notice and exits 0 (uploading nothing) — which is exactly how the
+# first run silently published nothing while the job went green. Catch that here
+# (grep the output, not just the exit code) and fail loudly before relying on it.
+echo "==> wrangler preflight …"
+WRANGLER_OUT="$(bunx wrangler --version 2>&1)" || { echo "ERROR: wrangler failed to run:" >&2; echo "$WRANGLER_OUT" >&2; exit 1; }
+case "$WRANGLER_OUT" in
+  *"requires at least Node"*|*"Wrangler requires"*)
+    echo "ERROR: wrangler cannot run in this environment:" >&2; echo "$WRANGLER_OUT" >&2; exit 1;;
+esac
+echo "    wrangler $WRANGLER_OUT"
+
 echo "==> Uploading linux.iso → $BUCKET/packages/linux/$VERSION/linux.iso …"
 bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/linux.iso" \
   --file "$ISO" --content-type application/x-iso9660-image --remote
@@ -151,6 +164,23 @@ trap 'rm -f "$TMP_LATEST"' EXIT
 printf '%s' "$LATEST_JSON" > "$TMP_LATEST"
 bunx wrangler r2 object put "$BUCKET/packages/linux/latest.json" \
   --file "$TMP_LATEST" --content-type application/json --remote
+
+# Verify the flip actually landed (latest.json is served no-cache). Belt-and-
+# suspenders against any silent wrangler no-op: re-fetch the live pointer and
+# assert it now carries THIS version, else fail the job.
+echo "==> Verifying latest.json went live …"
+for attempt in 1 2 3 4 5; do
+  LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
+  case "$LIVE" in
+    *"\"version\":\"$VERSION\""*) echo "    verified: latest.json → $VERSION"; break;;
+  esac
+  if [ "$attempt" = 5 ]; then
+    echo "ERROR: latest.json did not update to version $VERSION after the flip." >&2
+    echo "live latest.json was: $LIVE" >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 echo ""
 echo "==> PUBLISHED linux channel: version=$VERSION minEngine=$MIN_ENGINE"
