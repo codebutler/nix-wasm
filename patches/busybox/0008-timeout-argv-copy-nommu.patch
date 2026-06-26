@@ -1,53 +1,56 @@
 From: nix-wasm <eric@codebutler.com>
-Subject: [PATCH] busybox: timeout — don't mutate the shared parent argv (#35)
+Subject: [PATCH] busybox: timeout — private argv with -pPID before operands (#35)
 
 Applies on top of 0004 (which spawns timeout's watcher child clone-with-a-fn).
 
 busybox NOMMU `timeout` spawns a watcher child that re-execs itself as the
-grandchild with an extra `-pPID` arg, then the parent execs PROG. Stock busybox
-does this with a real vfork: the child mutates the SHARED argv to
-`["timeout","SECS","-pPID"]`, re-execs, and the (frozen-until-exec) parent then
-restores argv[optind]/[optind+1] and execs PROG. The ordering is exact because
-vfork suspends the parent until the child execs.
+grandchild with an extra `-pPID` arg (so the grandchild knows which pid to kill
+after the timeout), then the parent execs PROG. Stock busybox builds the re-exec
+argv by overwriting the SHARED argv: `argv[optind] = "-pPID"`, giving
+`["timeout","SECS","-pPID"]`, and relies on (a) a real vfork's exact
+suspend-until-exec ordering and (b) glibc getopt PERMUTING the late `-pPID`
+option past the `SECS` operand.
 
-0004 ported the watcher spawn to clone(CLONE_VM|CLONE_VFORK|SIGCHLD). CLONE_VM
-shares the argv array just like vfork, but the mutate-in-the-child /
-restore-in-the-parent dance does not survive the port: on the wasm guest the
-parent ends up running BB_EXECVP_or_die() on the still-mutated argv, so
-`timeout 2 sleep 10` fails immediately with
+Neither holds on the wasm/NOMMU guest:
+ - The watcher is spawned with clone(CLONE_VM|CLONE_VFORK), which shares argv
+   like vfork; the mutate-in-child / restore-in-parent dance does not survive
+   the port.
+ - musl's getopt does NOT permute: with argv `["timeout","SECS","-pPID"]` the
+   leading operand `SECS` stops option scanning, so `-pPID` is never parsed and
+   the grandchild runs with parent==0. It then treats `-pPID` as PROG and dies
+   with `timeout: can't execute '-p50'`, so the timeout is never enforced
+   (issue #35 — NOT the async-SIGALRM/signal hang it was first filed as; the
+   kernel async-signal path is proven good by .#sigalrm-test/.#kill-wake-test).
 
-    timeout: can't execute '-p50': No such file or directory
-
-(the parent execs the watcher's `-pPID` instead of `sleep`). This is issue #35's
-real failure — NOT the async-SIGALRM/signal-delivery gap it was first filed as
-(the kernel async-signal path is proven good by .#sigalrm-test and
-.#kill-wake-test).
-
-Fix: the clone child builds a PRIVATE argv copy for the re-exec and never writes
-the shared parent argv, so the parent's post-CLONE_VFORK exec of PROG is always
-correct regardless of CLONE_VM sharing or scheduling order. The parent's
-existing argv[0]=sv1/argv[1]=sv2 restore becomes a harmless no-op.
+Fix: the clone child builds a PRIVATE argv copy (never touches the parent's, so
+the parent's exec of PROG is correct) and inserts `-pPID` BEFORE the operands —
+`["timeout","-pPID","SECS",PROG...]` — so musl getopt parses it regardless of
+permutation. The grandchild then has parent!=0, jumps to its watch loop, and
+kills PROG after the timeout.
 
 diff -ruN a/coreutils/timeout.c b/coreutils/timeout.c
 --- a/coreutils/timeout.c
 +++ b/coreutils/timeout.c
-@@ -57,9 +57,17 @@
+@@ -57,9 +57,20 @@
  static int timeout_child(void *arg)
  {
  	struct timeout_child_args *a = arg;
 -	a->argv[a->optind] = xasprintf("-p%u", (unsigned)getppid());
 -	a->argv[a->optind + 1] = NULL;
 -	bb_daemonize_or_rexec(0, a->argv);
-+	/* Build a PRIVATE argv for the watcher re-exec instead of mutating the
-+	 * parent's. clone(CLONE_VM) shares the argv array, so overwriting
-+	 * argv[optind] with "-pPID" also corrupts the PARENT's argv — and the
-+	 * parent then BB_EXECVP_or_die()s "-pPID" instead of PROG ("can't execute
-+	 * '-pNN'", issue #35) rather than the program it was asked to run. A copy
-+	 * keeps the parent's argv pristine, so its post-CLONE_VFORK exec is correct. */
-+	int n = a->optind;
-+	char **cargv = xzalloc((n + 2) * sizeof(cargv[0]));
-+	memcpy(cargv, a->argv, n * sizeof(cargv[0]));
-+	cargv[n] = xasprintf("-p%u", (unsigned)getppid());
++	/* Build a PRIVATE argv for the watcher re-exec; don't mutate the parent's
++	 * (CLONE_VM shares it). Insert "-pPID" BEFORE the operands: musl's getopt
++	 * does NOT permute options past the first non-option (glibc does), so the
++	 * stock layout ["timeout","SECS","-pPID"] leaves -p UNPARSED on the wasm
++	 * guest — the watcher then runs with parent==0, re-execs PROG="-pPID"
++	 * ("can't execute '-pNN'") and never enforces the timeout (issue #35). */
++	int argc = 0;
++	while (a->argv[argc])
++		argc++;
++	char **cargv = xzalloc((argc + 2) * sizeof(cargv[0]));
++	cargv[0] = a->argv[0];
++	cargv[1] = xasprintf("-p%u", (unsigned)getppid());
++	memcpy(cargv + 2, a->argv + 1, argc * sizeof(cargv[0]));
 +	bb_daemonize_or_rexec(0, cargv);
  	return 0; /* not reached (bb_daemonize_or_rexec _exits this child) */
  }

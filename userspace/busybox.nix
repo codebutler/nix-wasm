@@ -62,9 +62,6 @@ cross.stdenv.mkDerivation {
     # "-pPID" instead of PROG (`timeout 2 sleep 10` → "can't execute '-p50'").
     # Build a private argv copy in the child; never touch the parent's.
     ../patches/busybox/0008-timeout-argv-copy-nommu.patch
-    # TEMP/DEBUG (#35): trace timeout's argv/optind/parent on the guest to find
-    # the real re-exec/getopt flow. Revert once the true fix lands.
-    ../patches/busybox/0009-timeout-debug-instrumentation.patch
   ];
 
   # busybox's Makefile resolves the O= dir via a hardcoded `/bin/pwd`, which
