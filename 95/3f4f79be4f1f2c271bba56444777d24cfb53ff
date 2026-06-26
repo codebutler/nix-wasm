@@ -1,0 +1,19 @@
+infra/preview-worker/package.json
+  s_2aa74a3a6bc0ab::t_7b3a646e384706 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "953f4f79be4f1f2c271bba56444777d24cfb53ff",
+  "prompts": {},
+  "sessions": {
+    "s_2aa74a3a6bc0ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b039c2b-8c6b-4a70-ab07-4b05782ad9d5",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
