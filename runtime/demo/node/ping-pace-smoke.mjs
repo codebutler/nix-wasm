@@ -1,11 +1,12 @@
-// ROOT CAUSE (#75, confirmed by the ping-pace-probe matrix): the hang is the
+// ROOT CAUSE (#75, confirmed by the ping-pace-probe matrix): the hang was the
 // SA_RESTART syscall-restart path, NOT an I/O-woken-recv timer loss. A SIGALRM
-// handler installed with SA_RESTART (busybox ping via signal()) is never
-// delivered when it interrupts a blocking syscall — the wasm restart loop
-// (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-enters the syscall before
-// _user_mode_tail runs the queued handler. This repro still reproduces it
-// faithfully (it installs the handler via signal() = SA_RESTART); the original
-// "I/O-woken recv re-blocks" framing below was the pre-matrix hypothesis.
+// handler installed with SA_RESTART (busybox ping via signal()) was never
+// delivered when it interrupted a blocking syscall — the wasm restart loop
+// (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-entered the syscall before
+// _user_mode_tail ran the queued handler. FIXED by patches/kernel/0021 (deliver
+// at the FOOT, return -EINTR — no transparent restart on this arch); this smoke
+// is now a GATING regression guard. The "I/O-woken recv re-blocks" framing below
+// was the pre-matrix hypothesis, kept for history.
 //
 // ping-pace-smoke.mjs — boots and runs /bin/ping-pace-test in-guest, the
 // faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends one

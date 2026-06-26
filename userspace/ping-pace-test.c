@@ -2,12 +2,14 @@
  * `ping` sends one ICMP echo, receives its reply, then never sends packet #2).
  *
  * ROOT CAUSE (confirmed by ping-pace-probe's control/restart/xcpu/repro matrix):
- * the bug is SA_RESTART, not the I/O-woken-recv sequence theorized below. A
+ * the bug was SA_RESTART, not the I/O-woken-recv sequence theorized below. A
  * SIGALRM handler installed with SA_RESTART (this repro uses signal(), like
- * busybox) is never delivered when it interrupts a blocking syscall — the wasm
- * syscall-restart loop (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-enters the
- * syscall before _user_mode_tail can run the queued handler. This repro still
- * reproduces it faithfully; the rationale below is the pre-matrix hypothesis.
+ * busybox) was never delivered when it interrupted a blocking syscall — the wasm
+ * syscall-restart loop (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-entered the
+ * syscall before _user_mode_tail could run the queued handler. FIXED by
+ * patches/kernel/0021 (deliver the handler at the FOOT, return -EINTR — this arch
+ * has no transparent restart); this is now a passing regression gate. The
+ * rationale below is the pre-matrix hypothesis, kept for history.
  *
  * It mirrors busybox ping's EXACT pacing structure WITHOUT networking, so it
  * runs in the busybox-only boot-smoke (kernel + initramfs, nix:false):

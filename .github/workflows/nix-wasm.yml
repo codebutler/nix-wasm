@@ -138,9 +138,11 @@ jobs:
   #   • sigalrm-smoke   — the kernel self-armed SIGALRM/itimer/alarm path (#55).
   #   • kill-wake-smoke — the cross-process kill() async-signal wake reproducer
   #     for the `timeout 2 sleep 10` hang (#35), no busybox/networking.
-  #   • ping-pace-smoke — #75 DIAGNOSTIC (non-gating): busybox `ping`'s one-shot-
-  #     itimer-re-armed-in-handler pacing across an async-I/O-woken, re-blocked
-  #     recv, no busybox/networking. Reported, never reds CI (bug still open).
+  #   • ping-pace-smoke — #75 regression (GATING; fixed by patches/kernel/0021):
+  #     a one-shot SIGALRM handler installed with SA_RESTART (busybox ping via
+  #     signal()) must run when it interrupts a blocking syscall. No networking.
+  #   • ping-pace-probe-smoke — #75 localizer (non-gating): control/restart/xcpu/
+  #     repro matrix, the detailed breakdown behind ping-pace-smoke.
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
@@ -217,31 +219,18 @@ jobs:
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
 
-          # #75 DIAGNOSTIC (NON-gating — the bug is still OPEN). Faithful
-          # no-network reproducer of busybox `ping`'s pacing: a one-shot itimer
-          # re-armed in its own handler across an async-I/O-woken, re-blocked
-          # recv (the gap sigalrm-test case 3 leaves). Reported, not gated: a
-          # PASS means the kernel/runtime timer path handles ping's sequence
-          # (bug is elsewhere — busybox ICMP internals or pc vnet); a FAIL
-          # means we've reproduced #75 at the kernel/runtime level. Either
-          # verdict is informational until #75 is fixed, so it never reds CI.
-          echo "::group::ping-pace-smoke (#75 diagnostic, non-gating)"
-          set +e
-          node demo/node/ping-pace-smoke.mjs
-          pp_rc=$?
-          set -e
-          echo "::endgroup::"
-          if [ "$pp_rc" -eq 0 ]; then
-            echo "::notice::#75 ping-pace-smoke PASSED — the SA_RESTART syscall-restart path now delivers the SIGALRM handler (root cause fixed)."
-          else
-            echo "::warning::#75 ping-pace-smoke FAILED (rc=$pp_rc) — reproduced: a SIGALRM handler installed with SA_RESTART (busybox ping via signal()) is never delivered when it interrupts a blocking syscall. The wasm syscall-restart loop (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-enters the syscall before _user_mode_tail runs the queued handler. See the ping-pace-probe matrix below + issue #75."
-          fi
+          # #75 regression (now fixed by patches/kernel/0021): busybox-ping's
+          # pacing — a one-shot SIGALRM handler installed with SA_RESTART must run
+          # when it interrupts a blocking syscall (the kernel delivers it at the
+          # FOOT and returns -EINTR; EINTR-aware loops retry). Gating — a
+          # regression (the one-packet-then-hang) fails the job.
+          run_smoke demo/node/ping-pace-smoke.mjs
 
-          # #75 LOCALIZER (NON-gating). Runs control/xcpu/repro in one boot and
-          # prints the matrix so we can tell whether the bug needs ping's handler
-          # re-arm (repro-only) or is a plain "pending one-shot lost after a
-          # cross-CPU wakeup re-blocks the wait" (xcpu) with the baseline (control)
-          # still working. Drives where the arch/wasm fix goes.
+          # #75 LOCALIZER (NON-gating diagnostic). Runs control/restart/xcpu/repro
+          # in one boot and prints the matrix. All four PASS with the fix; kept
+          # non-gating since it's the detailed breakdown behind the gating
+          # ping-pace-smoke above (and tolerant of the guest's "PROBE ?:" label
+          # quirk for the threaded cases).
           echo "::group::ping-pace-probe matrix (#75 localizer, non-gating)"
           set +e
           node demo/node/ping-pace-probe-smoke.mjs

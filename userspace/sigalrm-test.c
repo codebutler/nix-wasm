@@ -22,11 +22,12 @@
  * NB (issue #75): every case here installs the handler with sigaction(sa_flags=0)
  * — i.e. NO SA_RESTART — so an interrupted syscall returns -EINTR and the kernel
  * delivers the handler. busybox `ping` installs via signal() (musl → SA_RESTART),
- * and THAT path is broken on the guest: a SA_RESTART handler is never delivered
- * when it interrupts a blocking syscall (the wasm syscall-restart loop re-enters
- * the syscall before _user_mode_tail runs the queued handler). So this test does
- * NOT cover SA_RESTART; that gap is the #75 root cause, exercised by
- * ping-pace-probe.c (`restart`/`repro` cases) and ping-pace-test.c.
+ * and THAT path was the #75 root cause: a SA_RESTART handler was never delivered
+ * when it interrupted a blocking syscall (the wasm syscall-restart loop re-entered
+ * the syscall before _user_mode_tail ran the queued handler). Fixed by
+ * patches/kernel/0021 (deliver at the FOOT, return -EINTR — no transparent
+ * restart on this arch). So this test does NOT cover SA_RESTART; that path is
+ * covered by ping-pace-probe.c (`restart`/`repro` cases) and ping-pace-test.c.
  *
  * Background — #35's premise vs. reality: #35 reported busybox `ping` sending
  * only one packet and hypothesized "no async interval-timer source raises

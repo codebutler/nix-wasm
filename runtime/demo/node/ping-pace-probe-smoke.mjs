@@ -41,7 +41,12 @@ try {
 
   for (const c of ["control", "restart", "xcpu", "repro"]) {
     s.send(`/bin/ping-pace-probe ${c}\n`);
-    const ok = await s.waitForOutput(new RegExp(`PROBE ${c}: OK `), 15000).catch(() => false);
+    // Match the verdict line generically: the guest doesn't preserve the probe's
+    // casename string across echo-thread creation (it prints "PROBE ?:" for the
+    // threaded xcpu/repro cases), so key on the OK/FAIL token, not the name. Each
+    // case runs sequentially and prints exactly one verdict, so the next
+    // "PROBE …: OK" after the send is this case's.
+    const ok = await s.waitForOutput(/PROBE [^\n]*: OK /, 15000).catch(() => false);
     verdict[c] = ok ? "PASS" : "FAIL";
     console.log(`[ping-pace-probe-smoke] ${c}: ${verdict[c]}`);
   }
