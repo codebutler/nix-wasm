@@ -41,6 +41,7 @@ export interface UserShellApiActions {
   requestSurfaceClose(compositorSurface: CompositorSurface): void;
   pointerMotion(compositorSurface: CompositorSurface, x: number, y: number): void;
   pointerLeave(compositorSurface: CompositorSurface): void;
+  pointerButton(compositorSurface: CompositorSurface, buttonCode: number, released: boolean): void;
   notifyKey(keyboardEvent: KeyboardEvent, pressed: boolean): void;
 }
 
