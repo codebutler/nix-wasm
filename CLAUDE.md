@@ -175,6 +175,16 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-smoke.mjs
 # docs/superpowers/notes/m4-galculator-visual.md).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.mjs
 
+# #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
+#   sigalrm-smoke   — self-armed SIGALRM/itimer/alarm (kernel mechanism, #55).
+#   kill-wake-smoke — cross-process kill() async-signal wake (the `timeout 2
+#                     sleep 10` hang reproducer, #35; no busybox, no networking).
+# These two are wired into the nix-wasm.yml `boot-smoke` CI job (substitutes the
+# artifacts from Cachix and boots them on x86_64) — the first CI job that BOOTS
+# the guest rather than just building images.
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/sigalrm-smoke.mjs
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/kill-wake-smoke.mjs
+
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):

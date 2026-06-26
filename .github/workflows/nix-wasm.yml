@@ -129,3 +129,84 @@ jobs:
       # the same output. --rebuild rebuilds just the top derivation and compares.
       - name: Determinism check (.#nix-wasm --rebuild)
         run: nix build -L --rebuild '.#nix-wasm' --no-link
+
+  # --- boot-smoke: actually BOOT the guest and run the in-repo node smokes -----
+  # The static gates (runtime-gates.yml) never boot the guest, and the artifacts
+  # job above only BUILDS the images. This job substitutes vmlinux.wasm +
+  # initramfs.cpio.gz from Cachix and boots them in the Node harness to run the
+  # #35 async-signal regression/diagnostic smokes end to end:
+  #   • sigalrm-smoke   — the kernel self-armed SIGALRM/itimer/alarm path (#55).
+  #   • kill-wake-smoke — the cross-process kill() async-signal wake reproducer
+  #     for the `timeout 2 sleep 10` hang (#35), no busybox/networking.
+  # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
+  # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
+  # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
+  boot-smoke:
+    name: boot guest + run signal smokes
+    needs: toolchain
+    runs-on: namespace-profile-default
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Substitute the two artifacts a busybox-only (nix:false) boot needs.
+      - name: Build kernel + initramfs (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts/initramfs.cpio.gz
+          ls -lL .artifacts
+
+      - name: Install runtime deps
+        working-directory: runtime
+        run: bun install --frozen-lockfile
+
+      # Run a smoke up to 3 times, treating exit 2 (boot panic) as retryable.
+      - name: Boot smokes (sigalrm + kill-wake)
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/
+        run: |
+          run_smoke() {
+            local script="$1" attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt)"
+              set +e
+              node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then
+                echo "$script inconclusive (boot panic) — retrying"
+                continue
+              fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"
+            return 2
+          }
+          run_smoke demo/node/sigalrm-smoke.mjs
+          run_smoke demo/node/kill-wake-smoke.mjs
