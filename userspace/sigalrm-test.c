@@ -19,13 +19,14 @@
  *      (busybox-ping's pacing skeleton)         single timer-less blocking wait
  *                                               in a process that has spawned.
  *
- * NB (issue #75): case 3 fires a one-shot timer ONCE during a SINGLE recv that
- * never receives traffic, and the handler does NOT re-arm. Continuous busybox
- * `ping` does more: each interval the handler RE-ARMS another one-shot timer AND
- * a reply asynchronously I/O-wakes recv, so the next one-shot must fire after an
- * I/O-woken recv RE-BLOCKS. That extra "async-I/O wakeup + re-block, then the
- * pending one-shot fires" step is NOT covered here — it is exercised by
- * ping-pace-test.c (the #75 reproducer).
+ * NB (issue #75): every case here installs the handler with sigaction(sa_flags=0)
+ * — i.e. NO SA_RESTART — so an interrupted syscall returns -EINTR and the kernel
+ * delivers the handler. busybox `ping` installs via signal() (musl → SA_RESTART),
+ * and THAT path is broken on the guest: a SA_RESTART handler is never delivered
+ * when it interrupts a blocking syscall (the wasm syscall-restart loop re-enters
+ * the syscall before _user_mode_tail runs the queued handler). So this test does
+ * NOT cover SA_RESTART; that gap is the #75 root cause, exercised by
+ * ping-pace-probe.c (`restart`/`repro` cases) and ping-pace-test.c.
  *
  * Background — #35's premise vs. reality: #35 reported busybox `ping` sending
  * only one packet and hypothesized "no async interval-timer source raises

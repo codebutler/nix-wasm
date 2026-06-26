@@ -232,9 +232,9 @@ jobs:
           set -e
           echo "::endgroup::"
           if [ "$pp_rc" -eq 0 ]; then
-            echo "::notice::#75 ping-pace-smoke PASSED — ping's one-shot-itimer-re-armed-in-handler + I/O-woken-recv sequence works at the kernel/runtime level; the bug is elsewhere (busybox ICMP socket internals or pc vnet)."
+            echo "::notice::#75 ping-pace-smoke PASSED — the SA_RESTART syscall-restart path now delivers the SIGALRM handler (root cause fixed)."
           else
-            echo "::warning::#75 ping-pace-smoke FAILED (rc=$pp_rc) — reproduced the one-packet-then-hang at the kernel/runtime timer level (a pending one-shot ITIMER_REAL does not fire after an I/O-woken recv re-blocks). Fix belongs in arch/wasm timer/idle reprogramming."
+            echo "::warning::#75 ping-pace-smoke FAILED (rc=$pp_rc) — reproduced: a SIGALRM handler installed with SA_RESTART (busybox ping via signal()) is never delivered when it interrupts a blocking syscall. The wasm syscall-restart loop (arch/wasm/kernel/traps.c WASM_SYSCALL_N) re-enters the syscall before _user_mode_tail runs the queued handler. See the ping-pace-probe matrix below + issue #75."
           fi
 
           # #75 LOCALIZER (NON-gating). Runs control/xcpu/repro in one boot and
