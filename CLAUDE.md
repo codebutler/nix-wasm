@@ -301,19 +301,25 @@ follows.
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
 In-guest installs work like a real NixOS system via BOTH `nix-env -iA` and
-`nix profile install` (codebutler/nix-wasm#1). The ticket was long misdiagnosed as
-a fake-vs-real-derivation problem; the actual root cause is `src/nix/main.cc`: the
-NEW CLI (`nix profile`/`nix build`) probes for Internet and, finding none on the
-network-less guest, sets `useSubstitutes = false` UNLESS overridden — silently
-disabling substitution even for our `file:///nix-cache`. With substitution off it
-could not substitute the cached output and fell back to BUILDING the deriver (the
-xgcc symptom). Fix (no nix patch, no fake): (1) `substitute = true` in the guest
-nix.conf (`system.nix`) marks it overridden so the offline path leaves it on; (2)
-the `pkgs.nix` catalog entries are REAL derivations (carry the real `drvPath`) and
-`wasm-binary-cache` serves the `.drv` closures as well as the outputs, so the stock
-`DerivationGoal` substitutes the cache-valid output without building — identical to
-installing from `cache.nixos.org`. Archive ops work: `tar` (czf/xzf, patched) is
-validated; `wget` is N/A on the
+`nix profile install` (codebutler/nix-wasm#1). Two things, both required:
+(1) `substitute = true` in the guest nix.conf (`system.nix`). The NEW CLI
+(`nix profile`/`nix build`) probes for Internet and, finding none, sets
+`useSubstitutes = false` UNLESS overridden — silently disabling substitution even
+for our `file:///nix-cache`. Marking it overridden leaves it on. Necessary but not
+sufficient. (2) the catalog packages' DERIVER (`.drv`) closures are SEEDED VALID
+into the guest store: `flake.nix wasmDrvSeed` (a `closureInfo` over the toolchain
+`drvPath`s) → `base-squashfs.nix` ships those `.drv` files + a `registration` →
+`bootstrap.nix` runs `nix-store --load-db` at boot. **Nix never substitutes a
+`.drv` from a cache** (`src/libstore/misc.cc` `queryMissing` marks a non-local
+`.drv` "unknown" → the original "failed to obtain derivation of …guest-cc.drv"),
+so the `.drv` must be present LOCALLY — exactly a real system's store after eval,
+reached here by `nix copy --derivation` instead of in-guest nixpkgs eval (#92).
+With the `.drv` local, the new CLI forms `Built{drvPath}`, reads it, and
+substitutes the cache-valid OUTPUT without building. `nix-env -iA` worked all
+along because it realises the OUTPUT directly (Opaque), never touching the `.drv`.
+**DEAD END (removed):** publishing the `.drv` closures in `wasm-binary-cache` —
+Nix never fetches them, so it accomplished nothing. The cache serves OUTPUTS only.
+Archive ops work: `tar` (czf/xzf, patched) is validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
 internet fetch), so the disabled network/service vfork applets aren't needed.
 
@@ -835,13 +841,20 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
   approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
   satisfied (#48/#50). See the "clang is its own driver" note in Current state.
-- **#1** — DONE: `nix profile install` works like a real NixOS system. Root cause
-  was the new CLI disabling substitution offline (`src/nix/main.cc`), NOT fake-vs-real
-  derivations. Fix: `substitute = true` in the guest nix.conf + a real-derivation
-  catalog (`pkgs.nix` carries real `drvPath`) over a `.drv`-aware binary cache, so the
-  stock `DerivationGoal` substitutes the cached output without building. No nix patch,
-  no fake derivation. Validator: `runtime/demo/node/profile-install-e2e.mjs` (the
-  `nix-boot-smoke` CI job runs it).
+- **#1** — DONE: `nix profile install` (new CLI) works like a real NixOS system.
+  Two real pieces, no nix patch / no fake derivation: (1) `substitute = true` in
+  the guest nix.conf (`system.nix`) — the new CLI disables substitution offline
+  (`src/nix/main.cc`) unless overridden; (2) the catalog packages' `.drv` closures
+  are SEEDED VALID into the guest store at boot (`flake.nix wasmDrvSeed` →
+  `base-squashfs.nix` ships the `.drv`s + a `registration` → `bootstrap.nix`
+  `nix-store --load-db`), because Nix never substitutes a `.drv` from a cache
+  (`misc.cc queryMissing` FIXME → "failed to obtain derivation"). So the new CLI
+  forms `Built{drvPath}`, finds the local `.drv`, and substitutes the OUTPUT — the
+  real-system store state via `nix copy --derivation`, not in-guest eval (#92).
+  Full deriver parity for ARBITRARY packages (not just the seeded catalog) is the
+  separate in-guest-eval goal (#92). DEAD END: a `.drv`-aware binary cache — Nix
+  never fetches the `.drv`s. Validator: `runtime/demo/node/profile-install-e2e.mjs`
+  (the `nix-boot-smoke` CI job runs it).
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were

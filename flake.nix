@@ -380,9 +380,28 @@
         extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
+      # ---- the on-demand compiler-toolchain packages (catalog + .drv seed) --
+      # One source of truth for the four packages the guest installs on demand:
+      # the .#wasm-binary-cache catalog (their OUTPUTS) and the .drv-seed closure
+      # baked into the base squashfs (their DERIVERS) both derive from this list.
+      wasmDevPaths = [ guestClang guestCc guestCxx makeWasm ];
+
+      # The catalog packages' DERIVER (.drv) closure. Seeded VALID into the guest
+      # store (via base.squashfs + a boot-time `nix-store --load-db`) so the NEW
+      # CLI (`nix profile install`) works: it realises Built{drvPath}, which Nix
+      # requires to be present LOCALLY — Nix never substitutes a .drv from a cache
+      # (src/libstore/misc.cc queryMissing marks a non-local .drv "unknown" → the
+      # #1 "failed to obtain derivation" error). With the .drv local+valid, Nix
+      # reads it and substitutes the OUTPUT from the cache — the real-NixOS store
+      # state (.drvs present as local eval would have written them, outputs fetched
+      # on demand), reached here by `nix copy --derivation` instead of in-guest
+      # eval (#92). The closure is tiny: .drv text + small build scripts; package
+      # SOURCES are fetch-derivation OUTPUTS, so they are NOT in a .drv's closure.
+      wasmDrvSeed = pkgs.closureInfo { rootPaths = map (d: d.drvPath) wasmDevPaths; };
+
       # ---- the base-system store closure as a single squashfs image (#43) ---
       wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
-        inherit pkgs; toplevel = wasmToplevel;
+        inherit pkgs; toplevel = wasmToplevel; drvSeed = wasmDrvSeed;
       };
 
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
@@ -424,7 +443,7 @@
       # arrive on demand through substitution.
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
-        devPaths = [ guestClang guestCc guestCxx makeWasm ];
+        devPaths = wasmDevPaths;
       };
 
       # ---- the single versioned `linux` boot bundle (pc#315) ----------------

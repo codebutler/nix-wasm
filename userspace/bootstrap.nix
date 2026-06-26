@@ -125,6 +125,20 @@ pkgs.writeText "init" ''
     # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
     [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr 2>/dev/null || true
 
+    # Seed the catalog packages' .drv closure into the Nix DB (codebutler/nix-wasm#1).
+    # base.squashfs ships those .drv files + this registration; loading it makes the
+    # .drvs read as VALID locally, so the NEW CLI (`nix profile install`) — which
+    # realises Built{drvPath} and needs the .drv present (Nix never substitutes a
+    # .drv from a cache: src/libstore/misc.cc queryMissing marks a non-local .drv
+    # "unknown") — finds the deriver and substitutes the OUTPUT from /nix-cache.
+    # Real-system store state (.drvs local as eval would have written them), reached
+    # via `nix copy --derivation` rather than in-guest nixpkgs eval (#92).
+    if [ -f /nix/.drv-registration ] && [ -x "$sys/sw/bin/nix-store" ]; then
+      mkdir -p /nix/var/nix/db
+      "$sys/sw/bin/nix-store" --load-db < /nix/.drv-registration 2>/dev/null \
+        || echo "pc: nix-store --load-db (drv seed) failed"
+    fi
+
     echo "pc: booting Nix userspace from $sys"
     exec "$sys/init"
   fi

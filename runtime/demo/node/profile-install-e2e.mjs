@@ -1,25 +1,26 @@
 // profile-install-e2e.mjs — issue #1 validator: `nix profile install` (the new
 // CLI, not just `nix-env -iA`) of the compiler toolchain from the binary cache.
 //
-// STATUS: FIXED — expected to PASS. The ticket was misdiagnosed for a long time
-// (the "nix profile realises the deriver / builds xgcc" theory). The actual root
-// cause is in src/nix/main.cc: the NEW nix CLI probes for Internet and, finding
-// none on the network-less guest, sets `useSubstitutes = false` unless the setting
-// was explicitly overridden — silently disabling ALL substitution. Our only
-// substituter is `file:///nix-cache`, which needs no network, so that default is
-// wrong here. With substitution off, `nix profile install` could not substitute
-// the already-cached output and FELL BACK to building the deriver (hence the
-// xgcc-build symptom). `nix-env -iA` is a separate entry point that skips the
-// probe, which is why only the new CLI was ever affected.
-//
-// The real-NixOS fix, no hacks / no nix source patch:
-//   • `substitute = true` in the guest nix.conf (userspace/system.nix) marks the
-//     setting overridden, so the offline path leaves substitution ON.
+// STATUS: FIXED — expected to PASS. Two real-NixOS pieces, no hacks / no nix
+// source patch:
+//   • `substitute = true` in the guest nix.conf (userspace/system.nix). The new
+//     CLI probes for Internet (src/nix/main.cc) and, finding none on the
+//     network-less guest, sets `useSubstitutes = false` unless overridden —
+//     silently disabling substitution even for `file:///nix-cache` (which needs
+//     no network). Marking it overridden leaves substitution ON. Necessary but
+//     NOT sufficient on its own.
 //   • the catalog (pkgs.nix) entries are REAL derivations (carry the real drvPath),
-//     and the cache serves the .drv closures as well as the outputs — so
-//     `nix profile install` reads the deriver and the stock DerivationGoal
-//     substitutes the cache-valid output WITHOUT building. Exactly like installing
-//     from cache.nixos.org. (userspace/binary-cache.nix)
+//     so the new CLI forms a Built{drvPath}; and the deriver (.drv) closures are
+//     SEEDED VALID into the guest store at boot (flake.nix wasmDrvSeed →
+//     base-squashfs.nix → bootstrap.nix `nix-store --load-db`). Nix NEVER fetches
+//     a .drv from a cache — src/libstore/misc.cc queryMissing marks a non-local
+//     .drv "unknown", which was the original "failed to obtain derivation of
+//     …guest-cc.drv" error — so the .drv must be present LOCALLY, exactly like a
+//     real system's store after eval. With the .drv local, Nix reads it and
+//     substitutes the cache-valid OUTPUT without building. (Publishing .drv
+//     closures in the binary cache was a dead end — Nix never fetches them.)
+// `nix-env -iA` is a separate entry point that realises the OUTPUT directly
+// (Opaque), never touching the .drv — which is why it worked all along.
 //
 // Like smoke.mjs, a full nix:true boot is heavy; run manually after building the
 // artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
@@ -34,8 +35,9 @@
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
-// where nix-cache/ is the .#wasm-binary-cache tree (real derivations + .drv
-// closures) and base.squashfs carries the guest nix.conf with `substitute = true`.
+// where nix-cache/ is the .#wasm-binary-cache tree (package OUTPUTS) and
+// base.squashfs carries the guest nix.conf with `substitute = true` AND the
+// seeded .drv closure (+ /nix/.drv-registration loaded by the guest /init).
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
 import { bootNode } from "./boot-node.mjs";

@@ -9,18 +9,24 @@
 #            makeWasm). The pkgs.nix catalog is GENERATED from these — one attr per
 #            package, named by its real `lib.getName` (no hand-written aliases).
 #
-# REAL-NIXOS MODEL (codebutler/nix-wasm#1): the catalog entries are REAL
-# derivations (they carry the real `drvPath`, not just an `outPath`), and the cache
-# serves both the OUTPUT closures AND the DERIVER (.drv) closures — so the guest's
-# Nix reads each package's actual derivation and substitutes its already-built
-# output, identical to how a normal machine installs from cache.nixos.org. The two
-# pieces that make this work on the network-less guest, neither of which is a
+# REAL-NIXOS MODEL (codebutler/nix-wasm#1): this cache serves package OUTPUTS
+# only. The catalog entries are REAL derivations (they carry the real `drvPath`,
+# not just an `outPath`), so the new CLI forms a Built{drvPath} and substitutes
+# the already-built output — identical to how a normal machine installs from
+# cache.nixos.org. Two pieces make this work on the network-less guest, neither a
 # bespoke workaround:
 #   • `substitute = true` in the guest nix.conf (userspace/system.nix) — the new
 #     CLI (`nix profile`/`nix build`) otherwise disables substitution when its
 #     Internet probe fails, even for a `file://` cache that needs no network.
-#   • the .drv closures below — so `nix profile install` can read the deriver and
-#     the stock DerivationGoal substitutes the cache-valid output WITHOUT building.
+#   • the catalog packages' DERIVER (.drv) closures are seeded into the guest
+#     store and registered VALID at boot (flake.nix `wasmDrvSeed` →
+#     base-squashfs.nix → bootstrap.nix `nix-store --load-db`). Nix NEVER
+#     substitutes a .drv from a cache (src/libstore/misc.cc queryMissing marks a
+#     non-local .drv "unknown" → the #1 "failed to obtain derivation" error), so
+#     the .drv must be present locally — exactly like a real system after eval.
+#     With the .drv local, the new CLI reads it and substitutes the cache-valid
+#     output WITHOUT building. (Publishing .drv closures in THIS cache would be
+#     useless — Nix never fetches them; that earlier approach was a dead end.)
 # `nix-env -iA <name>` and `nix profile install <name>` both work against this.
 {
   pkgs,
@@ -33,17 +39,14 @@ let
   # exportReferencesGraph to compute full closures inside the sandbox — no
   # in-sandbox `nix copy` needed. Produces: nix-cache-info + *.narinfo + nar/*.nar.zst.
   #
-  # rootPaths includes BOTH the package OUTPUTS and their DERIVERS (`d.drvPath`), so
-  # the cache serves the .drv files (+ their input-derivation/source closure) as
-  # well as the outputs. `nix profile install` forms a Built{drvPath} from the
-  # catalog, substitutes the .drv to read it, then — since the output narinfo is
-  # also here — substitutes the prebuilt output instead of building (verified
-  # against the Nix 2.34 DerivationGoal: a cache-valid output short-circuits the
-  # build). On the host the .drvs are already instantiated, so adding them to the
-  # closure is just more paths to copy, not a build.
+  # rootPaths = the package OUTPUTS only. The cache substitutes outputs; the .drv
+  # files are NOT served here (Nix never fetches a .drv from a cache — see the
+  # header). The derivers reach the guest a different way: they are seeded VALID
+  # into the guest store at boot (flake.nix `wasmDrvSeed`), so `nix profile install`
+  # finds the local .drv and substitutes the matching output from this cache.
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
-    rootPaths = devPaths ++ map (drv: drv.drvPath) devPaths;
+    rootPaths = devPaths;
   };
 
   # pkgs.nix — the guest's package catalog (its channel substitute). The guest
@@ -93,21 +96,19 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   # Add the pkgs.nix catalog so the guest's ~/.nix-defexpr resolves installs.
   cp ${pkgsNix} "$out/pkgs.nix"
 
-  # Assert the cache actually SERVES each catalog package's deriver (.drv). The
-  # real-NixOS path is: `nix profile install` forms Built{drvPath} from the catalog
-  # and substitutes the .drv from the cache to read it. If the .drv narinfo isn't
-  # here, the guest fails with "failed to obtain derivation of …guest-cc.drv" — a
-  # 30-minutes-later boot failure. Catch it at build time instead (fast + loud).
-  # narinfo for /nix/store/<hash>-name.drv is <hash>.narinfo.
+  # Assert the cache actually SERVES each catalog package's OUTPUT (the narinfo for
+  # /nix/store/<hash>-name is <hash>.narinfo). The new CLI realises Built{drvPath}
+  # from the locally-seeded .drv, then substitutes THIS output; a missing output
+  # narinfo would be a 30-minutes-later boot failure, so catch it at build time.
   miss=0
-  for d in ${lib.concatMapStringsSep " " (drv: drv.drvPath) devPaths}; do
-    h=$(basename "$d"); h=''${h%%-*}
+  for p in ${lib.concatMapStringsSep " " (drv: "${drv}") devPaths}; do
+    h=$(basename "$p"); h=''${h%%-*}
     if [ ! -e "$out/$h.narinfo" ]; then
-      echo "ERROR: deriver narinfo $h.narinfo ($d) is NOT in the cache — the .drv" \
-           "closure was not published; nix profile install cannot obtain it." >&2
+      echo "ERROR: output narinfo $h.narinfo ($p) is NOT in the cache — nix" \
+           "profile install / nix-env cannot substitute it." >&2
       miss=1
     fi
   done
-  [ "$miss" = 0 ] || { echo "wasm-binary-cache: .drv closures missing — see above" >&2; exit 1; }
-  echo "wasm-binary-cache: all catalog .drv narinfos present (deriver closures published)"
+  [ "$miss" = 0 ] || { echo "wasm-binary-cache: output narinfos missing — see above" >&2; exit 1; }
+  echo "wasm-binary-cache: all catalog output narinfos present"
 ''
