@@ -28,6 +28,10 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      # The boot-smoke / nix-boot-smoke jobs run the runtime engine + the
+      # demo/node smoke scripts, so a change to either must re-validate them
+      # (kernel/toolchain substitute from Cachix when their inputs are unchanged).
+      - 'runtime/**'
       - '.rebuild-request'
       - '.github/workflows/nix-wasm.yml'
   pull_request:
@@ -36,6 +40,7 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      - 'runtime/**'
       - '.github/workflows/nix-wasm.yml'
   workflow_dispatch:
 
