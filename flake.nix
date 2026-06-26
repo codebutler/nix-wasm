@@ -183,6 +183,13 @@
         inherit cross;
       };
 
+      # Diagnostic reproducer for issue #35's `timeout 2 sleep 10` hang reduced
+      # to standalone C: cross-process kill() waking a syscall-blocked task
+      # (no busybox, no networking). See userspace/kill-wake-test.c.
+      killWakeTest = import ./userspace/kill-wake-test.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -345,7 +352,7 @@
       wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the base-system store closure as a single squashfs image (#43) ---
@@ -490,6 +497,10 @@
         # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
         # on the wasm guest (#35) → $out/bin/sigalrm-test.
         sigalrm-test = sigalrmTest;
+
+        # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
+        # kill() async-signal wake) → $out/bin/kill-wake-test.
+        kill-wake-test = killWakeTest;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;

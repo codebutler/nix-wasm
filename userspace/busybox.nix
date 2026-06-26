@@ -57,6 +57,11 @@ cross.stdenv.mkDerivation {
     # busybox's ~24 vfork applets (daemons/servers/edge tools) are DISABLED in the
     # config below rather than patched, so they can never be invoked and crash.
     ../patches/busybox/0006-hush-heredoc-clone.patch
+    # timeout (#35): the watcher child spawned by 0004 mutated the SHARED parent
+    # argv (CLONE_VM) to insert its "-pPID" re-exec arg, so the parent execed
+    # "-pPID" instead of PROG (`timeout 2 sleep 10` → "can't execute '-p50'").
+    # Build a private argv copy in the child; never touch the parent's.
+    ../patches/busybox/0008-timeout-argv-copy-nommu.patch
   ];
 
   # busybox's Makefile resolves the O= dir via a hardcoded `/bin/pwd`, which
