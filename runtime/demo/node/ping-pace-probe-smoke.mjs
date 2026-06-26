@@ -8,19 +8,22 @@
 //   xcpu    — one-shot, NO SA_RESTART, cross-CPU reply wakes recv then re-blocks.
 //             Confirms cross-CPU wakeup is NOT the bug — expected PASS.
 //   repro   — full busybox-ping shape (SA_RESTART + re-arm + echo). Expected FAIL.
+//   transparent — proves the restart is TRANSPARENT, not -EINTR: a single read()
+//             (no EINTR-retry) whose SA_RESTART handler supplies the byte must
+//             return the DATA (n==1), not -1/EINTR. FAILs on an EINTR-only fix.
 //
-// Reading the matrix (the CI run on this branch showed exactly this):
-//   control PASS, xcpu PASS, restart FAIL, repro FAIL
-//     → the bug is SA_RESTART, NOT cross-CPU and NOT the handler re-arm: a
-//       SIGALRM handler installed with SA_RESTART is never delivered when it
-//       interrupts a blocking syscall. Fix belongs in the wasm syscall-restart
-//       path (arch/wasm/kernel/traps.c WASM_SYSCALL_N + entry.S _user_mode_tail):
-//       the restart loop must deliver the queued handler before/with the restart.
+// Reading the matrix:
+//   ALL PASS  → the SA_RESTART fix (patches/kernel/0021, FOOT-level restart loop)
+//     works: the handler is delivered AND the syscall transparently restarts
+//     (the `transparent` case proves read() returns data, not -EINTR).
+//   restart/repro/transparent FAIL (control/xcpu PASS) → the pre-fix bug: a
+//     SA_RESTART handler is never delivered when it interrupts a blocking syscall
+//     (arch/wasm/kernel/traps.c WASM_SYSCALL_N + entry.S).
 //
 // Each probe self-bounds with an in-guest watchdog thread, so a lost-timer hang
 // becomes an explicit "FAIL (watchdog)" line rather than blocking this smoke.
-// NON-gating diagnostic: exit 0 always (prints the matrix); the bug is open.
-// Exit 2 only on boot panic (inconclusive — re-run).
+// NON-gating diagnostic: exit 0 always (prints the matrix); the gating guard is
+// ping-pace-smoke. Exit 2 only on boot panic (inconclusive — re-run).
 import { bootNode } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: false });
@@ -39,7 +42,7 @@ try {
   }
   if (!reached) throw new Error("no prompt");
 
-  for (const c of ["control", "restart", "xcpu", "repro"]) {
+  for (const c of ["control", "restart", "xcpu", "repro", "transparent"]) {
     s.send(`/bin/ping-pace-probe ${c}\n`);
     // Match the verdict line generically: the guest doesn't preserve the probe's
     // casename string across echo-thread creation (it prints "PROBE ?:" for the
@@ -55,6 +58,7 @@ try {
   s.kill();
 }
 console.log(
-  `\n[ping-pace-probe-smoke] matrix: control=${verdict.control} xcpu=${verdict.xcpu} repro=${verdict.repro}`,
+  `\n[ping-pace-probe-smoke] matrix: control=${verdict.control} restart=${verdict.restart}` +
+    ` xcpu=${verdict.xcpu} repro=${verdict.repro} transparent=${verdict.transparent}`,
 );
 process.exit(0);

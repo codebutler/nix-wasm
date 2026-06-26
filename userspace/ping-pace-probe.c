@@ -26,6 +26,14 @@
  *             still pending. Confirms cross-CPU wakeup is NOT the bug (PASS).
  *   repro   — the full busybox-ping shape: SA_RESTART + handler re-arm + echo
  *             thread. Expected to FAIL.
+ *   transparent — proves the restart is TRANSPARENT, not -EINTR: a single read()
+ *             (no EINTR-retry) whose SA_RESTART handler supplies the byte must
+ *             return the DATA (n==1), not -1/EINTR. PASSes only on a true
+ *             transparent-restart kernel; FAILs on an EINTR-only fix.
+ *
+ * Pre-fix (the localizer's original purpose): control/xcpu PASS, restart/repro/
+ * transparent FAIL → SA_RESTART handler never delivered. Post-fix (patch 0021,
+ * FOOT-level restart loop): ALL PASS.
  */
 #include <errno.h>
 #include <pthread.h>
@@ -136,6 +144,14 @@ int main(int argc, char **argv) {
     use_restart = 1;
     writes_sock = 1;
     rearm = 1;
+  } else if (!strcmp(arg, "transparent")) {
+    /* Proves the restart is TRANSPARENT, not -EINTR: a SA_RESTART handler fires
+     * during a blocking read() and writes the byte the read is waiting for. A
+     * correct transparent-restart kernel re-runs the read and returns the DATA
+     * (n==1); an EINTR kernel returns -1/EINTR. Single-threaded, one-shot. */
+    casename = "transparent";
+    use_restart = 1;
+    writes_pipe = 1;
   } else {
     printf("PROBE %s: FAIL (unknown case)\n", arg);
     return 2;
@@ -164,6 +180,28 @@ int main(int argc, char **argv) {
       printf("PROBE control: FAIL n=%zd errno=%d sent=%d\n", n, errno, count_sent);
     fflush(stdout);
     return (n < 0 && errno == EINTR && count_sent >= 1) ? 0 : 1;
+  }
+
+  if (!strcmp(casename, "transparent")) {
+    /* Single read(), NO EINTR-retry: the SA_RESTART handler writes the byte, so
+     * a transparent restart returns the data (n==1); -EINTR semantics would
+     * return -1/EINTR here and FAIL. */
+    arm_oneshot();
+    char b;
+    ssize_t n = read(pp[0], &b, 1);
+    done = 1;
+    if (n == 1 && count_sent >= 1)
+      printf("PROBE transparent: OK (SA_RESTART read returned data, not EINTR) "
+             "n=%zd sent=%d\n",
+             n, count_sent);
+    else if (n < 0 && errno == EINTR)
+      printf("PROBE transparent: FAIL (read returned EINTR — not transparent "
+             "restart) sent=%d\n",
+             count_sent);
+    else
+      printf("PROBE transparent: FAIL n=%zd errno=%d sent=%d\n", n, errno, count_sent);
+    fflush(stdout);
+    return (n == 1 && count_sent >= 1) ? 0 : 1;
   }
 
   if (!strcmp(casename, "restart")) {
