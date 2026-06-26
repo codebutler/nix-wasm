@@ -1,0 +1,21 @@
+userspace/sommelier.nix
+  s_cd1a77be509bb9::t_fe1c863b1a0005 49-56
+patches/sommelier/0002-keymap-mmap-graceful.patch
+  s_cd1a77be509bb9::t_95a0f8a035b7ca 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "9acdb77dc34d65461d3794e8cf9f92dafa369e07",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
