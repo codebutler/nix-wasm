@@ -49,6 +49,13 @@ jobs:
           name: nix-wasm
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
+      # wrangler needs Node >= 22; the Namespace runner ships v20 by default
+      # (matches the deploy-preview-worker.yml fix, #72). Without this `bunx
+      # wrangler` refuses to run and the publish silently no-ops.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       # bun so `bunx wrangler` is available in the publish script.
       - uses: oven-sh/setup-bun@v2
 
