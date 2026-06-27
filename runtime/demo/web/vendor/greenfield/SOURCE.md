@@ -30,6 +30,17 @@ in cb-windows.
   with `tsc --noEmitOnError false` (the upstream fork's dist has pre-existing
   SAB-vs-ArrayBuffer strict-type errors unrelated to this change) then re-bundled
   per the command below. Apply this same patch upstream-side before any rebuild.
+- **Local patch (cursor render — pc#94):** the renderer's `updateCursor` read the
+  cursor image as `bufferContents.pixelContent.bitmap`, but a wl_shm / canvas
+  buffer (every GTK app's cursor) exposes the decoded `ImageBitmap` DIRECTLY as
+  `pixelContent` — the same value `updateRenderStatesPixelContent` hands the
+  `surfaceContentUpdated` userShell event as `bitmap:`; only decoded video frames
+  wrap it in a `.bitmap` field. So `pixelContent.bitmap` was `undefined`,
+  `updateCursor` bailed before `setBrowserCursor`, and the pointer was left hidden
+  (`cursor: none`) over every Wayland window. Fix: accept both shapes —
+  `cursorImage.bitmap !== undefined ? cursorImage.bitmap : cursorImage`. Apply
+  upstream-side (`src/render/Renderer.ts` `updateCursor`) before any rebuild.
+  pc's vendored copy has the identical bug and needs the same one-liner.
 - **License:** `@gfld/compositor` is AGPL-3.0-or-later; `@gfld/compositor-wasm`
   (libpixman / libxkbcommon Emscripten libs) is MIT.
 

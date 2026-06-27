@@ -78,9 +78,10 @@ let
         # DejaVu Sans + a minimal fonts.conf + a fontconfig cache built at build
         # time; keyed to the build path so fontconfig rescans once on first FcInit.
         guestFonts = import ./fonts.nix { inherit pkgs; };
-        # Compiled GSettings schemas (org.gtk.Settings.*) + hicolor icon theme.
-        # GTK aborts without the compiled schemas; schemas are compiled with the
-        # NATIVE glib-compile-schemas (pkgs.buildPackages.glib). See gtk-assets.nix.
+        # Compiled GSettings schemas (org.gtk.Settings.*) + hicolor icon theme +
+        # the Adwaita Xcursor theme. GTK aborts without the compiled schemas;
+        # schemas are compiled with the NATIVE glib-compile-schemas
+        # (pkgs.buildPackages.glib). See gtk-assets.nix.
         gtkAssets = import ./gtk-assets.nix { inherit pkgs cross; };
         # autologin: getty's `-l` execs this instead of /bin/login (single-user
         # guest, passwordless root). Shipped as a PROFILE package so it resolves
@@ -101,7 +102,7 @@ let
           terminfoMin     # terminfo for the one supported terminal
           autologin       # /run/current-system/sw/bin/autologin (inittab references it)
           guestFonts      # DejaVu Sans + fonts.conf + prebuilt fc-cache (M2 text stack)
-          gtkAssets       # compiled GSettings schemas + hicolor icon theme (M3b)
+          gtkAssets       # compiled GSettings schemas + hicolor icon + Adwaita cursor theme (M3b)
           cross.galculator  # M4: GTK3 calculator. In systemPackages (not just the
                             # initramfs extraBins) so its store path — and thus its
                             # $out/share/galculator/ui/*.ui, loaded at runtime from the
@@ -121,7 +122,8 @@ let
         # Also link /share/fonts so DejaVu lands at
         # /run/current-system/sw/share/fonts (the guest path in fonts.conf).
         # /share/terminfo + /share/fonts are M2; /share/glib-2.0/schemas and
-        # /share/icons are M3b (GTK GSettings schemas + hicolor icon theme).
+        # /share/icons are M3b (GTK GSettings schemas + hicolor icon + Adwaita
+        # cursor theme).
         environment.pathsToLink = [
           "/share/terminfo"
           "/share/fonts"
@@ -141,6 +143,15 @@ let
         environment.variables.GSETTINGS_SCHEMA_DIR = "/run/current-system/sw/share/glib-2.0/schemas";
         # XDG_DATA_DIRS: icons + schemas live under the system profile's share/.
         environment.variables.XDG_DATA_DIRS = "/run/current-system/sw/share";
+        # Cursor theme: GDK/libwayland-cursor search XCURSOR_PATH for the named
+        # theme's cursors/ dir. The guest's default search path (/usr/share/icons,
+        # …) is empty, so without this every cursor request fails with
+        # "Gdk-Message: Unable to load <name> from the cursor theme". Point it at
+        # the Adwaita Xcursor theme baked into gtk-assets (share/icons, already in
+        # pathsToLink). XCURSOR_SIZE=24 matches Sommelier's XCURSOR_SIZE_BASE.
+        environment.variables.XCURSOR_PATH = "/run/current-system/sw/share/icons";
+        environment.variables.XCURSOR_THEME = "Adwaita";
+        environment.variables.XCURSOR_SIZE = "24";
 
         users.mutableUsers = false;
         users.users.root = {

@@ -810,6 +810,49 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
+- **GTK cursors: a theme on disk is necessary but the real blocker is musl's
+  `posix_fallocate`** (`toolchain/musl.nix` + `userspace/gtk-assets.nix` +
+  `system.nix`). GTK's `Gdk-Message: Unable to load <name> from the cursor theme`
+  (default/text/pointer/`*-resize`/col-resize, EVERY name) has TWO independent
+  causes; both must be fixed:
+  1. **No cursor theme on disk + no `XCURSOR_*`.** GDK's wayland backend draws
+     pointer shapes from an Xcursor theme via libwayland-cursor; the guest's
+     default search path (`/usr/share/icons`, …) is empty. Fix: bake the Adwaita
+     Xcursor theme into `gtk-assets` (`gnome-themes-extra`'s `share/icons/Adwaita`
+     is a symlink to `adwaita-icon-theme-50.0`, which DOES ship the full cursor
+     set — default/text/pointer/all `*-resize` as real `Xcur` files incl. size
+     24; `cp -r` follows the symlink and the ref scanner pulls the theme into the
+     closure) + a `default` theme that `Inherits=Adwaita`, then set
+     `XCURSOR_PATH=/run/current-system/sw/share/icons` + `XCURSOR_THEME=Adwaita`
+     (+ `XCURSOR_SIZE=24`) in `system.nix` `environment.variables` (reaches apps
+     via `/etc/profile`→`/etc/set-environment`, like `FONTCONFIG_FILE`).
+  2. **`wl_cursor_theme_load` can't size its `wl_shm` pool.** Even with a valid
+     theme present, libwayland-cursor allocates its image pool with wayland's
+     `os_create_anonymous_file`, which sizes the file via **`posix_fallocate`**.
+     The pool lives on ramfs (`/tmp`/`/dev/shm` — ramfs is mandatory for NOMMU
+     shared mmap; CONFIG_SHMEM is gated off behind MMU so tmpfs falls back to
+     ramfs too), and **ramfs has no `->fallocate`** → the syscall returns
+     EOPNOTSUPP. **musl forwards that error; glibc (every real system) emulates**
+     → so it works on stock NixOS and not here. GDK's *window* buffers dodge it
+     by using `ftruncate`, which is why the window renders but cursors don't. Fix
+     = make musl's `posix_fallocate` emulate like glibc (ensure the file size on
+     EOPNOTSUPP/ENOSYS) — `toolchain/musl.nix` `postPatch`. Shared across every
+     guest binary; a musl change → world rebuild. Verified the diagnosis by
+     booting the guest headless (`runtime/demo/node/boot-node.mjs`) and running
+     `fallocate` on `/tmp` + `/dev/shm` → both "Not supported", `truncate` → ok.
+     **The emulation MUST call the `fallocate()` wrapper, NOT a raw
+     `__syscall(SYS_fallocate, …)`:** musl's stock `posix_fallocate.c` issues
+     `fallocate` (nr=47) through a 4-arg `__wasm_syscall_4`, but `sys_fallocate`'s
+     `loff_t` args make that a `call_indirect` signature mismatch ("null function
+     or function signature mismatch") that PANICS the guest — the same arity
+     hazard the kernel-worker futex shim (nr=422) documents. The `fallocate()`
+     wrapper splits the 64-bit args into the 6-arg `__wasm_syscall_6` form the
+     kernel expects (proven safe: busybox's `fallocate` returns a clean
+     EOPNOTSUPP). The first cut used the raw `__syscall` and panicked busybox
+     forkshell's `posix_fallocate` (on its spawn temp file) → `nix-env`/GTK
+     kernel-panic, caught by CI's `nix-boot-smoke`; captured the exact `nr=47`
+     trap by booting the preview headless via Playwright with `trace_syscalls` on.
+  Rebuilds the world (musl) + `.#wasm-base-squashfs` (theme/env data change).
 - **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
   DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
   generic path does a native stack-pointer switch (`CRTJMP`) to `munmap` its own

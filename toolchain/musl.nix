@@ -72,6 +72,63 @@ pkgs.stdenv.mkDerivation {
     sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c
     # vfork(): the whole TU is just the function — empty it so no symbol remains.
     : > src/process/vfork.c
+    # posix_fallocate: emulate when the filesystem has no fallocate, like glibc.
+    # On the NOMMU wasm guest CONFIG_SHMEM is gated off behind MMU (kernel.nix),
+    # so tmpfs falls back to ramfs and NO mounted fs implements ->fallocate — the
+    # fallocate(2) syscall returns EOPNOTSUPP everywhere. musl upstream just
+    # forwards that error, but glibc (what every real system runs) emulates by
+    # ensuring the file size, so posix_fallocate succeeds. Without this,
+    # libwayland-cursor's wl_cursor_theme_load fails to size its wl_shm pool and
+    # every GTK cursor logs "Unable to load <name> from the cursor theme" (GDK's
+    # window buffers escape this only because they use ftruncate, not
+    # posix_fallocate). On an in-memory fs ensuring the size IS the allocation
+    # (pages fault in on write), matching what the fallocate syscall does on a
+    # real system's tmpfs.
+    #
+    # CRITICAL: call the fallocate() WRAPPER, never a raw __syscall(SYS_fallocate,
+    # …). The wrapper splits the 64-bit offset/len into the 6-arg __wasm_syscall_6
+    # form the kernel's sys_fallocate (loff_t args) expects; a bare 4-arg
+    # __wasm_syscall_4 dispatch traps with a call_indirect signature mismatch
+    # ("null function or function signature mismatch") and PANICS the guest — same
+    # arity-mismatch hazard the kernel-worker futex shim (nr=422) documents. This
+    # bit busybox forkshell's posix_fallocate on its spawn-state temp file.
+    cat > src/fcntl/posix_fallocate.c <<'EOF'
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+int posix_fallocate(int fd, off_t base, off_t len)
+{
+	/* Native fallocate first (real filesystems keep native behaviour). Use the
+	 * fallocate() wrapper — a raw 4-arg __syscall traps on the wasm port. */
+	if (fallocate(fd, 0, base, len) == 0)
+		return 0;
+	int e = errno;
+	if (e != EOPNOTSUPP && e != ENOSYS)
+		return e;
+
+	/* Filesystem has no fallocate (ramfs on the NOMMU wasm guest). Emulate
+	 * like glibc: validate, then ensure the file is at least base+len bytes. */
+	if (base < 0 || len < 0)
+		return EINVAL;
+	if (len && base > (off_t)((~(unsigned long long)0) >> 1) - len)
+		return EFBIG;
+
+	struct stat st;
+	if (fstat(fd, &st) < 0)
+		return errno;
+	if (S_ISFIFO(st.st_mode))
+		return ESPIPE;
+	if (!S_ISREG(st.st_mode))
+		return ENODEV;
+
+	if (st.st_size < base + len && ftruncate(fd, base + len) < 0)
+		return errno;
+	return 0;
+}
+EOF
   '';
 
   configurePhase = ''
