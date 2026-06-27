@@ -94,7 +94,7 @@ try {
   // taking effect for the new CLI here); substituters come from the guest nix.conf.
   console.log("  [nix profile install guest-cc from nix-cache — may take a while…]");
   s.send(
-    "P=$(nix eval --raw -f /nix-cache/paths.nix guest-cc); echo \"GUESTCC_PATH=$P\"; " +
+    'P=$(nix eval --raw -f /nix-cache/paths.nix guest-cc); echo "GUESTCC_PATH=$P"; ' +
       'nix profile install --option substitute true "$P" 2>&1; echo NIX_PROFILE_RC=$?\n',
   );
   const installed = await s.waitForOutput(/NIX_PROFILE_RC=[0-9]/, 300000);
