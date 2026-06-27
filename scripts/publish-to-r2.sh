@@ -24,7 +24,14 @@
 #
 # R2 bucket layout (served by the pc-previews Cloudflare Worker):
 #   packages/nix-wasm-base/<version>   — base.squashfs (virtio-blk block device)
-#   nix-cache/<relpath>                — binary cache tree (nix-cache.js serves)
+#   nix-cache/<relpath>                — ONLY pkgs.nix + paths.nix (the nix-wasm
+#                                        catalogs). The heavy nars + *.narinfo +
+#                                        nix-cache-info are NOT uploaded — they are
+#                                        served to the guest from Cachix through the
+#                                        worker's /cachix proxy (nix-wasm#78), so
+#                                        duplicating them into R2 is the waste this
+#                                        removed. (Make sure CI has pushed the wasm
+#                                        closure to nix-wasm.cachix.org.)
 #
 # After publishing, update pc js/packages/registry.js with the emitted
 # bytes/sha256/version values (see the deploy-r2.md runbook).
@@ -88,8 +95,8 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
   echo "    \"pc-previews/packages/nix-wasm-base/$VERSION\" \\"
   echo "    --file \"$SQ\" --content-type application/octet-stream --remote"
   echo ""
-  echo "  # Upload binary-cache tree (nix-cache-info + *.narinfo + nar/* + pkgs.nix) — a plain standard Nix cache"
-  ( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
+  echo "  # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
+  ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
       echo "  bunx wrangler r2 object put \"pc-previews/nix-cache/$REL\" \\"
       echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
@@ -112,11 +119,14 @@ bunx wrangler r2 object put \
   "pc-previews/packages/nix-wasm-base/$VERSION" \
   --file "$SQ" --content-type application/octet-stream --remote
 
-# 4b. Binary-cache tree → nix-cache/<relpath>
-# Uploads: nix-cache-info, *.narinfo, nar/*.nar.zst, pkgs.nix — a plain standard
-# Nix cache. runtime/nix-cache.js resolves files by on-demand HEAD probe (no index).
-echo "==> Uploading binary-cache tree to pc-previews/nix-cache/ …"
-( cd "$CACHE" && find . -type f -print0 | while IFS= read -r -d '' f; do
+# 4b. nix-wasm catalogs → nix-cache/<relpath>
+# Uploads ONLY pkgs.nix + paths.nix (the `nix-env -iA` / new-CLI catalogs, which
+# are nix-wasm artifacts not present in Cachix). The nars + *.narinfo +
+# nix-cache-info are deliberately NOT uploaded — the guest substitutes them from
+# Cachix via the worker's /cachix proxy (nix-wasm#78). runtime/nix-cache.js
+# resolves files by on-demand HEAD probe (no index), so a split source is fine.
+echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) to pc-previews/nix-cache/ …"
+( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
     bunx wrangler r2 object put "pc-previews/nix-cache/$REL" \
