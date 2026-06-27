@@ -1,0 +1,23 @@
+runtime/demo/node/selftests-batch.mjs
+  s_16a51fa7de9b99::t_f40c61c9ff7d88 1-5,13-19,21-26
+  s_16a51fa7de9b99::t_85f091f41c57fd 6-12,20,27-85
+  s_16a51fa7de9b99::t_973d421623ce49 86-100
+.github/workflows/nix-wasm.yml
+  s_16a51fa7de9b99::t_941c36cecaad45 370-383
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "872959db9063f869207700dd0c7e05067358149b",
+  "prompts": {},
+  "sessions": {
+    "s_16a51fa7de9b99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fc0d614c-fdad-451f-919e-3ba40aa27a5b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
