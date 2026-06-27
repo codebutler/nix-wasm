@@ -29,16 +29,17 @@
 // artifacts, and it is wired into the nix-wasm.yml `nix-boot-smoke` CI job:
 //   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/profile-install-e2e.mjs
 //
-// Steps (1-5 GATING — they are the #1 deliverable; 6 is non-gating info):
+// Steps (ALL GATING — they are the #1 deliverable):
 //   1. Boot the nix system (full /nix overlay from squashfs + nix-cache).
 //   2. Assert `cc` is NOT in $PATH (toolchain removed from base).
 //   3. Read guest-cc's output path from paths.nix; `nix profile install <outPath>`.
 //   4. Assert `cc` is now in $PATH (guest-cc ships /bin/cc, which execs guest-clang).
 //   5. Compile `int main(){return 42;}` with `cc` (CC_COMPILE_RC=0) — proves the
 //      new-CLI-installed toolchain works.
-//   6. (best-effort, non-gating) run the binary → exit 42. Executing a fresh wasm
-//      module is wrapperless-cc-e2e.mjs's domain and is not validated in this Node
-//      harness (it can hang); logged for signal, not gated.
+//   6. Run the binary → exit 42 (GATING). Once non-gating on a SUSPECTED exec hang
+//      (#96) that turned out to be a harness bug: the old `CC_RC` marker is a
+//      substring of step 4's `WHICH_CC_RC`, so the run check matched stale output.
+//      Fixed with a collision-free sentinel; the exec itself is healthy (~1-4s).
 //
 // LINUX_WASM_ARTIFACTS must point at a dir with:
 //   vmlinux.wasm  initramfs.cpio.gz  base.squashfs  nix-cache/
@@ -127,22 +128,25 @@ try {
   const compileOk = compiled && /CC_COMPILE_RC=0\b/.test(s.snapshot());
   check(compileOk, "cc /tmp/h.c -o /tmp/h compiles (CC_COMPILE_RC=0)");
 
-  // Step 6 (NON-gating, best-effort): EXECUTE the freshly-built binary. Running a
-  // just-compiled wasm module is the toolchain's RUNTIME behavior — orthogonal to
-  // how it was installed — and is the domain of wrapperless-cc-e2e.mjs (compile+run
-  // of clang/cc/c++ → exit 42/7), which is validated in-guest interactively but is
-  // NOT wired into this Node headless CI harness, where exec of a fresh module can
-  // hang. So we attempt it and LOG the result for signal, but do not gate #1 on a
-  // capability this harness hasn't proven. (Tracked separately — see the issue.)
-  s.send("/tmp/h; echo CC_RC=$?\n");
-  const ran = await s.waitForOutput(/CC_RC=[0-9]/, 12000);
-  const rc42 = ran && /CC_RC=42\b/.test(s.snapshot());
-  console.log(
-    rc42
-      ? "  ok    (info) cc-compiled program runs → exit 42"
-      : "  --    (info) cc-compiled binary exec is non-gating in this harness" +
-          " (covered by wrapperless-cc-e2e.mjs)",
-  );
+  // Step 6 (GATING): EXECUTE the freshly-built binary → exit 42. This was once
+  // non-gating on a SUSPECTED exec hang (issue #96) — but the binary always ran
+  // fine (cold first-exec ~1-4s; each exec recompiles the module from shared memory,
+  // there is no host module cache; warm execs are instant). The real #96 bug was
+  // HERE in the harness: the run marker `CC_RC` is a SUBSTRING of step 4's
+  // `WHICH_CC_RC`, so `waitForOutput(/CC_RC=[0-9]/)` matched the STALE
+  // `WHICH_CC_RC=0` from step 4 instantly, captured rc=0 (≠42), and reported the
+  // (healthy) run as failed/hung — "transcript ends at the compile". Fixed by using
+  // a sentinel that can't collide with any earlier output. wrapperless-cc-e2e.mjs
+  // gates the same exec capability more broadly (clang/clang++/cc/c++).
+  s.send("/tmp/h; echo PROG_EXIT=$?\n");
+  const ran = await s.waitForOutput(/PROG_EXIT=[0-9]/, 30000);
+  const rc42 = ran && /PROG_EXIT=42\b/.test(s.snapshot());
+  if (!rc42) {
+    // Capture state to distinguish a hang (no PROG_EXIT) from a wrong/missing binary.
+    s.send("ls -la /tmp/h 2>&1; echo LS_DONE\n");
+    await s.waitForOutput(/LS_DONE/, 8000);
+  }
+  check(rc42, "cc-compiled program runs → exit 42 (PROG_EXIT=42)");
 
   pass = checks.every((c) => c.ok);
 } finally {
