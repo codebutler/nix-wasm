@@ -108,6 +108,14 @@ pkgs.stdenv.mkDerivation {
     # restart happens AFTER the handler (transparent SA_RESTART, real replies, no
     # -EINTR). In-kernel change only — no host/engine ABI change.
     ./patches/kernel/0021-wasm-sa-restart-deliver-signal.patch
+    # #94: !MMU ramfs can't re-mmap a GROWN file — it allocates one contiguous
+    # block at first-map time (size==0) and a later grow only truncate_setsize()s,
+    # so mmap() of the grown file fails -ENODEV. libwayland-cursor's cursor-theme
+    # wl_shm pool grows as cursors load, so every cursor after the first grow
+    # failed ("Unable to load <name> from the cursor theme"). Fix: on a grow of an
+    # inode set up for shared mmap, re-allocate a larger contiguous block and copy
+    # the data across (only marked inodes; ordinary ramfs growth is unaffected).
+    ./patches/kernel/0022-wasm-nommu-ramfs-regrow-shared-mmap.patch
   ];
 
   # Guard against silent patch-fuzz corruption of the virtio device enum (the #84

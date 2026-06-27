@@ -1,0 +1,139 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 27 Jun 2026 00:00:00 -0400
+Subject: [PATCH] wasm: !MMU ramfs grow re-allocates contiguous block for shared mmap
+
+On !MMU a MAP_SHARED file mapping needs a directly-addressable contiguous
+backing; ramfs provides it via ramfs_nommu_expand_for_mapping(), which
+allocates one high-order contiguous block when a file is first sized for
+mapping (the size==0 path in ramfs_nommu_resize). But when such a file is
+GROWN afterwards (newsize > size > 0) the stock code only does
+truncate_setsize() — it does not re-allocate a larger contiguous block — so
+a subsequent mmap() of the grown file fails with -ENODEV.
+
+libwayland-cursor's cursor-theme wl_shm pool does exactly this: it starts
+small and grows as each cursor image is loaded. The first small mapping
+works; the first grow then makes every later cursor's mmap fail, so GTK logs
+"Unable to load <name> from the cursor theme" and no pointer shapes load.
+GDK window buffers escape this because they are fixed-size and never resize.
+
+Fix: on a grow of an inode set up for shared mmap (marked in
+ramfs_nommu_expand_for_mapping), re-allocate a larger contiguous block, copy
+the existing data, and swap it into the page cache. The wl_shm client
+munmap()s the old mapping before growing, so replacing the backing is safe.
+Only marked inodes take this path, so ordinary (lazy, non-contiguous) ramfs
+growth and large temp files are unaffected.
+---
+--- a/fs/ramfs/file-nommu.c
++++ b/fs/ramfs/file-nommu.c
+@@ -117,6 +117,88 @@
+ 		put_page(page);
+ 	}
+ 
++	/* mark this inode as set up for a !MMU shared mmap so a later grow
++	 * (ramfs_nommu_resize) re-allocates a contiguous block — otherwise the
++	 * remap of the grown file fails with -ENODEV (growing wl_shm pools). */
++	inode->i_private = (void *)1;
++	return 0;
++
++add_error:
++	while (loop < npages)
++		__free_page(pages + loop++);
++	return ret;
++}
++
++/*****************************************************************************/
++/*
++ * !MMU: re-allocate a larger contiguous block for a file that was already set
++ * up for shared mmap (ramfs_nommu_expand_for_mapping only handles the initial,
++ * size-0 setup), preserving the existing data. Without this a grown wl_shm pool
++ * — e.g. libwayland-cursor's cursor-theme pool, which grows as cursors load —
++ * can no longer be mmap()ed (-ENODEV), so GTK cursors fail to load. The wl_shm
++ * client munmap()s the old mapping before growing, so replacing the backing is
++ * safe.
++ */
++static int ramfs_nommu_regrow_for_mapping(struct inode *inode, size_t newsize,
++					  size_t oldsize)
++{
++	unsigned long npages, xpages, old_npages, loop;
++	struct page *pages;
++	unsigned order;
++	int ret;
++	gfp_t gfp = mapping_gfp_mask(inode->i_mapping);
++
++	order = get_order(newsize);
++	if (unlikely(order > MAX_PAGE_ORDER))
++		return -EFBIG;
++
++	ret = inode_newsize_ok(inode, newsize);
++	if (ret)
++		return ret;
++
++	/* allocate the new, larger contiguous block */
++	pages = alloc_pages(gfp, order);
++	if (!pages)
++		return -ENOMEM;
++
++	xpages = 1UL << order;
++	npages = (newsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	split_page(pages, order);
++	for (loop = npages; loop < xpages; loop++)
++		__free_page(pages + loop);
++
++	/* zero it, then copy the existing file contents into the new block */
++	memset(page_address(pages), 0, PAGE_SIZE * npages);
++	old_npages = (oldsize + PAGE_SIZE - 1) >> PAGE_SHIFT;
++	for (loop = 0; loop < old_npages && loop < npages; loop++) {
++		struct page *old = find_get_page(inode->i_mapping, loop);
++
++		if (old) {
++			memcpy(page_address(pages) + loop * PAGE_SIZE,
++			       page_address(old), PAGE_SIZE);
++			put_page(old);
++		}
++	}
++
++	/* drop the old pages and install the new contiguous block */
++	truncate_inode_pages(inode->i_mapping, 0);
++	i_size_write(inode, newsize);
++
++	for (loop = 0; loop < npages; loop++) {
++		struct page *page = pages + loop;
++
++		ret = add_to_page_cache_lru(page, inode->i_mapping, loop, gfp);
++		if (ret < 0)
++			goto add_error;
++
++		SetPageDirty(page);
++		SetPageUptodate(page);
++
++		unlock_page(page);
++		put_page(page);
++	}
++
++	inode->i_private = (void *)1;
+ 	return 0;
+ 
+ add_error:
+@@ -147,6 +229,22 @@
+ 		ret = nommu_shrink_inode_mappings(inode, size, newsize);
+ 		if (ret < 0)
+ 			return ret;
++
++		truncate_setsize(inode, newsize);
++		return 0;
++	}
++
++	/* !MMU GROW of a file set up for shared mmap: the contiguous block was
++	 * sized at first-map time and cannot be extended in place, so a later
++	 * mmap() of the grown file fails with -ENODEV. Re-allocate a larger
++	 * contiguous block, preserving the data. Only inodes marked by
++	 * ramfs_nommu_expand_for_mapping take this path, so ordinary (lazy,
++	 * non-contiguous) ramfs file growth is unaffected. */
++	if (newsize > size && inode->i_private) {
++		if (unlikely(newsize >> 32))
++			return -EFBIG;
++
++		return ramfs_nommu_regrow_for_mapping(inode, newsize, size);
+ 	}
+ 
+ 	truncate_setsize(inode, newsize);
