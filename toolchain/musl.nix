@@ -72,6 +72,53 @@ pkgs.stdenv.mkDerivation {
     sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c
     # vfork(): the whole TU is just the function — empty it so no symbol remains.
     : > src/process/vfork.c
+    # posix_fallocate: emulate when the filesystem has no fallocate, like glibc.
+    # On the NOMMU wasm guest CONFIG_SHMEM is gated off behind MMU (kernel.nix),
+    # so tmpfs falls back to ramfs and NO mounted fs implements ->fallocate — the
+    # fallocate(2) syscall returns EOPNOTSUPP everywhere. musl upstream just
+    # forwards that error, but glibc (what every real system runs) emulates by
+    # ensuring the file size, so posix_fallocate succeeds. Without this,
+    # libwayland-cursor's wl_cursor_theme_load fails to size its wl_shm pool and
+    # every GTK cursor logs "Unable to load <name> from the cursor theme" (GDK's
+    # window buffers escape this only because they use ftruncate, not
+    # posix_fallocate). On an in-memory fs ensuring the size IS the allocation
+    # (pages fault in on write), matching what the fallocate syscall does on a
+    # real system's tmpfs. Keep the native syscall first so real filesystems are
+    # unaffected; emulate only on EOPNOTSUPP/ENOSYS.
+    cat > src/fcntl/posix_fallocate.c <<'EOF'
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include "syscall.h"
+
+int posix_fallocate(int fd, off_t base, off_t len)
+{
+	int r = -__syscall(SYS_fallocate, fd, 0, base, len);
+	if (r != EOPNOTSUPP && r != ENOSYS)
+		return r;
+
+	/* Filesystem has no fallocate (ramfs on the NOMMU wasm guest). Emulate
+	 * like glibc: validate, then ensure the file is at least base+len bytes. */
+	if (base < 0 || len < 0)
+		return EINVAL;
+	if (len && base > (off_t)((~(unsigned long long)0) >> 1) - len)
+		return EFBIG;
+
+	struct stat st;
+	if (fstat(fd, &st) < 0)
+		return errno;
+	if (S_ISFIFO(st.st_mode))
+		return ESPIPE;
+	if (!S_ISREG(st.st_mode))
+		return ENODEV;
+
+	if (st.st_size < base + len && ftruncate(fd, base + len) < 0)
+		return errno;
+	return 0;
+}
+EOF
   '';
 
   configurePhase = ''

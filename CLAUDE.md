@@ -810,23 +810,37 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
-- **GTK needs a cursor theme + `XCURSOR_PATH`/`XCURSOR_THEME`** (`userspace/
-  gtk-assets.nix` + `system.nix`). GDK's wayland backend draws pointer shapes
-  from an Xcursor theme on disk via libwayland-cursor; the guest's default search
-  path (`/usr/share/icons`, …) is empty, so EVERY cursor request fails with
-  `Gdk-Message: Unable to load <name> from the cursor theme`
-  (default/text/pointer/`*-resize`/col-resize) and widgets show no hover/resize/
-  text cursors. The failing `default` line is the tell that NO theme is found at
-  all (not individual missing cursors). Fix: bake the **Adwaita** Xcursor theme
-  into `gtk-assets` (it lives under `gnome-themes-extra`'s `share/icons/Adwaita`,
-  NOT `adwaita-icon-theme`; taken native from `buildPackages` like hicolor — pure
-  data, the `cp` into the fresh derivation leaves no store ref) + a `default`
-  theme that `Inherits=Adwaita`, then set `XCURSOR_PATH=/run/current-system/sw/
-  share/icons` + `XCURSOR_THEME=Adwaita` (+ `XCURSOR_SIZE=24`) in `system.nix`'s
-  `environment.variables` (reaches apps via `/etc/profile`→`/etc/set-environment`,
-  same as `FONTCONFIG_FILE`/`GSETTINGS_SCHEMA_DIR`). The `default`-inherits-Adwaita
-  fallback covers libwayland-cursor's NULL-theme-name → "default" path. Rebuild
-  `.#wasm-base-squashfs` (system-profile data change).
+- **GTK cursors: a theme on disk is necessary but the real blocker is musl's
+  `posix_fallocate`** (`toolchain/musl.nix` + `userspace/gtk-assets.nix` +
+  `system.nix`). GTK's `Gdk-Message: Unable to load <name> from the cursor theme`
+  (default/text/pointer/`*-resize`/col-resize, EVERY name) has TWO independent
+  causes; both must be fixed:
+  1. **No cursor theme on disk + no `XCURSOR_*`.** GDK's wayland backend draws
+     pointer shapes from an Xcursor theme via libwayland-cursor; the guest's
+     default search path (`/usr/share/icons`, …) is empty. Fix: bake the Adwaita
+     Xcursor theme into `gtk-assets` (`gnome-themes-extra`'s `share/icons/Adwaita`
+     is a symlink to `adwaita-icon-theme-50.0`, which DOES ship the full cursor
+     set — default/text/pointer/all `*-resize` as real `Xcur` files incl. size
+     24; `cp -r` follows the symlink and the ref scanner pulls the theme into the
+     closure) + a `default` theme that `Inherits=Adwaita`, then set
+     `XCURSOR_PATH=/run/current-system/sw/share/icons` + `XCURSOR_THEME=Adwaita`
+     (+ `XCURSOR_SIZE=24`) in `system.nix` `environment.variables` (reaches apps
+     via `/etc/profile`→`/etc/set-environment`, like `FONTCONFIG_FILE`).
+  2. **`wl_cursor_theme_load` can't size its `wl_shm` pool.** Even with a valid
+     theme present, libwayland-cursor allocates its image pool with wayland's
+     `os_create_anonymous_file`, which sizes the file via **`posix_fallocate`**.
+     The pool lives on ramfs (`/tmp`/`/dev/shm` — ramfs is mandatory for NOMMU
+     shared mmap; CONFIG_SHMEM is gated off behind MMU so tmpfs falls back to
+     ramfs too), and **ramfs has no `->fallocate`** → the syscall returns
+     EOPNOTSUPP. **musl forwards that error; glibc (every real system) emulates**
+     → so it works on stock NixOS and not here. GDK's *window* buffers dodge it
+     by using `ftruncate`, which is why the window renders but cursors don't. Fix
+     = make musl's `posix_fallocate` emulate like glibc (ensure the file size on
+     EOPNOTSUPP/ENOSYS) — `toolchain/musl.nix` `postPatch`. Shared across every
+     guest binary; a musl change → world rebuild. Verified the diagnosis by
+     booting the guest headless (`runtime/demo/node/boot-node.mjs`) and running
+     `fallocate` on `/tmp` + `/dev/shm` → both "Not supported", `truncate` → ok.
+  Rebuilds the world (musl) + `.#wasm-base-squashfs` (theme/env data change).
 - **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
   DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
   generic path does a native stack-pointer switch (`CRTJMP`) to `munmap` its own
