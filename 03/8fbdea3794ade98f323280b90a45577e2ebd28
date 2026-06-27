@@ -1,0 +1,21 @@
+scripts/publish-to-r2.sh
+  s_16a51fa7de9b99::t_c3b96c917f2dfa 27-34
+  s_16a51fa7de9b99::t_10a75bff5fd7d4 98-99
+  s_16a51fa7de9b99::t_dac292b31bd2c8 122-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "038fbdea3794ade98f323280b90a45577e2ebd28",
+  "prompts": {},
+  "sessions": {
+    "s_16a51fa7de9b99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fc0d614c-fdad-451f-919e-3ba40aa27a5b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
