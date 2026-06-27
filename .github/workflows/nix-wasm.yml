@@ -323,22 +323,32 @@ jobs:
         run: bun install --frozen-lockfile
 
       # nix:true boots panic occasionally (exit 2) — retry; 0 pass / 1 fail are
-      # terminal. Gating: a 9P-transport regression fails the job.
-      - name: Boot full nix system + 9P smoke
+      # terminal. Gating: a 9P-transport regression OR an install regression fails.
+      - name: Boot full nix system + nix install smokes
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix/
         run: |
-          for attempt in 1 2 3; do
-            echo "::group::smoke.mjs (attempt $attempt)"
-            set +e
-            node demo/node/smoke.mjs
-            rc=$?
-            set -e
-            echo "::endgroup::"
-            [ "$rc" -eq 0 ] && exit 0
-            [ "$rc" -eq 2 ] && { echo "inconclusive (boot panic) — retrying"; continue; }
-            exit "$rc"
-          done
-          echo "still inconclusive after 3 attempts"
-          exit 2
+          run_smoke() {
+            local script="$1" attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt)"
+              set +e
+              node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then echo "$script inconclusive (boot panic) — retrying"; continue; fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"
+            return 2
+          }
+          # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/pc over
+          # pcroot 9P, installs make-wasm32 over nixcache 9P).
+          run_smoke demo/node/smoke.mjs
+          # The new CLI: `nix profile install` of a REAL-derivation catalog entry
+          # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware
+          # cache), then compiles + runs a C program. Gating.
+          run_smoke demo/node/profile-install-e2e.mjs

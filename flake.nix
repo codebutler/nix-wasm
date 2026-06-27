@@ -380,6 +380,11 @@
         extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
       };
 
+      # ---- the on-demand compiler-toolchain packages -----------------------
+      # One source of truth for the four packages the guest installs on demand;
+      # the .#wasm-binary-cache catalogs (pkgs.nix + paths.nix) derive from it.
+      wasmDevPaths = [ guestClang guestCc guestCxx makeWasm ];
+
       # ---- the base-system store closure as a single squashfs image (#43) ---
       wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
         inherit pkgs; toplevel = wasmToplevel;
@@ -424,7 +429,7 @@
       # arrive on demand through substitution.
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
-        devPaths = [ guestClang guestCc guestCxx makeWasm ];
+        devPaths = wasmDevPaths;
       };
 
       # ---- the single versioned `linux` boot bundle (pc#315) ----------------

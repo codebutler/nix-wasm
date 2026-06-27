@@ -306,10 +306,35 @@ follows.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
-One known wrinkle folded into Phase 5: in-guest installs use `nix-env -iA` (the
-cache index is `outPath`-only "fake derivations"); `nix profile install` rejects
-those for lacking a `drvPath` — shipping real `.drv`s in the published closure
-fixes it (codebutler/nix-wasm#1). Archive ops work: `tar` (czf/xzf, patched) is
+In-guest installs work like a real NixOS system via BOTH `nix-env -iA` and
+`nix profile install` (codebutler/nix-wasm#1), and crucially the two CLIs take
+DIFFERENT paths through Nix. (1) `substitute = true` in the guest nix.conf
+(`system.nix`): the NEW CLI (`nix profile`/`nix build`) probes for Internet and,
+finding none, sets `useSubstitutes = false` UNLESS overridden — silently disabling
+substitution even for our `file:///nix-cache`. Marking it overridden leaves it on.
+(2) TWO catalogs next to the cache (`userspace/binary-cache.nix`): `pkgs.nix`
+(REAL derivation entries) for `nix-env -iA <name>`, and `paths.nix` (a plain
+name → output-path map) for the new CLI: read the path (`nix eval --raw -f
+/nix-cache/paths.nix <name>`) and `nix profile install --option substitute true
+<outPath>` (positional Opaque install). Two catalogs, not one,
+because **`nix-env -iA` substitutes the `.drv` from the cache** (its realisation
+fetches the deriver, then the output) — so the cache MUST publish the `.drv`
+closures (`rootPaths = devPaths ++ map drvPath devPaths`) — whereas the **new CLI
+forms a `Built{drvPath}` and then can NOT obtain a non-local `.drv`**: its
+`queryMissing` marks it "unknown" (`src/libstore/misc.cc` → the "failed to obtain
+derivation of …guest-cc.drv" error), so it installs the OUTPUT path directly
+(Opaque, source-free) instead. The new CLI install passes `--option substitute
+true` because its offline-Internet probe (`src/nix/main.cc`) sets
+`useSubstitutes = false` unless overridden, and the `nix.conf` form of the
+override isn't taking effect at the `getWorkerSettings()` level the check reads — a
+command-line `--option` overrides for certain. **DEAD END (removed):** seeding the `.drv` closure
+into the **base squashfs** (`wasmDrvSeed` + `nix-store --load-db`) — a `.drv`
+closure pulls ~6.7 GB of build sources (a real system has none), overflowing the
+boot harness's 2 GiB file cap. (The `.drv` closures DO belong in the binary cache,
+served lazily over 9P — that is what nix-env substitutes; only *baking them into
+the squashfs* was wrong.) Full by-name deriver parity for ARBITRARY packages via
+the new CLI needs in-guest nixpkgs eval (#92). Archive ops work: `tar` (czf/xzf,
+patched) is
 validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
 internet fetch), so the disabled network/service vfork applets aren't needed.
@@ -861,8 +886,28 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   its own driver via the auto-loaded `clang.cfg`/`clang++.cfg` (config-file
   approach A — `toolchain/wasm-clang-config.nix`). The `posix_spawn` gate is
   satisfied (#48/#50). See the "clang is its own driver" note in Current state.
-- **#1** — `nix profile install` rejects the `outPath`-only guest index (use
-  `nix-env -iA`); fix folds into #2.
+- **#1** — DONE: `nix profile install` (new CLI) works like a real NixOS system by
+  installing the package's OUTPUT path (Opaque) — source-free, substitute-only. Two
+  real pieces, no nix patch / no fake derivation: (1) substitution must stay ON —
+  the new CLI disables it offline (`src/nix/main.cc`) unless overridden, so the
+  install passes `--option substitute true` (a command-line override the offline
+  block honors; the `nix.conf substitute = true` form doesn't take effect at the
+  `getWorkerSettings()` level the check reads); (2) a `paths.nix` name → output-path
+  map, so `nix profile install <outPath>` (path read via `nix eval --raw -f
+  /nix-cache/paths.nix <name>`) installs a store path (Opaque) and substitutes the
+  prebuilt output (+ closure). `nix-env -iA` keeps
+  using the derivation catalog `pkgs.nix`: its realisation SUBSTITUTES the `.drv`
+  from the cache (then the output), so the cache publishes the `.drv` closures
+  (`rootPaths = devPaths ++ map drvPath devPaths`). The new CLI can't use that path
+  — it forms `Built{drvPath}` and can NOT obtain a non-local `.drv` (`misc.cc
+  queryMissing` marks it "unknown" → "failed to obtain derivation"), so it installs
+  the output path instead. DEAD END: seeding the `.drv` closure into the base
+  SQUASHFS (not the cache) — a `.drv` closure is ~6.7 GB of build sources (a real
+  system has none), overflowing the boot harness's 2 GiB cap. The `.drv` closures
+  belong in the lazily-served cache (what nix-env fetches), just not baked into the
+  squashfs. Full by-name deriver parity for ARBITRARY packages via the new CLI
+  needs in-guest eval (#92). Validator: `runtime/demo/node/profile-install-e2e.mjs`
+  (the `nix-boot-smoke` CI job).
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
