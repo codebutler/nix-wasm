@@ -1,0 +1,27 @@
+.github/workflows/nix-wasm.yml
+  s_16a51fa7de9b99::t_8aa5a91d9977b4 355-362
+userspace/system.nix
+  s_16a51fa7de9b99::t_526da3824660b9 183-185,188-205
+runtime/demo/node/profile-install-e2e.mjs
+  s_16a51fa7de9b99::t_7571bc83897764 39-42
+  s_16a51fa7de9b99::t_64477a4366e717 131,144,146-148
+  s_16a51fa7de9b99::t_7a14866ed68944 149
+  s_16a51fa7de9b99::t_baa94dac116e61 32
+  s_16a51fa7de9b99::t_7636af6b75063e 132-143,145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "0fe6fcc84e6e90d7b7c113de037644c7475cc0fd",
+  "prompts": {},
+  "sessions": {
+    "s_16a51fa7de9b99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fc0d614c-fdad-451f-919e-3ba40aa27a5b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
