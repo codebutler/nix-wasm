@@ -840,6 +840,18 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
      guest binary; a musl change → world rebuild. Verified the diagnosis by
      booting the guest headless (`runtime/demo/node/boot-node.mjs`) and running
      `fallocate` on `/tmp` + `/dev/shm` → both "Not supported", `truncate` → ok.
+     **The emulation MUST call the `fallocate()` wrapper, NOT a raw
+     `__syscall(SYS_fallocate, …)`:** musl's stock `posix_fallocate.c` issues
+     `fallocate` (nr=47) through a 4-arg `__wasm_syscall_4`, but `sys_fallocate`'s
+     `loff_t` args make that a `call_indirect` signature mismatch ("null function
+     or function signature mismatch") that PANICS the guest — the same arity
+     hazard the kernel-worker futex shim (nr=422) documents. The `fallocate()`
+     wrapper splits the 64-bit args into the 6-arg `__wasm_syscall_6` form the
+     kernel expects (proven safe: busybox's `fallocate` returns a clean
+     EOPNOTSUPP). The first cut used the raw `__syscall` and panicked busybox
+     forkshell's `posix_fallocate` (on its spawn temp file) → `nix-env`/GTK
+     kernel-panic, caught by CI's `nix-boot-smoke`; captured the exact `nr=47`
+     trap by booting the preview headless via Playwright with `trace_syscalls` on.
   Rebuilds the world (musl) + `.#wasm-base-squashfs` (theme/env data change).
 - **Detached-thread exit needs a wasm `__unmapself`** (`patches/musl/0008`). A
   DETACHED pthread that exits runs musl `__pthread_exit` → `__unmapself`, whose
