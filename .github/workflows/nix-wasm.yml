@@ -360,3 +360,10 @@ jobs:
           # BUILD it and dies "platform mismatch" (#1 follow-up); (2) EXECUTING a
           # freshly-compiled wasm binary in the headless harness (issue #96). Gating.
           run_smoke demo/node/wrapperless-cc-e2e.mjs
+          # BUILD derivations FROM SOURCE on the guest (issue #92), not just
+          # substitute: a trivial sh-builder, a multi-util sh-builder (PATH=/bin),
+          # and a derivation that compiles inline C with the in-guest toolchain →
+          # then RUNS the from-source-built binary (exit 42). Proves nix's
+          # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
+          # posix_spawn. Gating.
+          run_smoke demo/node/build-from-source-e2e.mjs

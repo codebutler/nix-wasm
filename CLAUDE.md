@@ -333,7 +333,8 @@ closure pulls ~6.7 GB of build sources (a real system has none), overflowing the
 boot harness's 2 GiB file cap. (The `.drv` closures DO belong in the binary cache,
 served lazily over 9P — that is what nix-env substitutes; only *baking them into
 the squashfs* was wrong.) Full by-name deriver parity for ARBITRARY packages via
-the new CLI needs in-guest nixpkgs eval (#92). Archive ops work: `tar` (czf/xzf,
+the new CLI needs in-guest nixpkgs eval. (Building derivations FROM SOURCE in-guest
+is a separate axis and works — see #92 below.) Archive ops work: `tar` (czf/xzf,
 patched) is
 validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
@@ -949,8 +950,37 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   system has none), overflowing the boot harness's 2 GiB cap. The `.drv` closures
   belong in the lazily-served cache (what nix-env fetches), just not baked into the
   squashfs. Full by-name deriver parity for ARBITRARY packages via the new CLI
-  needs in-guest eval (#92). Validator: `runtime/demo/node/profile-install-e2e.mjs`
-  (the `nix-boot-smoke` CI job).
+  needs in-guest eval. Validator: `runtime/demo/node/profile-install-e2e.mjs`
+  (the `nix-boot-smoke` CI job). FOLLOW-UP (DONE): `nix-env -iA guest-cc` also
+  needed `always-allow-substitutes = true` in the guest nix.conf — guest-cc /
+  guest-cxx are trivial builders (`writeShellScriptBin`, `allowSubstitutes =
+  false` + `preferLocalBuild = true`), so nix-env realised the deriver and tried
+  to BUILD them ("platform mismatch") instead of substituting the cached output;
+  the build-incapable guest must always substitute. (`nix profile install
+  <outPath>` was unaffected — an Opaque install never consults `allowSubstitutes`.)
+- **#96** — DONE: the "freshly-compiled binary hangs on exec in the Node harness"
+  was a HARNESS bug, not an exec hang. `profile-install-e2e`'s run marker `CC_RC`
+  is a substring of step 4's `WHICH_CC_RC`, so `waitForOutput(/CC_RC=[0-9]/)`
+  matched the stale `WHICH_CC_RC=0` instantly, saw rc≠42, and reported the healthy
+  run as hung ("transcript ends at the compile"). Fixed with a collision-free
+  `PROG_EXIT` sentinel; step 6 is now gating. The exec itself is fine (cold
+  first-exec ~1-4s — each exec recompiles the module from shared memory, no host
+  module cache; warm execs instant). Lesson: harness markers must use `=$?`
+  (matches the expanded value in OUTPUT, not the echoed command) AND not be a
+  substring of any earlier marker.
+- **#92** — in-guest `nix build` from source: the BUILD path WORKS. nix's
+  `local-derivation-goal` (fork/exec a builder) runs on the NOMMU wasm guest via
+  `posix_spawn` (no fork/vfork), with sandbox/namespaces off (`sandbox = false`,
+  `filter-syscalls = false`). Proven + gated by
+  `runtime/demo/node/build-from-source-e2e.mjs` (in `nix-boot-smoke`): a trivial
+  `/bin/sh` builder, a multi-util builder with `PATH=/bin` (the cleared build env
+  needs PATH — busybox applets are otherwise "command not found"; normal Nix, not
+  a wasm limit), and a derivation that COMPILES inline C with the in-guest
+  toolchain (`guest-cc`) → a wasm binary that then RUNS → exit 42. REMAINING (the
+  larger lift): full nixpkgs-stdenv / autotools (`./configure && make`) builds need
+  the cross-built stdenv closure (bash/coreutils/make/cc-wrapper) substituted as
+  build INPUTS — a separate effort; and memory ceilings for big builds are
+  unmeasured (the toolchain itself stays substitute-only).
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
