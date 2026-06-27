@@ -352,3 +352,11 @@ jobs:
           # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware
           # cache), then compiles + runs a C program. Gating.
           run_smoke demo/node/profile-install-e2e.mjs
+          # `nix-env -iA` of the FULL toolchain (guest-clang-wasm32 + guest-cc +
+          # guest-cxx) then COMPILES AND RUNS bare clang/clang++/cc/c++ → exit
+          # 42/7. Gates two things the other smokes don't: (1) `nix-env -iA`
+          # substituting a trivial (`allowSubstitutes = false`) derivation — needs
+          # always-allow-substitutes in the guest nix.conf, else nix-env tries to
+          # BUILD it and dies "platform mismatch" (#1 follow-up); (2) EXECUTING a
+          # freshly-compiled wasm binary in the headless harness (issue #96). Gating.
+          run_smoke demo/node/wrapperless-cc-e2e.mjs

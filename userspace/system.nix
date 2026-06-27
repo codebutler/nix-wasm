@@ -180,10 +180,29 @@ let
         # default is wrong here: it makes `nix profile install` fail with "no
         # substituter that can build it" (and made `nix profile` look like it was
         # building derivers — it was actually just unable to substitute the cached
-        # output). `nix-env -iA` is a separate entry point that skips that probe, which
-        # is why only the new CLI was affected. Setting it here marks it `overridden`
+        # output). `nix-env -iA` is a separate entry point that skips that probe, so
+        # it is not affected by THIS knob (it has its own gap — see
+        # always-allow-substitutes below). Setting it here marks it `overridden`
         # so the offline path leaves it alone.
         nix.settings.substitute = true;
+        # Substitute even derivations marked `allowSubstitutes = false`
+        # (codebutler/nix-wasm#1 follow-up). nixpkgs' TRIVIAL builders —
+        # `runCommand` / `writeShellScriptBin` / `writeText`, which is what
+        # `guest-cc` / `guest-cxx` are — set `allowSubstitutes = false` +
+        # `preferLocalBuild = true`: on a normal machine rebuilding a tiny wrapper
+        # locally is cheaper than a network round-trip. But the wasm guest CANNOT
+        # build ANYTHING (no fork/exec builder; the deriver's `system` is the x86_64/
+        # aarch64 BUILD host, not wasm32) — so `nix-env -iA guest-cc` (which realises
+        # the deriver, i.e. a `Built{drvPath}`, and honours `allowSubstitutes`) tried
+        # to BUILD the output and died with "platform mismatch … Required: aarch64-
+        # linux, Current: wasm32-linux", even though the prebuilt output IS in the
+        # cache. (`nix profile install <outPath>` sidestepped it only because an
+        # Opaque store-path install never consults `allowSubstitutes`.) This knob
+        # makes Nix ignore that attribute and substitute the cached output — the only
+        # correct behaviour for a build-incapable guest — so `nix-env -iA guest-cc`
+        # and `nix-env -iA guest-clang-wasm32` install from the cache like any other
+        # package (fixes the `wrapperless-cc-e2e` install path).
+        nix.settings.always-allow-substitutes = true;
         nix.settings.sandbox = false;
         # Single-user guest: build/realize as the calling user (root). Empty
         # build-users-group disables build-user isolation — otherwise nix aborts
