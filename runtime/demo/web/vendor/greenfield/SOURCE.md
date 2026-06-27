@@ -8,16 +8,20 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `5a1227f` (branch `fix/dom-windows-popups-90`, codebutler/greenfield#2 —
-  "accept wl_shm cursor bitmap directly in updateCursor" on top of
-  "make xdg_popup grabs, positioning, and rendering work for DOM-windows shells"),
-  on top of `fc4966f` ("compositor: add pointerButton / forwardLocalButton") on top
-  of `5bf2e35` ("wayland-wasm: in-browser Wayland apps on Greenfield (extended fork)").
-  The popups-90 commit fixes xdg_popup grab serial/scene-coords/client-order, the
-  xdg_positioner anchor-center miscalc, and adds popup parent/offset + surfaceDestroyed
-  so a DOM-windows shell can render popups as positioned overlays (nix-wasm #98/#99/#101).
-  The cursor commit aligns the source with the #94 wl_shm-cursor fix previously applied
-  to this bundle directly.
+- **Commit:** `bc680ed` (`master`, codebutler/greenfield#6 — "honor xdg-decoration +
+  forward toplevel move to DOM-windows shells (#105)"), on top of the merged
+  refresh-mHz fix (codebutler/greenfield#5 — `wl_output.mode` refresh sent in
+  milli-hertz not hertz; fixes the GdkFrameClock 16.7-second freeze that made GTK
+  page-switch/animation appear hung) and the popup-placement fixes
+  (codebutler/greenfield#2/#3/#4 — xdg_popup grabs/scene-coords/client-order,
+  xdg_positioner anchor-center, constraintAdjustment bitwise-AND, and
+  xdg_popup.configure reporting the real anchor position), all on top of
+  `fc4966f` (pointerButton / forwardLocalButton) and `5bf2e35` (the extended fork).
+  **#105:** XdgDecorationManager now honors the client's xdg-decoration mode (CSD
+  clients self-decorate; the new `surfaceDecorationModeUpdated` event tells the shell
+  to drop its titlebar), and FloatingDesktopSurface.move forwards `xdg_toplevel.move`
+  to the shell via the new `surfaceMoveRequested` event so a titlebar-less CSD window
+  is dragged by its own headerbar.
 - **Local patch (pc Wayland Phase 4f):** `src/UserShellApi.ts` adds a
   `requestSurfaceClose(compositorSurface)` action — sends `xdg_toplevel.close` to
   the client (via the desktop surface's `requestClose`) and flushes, the standard

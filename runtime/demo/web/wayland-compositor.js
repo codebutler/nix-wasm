@@ -61,6 +61,23 @@ async function boot() {
   const surfaces = new Map();
   /** @type {Map<string, {title?:string, appId?:string}>} */
   const titleMeta = new Map();
+  // key → 'client' | 'server'. Set by surfaceDecorationModeUpdated, negotiated via
+  // xdg-decoration BEFORE the surface maps. 'client' = the guest draws its own
+  // titlebar (CSD), so we suppress ours (issue #105). Default (absent) = server.
+  /** @type {Map<string, 'client'|'server'>} */
+  const decoMode = new Map();
+  // Latest pointer position in client (viewport) coords. A CSD window has no shell
+  // titlebar to drag, so xdg_toplevel.move (→ surfaceMoveRequested) drives the drag
+  // from here, anchored to wherever the pointer currently is.
+  const lastPointer = { x: 0, y: 0 };
+  document.addEventListener(
+    "pointermove",
+    (ev) => {
+      lastPointer.x = ev.clientX;
+      lastPointer.y = ev.clientY;
+    },
+    { capture: true, passive: true },
+  );
   const keyOf = (cs) => `${cs.client.id}:${cs.id}`;
   const metaFor = (key) => {
     let m = titleMeta.get(key);
@@ -150,61 +167,73 @@ async function boot() {
     win.style.zIndex = String(nextZ++);
     winCount++;
 
-    const titlebar = document.createElement("div");
-    titlebar.className = "wl-win-titlebar";
+    // Decoration policy mirrors a real Wayland desktop (GNOME/Mutter-style): clients
+    // are CLIENT-side decorated by DEFAULT. The shell draws a titlebar ONLY for a
+    // client that explicitly negotiates SERVER-side decorations via xdg-decoration.
+    // GTK/Qt draw their own headerbar and never ask for SSD, so they get no shell
+    // chrome — no double titlebar (#105). A CSD window is dragged via the guest's
+    // own headerbar → xdg_toplevel.move (→ surfaceMoveRequested) and closed via the
+    // guest's own close button.
+    const ssd = decoMode.get(key) === "server";
+    record._csd = !ssd;
+    let titleEl = null;
+    if (ssd) {
+      const titlebar = document.createElement("div");
+      titlebar.className = "wl-win-titlebar";
 
-    const titleEl = document.createElement("span");
-    titleEl.className = "wl-win-title";
-    titleEl.textContent = bestTitle(key);
+      titleEl = document.createElement("span");
+      titleEl.className = "wl-win-title";
+      titleEl.textContent = bestTitle(key);
 
-    const closeBtn = document.createElement("button");
-    closeBtn.className = "wl-win-close";
-    closeBtn.textContent = "×";
-    closeBtn.title = "Close";
-    closeBtn.addEventListener("click", () => {
-      if (record.destroying) {
-        win.remove();
-        return;
-      }
-      record.destroying = true;
-      try {
-        session.userShell.actions.requestSurfaceClose(record.cs);
-      } catch {
-        win.remove();
-      }
-      // Safety net in case the guest ignores close.
-      setTimeout(() => {
-        if (!surfaces.has(key)) return;
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "wl-win-close";
+      closeBtn.textContent = "×";
+      closeBtn.title = "Close";
+      closeBtn.addEventListener("click", () => {
+        if (record.destroying) {
+          win.remove();
+          return;
+        }
+        record.destroying = true;
         try {
-          session.userShell.actions.closeClient({ id: record.clientId });
-        } catch {}
-        win.remove();
-      }, 2000);
-    });
+          session.userShell.actions.requestSurfaceClose(record.cs);
+        } catch {
+          win.remove();
+        }
+        // Safety net in case the guest ignores close.
+        setTimeout(() => {
+          if (!surfaces.has(key)) return;
+          try {
+            session.userShell.actions.closeClient({ id: record.clientId });
+          } catch {}
+          win.remove();
+        }, 2000);
+      });
 
-    titlebar.appendChild(titleEl);
-    titlebar.appendChild(closeBtn);
-    win.appendChild(titlebar);
+      titlebar.appendChild(titleEl);
+      titlebar.appendChild(closeBtn);
+      win.appendChild(titlebar);
 
-    // Draggable titlebar.
-    let drag = null;
-    titlebar.addEventListener("pointerdown", (ev) => {
-      if (ev.target === closeBtn) return;
-      drag = { x: ev.clientX - win.offsetLeft, y: ev.clientY - win.offsetTop };
-      titlebar.setPointerCapture(ev.pointerId);
-      win.style.zIndex = String(nextZ++);
-    });
-    titlebar.addEventListener("pointermove", (ev) => {
-      if (!drag) return;
-      win.style.left = ev.clientX - drag.x + "px";
-      win.style.top = ev.clientY - drag.y + "px";
-    });
-    titlebar.addEventListener("pointerup", () => {
-      drag = null;
-    });
-    titlebar.addEventListener("pointercancel", () => {
-      drag = null;
-    });
+      // Draggable titlebar.
+      let drag = null;
+      titlebar.addEventListener("pointerdown", (ev) => {
+        if (ev.target === closeBtn) return;
+        drag = { x: ev.clientX - win.offsetLeft, y: ev.clientY - win.offsetTop };
+        titlebar.setPointerCapture(ev.pointerId);
+        win.style.zIndex = String(nextZ++);
+      });
+      titlebar.addEventListener("pointermove", (ev) => {
+        if (!drag) return;
+        win.style.left = ev.clientX - drag.x + "px";
+        win.style.top = ev.clientY - drag.y + "px";
+      });
+      titlebar.addEventListener("pointerup", () => {
+        drag = null;
+      });
+      titlebar.addEventListener("pointercancel", () => {
+        drag = null;
+      });
+    }
 
     // Click anywhere on the window to raise it.
     win.addEventListener("pointerdown", () => {
@@ -300,6 +329,14 @@ async function boot() {
       } catch {}
     };
     canvas.addEventListener("pointermove", (ev) => {
+      // Interactive move in progress (CSD window dragged via xdg_toplevel.move):
+      // reposition the shell <div> from the pointer and don't forward motion to the
+      // guest — the compositor grab owns the pointer for the duration of the move.
+      if (record._moving && record.win) {
+        record.win.style.left = ev.clientX - record._moveAnchor.x + "px";
+        record.win.style.top = ev.clientY - record._moveAnchor.y + "px";
+        return;
+      }
       const p = surfaceCoords(record, ev);
       if (!p) return;
       try {
@@ -328,6 +365,8 @@ async function boot() {
       try {
         canvas.releasePointerCapture(ev.pointerId);
       } catch {}
+      // End any interactive move on release.
+      record._moving = false;
       try {
         actions.pointerButton(cs, code, true);
       } catch {}
@@ -415,12 +454,48 @@ async function boot() {
     if (record?.win) record.win.style.zIndex = String(nextZ++);
   };
 
+  // xdg-decoration negotiation (issue #105). Almost always arrives BEFORE
+  // surfaceCreated (decoration is negotiated before the first commit), so
+  // mountSurfaceWindow reads decoMode at build time. This live handler is a safety
+  // net for a client that toggles mode after mapping: hide an existing shell
+  // titlebar if it switched to client-side. (Materializing a titlebar for a
+  // late server-side switch is unsupported — negotiation-before-map is the norm.)
+  events.surfaceDecorationModeUpdated = (compositorSurface, mode) => {
+    const key = keyOf(compositorSurface);
+    decoMode.set(key, mode);
+    const record = surfaces.get(key);
+    if (!record?.win) return;
+    const titlebar = record.win.querySelector(".wl-win-titlebar");
+    if (mode === "client" && titlebar) {
+      titlebar.style.display = "none";
+      record._csd = true;
+    } else if (mode === "server" && titlebar) {
+      titlebar.style.display = "";
+      record._csd = false;
+    }
+  };
+
+  // A CSD client asked to move its own toplevel (the user grabbed its headerbar).
+  // The shell owns the window position, so start following the pointer from here,
+  // anchored to the window's current offset under the cursor.
+  events.surfaceMoveRequested = (compositorSurface) => {
+    const record = surfaces.get(keyOf(compositorSurface));
+    if (!record?.win) return;
+    record._moving = true;
+    record._moveAnchor = {
+      x: lastPointer.x - record.win.offsetLeft,
+      y: lastPointer.y - record.win.offsetTop,
+    };
+    record.win.style.zIndex = String(nextZ++);
+  };
+
   events.surfaceDestroyed = (compositorSurface) => {
     const key = keyOf(compositorSurface);
     const record = surfaces.get(key);
     if (!record) return;
     surfaces.delete(key);
     titleMeta.delete(key);
+    decoMode.delete(key);
     record.destroying = true;
     record.win?.remove();
   };
