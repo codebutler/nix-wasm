@@ -234,6 +234,49 @@ async function boot() {
     for (const content of pending) paintSurface(record, content);
   }
 
+  // --- popup overlays (xdg_popup / subsurface) -------------------------------
+  // Combobox dropdowns, menus, tooltips are child surfaces positioned relative to
+  // their parent. They are not desktop surfaces (no titlebar, not draggable), so
+  // they get a bare absolutely-positioned <canvas> overlay in `container`, anchored
+  // to the parent window's content canvas + the popup's parent-relative offset.
+  function mountPopupOverlay(key, parent) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    Object.assign(canvas.style, {
+      position: "fixed",
+      zIndex: String(100000 + nextZ++),
+      boxShadow: "0 4px 24px #0008",
+      imageRendering: "pixelated",
+      pointerEvents: "none", // input is routed through Greenfield, not the DOM
+    });
+    container.appendChild(canvas);
+    const record = {
+      win: canvas, // surfaceDestroyed removes record.win
+      canvas,
+      ctx: canvas.getContext("2d"),
+      pending: null,
+      isPopup: true,
+      parentKey: `${parent.client}:${parent.id}`,
+      destroying: false,
+    };
+    surfaces.set(key, record);
+    return record;
+  }
+
+  function positionPopupOverlay(record, parent) {
+    const parentRec = surfaces.get(record.parentKey);
+    const anchor = parentRec?.canvas;
+    if (!anchor) return;
+    const r = anchor.getBoundingClientRect();
+    const sx = r.width / (anchor.width || 1); // CSS px per buffer px
+    const sy = r.height / (anchor.height || 1);
+    record.canvas.style.left = r.left + (parent?.dx ?? 0) * sx + "px";
+    record.canvas.style.top = r.top + (parent?.dy ?? 0) * sy + "px";
+    // Match the parent's on-screen scale so the popup lines up 1:1.
+    record._scale = { sx, sy };
+  }
+
   // --- input forwarding (canvas → Greenfield seat) ---------------------------
 
   function surfaceCoords(record, ev) {
@@ -328,10 +371,25 @@ async function boot() {
   };
 
   events.surfaceContentUpdated = (compositorSurface, content) => {
-    const record = surfaces.get(keyOf(compositorSurface));
+    const key = keyOf(compositorSurface);
+    let record = surfaces.get(key);
+    // A child surface (xdg_popup / subsurface — combobox dropdowns, menus) carries
+    // `content.parent`. It is NOT a desktop surface, so surfaceCreated never fired;
+    // mount it lazily as a positioned overlay anchored to its parent window.
+    if (!record && content.parent) {
+      record = mountPopupOverlay(key, content.parent);
+    }
     if (!record) return;
     if (!record.ctx) {
       if (record.pending) record.pending = [content]; // coalesce
+      return;
+    }
+    if (record.isPopup) {
+      positionPopupOverlay(record, content.parent);
+      paintSurface(record, content);
+      const s = record._scale || { sx: 1, sy: 1 };
+      record.canvas.style.width = record.canvas.width * s.sx + "px";
+      record.canvas.style.height = record.canvas.height * s.sy + "px";
       return;
     }
     paintSurface(record, content);
