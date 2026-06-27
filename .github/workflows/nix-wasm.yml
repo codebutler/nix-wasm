@@ -367,3 +367,17 @@ jobs:
           # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
           # posix_spawn. Gating.
           run_smoke demo/node/build-from-source-e2e.mjs
+          # M2/M3a graphics + FFI selftests (issue #88), batched into ONE boot
+          # (display-free --selftest binaries baked into the image): glib (gobject +
+          # libffi double marshaller), libffi (raw wasm backend), pango (cairo-ft
+          # layout), wl-text (freetype/fontconfig/harfbuzz/cairo). Gating.
+          run_smoke demo/node/selftests-batch.mjs
+          # The HEAVY GTK selftests (issue #88) run one-per-fresh-boot — batching
+          # several ~14 MB GTK inits in one boot fragments the NOMMU heap and wedges
+          # a later one (they pass fine isolated). gtk-hello (GTK3 type tree via the
+          # fpcast seam, M3b), galculator (GTK3 .ui parse + widget class_init, M4),
+          # gtk3-widget-factory (GtkBuilder add_callback_symbol autoconnect, #33).
+          # Gating; the retry wrapper covers boot-panic flakes (exit 2).
+          run_smoke demo/node/gtk-smoke.mjs
+          run_smoke demo/node/galculator-smoke.mjs
+          run_smoke demo/node/widget-factory-smoke.mjs
