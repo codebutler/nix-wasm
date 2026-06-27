@@ -324,6 +324,19 @@ export class WlDevice extends VirtioWasmDevice {
   _pendingIn = [];
 
   _queueIn(vfdId, data) {
+    // The IN queue is prefilled with PAGE_SIZE buffers, so one VFD_RECV's
+    // header + wayland payload must fit in a single buffer. A server→guest batch
+    // larger than that (e.g. a burst of coalesced events) would otherwise be
+    // truncated and corrupt the stream into the client. Chunk it at MAX_FILL_CHUNK
+    // byte boundaries into multiple VFD_RECVs — the client reads the vfd as a
+    // byte stream and reassembles, so arbitrary boundaries are safe. (Mirrors the
+    // VFD_FILL keymap chunking, which is the same proven mechanism.)
+    if (data.length > MAX_FILL_CHUNK) {
+      for (let off = 0; off < data.length; off += MAX_FILL_CHUNK) {
+        this._pendingIn.push({ vfdId, data: data.subarray(off, off + MAX_FILL_CHUNK) });
+      }
+      return;
+    }
     this._pendingIn.push({ vfdId, data });
   }
 
