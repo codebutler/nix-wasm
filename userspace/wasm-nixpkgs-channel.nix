@@ -11,14 +11,16 @@
 # / `cross.file` evaluate to wasm32 .drvs in ~15s within the ~2 GiB cap
 # (docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md).
 #
-# Delivery (no kernel/ABI change — reuses the existing nix-cache 9P path): this
-# derivation is a SMALL tree (the cross config + a generated `default.nix`) that is
-# copied verbatim into the served nix-cache at `/nix-cache/channel` (see
-# binary-cache.nix). The guest's `~/.nix-defexpr/nixpkgs` is `import /nix-cache/channel
-# {}` (bootstrap.nix). nixpkgs itself is reached via the `<nixpkgs>` NIX_PATH lookup
-# (baked in system.nix) and substituted on demand from the cache only when a nixpkgs
-# attribute is actually evaluated — so the separate `wasm-tools` toolchain channel
-# (the old pkgs.nix catalog) stays fast and never pulls nixpkgs.
+# Delivery (no kernel/ABI change): this derivation is a SMALL tree (the cross config
+# + a generated `default.nix`, ~1.3 MB) baked into the base squashfs (base-squashfs.nix
+# adds it as a closure root) — a real on-disk dir so directory traversal works, unlike
+# the flat binary-cache 9P export. The guest's `~/.nix-defexpr/nixpkgs` is `import
+# <this store path> {}` (bootstrap.nix bakes the path). nixpkgs itself is reached via
+# the `<nixpkgs>` NIX_PATH lookup (baked in system.nix) and substituted on demand from
+# the cache only when a nixpkgs attribute is actually evaluated — so the separate
+# `wasm-tools` toolchain channel (the pkgs.nix catalog) stays fast and never pulls
+# nixpkgs. The channel's own closure is just itself (the .nix text files); <nixpkgs>
+# is not a closure reference, so baking it adds no real weight to the squashfs.
 #
 # The set returned is exactly `cross` (the wasm cross package set). The wasm-specific
 # toolchain (guest-cc/guest-cxx/guest-clang/make-wasm32) stays in its own `wasm-tools`

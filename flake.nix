@@ -374,7 +374,10 @@
       };
 
       # ---- thin initramfs /init (generated) + the initramfs cpio ------------
-      wasmBootstrap = import ./userspace/bootstrap.nix { pkgs = cross; };
+      wasmBootstrap = import ./userspace/bootstrap.nix {
+        pkgs = cross;
+        nixpkgsChannel = wasmNixpkgsChannel;
+      };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
         extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
@@ -388,6 +391,7 @@
       # ---- the base-system store closure as a single squashfs image (#43) ---
       wasmBaseSquashfs = import ./userspace/base-squashfs.nix {
         inherit pkgs; toplevel = wasmToplevel;
+        channel = wasmNixpkgsChannel;
       };
 
       # ---- Nix 2.34.7 itself, cross-compiled to wasm ------------------------
@@ -441,14 +445,26 @@
         localSystem = system;
       };
 
+      # Curated set of nixpkgs packages PUBLISHED for `nix-env -iA nixpkgs.<pkg>`
+      # (the channel can EVALUATE any package, but only published outputs can be
+      # SUBSTITUTED — the rest fail to realise, exactly like an uncached package on
+      # a real NixOS system). Validated in-guest: `nix-env -iA nixpkgs.file` →
+      # substitutes + installs + `file --version` runs. ALL outputs of each package
+      # are rooted (nix-env installs meta.outputsToInstall, e.g. [out man] for file;
+      # publishing only `out` makes nix fall back to building the package's full
+      # build closure from source). Grow this list as more packages are confirmed
+      # to cross-build to wasm32-NOMMU.
+      wasmPublishedPkgs = [ cross.file cross.hello ];
+      allOutputs = drv: map (o: drv.${o}) drv.outputs;
+
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = wasmDevPaths;
-        # Serve the channel tree at /nix-cache/channel (the guest's nixpkgs
-        # default expr) and publish the pinned nixpkgs source so <nixpkgs>
-        # substitutes on demand when a nixpkgs attribute is evaluated.
-        channel = wasmNixpkgsChannel;
-        extraRootPaths = [ nixpkgs.outPath ];
+        # Publish the pinned nixpkgs source (so <nixpkgs> substitutes on demand when
+        # a nixpkgs attribute is evaluated) + the curated package outputs above.
+        # (The channel TREE is baked into the squashfs instead — it needs directory
+        # traversal, which the flat binary-cache 9P export does not provide.)
+        extraRootPaths = [ nixpkgs.outPath ] ++ builtins.concatMap allOutputs wasmPublishedPkgs;
       };
 
       # ---- the single versioned `linux` boot bundle (pc#315) ----------------

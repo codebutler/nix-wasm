@@ -22,7 +22,10 @@
 # list fits in one descriptor chain; the default 64-entry ring would overflow
 # (-ENOSPC) on large reads like a nix-env NAR fetch.
 # /nix is a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
-{ pkgs }:
+# nixpkgsChannel — the wasm-nixpkgs channel store path (baked into the squashfs
+# via base-squashfs.nix). The guest's `nixpkgs` nix-env channel is `import
+# <this path> {}`; null → no nixpkgs channel (busybox-only / toolchain-only boots).
+{ pkgs, nixpkgsChannel ? null }:
 pkgs.writeText "init" ''
   #!/bin/sh
   # busybox is on /bin (baked); call applets via PATH.
@@ -135,7 +138,9 @@ pkgs.writeText "init" ''
     rm -rf /root/.nix-defexpr
     mkdir -p /root/.nix-defexpr/wasm-tools /root/.nix-defexpr/nixpkgs
     [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr/wasm-tools/default.nix 2>/dev/null || true
-    [ -e /nix-cache/channel/default.nix ] && echo 'import /nix-cache/channel { }' > /root/.nix-defexpr/nixpkgs/default.nix 2>/dev/null || true
+    ${pkgs.lib.optionalString (nixpkgsChannel != null) ''
+      echo 'import ${nixpkgsChannel} { }' > /root/.nix-defexpr/nixpkgs/default.nix
+    ''}
 
     echo "pc: booting Nix userspace from $sys"
     exec "$sys/init"
