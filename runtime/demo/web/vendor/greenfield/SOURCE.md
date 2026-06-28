@@ -8,20 +8,26 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `bc680ed` (`master`, codebutler/greenfield#6 — "honor xdg-decoration +
-  forward toplevel move to DOM-windows shells (#105)"), on top of the merged
-  refresh-mHz fix (codebutler/greenfield#5 — `wl_output.mode` refresh sent in
-  milli-hertz not hertz; fixes the GdkFrameClock 16.7-second freeze that made GTK
-  page-switch/animation appear hung) and the popup-placement fixes
-  (codebutler/greenfield#2/#3/#4 — xdg_popup grabs/scene-coords/client-order,
-  xdg_positioner anchor-center, constraintAdjustment bitwise-AND, and
-  xdg_popup.configure reporting the real anchor position), all on top of
-  `fc4966f` (pointerButton / forwardLocalButton) and `5bf2e35` (the extended fork).
-  **#105:** XdgDecorationManager now honors the client's xdg-decoration mode (CSD
-  clients self-decorate; the new `surfaceDecorationModeUpdated` event tells the shell
-  to drop its titlebar), and FloatingDesktopSurface.move forwards `xdg_toplevel.move`
-  to the shell via the new `surfaceMoveRequested` event so a titlebar-less CSD window
-  is dragged by its own headerbar.
+- **Commit:** `09f2758` (`master`, codebutler/greenfield#7 — "maximize/minimize/resize
+  for DOM-windows shells (#105)"), on top of #6 ("honor xdg-decoration + forward
+  toplevel move", #105), the merged refresh-mHz fix (codebutler/greenfield#5 —
+  `wl_output.mode` refresh sent in milli-hertz not hertz; fixes the GdkFrameClock
+  16.7-second freeze that made GTK page-switch/animation appear hung) and the
+  popup-placement fixes (codebutler/greenfield#2/#3/#4 — xdg_popup
+  grabs/scene-coords/client-order, xdg_positioner anchor-center, constraintAdjustment
+  bitwise-AND, and xdg_popup.configure reporting the real anchor position), all on top
+  of `fc4966f` (pointerButton / forwardLocalButton) and `5bf2e35` (the extended fork).
+  **#105 (decoration + move, #6):** XdgDecorationManager honors the client's
+  xdg-decoration mode (CSD clients self-decorate; `surfaceDecorationModeUpdated` tells
+  the shell to drop its titlebar), and FloatingDesktopSurface.move forwards
+  `xdg_toplevel.move` via `surfaceMoveRequested` so a titlebar-less CSD window is
+  dragged by its own headerbar.
+  **#105 (maximize/minimize/resize, #7):** in DOM-windows mode the scene canvas is a
+  hidden 1×1 driver, so `setMaximized`/`minimize` now forward to the shell via the new
+  `surfaceMaximizeRequested` / `surfaceMinimizeRequested` events (still sending the
+  maximized STATE), a new `configureSurfaceSize(cs, w, h)` action lets the shell tell a
+  guest to repaint at a new window size, and `resize` returns early in DOM-windows mode
+  (the shell owns the affordance).
 - **Local patch (pc Wayland Phase 4f):** `src/UserShellApi.ts` adds a
   `requestSurfaceClose(compositorSurface)` action — sends `xdg_toplevel.close` to
   the client (via the desktop surface's `requestClose`) and flushes, the standard
