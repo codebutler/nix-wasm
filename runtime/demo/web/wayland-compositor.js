@@ -275,7 +275,8 @@ async function boot() {
     Object.assign(canvas.style, {
       position: "fixed",
       zIndex: String(100000 + nextZ++),
-      boxShadow: "0 4px 24px #0008",
+      // No box-shadow: a GTK popup draws its own shadow inside its buffer's transparent
+      // margins, so a shell shadow here is a double shadow (and lingers after close).
       imageRendering: "pixelated",
       pointerEvents: "none", // input is routed through Greenfield, not the DOM
     });
@@ -357,8 +358,10 @@ async function boot() {
         h = Math.max(60, Math.round(h));
         if (e & 4) record.win.style.left = s.left + (s.w - w) + "px";
         if (e & 1) record.win.style.top = s.top + (s.h - h) + "px";
+        record._resizeLast = { w, h };
         try {
-          actions.configureSurfaceSize(cs, w, h);
+          // resizing=true carries the interactive-resize state so the guest tracks it.
+          actions.configureSurfaceSize(cs, w, h, true);
         } catch {}
         return;
       }
@@ -386,13 +389,23 @@ async function boot() {
     });
     canvas.addEventListener("pointerup", (ev) => {
       const code = toButtonCode(ev.button);
+      // End any interactive move/resize on release. For a resize, send a final configure
+      // with resizing=false so the guest ends its resize interaction (and resets its
+      // resize cursor); without it the cursor sticks.
+      record._moving = false;
+      if (record._resizing) {
+        record._resizing = false;
+        const last = record._resizeLast;
+        if (last) {
+          try {
+            actions.configureSurfaceSize(cs, last.w, last.h, false);
+          } catch {}
+        }
+      }
       if (code === null) return;
       try {
         canvas.releasePointerCapture(ev.pointerId);
       } catch {}
-      // End any interactive move/resize on release.
-      record._moving = false;
-      record._resizing = false;
       try {
         actions.pointerButton(cs, code, true);
       } catch {}
