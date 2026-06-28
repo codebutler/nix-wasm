@@ -1,0 +1,74 @@
+--- a/demos/gtk-demo/main.c	2026-06-28 19:07:33.694391246 +0000
++++ b/demos/gtk-demo/main.c	2026-06-28 19:14:36.466263397 +0000
+@@ -1170,6 +1170,60 @@
+   return -1;
+ }
+ 
++/* nix-wasm headless gate. The full gtk3-demo browser window needs a Wayland
++   display (no compositor in the node test harness), so the real window is a
++   MANUAL browser check. This --selftest instead proves, display-free, the parts
++   that exercise the wasm-specific seams:
++     - the generated demos.h table (geninclude.py) is linked and every entry's
++       do_<demo> function pointer is a real, address-taken symbol (an fpcast-emu
++       canonical thunk â the same mechanism every gobject vfunc rides);
++     - GTK's gobject types used by the browser chrome class_init cleanly through
++       the --fpcast-emu seam (g_type_class_ref, no display needed);
++     - gtk_get_major_version() == 3.
++   Unlike widget-factory/galculator this app never calls
++   gtk_builder_connect_signals(), so there is no GModule path to gate â the
++   browser wires every signal in C with g_signal_connect (main.c). */
++static int
++run_selftest (void)
++{
++  guint n_demos = 0;
++  guint n_funcs = 0;
++  int have_types;
++  int ok;
++  guint i;
++
++  /* gtk_demos[] holds the top-level rows: leaf demos carry a do_<name> func
++     pointer, group rows (a title with a '/') carry func==NULL and gather their
++     children in a separate childN[] array â so n_funcs < n_demos is expected
++     and we assert thresholds, not equality. Every non-NULL func here is a real,
++     address-taken symbol (an fpcast-emu canonical thunk). */
++  for (i = 0; gtk_demos[i].title != NULL; i++)
++    {
++      n_demos++;
++      if (gtk_demos[i].func != NULL)
++        n_funcs++;
++    }
++
++  /* Run a few of the browser's widget class_init functions through the
++     fpcast-emu seam without a display (no gtk_init / GdkDisplay required). */
++  g_type_class_ref (GTK_TYPE_TREE_VIEW);
++  g_type_class_ref (GTK_TYPE_NOTEBOOK);
++  g_type_class_ref (GTK_TYPE_HEADER_BAR);
++  g_type_class_ref (GTK_TYPE_TEXT_VIEW);
++  have_types = g_type_from_name ("GtkTreeView") != 0
++            && g_type_from_name ("GtkNotebook") != 0
++            && g_type_from_name ("GtkHeaderBar") != 0
++            && g_type_from_name ("GtkTextView") != 0;
++
++  ok = n_demos > 10 && n_funcs > 10 && have_types
++    && gtk_get_major_version () == 3;
++  printf ("GTK-DEMO-SELFTEST: demos=%u funcs=%u types=%d major=%u %s\n",
++          n_demos, n_funcs, have_types, gtk_get_major_version (),
++          ok ? "OK" : "FAIL");
++  fflush (stdout);
++  return ok ? 0 : 1;
++}
++
+ int
+ main (int argc, char **argv)
+ {
+@@ -1179,6 +1233,10 @@
+     { "quit", activate_quit, NULL, NULL, NULL },
+   };
+ 
++  /* nix-wasm: headless mechanism gate (no display). See run_selftest(). */
++  if (argc > 1 && g_strcmp0 (argv[1], "--selftest") == 0)
++    return run_selftest ();
++
+   /* Most code in gtk-demo is intended to be exemplary, but not
+    * these few lines, which are just a hack so gtk-demo will work
+    * in the GTK tree without installing it.

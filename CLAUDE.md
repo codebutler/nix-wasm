@@ -184,6 +184,14 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-smoke.mjs
 # docs/superpowers/notes/m4-galculator-visual.md).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.mjs
 
+# gtk3-demo (GTK's demo browser — the first REAL, non-showcase GTK3 app: a full
+# GtkApplication whose main window wires every signal in C with g_signal_connect
+# and never calls gtk_builder_connect_signals, so NO GModule dependency, unlike
+# galculator. --selftest walks the generated gtk_demos[] dispatch table + runs
+# browser-chrome widget class_init through the fpcast seam, display-free; the
+# full browser window is a MANUAL browser check).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-demo-smoke.mjs
+
 # #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
 #   sigalrm-smoke   — self-armed SIGALRM/itimer/alarm (kernel mechanism, #55).
 #   kill-wake-smoke — cross-process kill() async-signal wake (a reduced C
@@ -668,6 +676,41 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   .* OK/` (`buf=1 connected_no_gmodule=1 handler_ran=1 major=3`). The full window
   **RENDERS in the browser** (complete widget showcase, Adwaita theme) once the
   /dev/shm mount + musl `__unmapself` + 1.75 GiB RAM fixes are in.
+- **gtk3-demo — the first REAL (non-showcase) GTK3 app, and the proof that the
+  GModule wall is a SIGNAL-WIRING-STYLE issue, not a GTK-app issue**
+  (`userspace/gtk-demo.nix`, `patches/gtk-demo/0001-add-selftest.patch`). Where
+  galculator/widget-factory load a `.ui` and resolve its `<signal handler="…">`
+  names at runtime — galculator via `gtk_builder_connect_signals(NULL)` →
+  `g_module_open(NULL)`/`dlsym` (the GModule wall the static guest can't cross),
+  widget-factory via the `add_callback_symbol` workaround — **gtk3-demo's main
+  window never calls `gtk_builder_connect_signals` at all**: `main.c` loads
+  `main.ui`/`appmenu.ui` with `gtk_builder_add_*_from_resource`, fetches objects
+  by id, and wires every signal in C with `g_signal_connect`. So a full
+  GtkApplication browser (GtkTreeView demo list + source viewer + run pane) runs
+  with NO GModule dependency — the "real GTK app" that galculator couldn't be.
+  Built standalone against the cross gtk3 (gtk3's library build stays cached;
+  demos=false there), reproducing `demos/gtk-demo/meson.build` by hand like
+  widget-factory.nix: native `geninclude.py` → `demos.h` (the `do_<demo>`
+  dispatch table), native `glib-compile-resources` (embeds every `.ui`/`.css`/
+  image + the demo `.c` sources for the in-app source viewer), `$CC` over every
+  demo `.c` (all `*.c` EXCEPT `application.c` — the separate gtk3-demo-application
+  program's own `main()` — `gtkfishbowl.c` the helper, and `main.c`) + the two
+  generated `.c`, then the shared `--fpcast-emu` post-link pass. Resources are
+  EMBEDDED in the binary, so it ships as an initramfs extraBin (no share dir),
+  needing only gtk's own runtime data (gtk-assets, fonts) already in the system —
+  and no GSettings schema (main never calls `g_settings_new`). `--selftest` is
+  the display-free gate: it walks the generated `gtk_demos[]` table asserting
+  >10 rows and >10 non-NULL `do_<demo>` fn-pointers (group rows carry func==NULL
+  by design — assert thresholds, not equality — every non-NULL func is a real
+  address-taken fpcast canonical thunk), runs a few browser-chrome widget
+  `class_init`s through the fpcast seam (`g_type_class_ref`, no display), and
+  checks `gtk_get_major_version()==3`. Gate: `node demo/node/gtk-demo-smoke.mjs`
+  matches `/GTK-DEMO-SELFTEST: .* OK/`. The full browser window is a MANUAL
+  browser check (it reuses the same /dev/shm + `__unmapself` + RAM fixes
+  widget-factory needs). Caveat: a couple of individual demos won't work at
+  runtime on this guest — the `builder` demo would hit the GModule wall if its
+  own `.ui` autoconnect path is exercised, and `glarea` needs GL (libepoxy is
+  built no-GL) — but the browser itself and the bulk of the demos do.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
