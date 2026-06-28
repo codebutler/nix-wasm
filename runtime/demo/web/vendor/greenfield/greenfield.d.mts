@@ -51,7 +51,12 @@ export interface UserShellApiActions {
   pointerLeave(compositorSurface: CompositorSurface): void;
   pointerButton(compositorSurface: CompositorSurface, buttonCode: number, released: boolean): void;
   notifyKey(keyboardEvent: KeyboardEvent, pressed: boolean): void;
-  configureSurfaceSize(compositorSurface: CompositorSurface, width: number, height: number): void;
+  configureSurfaceSize(
+    compositorSurface: CompositorSurface,
+    width: number,
+    height: number,
+    resizing?: boolean,
+  ): void;
 }
 
 export interface UserShellApi {

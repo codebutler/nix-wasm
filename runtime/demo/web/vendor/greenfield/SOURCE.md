@@ -8,8 +8,13 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `30528f0` (`master`, codebutler/greenfield#8 — "forward client-initiated
-  resize to DOM-windows shells (#105)"), on top of #7 ("maximize/minimize/resize for
+- **Commit:** `b409396` (`master`, codebutler/greenfield#9 — "flush configureSurfaceSize
+  after the configure microtask + carry resizing state (#105)": the configure is emitted
+  on a microtask, so the old synchronous flush ran before the bytes existed and the guest
+  never repainted — a resize/maximize stretched the stale buffer; and an optional
+  `resizing` flag → `configureResizing` ends the resize cleanly so the client's resize
+  cursor resets), on top of #8 ("forward client-initiated
+  resize to DOM-windows shells (#105)"), #7 ("maximize/minimize/resize for
   DOM-windows shells", #105), #6 ("honor xdg-decoration + forward
   toplevel move", #105), the merged refresh-mHz fix (codebutler/greenfield#5 —
   `wl_output.mode` refresh sent in milli-hertz not hertz; fixes the GdkFrameClock
