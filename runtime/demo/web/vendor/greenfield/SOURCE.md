@@ -8,8 +8,9 @@ in cb-windows.
 
 - **Upstream:** Greenfield (https://github.com/udevbe/greenfield), extended fork.
 - **Source tree:** `~/Code/greenfield` (outside pc).
-- **Commit:** `09f2758` (`master`, codebutler/greenfield#7 — "maximize/minimize/resize
-  for DOM-windows shells (#105)"), on top of #6 ("honor xdg-decoration + forward
+- **Commit:** `30528f0` (`master`, codebutler/greenfield#8 — "forward client-initiated
+  resize to DOM-windows shells (#105)"), on top of #7 ("maximize/minimize/resize for
+  DOM-windows shells", #105), #6 ("honor xdg-decoration + forward
   toplevel move", #105), the merged refresh-mHz fix (codebutler/greenfield#5 —
   `wl_output.mode` refresh sent in milli-hertz not hertz; fixes the GdkFrameClock
   16.7-second freeze that made GTK page-switch/animation appear hung) and the
@@ -26,8 +27,11 @@ in cb-windows.
   hidden 1×1 driver, so `setMaximized`/`minimize` now forward to the shell via the new
   `surfaceMaximizeRequested` / `surfaceMinimizeRequested` events (still sending the
   maximized STATE), a new `configureSurfaceSize(cs, w, h)` action lets the shell tell a
-  guest to repaint at a new window size, and `resize` returns early in DOM-windows mode
-  (the shell owns the affordance).
+  guest to repaint at a new window size, and `resize` returned early in DOM-windows mode.
+  **#105 (client-initiated resize, #8):** `resize` (an app's own edge/corner handles →
+  `xdg_toplevel.resize`) now forwards to the shell via the new `surfaceResizeRequested(cs,
+  edges)` event so the shell follows the pointer to resize its window + configureSurfaceSize
+  the guest. `edges` is the xdg resize-edge bitmask (top=1, bottom=2, left=4, right=8).
 - **Local patch (pc Wayland Phase 4f):** `src/UserShellApi.ts` adds a
   `requestSurfaceClose(compositorSurface)` action — sends `xdg_toplevel.close` to
   the client (via the desktop surface's `requestClose`) and flushes, the standard

@@ -337,6 +337,31 @@ async function boot() {
         record.win.style.top = ev.clientY - record._moveAnchor.y + "px";
         return;
       }
+      // Interactive resize in progress (the app's own edge/corner handle via
+      // xdg_toplevel.resize): reposition the window origin so the far edge stays
+      // anchored and tell the guest to repaint at the new size (the window <div> is
+      // content-sized, so its width/height follow the guest buffer). edges bitmask:
+      // top=1, bottom=2, left=4, right=8.
+      if (record._resizing && record.win) {
+        const s = record._resizeStart;
+        const e = record._resizeEdges;
+        const dx = ev.clientX - s.px;
+        const dy = ev.clientY - s.py;
+        let w = s.w;
+        let h = s.h;
+        if (e & 8) w = s.w + dx;
+        if (e & 4) w = s.w - dx;
+        if (e & 2) h = s.h + dy;
+        if (e & 1) h = s.h - dy;
+        w = Math.max(60, Math.round(w));
+        h = Math.max(60, Math.round(h));
+        if (e & 4) record.win.style.left = s.left + (s.w - w) + "px";
+        if (e & 1) record.win.style.top = s.top + (s.h - h) + "px";
+        try {
+          actions.configureSurfaceSize(cs, w, h);
+        } catch {}
+        return;
+      }
       const p = surfaceCoords(record, ev);
       if (!p) return;
       try {
@@ -365,8 +390,9 @@ async function boot() {
       try {
         canvas.releasePointerCapture(ev.pointerId);
       } catch {}
-      // End any interactive move on release.
+      // End any interactive move/resize on release.
       record._moving = false;
+      record._resizing = false;
       try {
         actions.pointerButton(cs, code, true);
       } catch {}
@@ -485,6 +511,25 @@ async function boot() {
     record._moveAnchor = {
       x: lastPointer.x - record.win.offsetLeft,
       y: lastPointer.y - record.win.offsetTop,
+    };
+    record.win.style.zIndex = String(nextZ++);
+  };
+
+  // A CSD client started an interactive resize from its OWN edge/corner handle
+  // (xdg_toplevel.resize). Capture the start rect + edges; the canvas pointermove
+  // follows the pointer (reposition + configureSurfaceSize) until pointerup.
+  events.surfaceResizeRequested = (compositorSurface, edges) => {
+    const record = surfaces.get(keyOf(compositorSurface));
+    if (!record?.win) return;
+    record._resizing = true;
+    record._resizeEdges = edges;
+    record._resizeStart = {
+      px: lastPointer.x,
+      py: lastPointer.y,
+      left: record.win.offsetLeft,
+      top: record.win.offsetTop,
+      w: record.win.offsetWidth,
+      h: record.win.offsetHeight,
     };
     record.win.style.zIndex = String(nextZ++);
   };
