@@ -60,9 +60,24 @@ cross.stdenv.mkDerivation {
     # main.c (and some demos via gi18n) #include "config.h": it only needs
     # PACKAGE_VERSION (the About dialog) + GETTEXT_PACKAGE (gi18n). Supply a
     # minimal one for the standalone build.
+    # gtk/fallback-c89.c (pulled in by gtkfishbowl.c) provides C89 fallbacks for
+    # round/rint/nearbyint/isinf/log2/exp2/trunc/isnan/fmin, each guarded by a
+    # HAVE_* macro that GTK's generated config.h normally sets. Our musl has all of
+    # them as C99, so without the macros the fallbacks redefine musl's (e.g. isnan
+    # is a musl macro) and the build breaks — define the HAVE_* so the fallbacks
+    # compile out and gtkfishbowl.c uses musl's.
     cat > config.h <<EOF
     #define PACKAGE_VERSION "${"3.24.52"}"
     #define GETTEXT_PACKAGE "gtk30"
+    #define HAVE_ROUND 1
+    #define HAVE_RINT 1
+    #define HAVE_NEARBYINT 1
+    #define HAVE_DECL_ISINF 1
+    #define HAVE_LOG2 1
+    #define HAVE_EXP2 1
+    #define HAVE_TRUNC 1
+    #define HAVE_DECL_ISNAN 1
+    #define HAVE_FMIN 1
     EOF
 
     # The demo sources are every .c here EXCEPT the gtk3-demo-application program
