@@ -277,6 +277,24 @@
         libffi = cross.libffi; zlib = cross.zlib;
       };
 
+      # gtk3-demo — GTK's own demo browser, the first REAL (non-showcase) GTK3 app
+      # on the guest. A full GtkApplication whose main window wires every signal in
+      # C with g_signal_connect and never calls gtk_builder_connect_signals, so
+      # (unlike galculator) it has NO GModule dependency. Built standalone against
+      # the cross gtk3, reproducing demos/gtk-demo/meson.build by hand (geninclude
+      # → demos.h, glib-compile-resources, $CC over every demo .c, --fpcast-emu).
+      # --selftest is the display-free headless gate; the full window is a manual
+      # browser check. See userspace/gtk-demo.nix + patches/gtk-demo/.
+      gtkDemo = import ./userspace/gtk-demo.nix {
+        inherit cross;
+        gtk3 = cross.gtk3; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; libepoxy = cross.libepoxy;
+        harfbuzz = cross.harfbuzz; fontconfig = cross.fontconfig; freetype = cross.freetype;
+        fribidi = cross.fribidi; pixman = cross.pixman; wayland = cross.wayland;
+        wayland-protocols = cross.wayland-protocols; libxkbcommon = cross.libxkbcommon;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
       # M2 (text stack): wl-text — the end-to-end text-rendering proof. Resolves a
       # font via fontconfig, shapes with harfbuzz, rasterizes with cairo-ft, and
       # (--selftest) asserts on stdout — the M2 integration gate. Default mode
@@ -380,7 +398,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -613,6 +631,11 @@
         # headless gate (display-free GtkBuilder signal round-trip); the full window
         # renders in the browser (needs the musl/RAM/dev-shm fixes). → $out/bin/gtk3-widget-factory.
         widget-factory = widgetFactory;
+
+        # gtk3-demo — GTK's demo browser; the first real GTK3 app with no GModule
+        # signal autoconnect (C g_signal_connect). --selftest is the headless gate;
+        # the full browser window renders in the browser. → $out/bin/gtk3-demo.
+        gtk-demo = gtkDemo;
 
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.
