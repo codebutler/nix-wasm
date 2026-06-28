@@ -4,9 +4,17 @@
 # (#43). The image root holds store/<hash>… + var/nix/profiles/system → toplevel
 # (the symlink bootstrap reads), so mounting at /mnt/nix-ro and overlaying to
 # /nix resolves /nix/store/* and /nix/var/nix/profiles/system in-guest.
-{ pkgs, toplevel, blockSize ? 131072 }:
+# channel — the wasm-nixpkgs channel tree (userspace/wasm-nixpkgs-channel.nix).
+# Baked into the squashfs (a real on-disk dir → directory traversal works, unlike
+# the flat binary-cache 9P export) so the guest's `nix-env -iA nixpkgs.<pkg>`
+# default expr (`import <channel> {}`, set in bootstrap.nix) is always present. It
+# is tiny (~1.3 MB of config text) and its closure is just itself — nixpkgs is NOT
+# pulled in (the channel reaches it via <nixpkgs>, substituted from the cache).
+{ pkgs, toplevel, channel ? null, blockSize ? 131072 }:
 let
-  closure = pkgs.closureInfo { rootPaths = [ toplevel ]; };
+  closure = pkgs.closureInfo {
+    rootPaths = [ toplevel ] ++ pkgs.lib.optional (channel != null) channel;
+  };
 in
 pkgs.runCommand "base-squashfs"
   { nativeBuildInputs = [ pkgs.squashfsTools ]; }

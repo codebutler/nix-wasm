@@ -22,7 +22,10 @@
 # list fits in one descriptor chain; the default 64-entry ring would overflow
 # (-ENOSPC) on large reads like a nix-env NAR fetch.
 # /nix is a squashfs image on /dev/vda (virtio-blk, #43) — not a 9P export.
-{ pkgs }:
+# nixpkgsChannel — the wasm-nixpkgs channel store path (baked into the squashfs
+# via base-squashfs.nix). The guest's `nixpkgs` nix-env channel is `import
+# <this path> {}`; null → no nixpkgs channel (busybox-only / toolchain-only boots).
+{ pkgs, nixpkgsChannel ? null }:
 pkgs.writeText "init" ''
   #!/bin/sh
   # busybox is on /bin (baked); call applets via PATH.
@@ -122,8 +125,22 @@ pkgs.writeText "init" ''
     # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
     [ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh
 
-    # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
-    [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr 2>/dev/null || true
+    # nix-env channels (resolve `nix-env -iA <channel>.<name>`), real-NixOS-style.
+    # Two channels in ~/.nix-defexpr (nix-env addresses each top-level dir as a
+    # channel; access is lazy per channel, so installing a tool never forces the
+    # nixpkgs side and vice-versa):
+    #   wasm-tools — the on-demand toolchain catalog from the cache index
+    #                (guest-cc / guest-cxx / guest-clang / make-wasm32): pkgs.nix.
+    #   nixpkgs    — the pinned nixpkgs evaluated against the wasm crossSystem,
+    #                served as a tree at /nix-cache/channel: `nix-env -iA nixpkgs.<pkg>`
+    #                works for ANY package (substitutes the prebuilt wasm output when
+    #                published; otherwise the realise fails, like any uncached pkg).
+    rm -rf /root/.nix-defexpr
+    mkdir -p /root/.nix-defexpr/wasm-tools /root/.nix-defexpr/nixpkgs
+    [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr/wasm-tools/default.nix 2>/dev/null || true
+    ${pkgs.lib.optionalString (nixpkgsChannel != null) ''
+      echo 'import ${nixpkgsChannel} { }' > /root/.nix-defexpr/nixpkgs/default.nix
+    ''}
 
     echo "pc: booting Nix userspace from $sys"
     exec "$sys/init"

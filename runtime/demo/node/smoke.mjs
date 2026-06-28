@@ -82,7 +82,7 @@ try {
   // The catalog attrs are `lib.getName`-derived (#79), so this is `make-wasm32`, not
   // `make` (the stale `make` attr is what nix-boot-smoke caught when it was first run
   // in CI — see #88).
-  s.send("nix-env -iA make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
+  s.send("nix-env -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, 180000),
     "nix-env -iA make-wasm32 substitutes from the cache",

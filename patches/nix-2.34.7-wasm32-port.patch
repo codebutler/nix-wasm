@@ -28,7 +28,7 @@ index 0b594dc..c9d13f9 100644
 -  method : 'cmake',
 -  include_type : 'system',
 -)
-+toml11 = declare_dependency()
++toml11 = declare_dependency(version: '4.4.0')
  
  configdata_priv.set(
    'HAVE_TOML11_4',

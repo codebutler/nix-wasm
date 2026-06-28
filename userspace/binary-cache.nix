@@ -33,6 +33,13 @@
 {
   pkgs,
   devPaths,
+  # Extra store paths to PUBLISH in the cache (closure included) but NOT add to the
+  # nix-env / nix profile install catalogs (pkgs.nix / paths.nix). Used for the
+  # pinned nixpkgs source, which the guest substitutes on demand (via <nixpkgs>) to
+  # evaluate nixpkgs packages against the wasm cross — see
+  # userspace/wasm-nixpkgs-channel.nix. Defaults to [] so existing callers are
+  # unaffected.
+  extraRootPaths ? [ ],
 }:
 let
   inherit (pkgs) lib;
@@ -50,7 +57,7 @@ let
   # blowup; the cache is fetched on demand, so its size is not a boot cost).
   rawCache = pkgs.mkBinaryCache {
     name = "wasm-binary-cache";
-    rootPaths = devPaths ++ map (drv: drv.drvPath) devPaths;
+    rootPaths = devPaths ++ map (drv: drv.drvPath) devPaths ++ extraRootPaths;
   };
 
   # pkgs.nix — the `nix-env -iA <name>` catalog (the guest ships no nixpkgs, so

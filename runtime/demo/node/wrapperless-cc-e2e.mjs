@@ -48,8 +48,12 @@ try {
 
   console.log("  [installing guest-clang-wasm32 + guest-cc + guest-cxx from nix-cache…]");
   check(
-    await run("nix-env -iA guest-clang-wasm32 guest-cc guest-cxx 2>&1", "INSTALL_RC", 0),
-    "nix-env -iA guest-clang-wasm32 guest-cc guest-cxx",
+    await run(
+      "nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc wasm-tools.guest-cxx 2>&1",
+      "INSTALL_RC",
+      0,
+    ),
+    "nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc wasm-tools.guest-cxx",
   );
   s.send(". /etc/set-environment 2>/dev/null\n");
   await s.waitForPrompt(10000);
