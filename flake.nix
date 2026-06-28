@@ -427,32 +427,28 @@
       # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
       # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
       # arrive on demand through substitution.
-      # ---- the in-guest nixpkgs "channel" (M1): pinned nixpkgs + the wasm cross
-      # config + a default.nix so the guest can `nix-env -iA <any nixpkgs attr>`
-      # against the wasm crossSystem, not just the 4-entry toolchain catalog. The
-      # crossSystem set is PROVEN to evaluate in-guest to wasm .drvs (cross.file /
-      # cross.hello) — docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md.
+      # ---- the in-guest `nixpkgs` channel (M1): the pinned nixpkgs evaluated
+      # against the wasm crossSystem, so the guest can `nix-env -iA nixpkgs.<pkg>`
+      # exactly like a real NixOS system, not just the 4-entry toolchain catalog.
+      # The crossSystem set is PROVEN to evaluate in-guest to wasm .drvs (cross.file
+      # / cross.hello) — docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md.
       # localSystem is pinned to the build host so guest-evaluated .drv hashes match
-      # the host's published outputs (substitution). The channel closure is small
-      # (config only); nixpkgs is published separately + reached via <nixpkgs>.
+      # the host's published outputs (substitution). The channel TREE is served at
+      # /nix-cache/channel (9P); nixpkgs is published separately + reached via
+      # <nixpkgs> so the toolchain `wasm-tools` channel never pulls nixpkgs.
       wasmNixpkgsChannel = import ./userspace/wasm-nixpkgs-channel.nix {
         inherit pkgs self;
         localSystem = system;
-        tools = {
-          "guest-cc" = guestCc;
-          "guest-cxx" = guestCxx;
-          "guest-clang" = guestClang;
-          "make-wasm32" = makeWasm;
-        };
       };
 
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = wasmDevPaths;
-        # Publish the channel + the pinned nixpkgs source so the guest can
-        # substitute them on demand (the channel as the default expr; nixpkgs when
-        # a nixpkgs attribute is evaluated via <nixpkgs>).
-        extraRootPaths = [ wasmNixpkgsChannel nixpkgs.outPath ];
+        # Serve the channel tree at /nix-cache/channel (the guest's nixpkgs
+        # default expr) and publish the pinned nixpkgs source so <nixpkgs>
+        # substitutes on demand when a nixpkgs attribute is evaluated.
+        channel = wasmNixpkgsChannel;
+        extraRootPaths = [ nixpkgs.outPath ];
       };
 
       # ---- the single versioned `linux` boot bundle (pc#315) ----------------

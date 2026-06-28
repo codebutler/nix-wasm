@@ -56,7 +56,7 @@ try {
   // Step 3: install the toolchain from the binary cache by its REAL package
   // names (no invented `dev-tools` aggregate) — clang+lld and the cc driver.
   console.log("  [installing guest-clang-wasm32 + guest-cc from nix-cache — may take a while…]");
-  s.send("nix-env -iA guest-clang-wasm32 guest-cc 2>&1; echo NIX_ENV_RC=$?\n");
+  s.send("nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc 2>&1; echo NIX_ENV_RC=$?\n");
   // Wait for a digit after NIX_ENV_RC= (the echo has $? not a digit).
   const installed = await s.waitForOutput(/NIX_ENV_RC=[0-9]/, 300000);
   const installOk = installed && /NIX_ENV_RC=0\b/.test(s.snapshot());

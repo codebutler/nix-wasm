@@ -122,8 +122,20 @@ pkgs.writeText "init" ''
     # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
     [ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh
 
-    # nix-env default expr from the cache index (resolves `nix-env -iA <name>`).
-    [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr 2>/dev/null || true
+    # nix-env channels (resolve `nix-env -iA <channel>.<name>`), real-NixOS-style.
+    # Two channels in ~/.nix-defexpr (nix-env addresses each top-level dir as a
+    # channel; access is lazy per channel, so installing a tool never forces the
+    # nixpkgs side and vice-versa):
+    #   wasm-tools — the on-demand toolchain catalog from the cache index
+    #                (guest-cc / guest-cxx / guest-clang / make-wasm32): pkgs.nix.
+    #   nixpkgs    — the pinned nixpkgs evaluated against the wasm crossSystem,
+    #                served as a tree at /nix-cache/channel: `nix-env -iA nixpkgs.<pkg>`
+    #                works for ANY package (substitutes the prebuilt wasm output when
+    #                published; otherwise the realise fails, like any uncached pkg).
+    rm -rf /root/.nix-defexpr
+    mkdir -p /root/.nix-defexpr/wasm-tools /root/.nix-defexpr/nixpkgs
+    [ -f /nix-cache/pkgs.nix ] && cp /nix-cache/pkgs.nix /root/.nix-defexpr/wasm-tools/default.nix 2>/dev/null || true
+    [ -e /nix-cache/channel/default.nix ] && echo 'import /nix-cache/channel { }' > /root/.nix-defexpr/nixpkgs/default.nix 2>/dev/null || true
 
     echo "pc: booting Nix userspace from $sys"
     exec "$sys/init"

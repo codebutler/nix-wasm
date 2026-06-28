@@ -35,11 +35,17 @@
   devPaths,
   # Extra store paths to PUBLISH in the cache (closure included) but NOT add to the
   # nix-env / nix profile install catalogs (pkgs.nix / paths.nix). Used for the
-  # wasm-nixpkgs channel + the pinned nixpkgs source, which the guest substitutes
-  # on demand to evaluate arbitrary nixpkgs packages against the wasm cross — see
+  # pinned nixpkgs source, which the guest substitutes on demand (via <nixpkgs>) to
+  # evaluate nixpkgs packages against the wasm cross — see
   # userspace/wasm-nixpkgs-channel.nix. Defaults to [] so existing callers are
   # unaffected.
   extraRootPaths ? [ ],
+  # The wasm-nixpkgs channel TREE (config + generated default.nix). Copied verbatim
+  # into $out/channel so the guest serves it at /nix-cache/channel as the `nixpkgs`
+  # default expression (`nix-env -iA nixpkgs.<pkg>`). null → no channel dir (existing
+  # callers / the toolchain-only cache). Served as plain files over 9P — it is NOT a
+  # substituted store path, so the guest needs no realisation to read it.
+  channel ? null,
 }:
 let
   inherit (pkgs) lib;
@@ -118,6 +124,13 @@ pkgs.runCommand "wasm-binary-cache" { } ''
   # Add the catalogs: pkgs.nix (nix-env -iA) + paths.nix (nix profile install).
   cp ${pkgsNix} "$out/pkgs.nix"
   cp ${pathsNix} "$out/paths.nix"
+
+  # Add the wasm-nixpkgs channel TREE at $out/channel (the guest's `nixpkgs`
+  # default expr, served over 9P). Plain files — no nar/closure needed.
+  ${lib.optionalString (channel != null) ''
+    cp -r ${channel} "$out/channel"
+    chmod -R u+w "$out/channel"
+  ''}
 
   # Assert the cache actually SERVES each catalog package's OUTPUT (the narinfo for
   # /nix/store/<hash>-name is <hash>.narinfo). The new CLI realises Built{drvPath}

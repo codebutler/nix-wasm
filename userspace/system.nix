@@ -110,6 +110,14 @@ let
         ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
+        # NIX_PATH for the in-guest `nixpkgs` channel (userspace/wasm-nixpkgs-channel.nix):
+        # the channel's default.nix reaches nixpkgs via `<nixpkgs>`, which resolves
+        # to this pinned source store path and is substituted on demand from the
+        # nix-cache the first time a nixpkgs attribute is evaluated. Baking the exact
+        # store path (not a channel symlink) makes `nix-env -iA nixpkgs.<pkg>`
+        # reproducible against the host-published wasm outputs. Flows to the shell
+        # via /etc/set-environment → /etc/profile like the vars below.
+        environment.variables.NIX_PATH = "nixpkgs=${nixpkgs}";
         # UTF-8 locale: musl has C.UTF-8 built in (no glibcLocales / i18n.* stack,
         # which would pull the wrong libc). This is what busybox ash's
         # CHECK_UNICODE_IN_ENV reads to turn on width-aware line editing. Flows the
