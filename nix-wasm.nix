@@ -79,7 +79,19 @@ let
     + " -DBOOST_STACKTRACE_USE_NOOP"
     + " -fvisibility=hidden -fvisibility-inlines-hidden"
     + " -D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS -D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS"
-    + " -nostdinc++ -isystem ${libcxx}/include/c++/v1 ${depDev}";
+    + " -nostdinc++ -isystem ${libcxx}/include/c++/v1 ${depDev}"
+    # toml11 is HEADER-ONLY and architecture-independent, so the native
+    # `pkgs.toml11` headers work for the wasm target — no cross-build needed. The
+    # wasm port patch replaces libexpr's `dependency('toml11', method:'cmake')`
+    # (which needs a `cmake` + the toml11 CMake package we don't have in the cross
+    # sandbox) with an empty `declare_dependency(version:'4.4.0')`, so `<toml.hpp>`
+    # must come from here instead. WITHOUT this, `fromTOML.cc` fails to compile,
+    # `ninja -k0` silently drops the TU, and `builtins.fromTOML` is MISSING from
+    # nix.wasm — which makes nixpkgs' own `lib` (lib/trivial.nix references the
+    # `fromTOML` global) unevaluable, i.e. NO nixpkgs package can be evaluated
+    # in-guest. The version pinned in the patch matches `pkgs.toml11` (4.4.0) so
+    # libexpr's `HAVE_TOML11_4` selects the v4 toml11 API path in fromTOML.cc.
+    + " -isystem ${pkgs.toml11}/include";
   cxxWarn = "-Wno-error -Wno-error=suggest-override -Wno-error=switch -Wno-error=switch-enum"
     + " -Wno-error=undef -Wno-error=unused-result -Wno-error=sign-compare -Wno-error=return-type"
     + " -Wno-error=non-virtual-dtor -Wno-error=c99-designator";
