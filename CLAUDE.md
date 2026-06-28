@@ -129,9 +129,20 @@ symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo.
 **pc-facing delivery:** the versioned `linux` channel — `nix build .#linux-image`
 bundles kernel + initramfs + squashfs into a channel image uploaded to R2 under
 `packages/linux/<v>/`; `packages/linux/latest.json` (served `no-cache`) is the
-pointer pc resolves at runtime via `js/packages/linux-channel.js`. The full
-end-to-end republish runbook lives in pc's `vendor/linux-wasm/SOURCE.md` §
-"Republish the guest". The guest inittab and `/etc` live in `base.squashfs`
+pointer pc resolves at runtime via `js/packages/linux-channel.js`.
+**To ship a guest change to pc, just run the `publish-linux-channel` workflow**
+(GitHub Actions → *Run workflow* — it's `workflow_dispatch`-only since a
+live-channel flip is a deliberate release; pass `dry_run: true` first to build +
+print the exact wrangler commands and `latest.json` without touching R2). It runs
+`scripts/publish-linux-channel.sh`, which builds `.#linux-image` + `.#wasm-binary-cache`
+(substituting from Cachix), uploads under a new immutable version (= the image
+**content hash**, so no manual version bump), and flips `latest.json`. **No
+`runtime/sync-to-pc.sh` and no pc deploy are needed for a normal guest change**
+(new initramfs binary, userspace, kernel) — only when `ENGINE_ABI`
+(`runtime/abi.js`, which the script stamps as `minEngine`) moves does the engine
+JS also need syncing + a pc deploy, ordered per the runbook. The full end-to-end
+republish runbook lives in pc's `vendor/linux-wasm/SOURCE.md` § "Republish the
+guest". The guest inittab and `/etc` live in `base.squashfs`
 (via `userspace/init.nix → toplevel.nix → base-squashfs.nix`), **not** the
 initramfs — an `init.nix` change republishes via `.#linux-image`'s squashfs member.
 
@@ -388,7 +399,7 @@ design out (see the Environment notes under Hard-won learnings).
 CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
 `packagesFor system` + `genAttrs ["x86_64-linux" "aarch64-linux"]`, with
 `localSystem` threaded into `wasm-cross.nix`; `nix build .#X` picks the runner's
-system). Three workflows:
+system). Four workflows:
 - `.github/workflows/nix-wasm.yml` — builds the wasm world from source on a
   build-input/patch change and pushes to Cachix. The two from-source LLVM poles
   (`guest-clang`, `kernel`) build on their own runners in a matrix (each under the
@@ -405,6 +416,12 @@ system). Three workflows:
 - `.github/workflows/runtime-gates.yml` — runtime/ engine `test` + `typecheck`
   (the two gates green on a clean checkout). `lint`/`format:check` are red on
   pre-existing debt (no committed oxfmt/oxlint config) and deliberately unwired.
+- `.github/workflows/publish-linux-channel.yml` — **the one-button guest
+  republish to pc** (`workflow_dispatch`-only, `dry_run` input). Builds
+  `.#linux-image` + `.#wasm-binary-cache`, uploads under a new content-hash
+  version, flips `packages/linux/latest.json` (`scripts/publish-linux-channel.sh`).
+  This is how a merged guest change (new app, userspace, kernel) reaches the live
+  Linux app — see the `publish-linux-channel` pointer in "pc-facing delivery" above.
 
 **Secret required:** add `CACHIX_AUTH_TOKEN` (a push token for `nix-wasm.cachix.org`)
 to repo secrets so CI can push. Without it the jobs still substitute from the
