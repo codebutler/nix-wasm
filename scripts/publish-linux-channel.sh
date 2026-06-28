@@ -12,9 +12,14 @@
 #   packages/linux/<v>/linux.iso        — the channel image (.#linux-image):
 #                                         vmlinux.wasm + initramfs.cpio.gz +
 #                                         base.squashfs + manifest.json bundled
-#   packages/linux/<v>/nix-cache/<rel>  — the compiler toolchain (.#wasm-binary-cache),
-#                                         served over 9P for in-guest `nix-env -iA`
-#   packages/linux/latest.json          — the pointer pc reads (no-cache route)
+#   packages/linux/<v>/nix-cache/       — ONLY pkgs.nix + paths.nix (the nix-wasm
+#                                         `nix-env -iA` / new-CLI catalogs, NOT in
+#                                         Cachix). The heavy nars + *.narinfo +
+#                                         nix-cache-info are NOT uploaded — the guest
+#                                         gets them from Cachix through the worker's
+#                                         /cachix/<v> proxy (nix-wasm#78).
+#   packages/linux/latest.json          — the pointer pc reads (no-cache route);
+#                                         its nixCacheBaseUrl points at /cachix/<v>
 #
 # <v> = the linux.iso sha256 (content-addressed → immutable, safe to cache forever;
 # republishing identical bytes is idempotent, new bytes get a fresh key).
@@ -73,7 +78,11 @@ MIN_ENGINE=$(grep -oE '^[[:space:]]*export const ENGINE_ABI = [0-9]+;' "$ROOT/ru
 [ -n "$MIN_ENGINE" ] || { echo "ERROR: could not parse ENGINE_ABI from runtime/abi.js" >&2; exit 1; }
 
 IMG_URL="$PUBLIC_BASE_URL/packages/linux/$VERSION/linux.iso"
-NIX_CACHE_URL="$PUBLIC_BASE_URL/packages/linux/$VERSION/nix-cache"
+# The guest's nix-cache.js uses ONE baseUrl for nix-cache-info / *.narinfo / nar/*
+# AND pkgs.nix / paths.nix. The worker's /cachix/<v> route unifies them: catalogs
+# from R2 (packages/linux/<v>/nix-cache/), everything else proxied from
+# nix-wasm.cachix.org (nix-wasm#78). Point at it, NOT the raw R2 nix-cache path.
+NIX_CACHE_URL="$PUBLIC_BASE_URL/cachix/$VERSION"
 
 # latest.json — exactly the shape js/packages/linux-channel.js resolves:
 #   { version, minEngine, nixCacheBaseUrl, image: { url, bytes, sha256 } }
@@ -113,12 +122,12 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/linux.iso\" \\"
   echo "    --file \"$ISO\" --content-type application/x-iso9660-image --remote"
   echo ""
-  echo "  # toolchain cache tree → packages/linux/$VERSION/nix-cache/<rel>"
-  ( cd "$CACHE" && find -L . -type f -print0 | while IFS= read -r -d '' f; do
+  echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
+  ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
-      echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/nix-cache/$REL\" --file … --remote"
-    done | head -5 )
-  echo "  …(+ remaining nix-cache files)"
+      echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/nix-cache/$REL\" \\"
+      echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
+    done )
   echo ""
   echo "  # flip the pointer LAST (served no-cache → picked up immediately)"
   echo "  printf '%s' '<latest.json above>' | bunx wrangler r2 object put \\"
@@ -150,14 +159,16 @@ echo "==> Uploading linux.iso → $BUCKET/packages/linux/$VERSION/linux.iso …"
 bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/linux.iso" \
   --file "$ISO" --content-type application/x-iso9660-image --remote
 
-# `find -L` FOLLOWS symlinks: the .#wasm-binary-cache tree stores its nar/narinfo/
-# nix-cache-info entries as symlinks into the store, and a plain `find -type f`
-# skips them — run #2 uploaded only the 2 real files (pkgs.nix, manifest.json),
-# leaving the cache un-installable (nix-cache-info 404). `-L` enumerates the
-# symlink targets so the full cache is published; `wrangler --file` reads through
-# the symlink to the real bytes.
-echo "==> Uploading toolchain cache → $BUCKET/packages/linux/$VERSION/nix-cache/ …"
-( cd "$CACHE" && find -L . -type f -print0 | while IFS= read -r -d '' f; do
+# Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
+# new-CLI indexes, which are nix-wasm artifacts NOT present in Cachix. The heavy
+# nars + *.narinfo + nix-cache-info are deliberately NOT uploaded: the guest
+# substitutes them from Cachix through the worker's /cachix/<v> proxy
+# (nix-wasm#78, which nixCacheBaseUrl points at). Same split publish-to-r2.sh
+# already does. Precondition: nix-wasm CI pushed the .#wasm-binary-cache closure
+# to nix-wasm.cachix.org — the nix-wasm.yml artifacts job does, on this commit;
+# this publish substitutes that same closure, so it is guaranteed present.
+echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/packages/linux/$VERSION/nix-cache/ …"
+( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
     bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/nix-cache/$REL" \

@@ -401,8 +401,13 @@ design out (see the Environment notes under Hard-won learnings).
 **Two-tier cache wiring (#2, Phase 5):** the **host build cache is Cachix**
 (`nix-wasm.cachix.org`, public read; signing key
 `nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0=`); the
-**guest-facing cache is R2** (`nix-cache/` tree, served by `runtime/nix-cache.js`).
-CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
+**guest-facing cache** is served by the preview Worker's `/cachix/<v>` route
+(`runtime/nix-cache.js` resolves one baseUrl): the heavy nars + `*.narinfo` +
+`nix-cache-info` are **proxied from Cachix** (no second copy in R2), and only the
+small nix-wasm catalogs (`pkgs.nix`/`paths.nix`, not in Cachix) come from R2
+(nix-wasm#78). Both `publish-to-r2.sh` and `publish-linux-channel.sh` upload
+**only** the catalogs and point `nixCacheBaseUrl` at `/cachix/<v>` — never the
+raw nar tree. CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
 `packagesFor system` + `genAttrs ["x86_64-linux" "aarch64-linux"]`, with
 `localSystem` threaded into `wasm-cross.nix`; `nix build .#X` picks the runner's
 system). Four workflows:
