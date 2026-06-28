@@ -56,11 +56,16 @@ try {
   // Step 3: install the toolchain from the binary cache by its REAL package
   // names (no invented `dev-tools` aggregate) — clang+lld and the cc driver.
   console.log("  [installing guest-clang-wasm32 + guest-cc from nix-cache — may take a while…]");
-  s.send("nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc 2>&1; echo NIX_ENV_RC=$?\n");
+  s.send(
+    "nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc 2>&1; echo NIX_ENV_RC=$?\n",
+  );
   // Wait for a digit after NIX_ENV_RC= (the echo has $? not a digit).
   const installed = await s.waitForOutput(/NIX_ENV_RC=[0-9]/, 300000);
   const installOk = installed && /NIX_ENV_RC=0\b/.test(s.snapshot());
-  check(installOk, "nix-env -iA guest-clang-wasm32 guest-cc substitutes from /nix-cache");
+  check(
+    installOk,
+    "nix-env -iA wasm-tools.guest-clang-wasm32 wasm-tools.guest-cc substitutes from /nix-cache",
+  );
   if (!installOk) {
     console.log(
       "\n── nix-env output (tail) ──\n" +
@@ -74,7 +79,7 @@ try {
   // Step 4: assert clang is now present
   s.send(". /etc/set-environment 2>/dev/null; which clang 2>&1; echo WHICH_CLANG_RC=$?\n");
   const clangPresent = await s.waitForOutput(/WHICH_CLANG_RC=0\b/, 15000);
-  check(clangPresent, "clang now in PATH after nix-env -iA guest-clang-wasm32 guest-cc");
+  check(clangPresent, "clang now in PATH after nix-env -iA wasm-tools.guest-clang-wasm32 guest-cc");
 
   // Step 5: compile and run a C program that exits 42
   // Use a separate compile step with explicit stderr capture so a clang crash

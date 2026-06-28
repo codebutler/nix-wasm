@@ -1,9 +1,36 @@
-# Pulling in all of nixpkgs — in-guest eval spike (2026-06-28)
+# Pulling in all of nixpkgs — in-guest `nix-env -iA nixpkgs.<pkg>` (2026-06-28)
 
-Goal: let the guest `nix-env -iA <anything>` against **real nixpkgs** ("at least
-try to install things"), instead of the 4-entry curated catalog. This note
-records the live experiment, the walls found (in order), and the fix landed for
-the first one.
+Goal: let the guest `nix-env -iA nixpkgs.<pkg>` against **real nixpkgs**, exactly
+like a real NixOS system, instead of only the 4-entry curated catalog.
+
+## STATUS: DONE — validated end-to-end in the booted guest
+
+On the **shipped flake artifacts** (real `.#wasm-binary-cache` + `.#wasm-base-squashfs`
++ `.#wasm-initramfs`, published kernel), booted headless on an aarch64 host:
+
+```
+# nix-env -iA nixpkgs.file        → installs, substituting the wasm output from the cache
+# file --version                  → file-5.47   (magic file from /nix/store/…-file-…/share/misc/magic)
+# nix-env -iA nixpkgs.hello       → installs
+# hello                           → Hello, world!
+# nix-env -iA wasm-tools.guest-cc → installs the toolchain channel
+# cc --version                    → clang version 21.1.8
+# nix-env -q                      → file-static-…-5.47 / guest-cc / hello-static-…-2.12.3
+```
+
+i.e. the guest evaluates nixpkgs against the wasm crossSystem, substitutes the
+prebuilt wasm output from the cache, installs into the profile, and runs it — the
+real-NixOS `nix-env -iA nixpkgs.<pkg>` flow. Two `nix-env` channels:
+`nixpkgs.<pkg>` (any package, evaluated vs the cross) and `wasm-tools.<tool>` (the
+toolchain), addressed + lazy per channel like real NixOS.
+
+What's installable = what the host publishes (`wasmPublishedPkgs` in flake.nix —
+currently file + hello). The channel can EVALUATE any nixpkgs package; only
+published outputs SUBSTITUTE — the rest fail to realise, exactly like an uncached
+package on a real machine. Most packages won't cross-build to wasm32-NOMMU, so the
+published set is curated; grow it as packages are confirmed.
+
+The original spike (below) recorded the walls in order; all are resolved.
 
 ## How the experiment was run (no host Nix required)
 
@@ -113,26 +140,34 @@ hashes the host builds (so it can substitute the host's prebuilt output). `hello
    `extraRootPaths` so the channel + the pinned nixpkgs source are published for
    on-demand substitution. **Validate:** `nix build .#wasm-nixpkgs-channel`, then
    `nix eval --raw -f <out>/default.nix file.drvPath` should print a wasm `file.drv`.
-3. **[next — deliberately staged] Flip the guest default expr.** Point
-   `~/.nix-defexpr` at the channel (`bootstrap.nix`) and bake
-   `nix-path = nixpkgs=<store path>` into the guest nix.conf (`system.nix`).
-   Staged rather than committed blind because it (a) replaces the catalog the green
-   CI smokes use (`nix-env -iA make-wasm32`) — the `cross // {tools}` merge is meant
-   to preserve those, but wants a real `nix-env` run to confirm — and (b) rests on
-   the **assumption to verify**: `<nixpkgs>` / `import <channel>` substitutes a
-   missing store path on access under the guest's offline `substitute = true`. Both
-   are best validated with nix in hand, not by correct-by-construction alone.
-4. **Realisation:** eval yields a `.drv`; substitute its closure if the host
-   pre-built + published it (e.g. add `cross.file` to the published set on CI), else
-   it fails (the guest can't run the x86_64 build inputs). So `-iA <attr>` *attempts*
-   everything; *succeeds* for what's published. Building from source in-guest is the
-   separate #92 axis (needs the cross stdenv closure as inputs).
+3. **[DONE] Two `nix-env` channels in `~/.nix-defexpr` (bootstrap.nix) + NIX_PATH
+   (system.nix).** Real-NixOS addressing: `nixpkgs.<pkg>` (the cross set) and
+   `wasm-tools.<tool>` (the toolchain pkgs.nix), lazy per channel so a tool install
+   never forces the nixpkgs eval/fetch. The CI smokes were updated to the
+   `wasm-tools.` prefix.
+4. **[DONE] Realisation = substitute the published output.** `wasmPublishedPkgs`
+   (flake.nix) roots each curated package's outputs into the cache; `nix-env -iA
+   nixpkgs.<pkg>` substitutes + installs. Unpublished packages eval but fail to
+   realise (the guest can't run the x86_64 build inputs) — like an uncached package.
 
-After (3), `nix-env -qaP` lists all of nixpkgs and `-iA <attr>` evaluates + attempts
-realisation. Most packages still won't cross-build to wasm32-NOMMU, so this is "at
-least try," not "everything works" — but it is the open catalog. To make a SPECIFIC
-package (e.g. `file`) actually install, add it to the host's published set so its
-wasm output is substitutable.
+### Two extra fixes found ONLY by booting the guest (not by eval/correct-by-construction)
+
+- **Channel delivery — squashfs, not the nix-cache 9P.** The channel is a DIRECTORY
+  tree; `runtime/nix-cache.js` serves only the flat binary-cache protocol (HEAD/GET
+  files, `list` only for seeded dirs), so `stat(/nix-cache/channel)` 404'd and the
+  guest could not traverse it (`import /nix-cache/channel` → "No such file or
+  directory"). Fix: bake the ~1.3 MB channel into the **base squashfs** (a real
+  on-disk dir) and have bootstrap point the `nixpkgs` defexpr at that store path.
+  nixpkgs stays in the cache (a flat store path → standard substitution works).
+- **Publish ALL of a package's outputs.** nix-env installs `meta.outputsToInstall`
+  (e.g. `[out man]` for file). Rooting only the default `out` left `man` unsubstitutable,
+  so nix fell back to BUILDING `file.drv` → its 587-derivation build closure → fetch
+  bash/python/autoconf sources → no network → fail. `allOutputs` in flake.nix roots
+  every output of each published package.
+
+The substitute-on-access assumption held: `<nixpkgs>` (a missing store path in
+NIX_PATH) substitutes the 470 MB nixpkgs source from the cache the first time a
+nixpkgs attribute is evaluated, in the guest's RAM-backed store, within the cap.
 
 ## `file` specifically
 

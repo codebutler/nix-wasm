@@ -301,8 +301,28 @@ history). The old "hush isn't POSIX-enough" gap is closed.
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
 compiler toolchain is no longer in the base — it's substituted on demand via the
-Nix binary cache (`nix-env -iA guest-cc`). Phase 5 CI wiring (Task 9, issue #2)
-follows.
+Nix binary cache (`nix-env -iA wasm-tools.guest-cc`). Phase 5 CI wiring (Task 9,
+issue #2) follows.
+
+**In-guest nixpkgs channel is done** (2026-06-28): the guest installs packages
+exactly like a real NixOS system via TWO `nix-env` channels in `~/.nix-defexpr`
+(set up by `bootstrap.nix`): **`nixpkgs.<pkg>`** — the pinned nixpkgs evaluated
+against the wasm crossSystem (`userspace/wasm-nixpkgs-channel.nix` → `cross`,
+baked into the squashfs as `<store path>`; reaches nixpkgs via `<nixpkgs>` =
+`NIX_PATH` baked in `system.nix`, substituted on demand) — and **`wasm-tools.<tool>`**
+— the toolchain `pkgs.nix` catalog. Validated end-to-end in the booted guest:
+`nix-env -iA nixpkgs.file` → substitutes the prebuilt wasm output from the cache →
+`file --version` → `file-5.47`; same for `nixpkgs.hello` → `Hello, world!` and
+`wasm-tools.guest-cc` → `cc --version` → `clang 21.1.8`. Key design points (all
+hard-won by BOOTING the guest, not eval alone): the channel is a DIRECTORY tree so
+it must live in the squashfs (the flat nix-cache 9P export has no directory
+traversal); `wasmPublishedPkgs` (flake.nix) roots **all** outputs of each curated
+published package (nix-env installs `meta.outputsToInstall`, e.g. `[out man]` —
+rooting only `out` makes nix build the package's whole from-source closure); the
+two channels are addressed + lazy per channel so a `wasm-tools` install never pulls
+nixpkgs. What's installable = `wasmPublishedPkgs` (curated; the channel EVALUATES
+any package but only published outputs SUBSTITUTE — most won't cross-build to
+wasm32-NOMMU). Full record: `docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md`.
 
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
@@ -332,9 +352,12 @@ into the **base squashfs** (`wasmDrvSeed` + `nix-store --load-db`) — a `.drv`
 closure pulls ~6.7 GB of build sources (a real system has none), overflowing the
 boot harness's 2 GiB file cap. (The `.drv` closures DO belong in the binary cache,
 served lazily over 9P — that is what nix-env substitutes; only *baking them into
-the squashfs* was wrong.) Full by-name deriver parity for ARBITRARY packages via
-the new CLI needs in-guest nixpkgs eval. (Building derivations FROM SOURCE in-guest
-is a separate axis and works — see #92 below.) Archive ops work: `tar` (czf/xzf,
+the squashfs* was wrong.) **In-guest nixpkgs eval is now DONE** — `nix-env -iA
+nixpkgs.<pkg>` evaluates ANY nixpkgs package against the wasm crossSystem and
+substitutes the prebuilt wasm output (the `nixpkgs` channel; see "In-guest nixpkgs
+channel" below + `docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md`).
+(Building derivations FROM SOURCE in-guest is a separate axis and works — see #92
+below.) Archive ops work: `tar` (czf/xzf,
 patched) is
 validated; `wget` is N/A on the
 guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
