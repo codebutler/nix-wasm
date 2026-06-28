@@ -175,6 +175,15 @@ echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/package
       --file "$CACHE/$REL" --content-type application/octet-stream --remote
   done )
 
+# Capture the CURRENTLY-live version first, so the verify can report the actual
+# old→new transition. Drift visibility: if this equals $VERSION, the build
+# produced bytes identical to what's already published (idempotent republish) —
+# which is exactly the silent failure mode that shipped a stale, pre-gtk-demo
+# image (a publish raced ahead of the artifacts landing in Cachix, rebuilt the
+# OLD image, and the version-only verify passed against the already-live pointer).
+PREV_LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
+PREV_VERSION="$(printf '%s' "$PREV_LIVE" | sed -n 's/.*"version":"\([0-9a-f]*\)".*/\1/p')"
+
 echo "==> Flipping pointer → $BUCKET/packages/linux/latest.json …"
 TMP_LATEST="$(mktemp)"
 trap 'rm -f "$TMP_LATEST"' EXIT
@@ -183,21 +192,48 @@ bunx wrangler r2 object put "$BUCKET/packages/linux/latest.json" \
   --file "$TMP_LATEST" --content-type application/json --remote
 
 # Verify the flip actually landed (latest.json is served no-cache). Belt-and-
-# suspenders against any silent wrangler no-op: re-fetch the live pointer and
-# assert it now carries THIS version, else fail the job.
-echo "==> Verifying latest.json went live …"
+# suspenders against a silent wrangler no-op: re-fetch the live pointer and assert
+# it carries the FULL new pointer — BOTH the version AND the nixCacheBaseUrl we
+# wrote, not just the version substring. The version-only check passed spuriously
+# when a no-op flip left the OLD pointer live and that pointer already happened to
+# carry $VERSION (the stale-image race). Requiring nixCacheBaseUrl too means a
+# flip that didn't actually rewrite the object fails the job: an old R2-base
+# pointer (or any other version) no longer satisfies the new /cachix-base assert.
+echo "==> Verifying latest.json went live (version + nixCacheBaseUrl) …"
 for attempt in 1 2 3 4 5; do
   LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
-  case "$LIVE" in
-    *"\"version\":\"$VERSION\""*) echo "    verified: latest.json → $VERSION"; break;;
-  esac
+  ok=1
+  [ -n "$LIVE" ] || ok=0
+  case "$LIVE" in *"\"version\":\"$VERSION\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"nixCacheBaseUrl\":\"$NIX_CACHE_URL\""*) ;; *) ok=0 ;; esac
+  if [ "$ok" = 1 ]; then
+    echo "    verified: latest.json → version $VERSION"
+    echo "    nixCacheBaseUrl       → $NIX_CACHE_URL"
+    break
+  fi
   if [ "$attempt" = 5 ]; then
-    echo "ERROR: latest.json did not update to version $VERSION after the flip." >&2
-    echo "live latest.json was: $LIVE" >&2
+    echo "ERROR: latest.json did not fully update after the flip." >&2
+    echo "  expected version       : $VERSION" >&2
+    echo "  expected nixCacheBaseUrl: $NIX_CACHE_URL" >&2
+    echo "  live latest.json was   : $LIVE" >&2
     exit 1
   fi
   sleep 3
 done
+
+# Drift visibility: report the old→new transition. Identical version means we
+# republished byte-identical bytes — fine for a deliberate re-flip, but a red flag
+# if you EXPECTED a guest change to ship (the stale-image race looked exactly like
+# this). Loud, non-fatal (the script can't know intent).
+if [ -n "$PREV_VERSION" ] && [ "$PREV_VERSION" = "$VERSION" ]; then
+  echo "==> NOTICE: version UNCHANGED from the previously-live pointer ($VERSION)."
+  echo "    The built image is byte-identical to what was already published. If you"
+  echo "    expected a guest change to ship, the build resolved a STALE artifact —"
+  echo "    confirm the artifacts are in Cachix and re-run (a republish of identical"
+  echo "    bytes is otherwise a no-op)."
+else
+  echo "==> version changed: ${PREV_VERSION:-<none>} → $VERSION"
+fi
 
 echo ""
 echo "==> PUBLISHED linux channel: version=$VERSION minEngine=$MIN_ENGINE"
