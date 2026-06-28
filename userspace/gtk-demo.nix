@@ -67,10 +67,15 @@ cross.stdenv.mkDerivation {
 
     # The demo sources are every .c here EXCEPT the gtk3-demo-application program
     # (application.c — its own main()), the GtkFishbowl helper (gtkfishbowl.c — no
-    # do_ entry point), and main.c. Each demo file defines do_<name> and starts
-    # with a /* Title */ first line, which geninclude.py turns into the gtk_demos[]
-    # dispatch table (sorted by title, so input order is irrelevant).
-    DEMO_SRCS=$(ls *.c | grep -vE '^(application|gtkfishbowl|main)\.c$')
+    # do_ entry point), main.c, and pagesetup.c. Each demo file defines do_<name>
+    # and starts with a /* Title */ first line, which geninclude.py turns into the
+    # gtk_demos[] dispatch table (sorted by title, so input order is irrelevant).
+    # pagesetup.c is dropped: it #includes <gtk/gtkunixprint.h> (the Unix print
+    # dialog), which our wayland-only / no-cups cross gtk3 doesn't install, and its
+    # GtkPageSetupUnixDialog isn't compiled into libgtk — a printer is meaningless
+    # on the guest anyway. Excluding it from DEMO_SRCS also drops do_pagesetup from
+    # the geninclude table, so main.c never references it.
+    DEMO_SRCS=$(ls *.c | grep -vE '^(application|gtkfishbowl|main|pagesetup)\.c$')
 
     # 1. demos.h — the generated dispatch table main.c #includes.
     python3 geninclude.py demos.h $DEMO_SRCS
@@ -81,7 +86,11 @@ cross.stdenv.mkDerivation {
     glib-compile-resources --target=gtkdemo_resources.c --generate-source \
       --sourcedir=. demo.gresource.xml
 
-    CFLAGS="$($PKG_CONFIG --cflags gtk+-3.0 harfbuzz) -I. -O2 -Wno-deprecated-declarations"
+    # -I../.. is the gtk source root (meson's confinc): gtkfishbowl.c does
+    # #include "gtk/fallback-c89.c", an in-tree source file resolved from there. It
+    # goes AFTER the pkg-config includes so the installed <gtk/*.h> still win (the
+    # source-tree headers are unconfigured *.h.in templates).
+    CFLAGS="$($PKG_CONFIG --cflags gtk+-3.0 harfbuzz) -I. -I../.. -O2 -Wno-deprecated-declarations"
     LDLIBS="$($PKG_CONFIG --libs gtk+-3.0 harfbuzz) -lffi -lm"
     $CC $CFLAGS $DEMO_SRCS gtkfishbowl.c main.c gtkdemo_resources.c $LDLIBS -o gtk3-demo.pre
     fpcast_emu gtk3-demo.pre gtk3-demo
