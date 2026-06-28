@@ -111,15 +111,6 @@
  	flags |= EV_EXIT;
  	INT_OFF;
  	if (n->npipe.pipe_backgnd == 0)
-@@ -10510,7 +10607,7 @@
- 	 || !(IS_BUILTIN_REGULAR(cmdentry.u.cmd))
- 	) {
- 		path = path ? path : pathval();
--		find_command(argv[0], &cmdentry, cmd_flag | DO_ERR, path);
-+		find_command(argv[0], &cmdentry, cmd_flag, path);
- 	}
- 
- 	jp = NULL;
 @@ -10518,8 +10615,8 @@
  	/* Execute the command. */
  	switch (cmdentry.cmdtype) {
@@ -128,5 +119,5 @@
  		flush_stdout_stderr();
 +		exitstatus = status = cb_spawn(argv);
  		goto bail;
- 
+
  	default: {
