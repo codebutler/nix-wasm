@@ -427,9 +427,32 @@
       # in-guest via `nix-env -iA` (bootstrap copies /nix-cache/pkgs.nix to
       # ~/.nix-defexpr at boot). The tools are NOT in the base squashfs; they
       # arrive on demand through substitution.
+      # ---- the in-guest nixpkgs "channel" (M1): pinned nixpkgs + the wasm cross
+      # config + a default.nix so the guest can `nix-env -iA <any nixpkgs attr>`
+      # against the wasm crossSystem, not just the 4-entry toolchain catalog. The
+      # crossSystem set is PROVEN to evaluate in-guest to wasm .drvs (cross.file /
+      # cross.hello) — docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md.
+      # localSystem is pinned to the build host so guest-evaluated .drv hashes match
+      # the host's published outputs (substitution). The channel closure is small
+      # (config only); nixpkgs is published separately + reached via <nixpkgs>.
+      wasmNixpkgsChannel = import ./userspace/wasm-nixpkgs-channel.nix {
+        inherit pkgs self;
+        localSystem = system;
+        tools = {
+          "guest-cc" = guestCc;
+          "guest-cxx" = guestCxx;
+          "guest-clang" = guestClang;
+          "make-wasm32" = makeWasm;
+        };
+      };
+
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = wasmDevPaths;
+        # Publish the channel + the pinned nixpkgs source so the guest can
+        # substitute them on demand (the channel as the default expr; nixpkgs when
+        # a nixpkgs attribute is evaluated via <nixpkgs>).
+        extraRootPaths = [ wasmNixpkgsChannel nixpkgs.outPath ];
       };
 
       # ---- the single versioned `linux` boot bundle (pc#315) ----------------
@@ -613,6 +636,12 @@
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
         # Served by runtime/nix-cache.js; in-guest: `nix-env -iA guest-cc`.
         wasm-binary-cache = wasmBinaryCache;
+
+        # The in-guest nixpkgs channel (M1): pinned nixpkgs + wasm cross config +
+        # default.nix, so the guest can `nix-env -iA <any nixpkgs attr>` against the
+        # wasm crossSystem. Build with `nix build .#wasm-nixpkgs-channel`; verify it
+        # evaluates with e.g. `nix eval --raw -f <out>/default.nix file.drvPath`.
+        wasm-nixpkgs-channel = wasmNixpkgsChannel;
 
         # The single versioned `linux` boot bundle (pc#315): $out/iso/linux.iso.
         linux-image = linuxImage;

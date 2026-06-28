@@ -79,22 +79,60 @@ prebuilt clang stdenv). So in-guest eval must import nixpkgs the SAME way:
 `import nixpkgs { crossSystem = wasm; localSystem = …; overlays = [deps-overlay];
 config.replaceCrossStdenv = …; }`.
 
+## crossSystem eval PROVEN in-guest (the M1 make-or-break)
+
+The key question for M1 — does `wasm-cross.nix`'s `cross.<pkg>` actually *evaluate*
+in-guest, within memory? — is answered **yes**. Shipping the repo's cross config
+(`wasm-cross.nix` + `deps-overlay.nix` + `toolchain/` + `patches/`) alongside the
+fromTOML-stubbed nixpkgs into the guest (over the 9P `/mnt/pc` mount) and pinning
+`localSystem = "x86_64-linux"`, the guest evaluated:
+
+```
+nix-instantiate <channel> -A hello → …-hello-static-wasm32-unknown-linux-musl-2.12.3.drv   (17.5s)
+nix-instantiate <channel> -A file  → …-file-static-wasm32-unknown-linux-musl-5.47.drv      (15.5s)
+```
+
+real wasm32 `.drv`s, no OOM/panic, only the benign no-`--add-root` GC warning.
+This works because `wasm-cross.nix` takes an explicit `localSystem` and the cross
+derivations are host-agnostic, so **eval is pure and architecture-independent** —
+pinning `localSystem` to the build host makes the guest compute the SAME `.drv`
+hashes the host builds (so it can substitute the host's prebuilt output). `hello`
+/`file` don't touch `importTOML`, so the diagnostic stub does not perturb their
+`.drv` hashes — these match the real (fromTOML-fixed) eval and the host.
+
 ## The path to "install anything" (M1)
 
-1. **[done] Restore `fromTOML`** so nixpkgs `lib` loads in-guest.
-2. **Ship nixpkgs + the crossSystem default-expr into the guest** (replacing the
-   generated 4-entry `/nix-cache/pkgs.nix` that `bootstrap.nix` copies to
-   `~/.nix-defexpr`). Pinned nixpkgs as a read-only volume (reuse the
-   base-squashfs / virtio-blk machinery, or a substitutable store path) + a
-   `default.nix` that applies our `crossSystem`/overlay; point `NIX_PATH` /
-   `~/.nix-defexpr` at it.
-3. **Realisation:** eval yields a `.drv`; substitute its closure if pre-built,
-   else build from source (#92 path — works for simple derivations; full
-   stdenv/autotools needs the cross stdenv closure as build inputs).
+1. **[done] Restore `fromTOML`** so nixpkgs `lib` loads in-guest (the toml11 fix).
+2. **[landed — needs a nix build to validate] The channel artifact.**
+   `userspace/wasm-nixpkgs-channel.nix` → `.#wasm-nixpkgs-channel`: a small store
+   path with the cross config + a generated `default.nix` that returns
+   `cross // { guest-cc/guest-cxx/guest-clang/make-wasm32 }`. nixpkgs is reached via
+   `<nixpkgs>` (NOT an absolute store-path ref), so the channel closure stays small
+   and a plain `nix-env -iA guest-cc` doesn't drag nixpkgs in (lazy `//` access);
+   only a nixpkgs attr (`-iA file`) forces it. `binary-cache.nix` gains
+   `extraRootPaths` so the channel + the pinned nixpkgs source are published for
+   on-demand substitution. **Validate:** `nix build .#wasm-nixpkgs-channel`, then
+   `nix eval --raw -f <out>/default.nix file.drvPath` should print a wasm `file.drv`.
+3. **[next — deliberately staged] Flip the guest default expr.** Point
+   `~/.nix-defexpr` at the channel (`bootstrap.nix`) and bake
+   `nix-path = nixpkgs=<store path>` into the guest nix.conf (`system.nix`).
+   Staged rather than committed blind because it (a) replaces the catalog the green
+   CI smokes use (`nix-env -iA make-wasm32`) — the `cross // {tools}` merge is meant
+   to preserve those, but wants a real `nix-env` run to confirm — and (b) rests on
+   the **assumption to verify**: `<nixpkgs>` / `import <channel>` substitutes a
+   missing store path on access under the guest's offline `substitute = true`. Both
+   are best validated with nix in hand, not by correct-by-construction alone.
+4. **Realisation:** eval yields a `.drv`; substitute its closure if the host
+   pre-built + published it (e.g. add `cross.file` to the published set on CI), else
+   it fails (the guest can't run the x86_64 build inputs). So `-iA <attr>` *attempts*
+   everything; *succeeds* for what's published. Building from source in-guest is the
+   separate #92 axis (needs the cross stdenv closure as inputs).
 
-After (1)+(2), `nix-env -qaP` lists all of nixpkgs and `-iA <attr>` evaluates +
-attempts realisation. Most packages still won't cross-build to wasm32-NOMMU, so
-this is "at least try," not "everything works" — but it is the open catalog.
+After (3), `nix-env -qaP` lists all of nixpkgs and `-iA <attr>` evaluates + attempts
+realisation. Most packages still won't cross-build to wasm32-NOMMU, so this is "at
+least try," not "everything works" — but it is the open catalog. To make a SPECIFIC
+package (e.g. `file`) actually install, add it to the host's published set so its
+wasm output is substitutable.
 
 ## `file` specifically
 
