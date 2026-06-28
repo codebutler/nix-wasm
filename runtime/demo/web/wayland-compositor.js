@@ -489,6 +489,48 @@ async function boot() {
     record.win.style.zIndex = String(nextZ++);
   };
 
+  // A CSD client asked to (un)maximize (the headerbar maximize glyph). The shell owns
+  // window geometry, so position the window at the top-left and tell the guest to
+  // repaint at the viewport size (or its own size on restore). The compositor already
+  // sent the maximized STATE so the client adapts its chrome (greenfield#7).
+  events.surfaceMaximizeRequested = (compositorSurface, maximized) => {
+    const record = surfaces.get(keyOf(compositorSurface));
+    if (!record?.win || !record.cs) return;
+    const win = record.win;
+    if (maximized) {
+      record._restore = { left: win.style.left, top: win.style.top };
+      win.style.left = "0px";
+      win.style.top = "0px";
+      win.style.zIndex = String(nextZ++);
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
+      try {
+        session.userShell.actions.configureSurfaceSize(record.cs, w, h);
+      } catch {}
+    } else {
+      if (record._restore) {
+        win.style.left = record._restore.left;
+        win.style.top = record._restore.top;
+        record._restore = null;
+      }
+      // 0×0 = client picks its own size.
+      try {
+        session.userShell.actions.configureSurfaceSize(record.cs, 0, 0);
+      } catch {}
+    }
+  };
+
+  // A CSD client asked to minimize (the headerbar minimize glyph). The demo shell has
+  // no taskbar to restore from, so this just hides the window (the event firing — and
+  // the client staying alive — is the point being demonstrated; pc restores via its
+  // taskbar). Click any visible window to raise; minimized windows stay hidden.
+  events.surfaceMinimizeRequested = (compositorSurface) => {
+    const record = surfaces.get(keyOf(compositorSurface));
+    if (!record?.win) return;
+    record.win.style.display = "none";
+    console.info("[wl-demo] surface minimized (no taskbar in demo shell to restore from)");
+  };
+
   events.surfaceDestroyed = (compositorSurface) => {
     const key = keyOf(compositorSurface);
     const record = surfaces.get(key);

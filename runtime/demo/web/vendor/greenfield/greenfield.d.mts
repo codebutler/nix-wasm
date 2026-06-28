@@ -28,6 +28,13 @@ export interface UserShellApiEvents {
     compositorSurface: CompositorSurface,
     content: { bitmap: ImageBitmap; width: number; height: number },
   ) => void;
+  surfaceDecorationModeUpdated?: (
+    compositorSurface: CompositorSurface,
+    mode: "client" | "server",
+  ) => void;
+  surfaceMoveRequested?: (compositorSurface: CompositorSurface) => void;
+  surfaceMaximizeRequested?: (compositorSurface: CompositorSurface, maximized: boolean) => void;
+  surfaceMinimizeRequested?: (compositorSurface: CompositorSurface) => void;
   notify?: (variant: "warn" | "info" | "error", message: string) => void;
   sceneRefreshed?: (sceneId: string) => void;
 }
@@ -43,6 +50,7 @@ export interface UserShellApiActions {
   pointerLeave(compositorSurface: CompositorSurface): void;
   pointerButton(compositorSurface: CompositorSurface, buttonCode: number, released: boolean): void;
   notifyKey(keyboardEvent: KeyboardEvent, pressed: boolean): void;
+  configureSurfaceSize(compositorSurface: CompositorSurface, width: number, height: number): void;
 }
 
 export interface UserShellApi {
