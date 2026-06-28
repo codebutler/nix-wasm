@@ -151,9 +151,15 @@ guest — `.github/workflows/pr-preview.yml` builds the 3 boot artifacts (toolch
 substituted from the `nix-wasm` Cachix cache), content-addresses them into the
 `nix-wasm-previews` R2 bucket's `cas/<buildhash>/`, rclone-syncs the `runtime/`
 frontend into `pr-<N>/`, and comments `${PREVIEW_BASE_URL}/pr-<N>/demo/web/`. The
-served Worker (`infra/preview-worker/`) stamps COOP/COEP. Boot artifacts only —
-the guest `nix-cache/` substituter stays #2's concern. Setup runbook:
-`infra/preview-worker/README.md`.
+served Worker (`infra/preview-worker/`) stamps COOP/COEP, serves the R2 preview
+bucket, and proxies the guest toolchain cache from Cachix (the `/cachix/<v>` route
+the `linux` channel's `nixCacheBaseUrl` points at). That Worker is deployed by
+`.github/workflows/deploy-preview-worker.yml` — `workflow_dispatch` (run once to
+mint the `*.workers.dev` URL → set it as the `PREVIEW_BASE_URL` repo variable) and
+auto-redeploy on a push to `infra/preview-worker/**` on master; it runs the
+Worker unit tests (`src/index.test.js`) before `bunx wrangler deploy`. Boot
+artifacts only — the guest `nix-cache/` substituter stays #2's concern. Setup
+runbook: `infra/preview-worker/README.md`.
 
 Run these from the **runtime/** directory:
 
