@@ -35,6 +35,7 @@ export interface UserShellApiEvents {
   surfaceMoveRequested?: (compositorSurface: CompositorSurface) => void;
   surfaceMaximizeRequested?: (compositorSurface: CompositorSurface, maximized: boolean) => void;
   surfaceMinimizeRequested?: (compositorSurface: CompositorSurface) => void;
+  surfaceResizeRequested?: (compositorSurface: CompositorSurface, edges: number) => void;
   notify?: (variant: "warn" | "info" | "error", message: string) => void;
   sceneRefreshed?: (sceneId: string) => void;
 }
