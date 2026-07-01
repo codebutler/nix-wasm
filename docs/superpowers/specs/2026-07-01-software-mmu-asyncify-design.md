@@ -427,6 +427,11 @@ describe the post-plan target as NOMMU.
 backend only accepts OS `unknown`/`wasi`/`emscripten`), so the guest compiles as freestanding and
 the Linux-ness is re-supplied by flags (`-D__linux__ -matomics -mbulk-memory -fwasm-exceptions`).
 This persists after the plan — it's part of the *arch-exoticness*, not the memory model.
+*(Inventing a custom vendor/OS doesn't help: an unrecognized OS string parses to `unknown` —
+pure relabeling, same flags — and a first-class recognized OS would require **forking LLVM**
+(driver ToolChain + ABI), which the stock-LLVM principle forbids and which wouldn't reduce
+the actual musl/headers/features work. The upstream effort to give "Linux under wasm" a real
+recognized triple is **WALI** (`wasm32-wali-linux-musl`) — a watch-item, not an action here.)*
 
 The residual gaps, by kind:
 - **A. JIT — the one inherent wall (accepted non-goal).** wasm can't execute runtime-generated
