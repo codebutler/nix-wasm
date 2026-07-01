@@ -24,8 +24,28 @@ node run.mjs` (clang→wasm32, V8 via node).
 
 ## Results (node v22 / V8 12.4, min of 9 trials, ~300 ms each)
 
+Ordered lowest→highest overhead — the realistic cases (what you'd actually pay) first,
+the pathological ceiling last:
+
+| kernel | overhead | what it's testing | practical effect of that overhead |
+|---|---|---|---|
+| **mixed** (L1 & DRAM) | **+1%** | A loop doing several arithmetic ops per load (an LCG mix), in- and out-of-cache. The shape of *normal* code — logic interleaved with memory. | Effectively free. Ordinary program logic, arithmetic, parsing, most kernel/userspace work pays nothing for the MMU. |
+| **stride** (DRAM) | **+2%** | One read per 64-byte cache line across 64 MB — cache-**miss**-bound but predictable (streaming a big array/struct). | The DRAM fetch dominates; the extra (cache-resident) page-table load hides behind memory latency. Bulk streaming over large buffers ≈ free. |
+| **chase** (DRAM) | **+8%** | Pointer-chasing a random cycle through 64 MB — latency-bound, prefetch-defeating. The realistic model for **interpreters, GC, tree/hash traversal — including nix eval** — on a large working set. | Modest. Even the worst *realistic* pattern stays under 10% once the data doesn't fit in cache, because each data cache-miss masks the PTE load. |
+| **seq** (DRAM) | **+58%** | Summing a 64 MB array sequentially — bandwidth-bound, near-zero compute per access (a checksum/`memcpy`-style scan). | Noticeable: you've added a *second* memory stream (the page table) next to the data stream, so pure scan loops slow. But add any real work per element → collapses to the `mixed` number. |
+| **store** (DRAM) | **+82%** | Writing a 64 MB array sequentially (`memset`/buffer-fill). Stores are buffered/cheap, so translate cost is a big fraction of each. | Large buffer fills / bulk writes slow down. Again, only bites code that does *nothing but* store. |
+| **seq** (L1, 32 KB) | **2.07×** | Summing a 32 KB array that stays in L1, repeated, zero compute — the fastest possible memory op. | Microarchitectural **ceiling**, not a workload: doubling the loads (data + PTE) doubles the time. Tells you the per-access cost limit, not what programs feel. |
+| **chase** (L1, 32 KB) | **2.67×** | Pointer-chasing within a 32 KB **cache-resident** cycle — each step a dependent L1 load, no compute, no latency to hide behind. | **The danger zone.** A hot inner loop that's pure pointer-chasing over a small hot structure (tight interpreter dispatch, hash probe) nearly triples. The one pattern to watch — and what the mitigations target. |
+
+Geomean across the (deliberately half-pathological) set: **forced 1.44×, optimizable
+1.43×**. Through-line: overhead scales with how memory-dense *and* how cache-resident the
+code is — real code is diluted by compute or hidden behind cache-miss latency
+(**~1.05–1.3× in practice**); the 2–2.7× cases are loops that do *nothing but* touch a
+tiny cache-hot buffer.
+
+Raw output (both translate variants, `base(ms) forced +% optimiz +%`):
+
 ```
-kernel                base(ms)  forced   +%    optimiz  +%
 seq  (L1, 32KB)          298   2.07   107%    2.06   106%
 seq  (DRAM, 64MB)        287   1.58    58%    1.56    56%
 stride64 (DRAM)          290   1.02     2%    1.01     1%
@@ -34,7 +54,6 @@ mixed (L1, 32KB)         301   1.01     1%    1.02     2%
 mixed (DRAM, 64MB)       295   1.01     1%    1.01     1%
 chase (L1, 32KB)         298   2.67   167%    2.67   167%
 chase (DRAM, 64MB)       297   1.08     8%    1.07     7%
-geomean:  forced 1.44×   optimizable 1.43×
 ```
 
 ## What it means
