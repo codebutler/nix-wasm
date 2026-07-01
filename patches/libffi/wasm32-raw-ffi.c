@@ -38,17 +38,29 @@
      • all scalar RETURNS (void / i32 / i64 / f32 / f64) regardless of bounds.
    It is a SHARED crossSystem fix, not a wayland-private one.
 
-   What this backend refuses LOUDLY (abort/"argument signature outside generated
-   bounds" / FFI_BAD_ABI) rather than silently mis-call:
-     - by-value struct / complex ARGUMENTS (the raw wasm ABI can't express them);
-     - by-value i64/f32/f64 ARGUMENTS that exceed the (K=10, M=2) bounds (e.g.
-       a call with 3 or more non-i32 args) — bump gen-trampolines.py's K/M to
-       widen the table if a new signal shape needs more;
-     - variadic calls (wasm passes varargs through a hidden buffer pointer — a
-       different convention than fixed params);
-     - closures (ffi_prep_closure_loc): they require creating a NEW callable
-       wasm function at runtime, which needs host/JS support this platform does
-       not have. This matches ffitarget.h's own "closures (not implemented!)".
+   --- The runtime fallback (nix-wasm #126 Track C / #130) ------------------
+   The static table above is the fast path. Anything it cannot express —
+   out-of-(K,M)-bounds scalar signatures, by-value STRUCT arguments/returns,
+   and VARARGS — now falls through to a RUNTIME path instead of aborting:
+   `__wasm_ffi_call`, a host import (runtime/kernel-worker.js → ffi-codegen.js)
+   that GENERATES a wasm trampoline module for the exact lowered signature at
+   runtime and invokes it. This is the same runtime-wasm-instantiation
+   primitive dlopen uses (#130), so libffi and dlopen share one mechanism.
+
+   The lowering to the wasm C ABI is done HERE (the host only sees wasm value
+   types): a by-value struct argument is passed as an i32 POINTER to a copy; a
+   struct/long-double RETURN prepends an i32 pointer parameter and makes the
+   call return void; varargs are packed into a separate buffer whose i32
+   pointer is the one trailing parameter (emscripten's convention). The host
+   picks the trampoline ABI (raw vs the fpcast (i64×128)->i64 canonical thunk)
+   from which module owns the target funcref — a function pointer IS a table
+   index on wasm, so `(uintptr_t)fn` is that index.
+
+   What still aborts LOUDLY: complex types, and closures
+   (ffi_prep_closure_loc) — a closure is the INVERSE (mint a NEW callable
+   funcref that dispatches to a C handler); that is also runtime codegen but a
+   separate direction, and no current guest consumer needs it, so it stays a
+   loud FFI_BAD_ABI rather than a silent mis-call.
    ----------------------------------------------------------------------- */
 
 #include <ffi.h>
@@ -57,6 +69,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+
+/* The runtime FFI host import (ENGINE_ABI 8): generate+invoke a trampoline for
+   the lowered wasm signature at `sig` (a byte descriptor, see below). Returns 0
+   on success. funcIndex = the target funcref's table index = (uintptr_t)fn. */
+int __wasm_ffi_call(uint32_t funcIndex, void *argbuf, void *retbuf,
+                    const void *sig, uint32_t siglen);
 
 /* Max argument count we generate trampolines for. libwayland needs
    WL_CLOSURE_MAX_ARGS (20) + 2 (data, target) = 22; 24 leaves margin. */
@@ -79,11 +98,11 @@ ffi_prep_cif_machdep(ffi_cif *cif)
 {
   if (cif->abi != FFI_WASM32)
     return FFI_BAD_ABI;
-  /* ffi_prep_cif_machdep_var sets nfixedargs; for the fixed path it equals
-     nargs (mirrors the stock emscripten backend's bookkeeping). */
+  /* nfixedargs == nargs for the non-variadic path (the var path overrides it,
+     below). Structs and out-of-(K,M) scalar arities are NO LONGER rejected —
+     they route to the runtime fallback (__wasm_ffi_call). Only complex stays
+     unsupported (no wasm ABI for it). */
   cif->nfixedargs = cif->nargs;
-  if (cif->nargs > WASM_FFI_MAX_ARGS)
-    return FFI_BAD_TYPEDEF;
   if (cif->rtype->type == FFI_TYPE_COMPLEX)
     return FFI_BAD_TYPEDEF;
   for (unsigned i = 0; i < cif->nargs; i++)
@@ -95,10 +114,15 @@ ffi_prep_cif_machdep(ffi_cif *cif)
 ffi_status FFI_HIDDEN
 ffi_prep_cif_machdep_var(ffi_cif *cif, unsigned nfixedargs, unsigned ntotalargs)
 {
-  (void)cif; (void)nfixedargs; (void)ntotalargs;
-  /* Variadic calls use a different wasm convention (hidden buffer pointer);
-     a fixed i32^N trampoline would be the wrong signature. Refuse. */
-  return FFI_BAD_ABI;
+  (void)ntotalargs;
+  /* Variadic calls take the runtime fallback: the wasm convention packs the
+     variadic args into a separate buffer and passes ONE trailing i32 pointer
+     to it (a different shape than fixed params, which is why the static i32^N
+     table can't serve them). Record the fixed/total split for ffi_call. */
+  cif->nfixedargs = nfixedargs;
+  if (cif->rtype->type == FFI_TYPE_COMPLEX)
+    return FFI_BAD_TYPEDEF;
+  return FFI_OK;
 }
 
 /* ---- argument loading: each scalar arg -> the i32 the wasm ABI passes ----- */
@@ -156,7 +180,176 @@ static unsigned ret_class(ffi_type *t) {
   }
 }
 
+/* ---- the runtime fallback: lower to wasm value types + __wasm_ffi_call ----- */
+
+/* wasm signature value-type codes in the descriptor passed to the host. */
+#define WSIG_VOID 0
+#define WSIG_I32  1
+#define WSIG_I64  2
+#define WSIG_F32  3
+#define WSIG_F64  4
+
+/* Is this a plain scalar the static i32/i64/f32/f64 accessors handle? */
+static int is_scalar(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_INT: case FFI_TYPE_UINT8: case FFI_TYPE_SINT8:
+    case FFI_TYPE_UINT16: case FFI_TYPE_SINT16:
+    case FFI_TYPE_UINT32: case FFI_TYPE_SINT32: case FFI_TYPE_POINTER:
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64:
+    case FFI_TYPE_FLOAT: case FFI_TYPE_DOUBLE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/* Does this call need the runtime path (struct/long-double by value, variadic,
+   or a scalar arity/mix the static table doesn't cover)? */
+static int needs_runtime(ffi_cif *cif) {
+  if (cif->nfixedargs != cif->nargs) return 1;       /* variadic */
+  if (cif->nargs > WASM_FFI_MAX_ARGS) return 1;
+  if (!is_scalar(cif->rtype) && cif->rtype->type != FFI_TYPE_VOID) return 1;
+  for (unsigned i = 0; i < cif->nargs; i++)
+    if (!is_scalar(cif->arg_types[i])) return 1;
+  /* Scalar & within count — but the static table also bounds the NON-i32 mix
+     (M) and the mixed arity (K). Let the static switch's own `default` catch
+     those rare cases and recurse into the runtime path. */
+  return 0;
+}
+
+/* wasm value-type code for a SCALAR ffi_type (the natural wasm passing type). */
+static uint8_t scalar_wcode(ffi_type *t) {
+  switch (t->type) {
+    case FFI_TYPE_UINT64: case FFI_TYPE_SINT64: return WSIG_I64;
+    case FFI_TYPE_FLOAT:  return WSIG_F32;
+    case FFI_TYPE_DOUBLE: return WSIG_F64;
+    default:              return WSIG_I32; /* ints/subwords/pointer */
+  }
+}
+
+/* Write a scalar arg into an 8-byte trampoline slot (little-endian; the
+   trampoline loads the natural width at the slot base). */
+static void write_scalar_slot(uint8_t *slot, ffi_type *t, void *p) {
+  switch (scalar_wcode(t)) {
+    case WSIG_I64: memcpy(slot, p, 8); break;
+    case WSIG_F32: memcpy(slot, p, 4); break;
+    case WSIG_F64: memcpy(slot, p, 8); break;
+    default: {
+      /* extend subword ints to a 32-bit value in the low 4 bytes */
+      uint32_t v = load_i32_arg(t, p);
+      memcpy(slot, &v, 4);
+      break;
+    }
+  }
+}
+
+/* Max lowered wasm params: real args + a leading struct-return pointer + a
+   trailing varargs-buffer pointer. WASM_FFI_MAX_ARGS is generous; add slack. */
+#define WSIG_MAX (WASM_FFI_MAX_ARGS + 64)
+
+static void wasm_runtime_ffi_call(ffi_cif *cif, void (*fn)(void),
+                                  void *rvalue, void **avalue) {
+  uint8_t sig[2 + WSIG_MAX];
+  uint8_t args[8 * WSIG_MAX];
+  unsigned np = 0;         /* lowered wasm param count */
+  unsigned nfixed = cif->nfixedargs;
+
+  int rt = cif->rtype->type;
+  int struct_ret = (rt == FFI_TYPE_STRUCT || rt == FFI_TYPE_LONGDOUBLE);
+
+  /* return code */
+  uint8_t retcode = WSIG_VOID;
+  if (struct_ret) {
+    /* struct/long double: caller passes rvalue as a leading pointer, call
+       returns void. rvalue must be non-NULL (libffi guarantees a buffer). */
+    retcode = WSIG_VOID;
+    ((uint32_t *)args)[0] = (uint32_t)(uintptr_t)rvalue;
+    /* zero the rest of the leading slot's high word */
+    ((uint32_t *)args)[1] = 0;
+    sig[2 + np] = WSIG_I32;
+    np++;
+  } else if (rt != FFI_TYPE_VOID) {
+    retcode = scalar_wcode(cif->rtype);
+  }
+
+  /* fixed args */
+  for (unsigned i = 0; i < nfixed; i++) {
+    ffi_type *t = cif->arg_types[i];
+    uint8_t *slot = args + (size_t)np * 8;
+    if (t->type == FFI_TYPE_STRUCT || t->type == FFI_TYPE_LONGDOUBLE) {
+      /* by-value aggregate -> pass a pointer to the (caller-owned) storage */
+      uint32_t ptr = (uint32_t)(uintptr_t)avalue[i];
+      memcpy(slot, &ptr, 4);
+      sig[2 + np] = WSIG_I32;
+    } else {
+      write_scalar_slot(slot, t, avalue[i]);
+      sig[2 + np] = scalar_wcode(t);
+    }
+    np++;
+    if (np >= WSIG_MAX) wasm_ffi_unsupported("too many lowered arguments");
+  }
+
+  /* variadic args: packed into a separate buffer, one trailing i32 pointer. */
+  uint8_t varbuf[8 * WSIG_MAX];
+  if (cif->nfixedargs != cif->nargs) {
+    size_t off = 0;
+    for (unsigned i = nfixed; i < cif->nargs; i++) {
+      ffi_type *t = cif->arg_types[i];
+      size_t sz, al;
+      if (t->type == FFI_TYPE_STRUCT || t->type == FFI_TYPE_LONGDOUBLE) {
+        /* aggregates in varargs are also passed by pointer on wasm */
+        sz = 4; al = 4;
+        off = (off + al - 1) & ~(al - 1);
+        if (off + sz > sizeof(varbuf)) wasm_ffi_unsupported("varargs buffer overflow");
+        uint32_t ptr = (uint32_t)(uintptr_t)avalue[i];
+        memcpy(varbuf + off, &ptr, 4);
+      } else {
+        sz = t->size; al = t->alignment;
+        off = (off + al - 1) & ~(al - 1);
+        if (off + sz > sizeof(varbuf)) wasm_ffi_unsupported("varargs buffer overflow");
+        memcpy(varbuf + off, avalue[i], sz);
+      }
+      off += sz;
+    }
+    uint8_t *slot = args + (size_t)np * 8;
+    uint32_t ptr = (uint32_t)(uintptr_t)varbuf;
+    memcpy(slot, &ptr, 4);
+    sig[2 + np] = WSIG_I32;
+    np++;
+  }
+
+  sig[0] = (uint8_t)np;
+  sig[1] = retcode;
+
+  /* retbuf: for scalar returns the host writes here; for struct returns the
+     value already goes to rvalue via the leading pointer, retbuf is unused. */
+  uint8_t retbuf[16];
+  int rc = __wasm_ffi_call((uint32_t)(uintptr_t)fn, args, retbuf, sig,
+                           (uint32_t)(2 + np));
+  if (rc != 0)
+    wasm_ffi_unsupported("runtime trampoline call failed");
+
+  if (!struct_ret && rt != FFI_TYPE_VOID && rvalue) {
+    switch (retcode) {
+      case WSIG_I64: memcpy(rvalue, retbuf, 8); break;
+      case WSIG_F32: memcpy(rvalue, retbuf, 4); break;
+      case WSIG_F64: memcpy(rvalue, retbuf, 8); break;
+      default: {
+        /* i32-class: libffi widens sub-word integer returns to ffi_arg. */
+        uint32_t v; memcpy(&v, retbuf, 4);
+        *(ffi_arg *)rvalue = (ffi_arg)v;
+        break;
+      }
+    }
+  }
+}
+
 void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue) {
+  if (needs_runtime(cif)) {
+    wasm_runtime_ffi_call(cif, fn, rvalue, avalue);
+    return;
+  }
+
   ffi_type **at = cif->arg_types;
   void **av = avalue;
   unsigned n = cif->nargs;
@@ -167,7 +360,8 @@ void ffi_call(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue) {
   switch (key) {
     #include "wasm-ffi-trampolines.inc"
     default:
-      wasm_ffi_unsupported("argument signature outside generated bounds");
+      /* within scalar count but outside the (K,M) mix bound — runtime path. */
+      wasm_runtime_ffi_call(cif, fn, rvalue, avalue);
   }
 }
 

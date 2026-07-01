@@ -24,6 +24,12 @@
 # (the runtime/dylink.js side-module loader), consumed by musl's wasm dlopen
 # port (patches/musl/0009).
 #
+# __wasm_ffi_call (#126 Track C / #130): the runtime-libffi host surface —
+# runtime/kernel-worker.js → runtime/ffi-codegen.js generates a trampoline
+# module for a call signature the static wasm32-raw-ffi.c table can't express
+# (structs/varargs/out-of-bounds arity). Consumed by patches/libffi/
+# wasm32-raw-ffi.c's runtime fallback.
+#
 # To intentionally add a host-provided symbol: add it here (one name per line)
 # with a comment explaining who provides it. Do NOT re-introduce a blanket
 # --allow-undefined to "make a link pass" — that defeats the contract.
@@ -44,4 +50,5 @@ pkgs.writeText "wasm-allow-undefined.txt" ''
   __wasm_dl_probe
   __wasm_dlopen
   __wasm_dlsym
+  __wasm_ffi_call
 ''

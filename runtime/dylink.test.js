@@ -241,6 +241,19 @@ describe("the fpcast canonical-thunk rule", () => {
       if (e.kind === 0) expect(slots.has(e.name)).toBe(true);
     }
   });
+
+  // NB: the fpcast STRUCTURAL fingerprint (isCanonicalSlot / info.fpcast) is
+  // keyed on the production canonical width (max-func-params@128 =
+  // CANONICAL_PARAMS). These main/side fixtures are built @8 (for readable
+  // canonArgs); the @128 detection is tested in ffi-codegen.test.js against the
+  // targets.fpcast.wasm fixture. isCanonicalSlot on the non-fpcast fixtures
+  // must be raw regardless:
+  test("isCanonicalSlot on a NON-fpcast program is always raw", () => {
+    const h = bootMain("main.wasm");
+    const { handle } = dlopen(h, "side.wasm");
+    expect(h.loader.isCanonicalSlot(h.loader.dlsym(handle, "side_taken"))).toBe(false);
+    expect(h.loader.isCanonicalSlot(h.loader.dlsym(handle, "side_fn"))).toBe(false);
+  });
 });
 
 describe("fork/clone replay (Track 0 §4)", () => {

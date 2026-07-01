@@ -9,6 +9,7 @@
 // virtio-9p transport (issue #10), serviced by the main-thread host devices —
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
 import { DynamicLoader } from "./dylink.js";
+import { FfiTrampolines } from "./ffi-codegen.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
@@ -105,6 +106,11 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   let dyn_loader = null;
   let dyn_replay = null;
   let user_executable_range = null;
+
+  /// pc (#130): the per-process runtime-FFI trampoline cache (runtime/
+  /// ffi-codegen.js) — built lazily on the first __wasm_ffi_call, sharing this
+  /// process's Memory + function table.
+  let ffi_trampolines = null;
 
   /// Flag that a clone callback should be called instead of _start().
   let should_call_clone_callback = false;
@@ -216,6 +222,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       });
     }
     return dyn_loader;
+  };
+
+  /// pc (#130): the runtime-FFI trampoline cache, over this process's Memory +
+  /// function table (the same table dlopen'd modules install into).
+  const ensure_ffi = () => {
+    if (!ffi_trampolines) {
+      ffi_trampolines = new FfiTrampolines({
+        memory,
+        table: user_executable_imports.env.__indirect_function_table,
+      });
+    }
+    return ffi_trampolines;
   };
 
   /// Get a JS string object from a (nul-terminated) C-string in a Uint8Array.
@@ -554,6 +572,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // the new image's byte range for the lazy loader.
       dyn_loader = null;
       dyn_replay = null;
+      ffi_trampolines = null;
       user_executable_range = { bin_start, bin_end };
       const bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
       user_executable = WebAssembly.compile(bytes);
@@ -1037,6 +1056,37 @@ import { SharedQueues } from "./virtio/shared-queues.js";
                 Number(handle),
                 get_cstring(memory, Number(namePtr)),
               );
+            },
+
+            // pc (#126 Track C / #130): runtime libffi. The in-tree
+            // wasm32-raw-ffi.c backend enumerates call signatures at BUILD time
+            // (a fixed trampoline table, bounded K=24/M=2, no structs/varargs);
+            // a call whose signature falls outside that table lands here. We
+            // generate + cache a wasm trampoline module for the EXACT signature
+            // (runtime/ffi-codegen.js — the same runtime-instantiation primitive
+            // dlopen uses) and invoke it. The signature is a byte descriptor at
+            // sigPtr: [nparams, retcode, p0code, …] where a code is 0=void
+            // (ret only), 1=i32, 2=i64, 3=f32, 4=f64. argPtr/retPtr are the
+            // 8-byte-slotted arg buffer + result slot the C backend prepared.
+            // Canonical-thunk targets (fpcast'd modules) get the (i64×128)->i64
+            // ABI; the loader decides from which module owns table[funcIndex].
+            __wasm_ffi_call: (funcIndex, argPtr, retPtr, sigPtr, sigLen) => {
+              const u8 = new Uint8Array(memory.buffer);
+              const base = Number(sigPtr);
+              const CODES = [null, "i32", "i64", "f32", "f64"];
+              const np = u8[base];
+              const ret = CODES[u8[base + 1]];
+              const params = [];
+              for (let i = 0; i < np; i++) params.push(CODES[u8[base + 2 + i]]);
+              const canonical = ensure_dyn_loader().isCanonicalSlot(Number(funcIndex));
+              ensure_ffi().call(
+                { params, result: ret },
+                canonical,
+                Number(funcIndex),
+                Number(argPtr),
+                Number(retPtr),
+              );
+              return 0;
             },
 
             // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's

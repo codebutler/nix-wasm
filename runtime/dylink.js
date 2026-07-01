@@ -50,9 +50,20 @@ const textDecoder = new TextDecoder("utf-8");
 
 // Wasm section ids.
 const SEC_CUSTOM = 0;
+const SEC_TYPE = 1;
 const SEC_IMPORT = 2;
 const SEC_EXPORT = 7;
 const SEC_ELEM = 9;
+
+// The fpcast-emu canonical param count (must match runtime/ffi-codegen.js
+// CANONICAL_PARAMS + userspace/fpcast-emu.nix `-pa max-func-params@128`). A
+// module carrying a type `(i64 × CANONICAL_PARAMS) -> i64` was fpcast'd — no
+// ordinary wasm has that signature, so it's a reliable structural fingerprint
+// (no build-side marker needed). Function pointers into such a module are
+// canonical thunks, which the runtime FFI path must call through the canonical
+// ABI (ffi-codegen.js).
+const CANONICAL_PARAMS = 128;
+const VT_I64 = 0x7e;
 
 // Import/export kinds.
 const KIND_FUNC = 0;
@@ -132,6 +143,7 @@ function skipLimits(c) {
  *   exports: { name: string, kind: number, index: number }[],
  *   elem: { offsetKind: "global" | "const", offsetConst: number, funcIndices: number[] } | null,
  *   dynsym: Map<string, number>,
+ *   fpcast: boolean,
  * }}
  */
 export function parseDylinkModule(bytes) {
@@ -154,13 +166,31 @@ export function parseDylinkModule(bytes) {
     exports: [],
     elem: null,
     dynsym: new Map(),
+    fpcast: false,
   };
 
   while (c.i < bytes.length) {
     const id = c.u8();
     const size = c.uleb();
     const end = c.i + size;
-    if (id === SEC_CUSTOM) {
+    if (id === SEC_TYPE) {
+      // Scan for the fpcast canonical signature (i64 × CANONICAL_PARAMS) -> i64.
+      const n = c.uleb();
+      for (let k = 0; k < n; k++) {
+        if (c.u8() !== 0x60) break; // functype tag; anything else = malformed
+        const np = c.uleb();
+        let allI64 = np === CANONICAL_PARAMS;
+        for (let j = 0; j < np; j++) {
+          if (c.u8() !== VT_I64) allI64 = false;
+        }
+        const nr = c.uleb();
+        let i64Ret = nr === 1;
+        for (let j = 0; j < nr; j++) {
+          if (c.u8() !== VT_I64) i64Ret = false;
+        }
+        if (allI64 && i64Ret) info.fpcast = true;
+      }
+    } else if (id === SEC_CUSTOM) {
       const start = c.i;
       const name = c.name();
       if (name === "cb.dynsym") {
@@ -309,6 +339,7 @@ export const DL_ERRNO = { ENOENT: 2, ENOMEM: 12, EINVAL: 22, ENOEXEC: 8 };
  *   instance: WebAssembly.Instance,
  *   elemSlots: Map<string, number>,
  *   dynSlots: Map<string, number>,
+ *   fpcast: boolean,
  * }} DlModule
  */
 
@@ -372,6 +403,7 @@ export class DynamicLoader {
       instance,
       elemSlots: exportedElemSlots(info),
       dynSlots: new Map(),
+      fpcast: info.fpcast,
     });
   }
 
@@ -440,6 +472,31 @@ export class DynamicLoader {
     return idx;
   }
 
+  /**
+   * Is table slot `index` a fpcast canonical thunk? Used by the runtime FFI
+   * path (kernel-worker __wasm_ffi_call) to pick the trampoline ABI. A slot is
+   * canonical iff it lands in a fpcast'd module's [tableBase, +tableCount)
+   * range and is NOT a dynamically-installed raw export (dynSlots are always
+   * raw, whatever module they belong to). Falls back to the main module's
+   * fpcast status for slots outside any recorded range (e.g. a program that
+   * never dlopen'd — its own function pointers follow its own build).
+   *
+   * @param {number} index
+   * @returns {boolean}
+   */
+  isCanonicalSlot(index) {
+    for (const m of this.modules) {
+      for (const slot of m.dynSlots.values()) {
+        if (slot === index) return false; // raw install, any module
+      }
+    }
+    for (const m of this.modules) {
+      if (index >= m.tableBase && index < m.tableBase + m.tableCount) return m.fpcast;
+    }
+    const main = this.modules[0];
+    return main ? main.fpcast : false;
+  }
+
   /** A data symbol's absolute address: defining module's memoryBase + relative export. */
   dataAddress(m, value) {
     return m.memoryBase + Number(/** @type {WebAssembly.Global} */ (value).value);
@@ -484,6 +541,7 @@ export class DynamicLoader {
       instance: /** @type {any} */ (null),
       elemSlots: exportedElemSlots(info),
       dynSlots: new Map(),
+      fpcast: info.fpcast,
     };
 
     // PHASE 1 — fallible resolution, with NO side effects on the table or the
