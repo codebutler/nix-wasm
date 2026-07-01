@@ -10,9 +10,14 @@ made on an *unmeasured* estimate (see §1).
 > One-line thesis: a **software MMU** (per-access translation, WAVEN-style) and the
 > **asyncify fork seam** (already built in PR #20) are the two halves that let the
 > guest run as **normal MMU Linux** and retire the entire NOMMU accommodation layer.
-> They do **not** solve **dlopen / dynamic linking** — that is a *code-loading*
-> problem, orthogonal to memory and stack, and it needs its own track (#33). This
-> doc must not let dlopen be forgotten.
+> They do **not**, on their own, solve **dlopen / dynamic linking** — but dlopen is
+> **not orthogonal to this plan**. It is the **third leg of the same process
+> abstraction**, sitting on the *same* per-process address-space + function-table +
+> relocation substrate the MMU/fork work builds (#33's own analysis calls that work
+> "enabling groundwork" for a dynamic loader, and fork-after-dlopen couples them). So
+> the process model must be **co-designed** with dynamic linking from day one — while
+> keeping dlopen's *delivery* independent, so the GModule win is never held hostage to
+> the MMU effort.
 
 ---
 
@@ -114,10 +119,21 @@ session transcript; key results:
 
 ---
 
-## 2. The two halves — what MMU + asyncify jointly unlock
+## 2. One process abstraction, three legs — sharing one substrate
+
+A real process is **three** things, all of which `fork()` must clone: an **address
+space**, an **execution context**, and a **code/module + function-table set**. NOMMU
+has a degenerate form of each. The three legs map to the three tracks — and their
+*designs* are **not** independent, because they share one substrate: a per-process
+address-space allocator, a per-process **function table**, and the GOT/relocation
+machinery. Decide that substrate once (Track 0, §4) or pay to redo it. Critically, the
+third leg (module/table set) is **engine state outside linear memory**, so the MMU's
+memory snapshot does **not** capture it — the process record must track it explicitly.
+
+Fork's two hard halves (memory + execution):
 
 Real `fork()` needs **both** an address-space clone **and** an execution-context clone.
-NOMMU has neither; the two pieces supply them:
+NOMMU has neither; MMU + asyncify supply them:
 
 | Half | Mechanism | Gives |
 |---|---|---|
@@ -147,12 +163,19 @@ single-user) becomes **real per-process protection**.
 
 ---
 
-## 3. The gap that SURVIVES: dlopen / dynamic linking (do not forget this)
+## 3. The third leg: dlopen / dynamic linking (co-designed, not bolted on)
 
-**MMU + asyncify do NOT fix dlopen.** dlopen is a *code-loading* problem, and in wasm
-**code lives outside linear memory**. Neither address translation (data) nor stack
-capture (execution) can load new executable code or resolve a symbol to a callable. So
-after both tracks land, these still fail exactly as today:
+**MMU + asyncify do NOT, by themselves, fix dlopen** — dlopen is a *code-loading*
+problem, and in wasm **code lives outside linear memory**, so neither address
+translation (data) nor stack capture (execution) can load code or resolve a symbol to a
+callable. But that same fact is *why dlopen is a first-class part of this plan, not a
+side quest*: because code/table state lives **outside** the MMU-governed memory image,
+the process abstraction must track a process's **module + function-table set as core
+process state** — the thing `fork()` clones and `dlopen` mutates. Design the process
+model without it and you build an abstraction that can't hold dynamic modules, then redo
+it. So dlopen is **design-coupled** to A/B via the shared substrate (§2, Track 0), even
+though it carries **independent delivery value** (below). After A/B alone, these still
+fail exactly as today:
 
 - GModule / gio modules / gdk-pixbuf loaders / `gtk_builder_connect_signals(NULL)`
   (galculator's real window, and any GtkBuilder-autoconnect app).
@@ -183,7 +206,26 @@ this until both tracks land — but bake the hook in from the start.)
 
 ---
 
-## 4. The three tracks
+## 4. The tracks
+
+### Track 0 — the shared process + function-table model (design once, up front)
+
+Before A1/B1/C1 diverge, decide the **process abstraction** and the **per-process
+function-table + PIC/dynamic-linking model** *once*, because all three legs read/write
+it:
+- **What a process IS**: its address-space region (A), its execution/asyncify state (B),
+  and its **loaded-module set + function table** (C). `fork()` clones all three; the
+  third is engine state *outside* linear memory, so the MMU snapshot does **not** capture
+  it — the process record must own it explicitly and the fork path must replay it.
+- **The function-table / function-pointer model** is the connective tissue shared by
+  `dlsym` (pointer = table index), fork's table-reproduction, and the existing
+  **fpcast-emu** hack (gobject signature casts) + the table-reloc bug (#33 point 2:
+  fn-pointer relocs must land at the right slot, not `table[0]`). One coherent model puts
+  dlopen, fork-clone, and fpcast on the same footing. (Whether a clean typed table lets
+  fpcast-emu be *retired* is an open question — §7 — not a promise.)
+- **Deliverable:** a short design note pinning the process record, per-process table
+  ownership, GOT/reloc handling, and the **fork-clone + dlopen-mutate contract** — the
+  shared spec A1, B1, and C1 all build against. Cheap; do it alongside the A0 spike.
 
 ### Track A — Software MMU (get the real number FIRST)
 
@@ -228,15 +270,20 @@ this until both tracks land — but bake the hook in from the start.)
 - **C2:** design the **fork × dlopen** replay hook (§3) so a forked child re-instantiates
   side modules.
 - Payoff: GModule works → galculator's real window, GtkBuilder autoconnect, gio/gdk-pixbuf
-  modules — the GTK per-app treadmill ends. **This is independent of A and B; it will not
-  fall out of them and must be tracked separately.**
+  modules — the GTK per-app treadmill ends. **Delivery is independent** (a narrow slice
+  ships on today's substrate — the galculator static path already did), so C must **not be
+  blocked** on the MMU megaproject. But its **design is not** independent: C1 builds on
+  Track 0's process/table model and A's per-process address-space substrate. *Integrate the
+  design; keep the schedule decoupled.*
 
 ---
 
 ## 5. Sequencing
 
-1. **Track A0 spike** — the measurement. Nothing else is justified until this number
-   exists. (Cheap; days.)
+0. **Track 0 design note** — the shared process + function-table model. Cheap, and it
+   gates coherent divergence of A1/B1/C1. Runs alongside the A0 spike.
+1. **Track A0 spike** — the measurement. Nothing else *big* is justified until this
+   number exists. (Cheap; days.)
 2. Branch on A0:
    - number acceptable → commit to **A1/A2** (the big kernel MMU effort) and, in
      parallel (independent), **Track C** (dlopen — the gap that A/B can't touch).
@@ -246,9 +293,12 @@ this until both tracks land — but bake the hook in from the start.)
 3. **Track B** (fork seam revival) follows A2 (needs COW to beat #29).
 4. **memory-control** watched throughout as A's eventual zero-cost backend.
 
-Note: **Track C (dlopen) has no dependency on A or B.** Even if the MMU work never
-happens, C is the highest-leverage item for "stop patching apps" on the GTK side. Do not
-let it ride A/B's coattails or slip.
+Note: **Track C (dlopen) is design-coupled but delivery-independent.** Its *design*
+shares Track 0's process/table model and A's address-space substrate — so it is decided
+*with* A/B, not after (build the process abstraction wrong and you redo it). Its
+*delivery* does not wait on the MMU: C is the highest-leverage item for "stop patching
+apps" on the GTK side and can ship a slice on today's substrate. **Integrate the design;
+decouple the schedule.**
 
 ---
 
