@@ -405,9 +405,51 @@ codegen," not "a dlopen loader."**
   **per-engine** rewrite, not systemic. Treat hard-JIT-required packages as out of scope.
 
 **Net after the whole stack + these:** a large fraction of normal C/C++ nixpkgs runs
-unmodified; the true residuals are **hard-JIT-required packages** and **FFI shapes even
-generated trampolines can't express** (rare). Everything else is mechanism-we-know-how-to-build
-or labor.
+unmodified. The libffi path is now **proven** (`spikes/ffi-codegen/`): runtime-generated
+trampoline modules call arbitrary scalar signatures — *including past the fixed backend's
+K=24/M=2 bounds* — so FFI is **finish-work** (structs/varargs/closures = more marshalling on
+the same mechanism), not a wall. The true residuals are **hard-JIT-required packages** and the
+**cross-build tail** — see §9 for the precise floor.
+
+## 9. The true floor (after the whole plan)
+
+What the guest is, and what's left, *after* Tracks 0/A/B/C + the cleanup (#131) — stated
+precisely so nobody mistakes "runtime walls gone" for "all of nixpkgs works."
+
+**The post-plan target is MMU, NOT NOMMU.** Tracks A/B + #131 rebuild musl with `fork`/`vfork`
+restored and the kernel with real `mmap`/COW/mprotect/isolation, so from the toolchain's view
+the target is a **normal MMU Linux wasm target** (`wasm32 … linux-musl`, MMU; *static-or-dynamic*
+once Track C adds a runtime linker). NOMMU is precisely what the plan **deletes** — do not
+describe the post-plan target as NOMMU.
+
+**But the LLVM triple stays `wasm32-unknown-unknown`, and that's fine.** The `-unknown` OS is a
+*toolchain* constraint, unrelated to the MMU: clang **rejects** `wasm32-…-linux-…` (LLVM's wasm
+backend only accepts OS `unknown`/`wasi`/`emscripten`), so the guest compiles as freestanding and
+the Linux-ness is re-supplied by flags (`-D__linux__ -matomics -mbulk-memory -fwasm-exceptions`).
+This persists after the plan — it's part of the *arch-exoticness*, not the memory model.
+
+The residual gaps, by kind:
+- **A. JIT — the one inherent wall (accepted non-goal).** wasm can't execute runtime-generated
+  *native* code. Interpreter fallback (`--disable-jit`) covers most; hard-JIT-required packages are
+  out of scope. (The runtime-*wasm*-codegen primitive from Track C is the only general escape, but
+  a per-engine port.)
+- **B. The cross-build tail — the *actual* ceiling on "most of nixpkgs," and it's
+  arch-exoticness, NOT NOMMU.** `wasm32` is a niche cross target with a bespoke static/dylink link
+  model (the `-unknown` re-supply above, `-fvisibility=hidden`, the wasm-ld ELF-flag filter, the
+  custom TLS `.o` link). This plan fixes the *runtime*, not the *build*; making the long tail
+  *cross-compile* is a **separate, mostly-generic cross-compilation epic** (levers: run target
+  wasm build-tools at build time; in-guest native builds via #92; upstream nixpkgs cross fixes).
+- **C. Coverage frontiers (shrink over time).** Missing/ENOSYS syscalls + compiled-out kernel
+  features (pc#137); single-CPU (`maxcpus=1`, no true SMP scaling); FFI structs/varargs/closures
+  (core **proven** in `spikes/ffi-codegen/`, the rest is marshalling).
+- **D. Inherently out of scope.** GPU/CUDA, kernel modules, direct hardware, hard real-time — a
+  browser wasm guest can't offer these by nature.
+- **Perf caveat (not correctness).** ~1.05–1.9× (eval-heavy worst, measured) until `memory-control`
+  ships and swaps in the hardware backend.
+
+**The reframe:** after the plan, the binding constraint flips from *"the process model is weird"*
+(solved) to *"does it cross-compile to an exotic wasm32 target"* (a generic cross-porting problem).
+That's a much better place to be — normal porting, not a fundamental wall.
 
 ## References
 
@@ -417,7 +459,8 @@ or labor.
   **#29** (fork-at-scale eager-copy cliff; COW gated on MMU), **#33** (dlopen/dlsym +
   fork×dlopen interaction), **#11** (revisit NOMMU Wayland accommodations if MMU lands).
 - In-repo: `docs/process-model.md`, `docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md`,
-  `spikes/{elastic-mem,nofork,stackswitch}/`, the asyncify seam (`toolchain/musl.nix`
+  the Track 0 note (`2026-07-01-process-model-track0-design.md`),
+  `spikes/{elastic-mem,nofork,stackswitch,softmmu,ffi-codegen}/`, the asyncify seam (`toolchain/musl.nix`
   `forkSeam`, `userspace/asyncify-cc.nix`, `toolchain/guest-cc-fork.nix`), PIC/dylink +
   GOT substrate (`wasm-cross.nix`).
 - External (measured, primary): WAVEN (NDSS 2025, `2025-746-paper.pdf`) — software MMU on
