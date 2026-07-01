@@ -55,9 +55,8 @@ and issue #24 estimated it differently:
 > "a 2–5× slowdown (cf. Emscripten SAFE_HEAP)."
 
 **These are estimates, and they disagree with each other** (2–5× vs 10–100×) — the tell
-that neither is a measurement. There is **no soft-MMU spike** in `spikes/` (only
-`elastic-mem`, `nofork`, `stackswitch`, which *are* real measurements). The soft MMU
-was ruled out by analogy to SAFE_HEAP, never benchmarked.
+that neither is a measurement. The soft MMU was ruled out by analogy to SAFE_HEAP, never
+benchmarked. **`spikes/softmmu/` now measures it** (see §1b) — the verdict was wrong.
 
 ### What the research actually found (2026-07-01 deep-research pass)
 
@@ -115,7 +114,36 @@ session transcript; key results:
   expect the higher end.
 - **Realistic budget: ~1.1× (optimistic) to ~1.3–1.7× (pessimistic).** Either way,
   squarely "worth prototyping," not "non-starter." **This is the number the project
-  never had, and the whole "too slow" verdict rested on it.**
+  never had, and the whole "too slow" verdict rested on it.** → now measured, §1b.
+
+### 1b. The A0 measurement (`spikes/softmmu/`) — the guess is now a number
+
+A wasm module run under **V8** (node) routes every load/store through a single-level
+page-table translate (WAVEN's model), vs plain access. Full data + method:
+`spikes/softmmu/FINDINGS.md`. Headline:
+
+| workload class | measured overhead |
+|---|---|
+| realistic — compute-dense (`mixed`) or memory-latency-bound (`chase`/`stride` DRAM) | **+1% to +8%** (reproduces WAVEN's ~10%) |
+| pathological — pure memory ops on a **cache-resident** working set (`seq`/`chase` L1, `store`) | **1.8×–2.7×** |
+| geomean across the (deliberately half-pathological) kernel set | 1.44× |
+
+Findings that matter:
+- **"10–100×" is decisively refuted** — the *worst* case is 2.67× (a loop that does
+  nothing but chase cache-resident pointers); real code is single-digit percent.
+- **The cost is fundamental**: a non-volatile PTE load (compiler free to hoist) measured
+  identical to a forced one — the optimizer cannot remove the per-access translate. (A
+  software TLB wouldn't help; WAVEN measured it *worse*.)
+- **These are the honest ratios for pc**: the baseline is V8 guard-page bounds checks
+  (≈ free, the fastest baseline), so no "replaced an existing check" discount hides cost.
+- **The risk to watch**: cache-resident pointer-chasing (interpreters / GC — and **nix
+  eval** is pointer-heavy) is the 2–2.7× case. But the *same* chase spilled to DRAM is
+  **+8%** (latency hides the PTE load), so sustained real eval likely lands well under
+  1.5×. Mitigations if a hot path bites: exempt provably-in-bounds stack/shadow-stack
+  accesses; selective instrumentation.
+
+**Verdict: viable.** ~1.05–1.3× for realistic guest workloads, with a bounded, known,
+mitigable worst case. The "too slow" prior is retired on evidence.
 
 ---
 
