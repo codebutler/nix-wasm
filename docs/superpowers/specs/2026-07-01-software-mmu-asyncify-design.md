@@ -361,6 +361,51 @@ decouple the schedule.**
 
 ---
 
+## 8. Residual gaps beyond the three walls (what this stack does NOT fix — and ideas)
+
+Tracks 0/A/B/C + the cleanup (#131) remove the **fork / dlopen / NOMMU-memory** walls. They
+do **not** make "most of nixpkgs build unmodified" — several independent axes survive.
+Captured so the epic isn't oversold and the ideas aren't lost.
+
+**The shared enabler.** Most of these collapse onto ONE primitive: **runtime wasm
+instantiation** — generate/instantiate a wasm module at runtime against the shared
+table/memory. Track C (#130) builds it for dlopen, but it is *more general than dlopen*:
+libffi and the only general JIT escape-hatch both ride on it. **Scope #130 as "runtime wasm
+codegen," not "a dlopen loader."**
+
+- **libffi (arbitrary runtime FFI).** The trampoline-table backend is bounded (K/M, no
+  structs/varargs/closures). Real fix: **generate a trampoline wasm module per needed
+  signature** (a fn with those param types that marshals from the arg buffer + `call_indirect`s
+  the right type), instantiate against the shared table, cache by signature; closures = a
+  generated context-capturing thunk; structs = the wasm C ABI's predictable lowering. This is
+  Track C's primitive. Engine path (parallel to `memory-control`): **`WebAssembly.Function`**
+  (type-reflection) would synthesize the funcref host-side with no module — cleaner, unshipped
+  in V8. Ship the generate-a-module form now.
+- **fpcast (strict `call_indirect` signature casts).** `--fpcast-emu` already *is* the fix
+  (opaque pointers killed LLVM's bitcast pass). Gap = it's a manual per-package opt-in.
+  Improvement is infra: **auto-apply the post-link pass to any binary whose closure pulls in
+  glib/gobject** (detect the dep), so it stops being an override. NOT global (that rewrites
+  every binary's calling convention — see the fpcast learning in CLAUDE.md).
+- **Unimplemented syscalls / compiled-out kernel features (pc#137).** Not a wall — coverage.
+  Each is a "port it" task like SA_RESTART / futex / the virtio devices were (`memfd_create`,
+  seccomp-as-allow, …). pc#137 is the audit; work it down. The VM-requiring ones arrive with
+  Track A.
+- **The cross-compile long tail.** Mostly generic nixpkgs cross quality. Two wasm-specific
+  levers: (1) **run target wasm build-tools at build time** through a runtime (node/wasmtime)
+  — unlike most cross targets, wasm binaries *are* host-runnable, fixing "package builds a
+  codegen tool then runs it"; (2) **build in-guest** (native to the target) via #92 instead of
+  cross — slow but sidesteps cross bugs for the tail.
+- **JIT — the one true residual wall (accepted non-goal).** wasm can't execute runtime-
+  generated *native* code. Softeners: most JIT packages run on their **interpreter fallback**
+  (`--disable-jit`: Lua/CPython/PCRE) so it's usually a build flag, not a break; the *general*
+  escape hatch is again runtime **wasm** codegen, but porting an engine's JIT to emit wasm is a
+  **per-engine** rewrite, not systemic. Treat hard-JIT-required packages as out of scope.
+
+**Net after the whole stack + these:** a large fraction of normal C/C++ nixpkgs runs
+unmodified; the true residuals are **hard-JIT-required packages** and **FFI shapes even
+generated trampolines can't express** (rare). Everything else is mechanism-we-know-how-to-build
+or labor.
+
 ## References
 
 - Issues: **#24** (MMU on wasm — the blocker & payoff; `memory-control` watch), **#23**
