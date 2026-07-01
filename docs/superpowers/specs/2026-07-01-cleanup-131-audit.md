@@ -45,7 +45,13 @@ nix/patch edit whose PROOF is the `dlopen-smoke.mjs` + GTK smokes on the box:
   normal loadable-loader build + ship `loaders.cache`; gdk-pixbuf `dlopen`s each
   loader on demand. **Verify:** `gtk-smoke.mjs` / a PNG-loading path in the
   browser.
-- [ ] **`patches/widget-factory/0001` — drop `add_callback_symbol`.** The patch
+- [ ] **`patches/widget-factory/0001` — drop `add_callback_symbol`.** (Mechanism
+  already BOOT-VERIFIED: `g_module_open(NULL)`/`g_module_symbol` reduce to
+  `dlopen(NULL)`/`dlsym`, exactly the path `dlopen-smoke` proves — the old #33
+  error was `g_module_open(NULL)` failing because dlopen was stubbed, now real.
+  This box is the widget-factory INTEGRATION: it needs the handlers exported
+  (`--export-dynamic`) + non-static so dlsym finds them by name — source surgery
+  the box does with a boot check.) The patch
   registers each `.ui` handler via `gtk_builder_add_callback_symbol` to dodge
   GModule. With real `dlopen(NULL)`/`dlsym` (musl 0009 + `--export-dynamic`),
   restore plain `gtk_builder_connect_signals(builder, NULL)`. **Requires** the
@@ -56,8 +62,9 @@ nix/patch edit whose PROOF is the `dlopen-smoke.mjs` + GTK smokes on the box:
 - [ ] **galculator — real window with no workaround.** galculator's 115 `.ui`
   handlers go through `gtk_builder_connect_signals(NULL)` → GModule → the real
   loader now. galculator already dynsym-injects (this PR wired it,
-  `deps-overlay.nix`). **Verify:** the manual browser click-to-42 (the
-  long-pending M4 visual) now works because GModule resolves.
+  `deps-overlay.nix`, and its binary now carries `cb.dynsym` — verified on the
+  build box). The GModule wall is gone (dlopen boot-verified); the click-to-42 is
+  now a browser-VISUAL check (needs a compositor), no longer a mechanism gap.
 - [x] **`runtime/kernel-worker.js` — real dlsym.** DONE in this PR: the
   `__wasm_dl_probe`/`__wasm_dlopen`/`__wasm_dlsym` host imports + the
   `DynamicLoader` back them; musl 0009 DEFINES `__dlsym_time64` as a real
