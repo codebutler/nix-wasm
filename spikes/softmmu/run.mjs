@@ -42,6 +42,9 @@ const kernels = [
   K("mixed (DRAM, 64MB)", (r) => e.mixed_base(DRAM, r), (r) => e.mixed_xlate(DRAM, r), (r) => e.mixed_xlateo(DRAM, r)),
   K("chase (L1, 32KB)",   (s) => e.chase_base(s), (s) => e.chase_xlate(s), (s) => e.chase_xlateo(s), () => e.build_chase(L1)),
   K("chase (DRAM, 64MB)", (s) => e.chase_base(s), (s) => e.chase_xlate(s), (s) => e.chase_xlateo(s), () => e.build_chase(DRAM)),
+  // nix-eval shape: value-graph walk (alloc + data-dependent pointer-chase + compute + store)
+  K("nix-eval (hot, 64KB)",  (s) => e.nixeval_base(s), (s) => e.nixeval_xlate(s), (s) => e.nixeval_xlateo(s), () => e.build_graph(4096)),
+  K("nix-eval (48MB graph)", (s) => e.nixeval_base(s), (s) => e.nixeval_xlate(s), (s) => e.nixeval_xlateo(s), () => e.build_graph(3 * 1024 * 1024)),
 ];
 
 console.log(`node ${process.version} — V8 ${process.versions.v8}\n`);

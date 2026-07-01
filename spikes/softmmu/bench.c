@@ -116,6 +116,40 @@ GEN_CHASE(chase_base, IDENT)
 GEN_CHASE(chase_xlate, xlate)
 GEN_CHASE(chase_xlateo, xlateo)
 
+// ---- nix-eval shape: lazy value-graph interpreter ----
+// A node is 4 u32 at byte offset i*16: [child0_off, child1_off, val, pad].
+// build_graph links each node to two random nodes (the value DAG); the walk
+// forces/looks-up along data-dependent pointers (defeats prefetch, like thunk
+// forcing), does a small primop per node, and memoizes a store back — the real
+// nix-eval cost shape: alloc + pointer-chase + modest compute + write-back.
+__attribute__((export_name("build_graph")))
+void build_graph(u32 nodes) {
+  for (u32 i = 0; i < nodes; i++) {
+    data[i * 4 + 0] = (xrand() % nodes) * 16u; // child0 byte offset
+    data[i * 4 + 1] = (xrand() % nodes) * 16u; // child1 byte offset
+    data[i * 4 + 2] = i;                        // val
+    data[i * 4 + 3] = 0;                        // pad
+  }
+}
+#define GEN_NIXEVAL(NAME, XL)                                                 \
+  __attribute__((export_name(#NAME)))                                         \
+  u32 NAME(u32 steps) {                                                       \
+    u32 off = 0, acc = 1, s = 0;                                              \
+    for (u32 i = 0; i < steps; i++) {                                         \
+      u32 c0 = *(u32 *)((char *)data + XL(off));                              \
+      u32 c1 = *(u32 *)((char *)data + XL(off + 4));                          \
+      u32 v = *(u32 *)((char *)data + XL(off + 8));                           \
+      acc = acc * 31u + v;                                                    \
+      *(u32 *)((char *)data + XL(off + 8)) = acc ^ (c0 + c1);                 \
+      off = (acc & 1u) ? c0 : c1;                                             \
+      s += off;                                                               \
+    }                                                                         \
+    return s ^ acc;                                                           \
+  }
+GEN_NIXEVAL(nixeval_base, IDENT)
+GEN_NIXEVAL(nixeval_xlate, xlate)
+GEN_NIXEVAL(nixeval_xlateo, xlateo)
+
 // ---- mixed: several arithmetic ops per load (realistic dilution) ----
 #define GEN_MIXED(NAME, XL)                                                   \
   __attribute__((export_name(#NAME)))                                         \
