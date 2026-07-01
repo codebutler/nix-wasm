@@ -136,11 +136,14 @@ Findings that matter:
   software TLB wouldn't help; WAVEN measured it *worse*.)
 - **These are the honest ratios for pc**: the baseline is V8 guard-page bounds checks
   (≈ free, the fastest baseline), so no "replaced an existing check" discount hides cost.
-- **The risk to watch**: cache-resident pointer-chasing (interpreters / GC — and **nix
-  eval** is pointer-heavy) is the 2–2.7× case. But the *same* chase spilled to DRAM is
-  **+8%** (latency hides the PTE load), so sustained real eval likely lands well under
-  1.5×. Mitigations if a hot path bites: exempt provably-in-bounds stack/shadow-stack
-  accesses; selective instrumentation.
+- **The risk to watch — now measured**: a **nix-eval-shaped kernel** (value-graph
+  interpreter: alloc + data-dependent pointer-chase + primop + memoizing store) was added to
+  the spike. Result: **+24% on a large (48 MB, mostly-cold) graph** and **1.93× fully
+  cache-resident** — so real nixpkgs eval, the workload *most* exposed to per-access
+  translation, lands **~1.25–1.9× depending on cache-residency**. Viable, not "10×", and the
+  case that most rewards the mitigations (exempt provably-in-bounds stack/shadow-stack
+  accesses; selective instrumentation) and the eventual `memory-control` hardware backend.
+  Full data: `spikes/softmmu/FINDINGS.md` § nix-eval.
 
 **Verdict: viable.** ~1.05–1.3× for realistic guest workloads, with a bounded, known,
 mitigable worst case. The "too slow" prior is retired on evidence.

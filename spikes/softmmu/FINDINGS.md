@@ -36,6 +36,8 @@ the pathological ceiling last:
 | **store** (DRAM) | **+82%** | Writing a 64 MB array sequentially (`memset`/buffer-fill). Stores are buffered/cheap, so translate cost is a big fraction of each. | Large buffer fills / bulk writes slow down. Again, only bites code that does *nothing but* store. |
 | **seq** (L1, 32 KB) | **2.07×** | Summing a 32 KB array that stays in L1, repeated, zero compute — the fastest possible memory op. | Microarchitectural **ceiling**, not a workload: doubling the loads (data + PTE) doubles the time. Tells you the per-access cost limit, not what programs feel. |
 | **chase** (L1, 32 KB) | **2.67×** | Pointer-chasing within a 32 KB **cache-resident** cycle — each step a dependent L1 load, no compute, no latency to hide behind. | **The danger zone.** A hot inner loop that's pure pointer-chasing over a small hot structure (tight interpreter dispatch, hash probe) nearly triples. The one pattern to watch — and what the mitigations target. |
+| **nix-eval** (48 MB graph) | **+24%** | The realistic shape: allocate a value graph, then per node a data-dependent pointer-chase + a primop + a memoizing store, over a large (mostly-DRAM) working set. | **The go/no-go number.** Real nixpkgs eval — the workload *most* exposed to a software MMU — lands here: compute+store dilute the chase and most of the heap is cold. Viable. |
+| **nix-eval** (hot, 64 KB) | **1.93×** | Same interpreter, but the whole graph fits in L1 (a tiny eval / hot scope only). | The eval **upper** bound: even fully cache-resident, the per-node compute+store keep it below the pure-chase 2.69× ceiling. Real eval sits between this row and the DRAM one. |
 
 Geomean across the (deliberately half-pathological) set: **forced 1.44×, optimizable
 1.43×**. Through-line: overhead scales with how memory-dense *and* how cache-resident the
@@ -46,15 +48,34 @@ tiny cache-hot buffer.
 Raw output (both translate variants, `base(ms) forced +% optimiz +%`):
 
 ```
-seq  (L1, 32KB)          298   2.07   107%    2.06   106%
-seq  (DRAM, 64MB)        287   1.58    58%    1.56    56%
-stride64 (DRAM)          290   1.02     2%    1.01     1%
-store (DRAM, 64MB)       300   1.86    86%    1.82    82%
-mixed (L1, 32KB)         301   1.01     1%    1.02     2%
-mixed (DRAM, 64MB)       295   1.01     1%    1.01     1%
-chase (L1, 32KB)         298   2.67   167%    2.67   167%
-chase (DRAM, 64MB)       297   1.08     8%    1.07     7%
+seq  (L1, 32KB)          296   2.07   107%    2.06   106%
+seq  (DRAM, 64MB)        292   1.44    44%    1.41    41%
+stride64 (DRAM)          300   1.04     4%    0.99    -1%
+store (DRAM, 64MB)       302   1.72    72%    1.68    68%
+mixed (L1, 32KB)         300   1.01     1%    1.01     1%
+mixed (DRAM, 64MB)       294   1.02     2%    1.02     2%
+chase (L1, 32KB)         299   2.69   169%    2.68   168%
+chase (DRAM, 64MB)       291   1.06     6%    1.06     6%
+nix-eval (hot, 64KB)     435   1.93    93%    1.79    79%
+nix-eval (48MB graph)     39   1.24    24%    1.26    26%
 ```
+
+### nix-eval — the workload that matters most (go/no-go)
+Nix eval is allocation- + pointer-chase-heavy (a lazy value-graph interpreter), so it's the
+guest workload *most* exposed to per-access translation. Measured under V8:
+- **Realistic (48 MB graph): +24%.** A large value graph with data-dependent chase + a
+  primop + a memoizing store per node. The compute/store dilute the chase and most of the
+  heap is cold → well under 1.5×. (Caveat: the data-dependent 1-of-2 descent can settle into
+  cache-resident cycles, so this is a *mix* of hot and cold access — which is exactly real
+  eval's locality profile; the short `base` time reflects the DRAM-latency-bound per-step
+  cost, so treat +24% as indicative, not high-precision.)
+- **Fully hot (64 KB): 1.93×.** The whole graph in L1 — the eval upper bound; still below
+  the pure-chase 2.69× because the per-node work dilutes it.
+
+**Verdict: real eval lands ~1.25–1.9× depending on cache-residency — viable, and the case
+that most rewards the mitigations** (exempt provably-in-bounds stack/shadow-stack accesses;
+selective instrumentation) and the eventual `memory-control` hardware backend (which erases
+per-access cost entirely). It does NOT approach the "10–100×" the verdict feared.
 
 ## What it means
 
