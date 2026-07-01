@@ -21,7 +21,7 @@ Parent: `2026-07-01-software-mmu-asyncify-design.md` (#126), issue #131.
 | Slice | Gate | Track status | Can execute here? |
 |---|---|---|---|
 | 1 — fork/spawn | Track B real `fork()` (#129) | mechanism recovered + engine tested; muslFork re-integration + COW pending (world build) | No — needs muslFork + boot |
-| 2 — dlopen | Track C GModule (#130) | **LANDED** (loader + musl 0009 + dynsym seam + libffi codegen, all node-tested) | Authorable; boot-verify on box |
+| 2 — dlopen | Track C GModule (#130) | **LANDED + BOOT-VERIFIED** (loader + musl 0009 + dynsym seam + libffi codegen; `dlopen-smoke` passes in a booted guest, galculator carries `cb.dynsym`) | Yes — being executed |
 | 3 — NOMMU memory | Track A real MMU (#128) | pass done+measured; kernel arch layer pending (world/kernel build) | No — needs CONFIG_MMU=y boot |
 
 ## Slice 2 — dlopen accommodations (gated on #130, LANDED)

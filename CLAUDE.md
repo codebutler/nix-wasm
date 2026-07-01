@@ -1015,7 +1015,7 @@ NOMMU/no-fork/no-dlopen accommodation layer (#126; sub-issues #127–#131; desig
 LANDED on-branch (node-tested where testable; nix/kernel halves build-gated to
 CI / the linux box, per the design's "ship what works" scope):
 
-- **Track C — dlopen / dynamic linking (#130): DONE + tested.** The general
+- **Track C — dlopen / dynamic linking (#130): DONE + BOOT-VERIFIED.** `runtime/demo/node/dlopen-smoke.mjs` passes in a real booted guest (both the raw and the dynsym+fpcast canonical-thunk dl paths run dlopen(NULL)/dlsym + side-module load off the guest FS + ctors); galculator builds with the dynsym seam (carries a `cb.dynsym` section) and its selftest passes. The general
   runtime side-module loader is `runtime/dylink.js` (`DynamicLoader`:
   instantiate PIC `SIDE_MODULE`s against the process Memory + shared table, GOT
   resolution, elem-slot `dlsym` per the fpcast rule, fork/clone REPLAY per Track
