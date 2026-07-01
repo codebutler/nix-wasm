@@ -36,6 +36,14 @@ pkgs.stdenv.mkDerivation {
     # dance on wasm (CRTJMP abort()s) → munmap+exit inline instead. Fixes GLib
     # GThreadPool worker exit → SIGILL that blocked GTK apps (gtk3-widget-factory).
     ../patches/musl/0008-wasm-unmapself-no-stack-switch.patch
+    # 0009 (#126 Track C / #130): real dlopen/dlsym/dlclose on wasm. The libc
+    # reads the side-module file + allocates its data region from the process
+    # arena; the ENGINE instantiates/links it (runtime/dylink.js via the
+    # __wasm_dl_probe/__wasm_dlopen/__wasm_dlsym host imports — ENGINE_ABI 8,
+    # allow-listed in wasm-host-imports.nix). Also resolves the long-dangling
+    # __dlsym_time64 import (dlfcn.h's time64 __REDIR of dlsym) to a REAL
+    # dlsym. dlclose is leak-until-exit (table slots can't be reclaimed).
+    ../patches/musl/0009-wasm-dlopen-dlsym-host-loader.patch
   ];
 
   nativeBuildInputs = [ bt ];
