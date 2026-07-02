@@ -75,6 +75,27 @@ arena ("physical RAM"); `pt_base` points at it.
 pages from the arena (the same allocator NOMMU uses today, now backing "physical"
 pages). `mm_struct` gains the table root; `pt_base` = that root's arena offset.
 
+**REVISED for A1 (empirical, 2026-07-02): standard 2-level, NOT single-level flat.**
+The `CONFIG_MMU=y` compile probe (§3a) showed the generic MM assumes a **page-sized**
+PTE table (`pte_alloc_one` returns a `struct page`; `pte_offset_*` masks within one
+page). A single flat 2^20-entry table is 4 MiB = 1024 pages, which fights every
+generic PTE-table helper. So A1 uses the **classic 32-bit 2-level split**
+(`PGDIR_SHIFT=22`, `PTRS_PER_PGD=1024`, `PTRS_PER_PTE=1024`, each PTE table one 4KB
+page) — fully standard, no fight with the generic MM. The cost is the pass grows
+from a **one-load** to a **two-load** walk:
+```
+pgd_e = u32[ pt_base + (va>>22)<<2 ]          // level 1: PGD entry (PTE-table phys base)
+pte   = u32[ (pgd_e & ~0xfff) + ((va>>12 & 0x3ff)<<2) ]   // level 2: PTE
+phys  = (pte & ~0xfff) + (va & 0xfff)
+```
+This is a small, separable change to `runtime/softmmu-pass.js` (`emitTranslate`) +
+a re-measurement (the spike's single-level ~1.05–1.9× is the floor; the 2nd
+dependent load adds one cache-friendly access). Tracked with the kernel work.
+`PAGE_SHIFT` MUST be 12 (both the pass and this split hard-code 4KB) — select
+`HAVE_PAGE_SIZE_4KB`. PTE format: bits 0–11 flags (present/write/user/accessed/
+dirty), bits 12–31 the physical page base; the A1 fast path can ignore flags
+(identity-clean), A2's extended pass masks `(pte & ~0xfff)` + checks present/write.
+
 ## 3. What `CONFIG_MMU=y` unlocks (and the arch must supply)
 
 Flipping the wasm arch from NOMMU to MMU means the generic Linux MM (which is
@@ -124,7 +145,21 @@ making the flat 2^20-entry PTE table the level the pass reads: `PGDIR_SHIFT=12`
 region so `pt_base` (set by `switch_mm` = the incoming mm's flat table) is what
 `va>>12` indexes. A 4 MiB flat table per process (the accepted A1 cost, §2).
 `PAGE_SHIFT` MUST be 12 (the pass hard-codes `>>12`); select the 4KB page size,
-not 64KB. Probe tree: `scratch-mmu-probe/` (not committed).
+not 64KB.
+
+**MILESTONE (2026-07-02): the arch MMU layer COMPILES + LINKS end-to-end** —
+`vmlinux` builds with `CONFIG_MMU=y` (4.1 MB); the default NOMMU build is
+unregressed (3.8 MB; every edit is `#ifdef CONFIG_MMU`-guarded, verified by
+rebuilding both). Error-surface progression while advancing the walls: generic
+`pgtable.h` (dozens) → swap/tlb (947) → 44 → 4 (elf macros) → 1 (binfmt_elf
+`start_thread`, fixed by `--disable CONFIG_BINFMT_ELF` since the guest execs
+wasm) → **0**. The layer is preserved as
+`docs/superpowers/notes/mmu-wip-0023-arch-layer.patch` (validated: reverse-applies
+cleanly; apply AFTER patches 0004–0022; **NOT yet wired into `kernel.nix`** — it
+does not BOOT yet). The remaining semantic core (switch_mm→pt_base, uaccess
+table-walk, exec address-space setup, fault entry, the pass 2-level walk, engine
+integration) is enumerated in
+`docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md`.
 
 ## 4. Context switch — the one hot action
 
