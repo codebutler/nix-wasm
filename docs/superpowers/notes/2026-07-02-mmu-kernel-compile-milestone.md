@@ -97,3 +97,32 @@ wall. Error surface progression: dozens (generic pgtable.h) → 8 → 947 (swap/
 
 Boot gate: a new `mmu-smoke` (boot the instrumented userspace under the MMU
 kernel — identity map first, then per-process tables).
+
+## HAZARD (found by analysis, must be resolved before/at first boot): vmalloc
+
+The design keeps the KERNEL uninstrumented — every kernel access is raw =
+identity (VA==PA). That is sound for kmalloc/linear-map memory, but under
+`CONFIG_MMU=y` the generic `mm/vmalloc.c` comes online (NOMMU's
+`vmalloc = kmalloc` in `mm/nommu.c` is compiled out): vmalloc allocates
+SCATTERED physical pages and maps them at `VMALLOC_START+` via kernel page
+tables (swapper_pg_dir) — which nothing walks for kernel code. An
+uninstrumented kernel dereferencing a vmalloc'd address reads unmapped linear
+memory → silent corruption, only observable at boot.
+
+Resolution paths (decide empirically at first boot):
+1. **A1 identity boot**: many vmalloc users are configured out of this guest
+   (no modules, no VMAP_STACK, no BPF); if early boot doesn't exercise
+   vmalloc, boot first and instrument later. Add a loud arch warning in
+   vmalloc paths (e.g. arch_vmap hooks / a boot-time pr_warn) so any use is
+   VISIBLE, never silent.
+2. **The correct-in-general endpoint: instrument the KERNEL too** — real MMU
+   hardware translates kernel accesses as well. Run the softmmu pass over
+   vmlinux with `pt_base = init_mm`'s tables, where the linear map is identity
+   (kmalloc cost = the measured mixed ~1.01×) and vmalloc regions genuinely
+   map scattered pages. This also removes the "kernel must be identity"
+   asymmetry from uaccess (though the soft walk stays, since user tables
+   differ per-mm). Bigger step: pass over vmlinux + engine pt_base for the
+   kernel instance + raw-exemption audit of the kernel's own PT accesses
+   (they're raw by construction — the pass only instruments translated
+   modules' own code; the kernel walking user tables through identity is
+   correct since PTE tables live in linear memory).
