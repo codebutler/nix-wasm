@@ -169,3 +169,33 @@ pt_base) works. What's left is cross-process rendezvous AFTER fork:
 
 Both are orthogonal to fork returning twice + COW, which is the Track B core and
 is DONE. `sync-to-pc.sh` (ENGINE_ABI 10) is required before a pc channel deploy.
+
+
+## UPDATE 2026-07-02 (final) — FULL fork()+wait() works; the "follow-up" was a pt_base bug
+
+The two "remaining follow-ups" (blocking-syscall wakeup + MAP_SHARED visibility)
+were NOT separate scheduler/shmem gaps — they were ONE engine bug, now fixed.
+
+A fault-rate boot trace showed the woken parent was correctly RESCHEDULED (it is
+switched back to pid 1 after the child fully exits) but then fault-looped 130M+
+times on its own stack against a FOREIGN page table. Root cause: the kernel's
+`switch_mm` calls the host import `__mmu_set_pt_base(next->pgd)` on every context
+switch, running in whatever worker executes the scheduler — including a task's
+OWN worker when it schedules out (`switch_mm(self, next)` writes `next`'s pgd
+into self's instance `__mmu_pt_base`, then self parks). Nothing cross-worker
+restored it, so on resume the instrumented user code walked the wrong table and
+faulted forever. Single-task A2 smokes never switch between two user tasks, so
+never hit it — the fork smoke is the first two-user-task test.
+
+Fix (pure engine, kernel unchanged): a worker's instance `pt_base` is IMMUTABLE
+after instantiation; `kernel-worker.js` remembers it as `own_pt_base` and
+re-applies it in `serialize_me` right after the task is woken, before returning
+to user code. This is a GENERAL software-MMU correctness fix for any two user
+tasks context-switching, not just fork.
+
+**Result:** `fork-smoke` now proves FULL POSIX fork()+wait() — the parent BLOCKS
+in `waitpid()`, is woken, reaps the child, and sees `WEXITSTATUS==7` — on top of
+fork returning twice + COW isolation. Gated in `nix-wasm.yml`. Track B is DONE.
+The #131 slice-1 payoff (retire forkshell ash, busybox spawn patches, glib's
+posix_spawn-only patch; unblock #93) is now unblocked. ENGINE_ABI 10 needs
+`runtime/sync-to-pc.sh` before a pc deploy.

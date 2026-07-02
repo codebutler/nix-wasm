@@ -1130,18 +1130,27 @@ CI / the linux box, per the design's "ship what works" scope):
   worker, `run_user_entry` drives the fork loop (parent unwind →
   `wasm_fork_current` → dual rewind on the SAME shared arena with per-process
   `pt_base`), a fork child REWINDS the captured stack at first run.
-  **Boot proof (one boot, `fork-smoke.mjs`, gated in `nix-wasm.yml`):**
-  `parent pid=0x1e witness=0x1b0` AND `child ret=0 witness=0x10c` — fork returned
-  twice, the private witness at one VA COW-diverged. Mechanism also unit-proven
-  in `softmmu-fork.test.js` (asyncify×softmmu×COW, two instances on one Memory).
-  **REMAINING follow-ups (deeper kernel completeness, NOT the fork mechanism):**
-  a BLOCKING syscall then wake in the rewound parent (`waitpid` of an exiting
-  child, `nanosleep`) is a lost-wakeup in the cooperative single-CPU scheduler —
-  the child IS linked (WNOHANG returns 0, not ECHILD); and MAP_SHARED
-  cross-process visibility. Both are cross-process rendezvous, orthogonal to fork
-  returning twice + COW. Full record:
+  **FULL POSIX fork()+wait() (one boot, `fork-smoke.mjs`, gated in `nix-wasm.yml`):**
+  `child ret=0 witness=0x10c` AND `parent pid=0x1e witness=0x1b0 status=0x7` —
+  fork returned twice, the private witness at one VA COW-diverged, and the parent
+  BLOCKED in `waitpid()`, was woken, and reaped the child's `exit(7)`. Mechanism
+  also unit-proven in `softmmu-fork.test.js` (asyncify×softmmu×COW, two instances
+  on one Memory).
+  **The keystone engine fix (a GENERAL software-MMU correctness bug, not
+  fork-specific):** the kernel's `switch_mm` calls `__mmu_set_pt_base(next->pgd)`
+  on every context switch, running in whatever worker executes the scheduler —
+  including a task's OWN worker when it schedules out (`switch_mm(self, next)`
+  writes `next`'s pgd into self's instance `__mmu_pt_base`, then self parks).
+  Nothing cross-worker restored it, so a woken task walked the WRONG page table
+  and fault-looped on its own stack (found via a fault-rate boot trace: 130M+
+  faults at one stack addr). A worker's instance `pt_base` is IMMUTABLE after
+  instantiation, so `kernel-worker.js` remembers it as `own_pt_base` and
+  re-applies it in `serialize_me` after each wake. Single-task A2 smokes never
+  switch between two user tasks, so never hit it — the fork smoke is the first
+  two-user-task test. This unblocks the **#131 slice-1 payoff** (retire forkshell
+  ash, busybox spawn patches, glib's posix_spawn-only patch; #93). Full record:
   `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md` (UPDATE
-  2026-07-02 later). ENGINE_ABI 10 needs `runtime/sync-to-pc.sh` before a pc deploy.
+  2026-07-02 final). ENGINE_ABI 10 needs `runtime/sync-to-pc.sh` before a pc deploy.
 - **#131 cleanup** — the payoff. Slice 2 (dlopen accommodations) is unblocked by
   Track C; slices 1/3 gated on Track B/A world builds. Execution-ready audit
   (each box + exact edit + verify gate): `docs/superpowers/specs/
