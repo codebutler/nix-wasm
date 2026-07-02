@@ -1,0 +1,42 @@
+# nix-wasm #128 A2 (a2=true only): drop the A1 full-populate accommodations
+# (VM_LOCKED def_flags + the initial-stack mm_populate) so the checked softmmu
+# translate's __wasm_mmu_fault path does real DEMAND PAGING. Applied after 0023.
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -318,14 +318,6 @@
+ 	setup_new_exec(bprm);
+ 
+ #ifdef CONFIG_MMU
+-	/*
+-	 * Software MMU (#128, A1): the fast-path translate has NO present
+-	 * check (the __mmu_fault demand-paging path is A2), so every user
+-	 * mapping must be POPULATED at creation. VM_LOCKED on def_flags makes
+-	 * all VMAs of this image mlockall-style populated.
+-	 */
+-	current->mm->def_flags |= VM_LOCKED;
+-
+ 	{
+ 		/*
+ 		 * The engine consumes the binary BYTES from kernel memory (see
+@@ -546,21 +538,6 @@
+ 	res = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
+ 	if (!res)
+ 		res = create_wasm_tables(bprm, bprm->p);
+-	if (!res) {
+-		/*
+-		 * A1 (#128): the fast-path translate has NO present check, so
+-		 * every page the program can touch must be POPULATED before the
+-		 * instrumented code runs. setup_arg_pages leaves the stack VMA
+-		 * demand-paged (MAP_GROWSDOWN); populate its whole initial
+-		 * extent now (VM_LOCKED is already on def_flags). Runtime stack
+-		 * GROWTH beyond this initial VMA needs the A2 present-check +
+-		 * __wasm_mmu_fault path — see arch/wasm/mm/fault.c.
+-		 */
+-		struct vm_area_struct *vma = find_vma(current->mm, bprm->p);
+-
+-		if (vma)
+-			mm_populate(vma->vm_start, vma->vm_end - vma->vm_start);
+-	}
+ #else
+ 	res = transfer_args_to_stack(bprm, &current->mm->start_stack);
+ 	if (!res)

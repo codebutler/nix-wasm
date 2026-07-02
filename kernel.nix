@@ -19,9 +19,9 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC, mmu ? false }:
+{ pkgs, kernelSrc, kernelCC, mmu ? false, a2 ? false, debugTrace ? false }:
 pkgs.stdenv.mkDerivation {
-  pname = if mmu then "vmlinux-wasm-mmu" else "vmlinux-wasm";
+  pname = if a2 then "vmlinux-wasm-mmu-a2" else if mmu then "vmlinux-wasm-mmu" else "vmlinux-wasm";
   version = "7.0-039e5f3e";
 
   src = kernelSrc;
@@ -119,6 +119,12 @@ pkgs.stdenv.mkDerivation {
   ] ++ pkgs.lib.optionals mmu [
     # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
     ./patches/kernel/0023-wasm-software-mmu.patch
+  ] ++ pkgs.lib.optionals a2 [
+    # #128 A2: drop the A1 full-populate so the checked translate demand-pages.
+    ./patches/kernel/0024-wasm-mmu-a2-demand-paging.patch
+  ] ++ pkgs.lib.optionals debugTrace [
+    # #128 A2 DEBUG: bounded printk trace of the __wasm_mmu_fault path.
+    ./patches/kernel/0025-mmu-debug-trace.patch
   ];
 
   # Guard against silent patch-fuzz corruption of the virtio device enum (the #84

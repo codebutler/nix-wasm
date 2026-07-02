@@ -56,6 +56,10 @@
       kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
       # #128 Track A: the CONFIG_MMU=y software-MMU vmlinux (applies patch 0023).
       kernelMmu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; };
+      # #128 A2: demand-paging kernel (VM_LOCKED/populate dropped) for checked userspace.
+      kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
+      # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
+      kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
@@ -183,6 +187,11 @@
       # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
       # mmu-init — minimal instrumented PID-1 for the software-MMU smoke (#128).
       mmuInit = import ./userspace/mmu-init.nix {
+        inherit cross;
+      };
+
+      # #128 A2: demand-paging PID-1 (checked-instrumented by the A2 smoke).
+      mmuInitA2 = import ./userspace/mmu-init-a2.nix {
         inherit cross;
       };
 
@@ -531,6 +540,8 @@
         # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
         kernel = kernel;
         kernel-mmu = kernelMmu;
+        kernel-mmu-a2 = kernelMmuA2;
+        kernel-mmu-a2-dbg = kernelMmuA2Dbg;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
@@ -598,6 +609,8 @@
         sigalrm-test = sigalrmTest;
         # minimal PID-1 for the software-MMU smoke (#128) → $out/bin/mmu-init.
         mmu-init = mmuInit;
+        # demand-paging PID-1 for the A2 smoke (#128) → $out/bin/mmu-init-a2.
+        mmu-init-a2 = mmuInitA2;
 
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.

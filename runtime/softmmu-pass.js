@@ -87,6 +87,221 @@ const VALTYPE = {
 
 const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
+// ---- A2: present-checked translate (#128 Track A2) -------------------------
+//
+// The A1 fast path (above) assumes every PTE is present — correct only under
+// a kernel that never demand-pages or COWs. `checked: true` instruments the
+// SAME inline walk with a present test after EACH level's load, but the test
+// DIFFERS by level to match the kernel's folded 2-level table format: the
+// LEVEL-1 pgd/pmd slot holds the bare pte-page physical address with NO flag
+// bits (present iff `entry != 0`, per arch/wasm pgtable.h pmd_present/pmd_none),
+// while only the LEAF pte carries `_PAGE_PRESENT` in bit 0 (present iff
+// `pte & 1`). On a miss the guest calls into the kernel's fault handler and
+// RE-WALKS
+// (the kernel is expected to have made the entry present — or to have
+// delivered a fatal signal instead of returning, per the generic MM's
+// handle_mm_fault contract), rather than emitting an untranslated/garbage
+// access. `checked` is OFF by default so every A1 test/measurement is
+// byte-for-byte unchanged.
+//
+// BULK OPS (memory.copy/fill/init) get their OWN checked translate: the
+// page-chunked helpers (memcpyHelperBody/memfillHelperBody/meminitHelperBody)
+// call an appended `__mmu_translate_ck(va,kind)` per chunk instead of the
+// plain unchecked `__mmu_translate(va)` — see `emitTranslateCall` — so a
+// chunk landing on a not-present page faults in with the correct permission
+// (dest=1 write, memcpy's src=0 read) instead of silently walking a zero PTE
+// onto page 0. `checkedTranslateBody` builds that appended function; it is
+// the SAME present-checked two-level walk as the inline path below, just
+// parameterized as a standalone function since a bulk op calls it once per
+// PAGE (a call here is fine — the "inline the translate" rule below is about
+// per-SCALAR-ACCESS cost, not per-page).
+//
+// The fault entry is NOT a bespoke host import — it reuses the EXISTING
+// syscall dispatch every guest binary already has: musl's wasm syscall ABI
+// (`arch/wasm/bits/asm.h` / `src/misc/wasm/syscalls.S`) exposes
+// `__wasm_syscall_2(sp, tp, nr, a, b) -> result`, imported as `env
+// .__wasm_syscall_2` by every guest binary that links libc (real guest
+// binaries always do — the process model is single-shared-arena over musl).
+// The kernel side of the fault entry (`arch/wasm/mm/fault.c
+// __wasm_mmu_fault(addr, kind)`) is dispatched off syscall nr 244
+// (`__NR_arch_specific_syscall`, the first of the reserved arch-private
+// 16-slot block — confirmed unused by wasm's syscall table), so the emitted
+// call is `__wasm_syscall_2(NR_MMU_FAULT, ea, kind)` — `sp`/`tp` are the
+// mandatory leading operands of the *real* `__wasm_syscall_2` ABI (musl's
+// `__SYSCALL_HEAD` pushes `__stack_pointer`/`__tls_base` ahead of the
+// syscall args), not extra plumbing invented by this pass.
+//
+// CONTRACT CHOICE (documented per the task): `checked: true` REQUIRES the
+// module to already import `__wasm_syscall_2` (type `(i32,i32,i32,i32,i32)
+// -> i32`) plus the `__stack_pointer`/`__tls_base` globals, and THROWS a
+// clear error if any are absent, rather than splicing a new function import
+// into the module. Splicing a function import would shift every existing
+// defined-function index by one everywhere a `call`/`call_indirect`/
+// `ref.func`/element-segment/export refers to a function by index — a
+// whole-module renumbering pass, for an import that (per the ABI note
+// above) every real checked-mode target already carries. REQUIRE is the
+// correct simpler contract: it matches reality (every musl-linked guest
+// binary imports these three already) and keeps the module surgery in this
+// pass limited to APPENDING (types/funcs/globals/exports), which is the
+// invariant the rest of `instrument()` already relies on.
+export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unistd.h)
+
+/** Fault `kind` for an atomic op: RMW/cmpxchg/store need write permission. */
+function atomicFaultKind(sub) {
+  return sub >= 0x17 ? 1 : 0;
+}
+
+/** [name, nextIndex] — read a wasm length-prefixed name at `i`. */
+function readName(b, i) {
+  let len;
+  [len, i] = readU(b, i);
+  let str = "";
+  for (let k = 0; k < len; k++) str += String.fromCharCode(b[i + k]);
+  return [str, i + len];
+}
+
+/** Parse the import section into ordered func/global entries (index == position). */
+function parseImportsDetailed(body) {
+  let i = 0;
+  let n;
+  [n, i] = readU(body, 0);
+  const funcs = [];
+  const globals = [];
+  for (let k = 0; k < n; k++) {
+    let mod, name;
+    [mod, i] = readName(body, i);
+    [name, i] = readName(body, i);
+    const ek = body[i++];
+    if (ek === 0x00) {
+      let t;
+      [t, i] = readU(body, i);
+      funcs.push({ module: mod, name, typeIdx: t });
+    } else if (ek === 0x01) {
+      i++; // elemtype
+      const fl = body[i++];
+      [, i] = readU(body, i);
+      if (fl & 1) [, i] = readU(body, i);
+    } else if (ek === 0x02) {
+      const fl = body[i++];
+      [, i] = readU(body, i);
+      if (fl & 1) [, i] = readU(body, i);
+    } else if (ek === 0x03) {
+      const vt = body[i++];
+      const mut = body[i++];
+      globals.push({ module: mod, name, valtype: vt, mutable: mut });
+    }
+  }
+  return { funcs, globals };
+}
+
+/** Parse the type section into [{params:[valtype…], results:[valtype…]}]. */
+function parseTypeEntries(typeBody) {
+  if (!typeBody) return [];
+  let i = 0;
+  let n;
+  [n, i] = readU(typeBody, 0);
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    if (typeBody[i++] !== 0x60) throw new Error("softmmu: bad functype");
+    let np;
+    [np, i] = readU(typeBody, i);
+    const params = [];
+    for (let p = 0; p < np; p++) params.push(typeBody[i++]);
+    let nr;
+    [nr, i] = readU(typeBody, i);
+    const results = [];
+    for (let r = 0; r < nr; r++) results.push(typeBody[i++]);
+    out.push({ params, results });
+  }
+  return out;
+}
+
+/**
+ * Resolve + validate the three imports `checked: true` requires. Throws a
+ * clear, specific error (never silently degrades to unchecked) when any is
+ * missing or has an unexpected signature.
+ *
+ * @param {{id:number, body:Uint8Array}|undefined} importSec
+ * @param {{id:number, body:Uint8Array}|undefined} typeSec
+ * @param {{id:number, body:Uint8Array}|undefined} exportSec
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}}
+ */
+function resolveCheckedImports(importSec, typeSec, exportSec) {
+  if (!importSec) {
+    throw new Error(
+      'softmmu: checked mode requires imports for "__wasm_syscall_2", ' +
+        '"__stack_pointer", and "__tls_base" — this module has no import section',
+    );
+  }
+  const { funcs, globals } = parseImportsDetailed(importSec.body);
+  const syscallFuncIdx = funcs.findIndex((f) => f.name === "__wasm_syscall_2");
+  if (syscallFuncIdx === -1) {
+    throw new Error(
+      'softmmu: checked mode requires the module to import "__wasm_syscall_2" ' +
+        "(musl's syscall2 host trap, used here to route NR_MMU_FAULT to the " +
+        "kernel's fault handler) — every real guest binary that links libc " +
+        "imports it; this module does not",
+    );
+  }
+  const types = parseTypeEntries(typeSec ? typeSec.body : null);
+  const sig = types[funcs[syscallFuncIdx].typeIdx];
+  const wantParams = [VT.i32, VT.i32, VT.i32, VT.i32, VT.i32];
+  const isExpectedSig =
+    sig &&
+    sig.params.length === wantParams.length &&
+    sig.params.every((t, idx) => t === wantParams[idx]) &&
+    sig.results.length === 1 &&
+    sig.results[0] === VT.i32;
+  if (!isExpectedSig) {
+    throw new Error(
+      'softmmu: checked mode: imported "__wasm_syscall_2" has an unexpected ' +
+        "signature (expected (i32,i32,i32,i32,i32)->i32 — sp,tp,nr,a,b, matching " +
+        "musl's arch/wasm/bits/asm.h)",
+    );
+  }
+  const spGlobalIdx = globals.findIndex((g) => g.name === "__stack_pointer");
+  if (spGlobalIdx === -1) {
+    throw new Error(
+      'softmmu: checked mode requires the module to import the "__stack_pointer" global',
+    );
+  }
+  // tp = the current task's TLS base. A static musl binary keeps __tls_base as
+  // an INTERNAL global (not imported/named), exposed only via the exported
+  // __get_tls_base() function — which the engine relies on universally (it
+  // calls the __set_tls_base pair on every user instance). So source tp by
+  // CALLING __get_tls_base, exactly as musl's own syscall wrapper effectively
+  // does, rather than reading a (usually absent) named global.
+  const tlsFuncIdx = findExportFuncIdx(exportSec, "__get_tls_base");
+  if (tlsFuncIdx === -1) {
+    throw new Error(
+      'softmmu: checked mode requires the module to export "__get_tls_base" ' +
+        "(the TLS-base accessor musl emits + the engine drives via __set_tls_base); " +
+        "this module does not",
+    );
+  }
+  return { syscallFuncIdx, spGlobalIdx, tlsFuncIdx };
+}
+
+/** Find an exported FUNCTION's index by name (export kind 0). -1 if absent. */
+function findExportFuncIdx(exportSec, name) {
+  if (!exportSec) return -1;
+  const b = exportSec.body;
+  let i = 0;
+  let n;
+  [n, i] = readU(b, 0);
+  for (let k = 0; k < n; k++) {
+    let len;
+    [len, i] = readU(b, i);
+    const nm = String.fromCharCode(...b.subarray(i, i + len));
+    i += len;
+    const kind = b[i++];
+    let idx;
+    [idx, i] = readU(b, i);
+    if (kind === 0 && nm === name) return idx;
+  }
+  return -1;
+}
+
 // ---- atomic memory ops (0xfe prefix) ---------------------------------------
 //
 // The guest's musl pthread is atomics-heavy, so a real-guest instrumented boot
@@ -357,9 +572,13 @@ function skipAtomic(b, i) {
  * @param {Uint8Array} code the function body (local decls + instrs, no size prefix)
  * @param {number} numParams
  * @param {number} ptBaseGlobal
+ * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
+ *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
+ *   default A1 unchecked fast path (byte-identical to before A2 existed).
  * @returns {number[]}
  */
-export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
+export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns, checked = null) {
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -381,14 +600,21 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
   //     — operand SLOT B (an atomic's second operand: cmpxchg replacement /
   //       wait timeout). Slot A and B use disjoint locals so a two-operand
   //       atomic with same-typed operands never clobbers.
+  //   base+7 pgd_e, base+8 pte (checked mode only)
+  //     — the A2 present-checked walk's level-1/level-2 entries, held in
+  //       locals so the present-bit test can consume a copy (local.tee)
+  //       while the unmasked value is still needed for the next level /
+  //       the final phys computation.
   const base = numParams + existingLocalCount;
   const EA = base;
   const VAL = { i32: base + 1, i64: base + 2, f32: base + 3, f64: base + 4 };
   const B = { i32: base + 5, i64: base + 6 };
+  const PGD_E = base + 7;
+  const PTE = base + 8;
 
   const out = [];
-  // new local-decl vec: existing groups + 6 appended groups
-  out.push(...u(nLocals + 6));
+  // new local-decl vec: existing 6 groups + 1 more (pgd_e+pte) when checked
+  out.push(...u(nLocals + 6 + (checked ? 1 : 0)));
   for (let k = localsStart; k < localsEnd; k++) out.push(code[k]);
   out.push(...u(2), VT.i32); // ea + val_i32
   out.push(...u(1), VT.i64); // val_i64
@@ -396,6 +622,7 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
   out.push(...u(1), VT.f64); // val_f64
   out.push(...u(1), VT.i32); // b_i32
   out.push(...u(1), VT.i64); // b_i64
+  if (checked) out.push(...u(2), VT.i32); // pgd_e + pte (A2 scratch)
 
   // emit the inline translate producing `phys` on the stack from `ea` in $EA.
   // TWO-LEVEL walk matching the kernel arch layer (design §2 revised: the
@@ -406,24 +633,115 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
   // Low 12 bits of both entries are MASKED — kernel PTEs carry flag bits
   // (present/write/accessed/dirty); the A1 fast path ignores them but must
   // not let them corrupt the address.
-  const emitTranslate = () => {
+  // emitFaultCall(kind): __wasm_syscall_2(sp, tp, NR_MMU_FAULT, ea, kind),
+  // result dropped (the retry loop re-walks rather than consuming a value).
+  // Only valid when `checked` is set (resolveCheckedImports already verified
+  // the import + its signature).
+  const emitFaultCall = (kind) => {
+    out.push(0x23, ...u(checked.spGlobalIdx)); // global.get __stack_pointer
+    out.push(0x10, ...u(checked.tlsFuncIdx)); // call __get_tls_base -> tp
+    out.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(kind)); // i32.const kind
+    out.push(0x10, ...u(checked.syscallFuncIdx)); // call __wasm_syscall_2
+    out.push(0x1a); // drop
+  };
+
+  // emitTranslate(kind): leaves `phys` (i32) on the stack from `ea` in $EA.
+  // `kind` (0=load, 1=store/rmw/cmpxchg) is only used by the checked variant
+  // (the fault's access-kind argument) — the unchecked fast path ignores it.
+  //
+  // UNCHECKED (default, checked===null): the A1 fast path — pure two-level
+  // walk, no present check (byte-identical to the pre-A2 pass).
+  //
+  // CHECKED: the SAME two-level walk, but after each level's raw i32.load a
+  // present-bit test (`entry & 1`) gates a `call __wasm_syscall_2(NR_MMU_FAULT,
+  // ea, kind)` + RE-WALK (a `block $done (result i32) { loop $retry { … } }`:
+  // a clear bit calls the fault handler then `br $retry`; present falls
+  // through; the final phys computation `br $done`s out with the result). The
+  // kernel's fault handler is expected to have made the entry present (or to
+  // have delivered a fatal signal instead of returning) — the loop simply
+  // re-reads, it does not bound the retry count, exactly like a hardware page
+  // fault. Entries are held in $pgd_e/$pte locals (`local.tee`) so the
+  // present-bit test can consume a copy while the raw value survives for the
+  // next level / the final address computation.
+  const emitTranslate = (kind) => {
+    if (!checked) {
+      out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
+      out.push(0x20, ...u(EA)); // local.get ea
+      out.push(0x41, ...s(22), 0x76); // i32.const 22 ; i32.shr_u  -> pgd index
+      out.push(0x41, ...s(2), 0x74); // i32.const 2 ; i32.shl      -> *4
+      out.push(0x6a); // i32.add -> pt_base + pgdi*4
+      out.push(0x28, 0x02, ...u(0)); // i32.load align=2 off=0 -> pgd_e (RAW)
+      out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
+      out.push(0x20, ...u(EA)); // local.get ea
+      out.push(0x41, ...s(12), 0x76); // >>> 12
+      out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff -> pte index
+      out.push(0x41, ...s(2), 0x74); // << 2
+      out.push(0x6a); // i32.add
+      out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
+      out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+      out.push(0x20, ...u(EA)); // local.get ea
+      out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
+      out.push(0x6a); // i32.add -> phys
+      return;
+    }
+    out.push(0x02, VT.i32); // block $done (result i32)
+    out.push(0x03, 0x40); // loop $retry (void)
+    // level 1: pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
     out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
     out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(22), 0x76); // i32.const 22 ; i32.shr_u  -> pgd index
-    out.push(0x41, ...s(2), 0x74); // i32.const 2 ; i32.shl      -> *4
-    out.push(0x6a); // i32.add -> pt_base + pgdi*4
-    out.push(0x28, 0x02, ...u(0)); // i32.load align=2 off=0 -> pgd_e (RAW)
+    out.push(0x41, ...s(22), 0x76); // >>> 22
+    out.push(0x41, ...s(2), 0x74); // << 2
+    out.push(0x6a); // add
+    out.push(0x28, 0x02, ...u(0)); // i32.load -> pgd_e (RAW)
+    out.push(0x22, ...u(PGD_E)); // local.tee pgd_e (keep a copy on stack)
+    // LEVEL-1 (PGD/PMD) present test is "entry != 0", NOT "bit 0 set". The
+    // kernel's folded 2-level tables store the bare pte-page PHYSICAL address in
+    // the pgd/pmd slot with NO flag bits (arch/wasm pgtable.h: pmd_present(pmd)
+    // = pmd_val(pmd), pmd_none = !pmd_val, pmd_page_vaddr = pmd_val & PAGE_MASK).
+    // Only the LEAF pte carries _PAGE_PRESENT in bit 0. Testing bit 0 here would
+    // read a validly-populated pgd entry (e.g. 0x206ed000) as not-present and
+    // fault forever. So the present bit lives at the leaf; the branch node is
+    // present iff nonzero.
+    out.push(0x45); // i32.eqz -> pgd_e == 0 ("not present")
+    out.push(0x04, 0x40); // if (void)
+    emitFaultCall(kind);
+    out.push(0x0c, ...u(1)); // br $retry
+    out.push(0x0b); // end if
+    // level 2: pte = u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]
+    out.push(0x20, ...u(PGD_E)); // local.get pgd_e
     out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(12), 0x76); // >>> 12
-    out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff -> pte index
+    out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff
     out.push(0x41, ...s(2), 0x74); // << 2
-    out.push(0x6a); // i32.add
+    out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
+    out.push(0x22, ...u(PTE)); // local.tee pte (keep a copy on stack)
+    out.push(0x41, ...s(1), 0x71); // & 1 (present bit)
+    out.push(0x45); // i32.eqz -> "not present"
+    out.push(0x04, 0x40); // if (void)
+    emitFaultCall(kind);
+    out.push(0x0c, ...u(1)); // br $retry
+    out.push(0x0b); // end if
+    // phys = (pte & ~0xfff) + (ea & 0xfff); exit with it as $done's result.
+    out.push(0x20, ...u(PTE)); // local.get pte
     out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-    out.push(0x6a); // i32.add -> phys
+    out.push(0x6a); // add -> phys
+    out.push(0x0c, ...u(1)); // br $done (carries phys out of the loop+block)
+    out.push(0x0b); // end loop
+    // The loop is ALWAYS exited via one of the `br`s above (never falls off
+    // the end), but wasm validation does not propagate that "unreachable"
+    // fact past a nested construct's `end`: after the loop frame pops, the
+    // $done block's OWN reachability is independent (it was reachable when
+    // the loop was entered) and its `end` requires an actual i32 on the
+    // stack. An explicit `unreachable` here (dead at runtime — every path
+    // through the loop already branched out) satisfies that statically.
+    out.push(0x00); // unreachable
+    out.push(0x0b); // end block -> phys left on the value stack
   };
 
   i = localsEnd;
@@ -439,7 +757,7 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
         // stack: va  ->  ea = va + offset (in $EA), then phys, then raw load
         if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
         out.push(0x21, ...u(EA)); // local.set ea
-        emitTranslate(); // -> phys
+        emitTranslate(0); // -> phys (kind=0 load)
         out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
       } else {
         // stack: va, value  ->  save value, ea, phys, value, raw store
@@ -447,7 +765,7 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
         out.push(0x21, ...u(vl)); // local.set val
         if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
         out.push(0x21, ...u(EA)); // local.set ea
-        emitTranslate(); // -> phys
+        emitTranslate(1); // -> phys (kind=1 store)
         out.push(0x20, ...u(vl)); // local.get val
         out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
       }
@@ -479,7 +797,7 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
       // addr on top → ea = addr + offset
       if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
       out.push(0x21, ...u(EA)); // local.set ea
-      emitTranslate(); // -> phys
+      emitTranslate(atomicFaultKind(sub)); // -> phys
       // restore operands in order
       for (let k = 0; k < a.opsAbove.length; k++) {
         out.push(0x20, ...u(scratch[k])); // local.get
@@ -731,8 +1049,38 @@ function emitBwdBound(o, x, n, dst) {
   );
 }
 
-/** __mmu_memcpy(d,s,n) body — overlap-aware page-chunked memory.copy. */
-function memcpyHelperBody(translateFunc) {
+/**
+ * Emit the call that turns a translated virtual address (already pushed on
+ * the stack) into a physical one, for use inside a bulk-memory helper body.
+ *
+ * UNCHECKED (`ckFunc` nullish — the default): `call __mmu_translate(va)` —
+ * byte-for-byte what these helpers emitted before the bulk ops were made
+ * present-checked (A1 fast path, no fault-in).
+ *
+ * CHECKED (`ckFunc` given): push the access `kind` (0=read, 1=write — the
+ * permission this chunk needs faulted in) and `call
+ * __mmu_translate_ck(va, kind)` instead, so a not-present page underneath a
+ * memory.copy/fill/init faults in with the CORRECT permission — exactly like
+ * the inline scalar/atomic translate's present check — instead of silently
+ * walking a zero PTE and landing on page 0.
+ */
+function emitTranslateCall(o, translateFunc, ckFunc, kind) {
+  if (ckFunc != null) {
+    o.push(I.i32c, ...s(kind), I.call, ...u(ckFunc));
+  } else {
+    o.push(I.call, ...u(translateFunc));
+  }
+}
+
+/**
+ * __mmu_memcpy(d,s,n) body — overlap-aware page-chunked memory.copy.
+ *
+ * @param {number} translateFunc the plain (unchecked) `__mmu_translate` helper
+ * @param {number|null} [ckFunc] the checked `__mmu_translate_ck(va,kind)`
+ *   helper — when given, dest chunks fault in with kind=1 (write) and src
+ *   chunks with kind=0 (read); omit/null for the unchecked A1 fast path.
+ */
+function memcpyHelperBody(translateFunc, ckFunc = null) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -752,8 +1100,10 @@ function memcpyHelperBody(translateFunc) {
   emitMinCT(o, c, t);
   emitMinCN(o, c, n);
   o.push(I.lget, ...u(n), I.lget, ...u(c), I.sub, I.lset, ...u(n)); // n -= c (chunk at base+n)
-  o.push(I.lget, ...u(d), I.lget, ...u(n), I.add, I.call, ...u(translateFunc));
-  o.push(I.lget, ...u(sp), I.lget, ...u(n), I.add, I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(d), I.lget, ...u(n), I.add);
+  emitTranslateCall(o, translateFunc, ckFunc, 1); // dest: write
+  o.push(I.lget, ...u(sp), I.lget, ...u(n), I.add);
+  emitTranslateCall(o, translateFunc, ckFunc, 0); // src: read
   o.push(I.lget, ...u(c));
   o.push(0xfc, 0x0a, 0x00, 0x00); // raw memory.copy
   o.push(I.br, ...u(0)); // -> C
@@ -767,8 +1117,10 @@ function memcpyHelperBody(translateFunc) {
   emitFwdBound(o, sp, t);
   emitMinCT(o, c, t);
   emitMinCN(o, c, n);
-  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
-  o.push(I.lget, ...u(sp), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(d));
+  emitTranslateCall(o, translateFunc, ckFunc, 1); // dest: write
+  o.push(I.lget, ...u(sp));
+  emitTranslateCall(o, translateFunc, ckFunc, 0); // src: read
   o.push(I.lget, ...u(c));
   o.push(0xfc, 0x0a, 0x00, 0x00); // raw memory.copy
   o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
@@ -780,8 +1132,15 @@ function memcpyHelperBody(translateFunc) {
   return o;
 }
 
-/** __mmu_memfill(d,v,n) body. */
-function memfillHelperBody(translateFunc) {
+/**
+ * __mmu_memfill(d,v,n) body.
+ *
+ * @param {number} translateFunc the plain (unchecked) `__mmu_translate` helper
+ * @param {number|null} [ckFunc] the checked `__mmu_translate_ck(va,kind)`
+ *   helper — when given, dest chunks fault in with kind=1 (write); omit/null
+ *   for the unchecked A1 fast path.
+ */
+function memfillHelperBody(translateFunc, ckFunc = null) {
   const d = 0,
     v = 1,
     n = 2,
@@ -792,7 +1151,8 @@ function memfillHelperBody(translateFunc) {
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
   emitMinCN(o, c, n);
-  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(d));
+  emitTranslateCall(o, translateFunc, ckFunc, 1); // dest: write
   o.push(I.lget, ...u(v), I.lget, ...u(c));
   o.push(0xfc, 0x0b, 0x00); // raw memory.fill
   o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
@@ -802,8 +1162,17 @@ function memfillHelperBody(translateFunc) {
   return o;
 }
 
-/** __mmu_meminit_<seg>(d,s,n) body — s is an offset INTO segment (untranslated). */
-function meminitHelperBody(translateFunc, seg) {
+/**
+ * __mmu_meminit_<seg>(d,s,n) body — s is an offset INTO segment (untranslated,
+ * so only `d` is ever translated).
+ *
+ * @param {number} translateFunc the plain (unchecked) `__mmu_translate` helper
+ * @param {number|null} ckFunc the checked `__mmu_translate_ck(va,kind)`
+ *   helper — when given, dest chunks fault in with kind=1 (write); pass null
+ *   for the unchecked A1 fast path.
+ * @param {number} seg the data-segment index
+ */
+function meminitHelperBody(translateFunc, ckFunc, seg) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -814,7 +1183,8 @@ function meminitHelperBody(translateFunc, seg) {
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
   emitMinCN(o, c, n);
-  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(d));
+  emitTranslateCall(o, translateFunc, ckFunc, 1); // dest: write
   o.push(I.lget, ...u(sp), I.lget, ...u(c));
   o.push(0xfc, 0x08, ...u(seg), 0x00); // raw memory.init <seg>
   o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
@@ -826,10 +1196,91 @@ function meminitHelperBody(translateFunc, seg) {
 }
 
 /**
+ * __mmu_translate_ck(va, kind) -> phys — the CHECKED counterpart to the plain
+ * `__mmu_translate` helper (translateBody below), appended ONLY when
+ * `checked: true`. Bulk-memory helpers (memcpy/memfill/meminit) call THIS
+ * one per page-chunk instead of the plain helper so a memory.copy/fill/init
+ * touching a not-present page faults in (with the right kind — see
+ * `emitTranslateCall`) rather than walking a zero PTE. Same present-checked
+ * two-level walk + retry-via-`br $retry` as the INLINE checked path in
+ * `rewriteFuncBody`'s `emitTranslate`, just parameterized as a standalone
+ * function (`va`/`kind` are params, not per-call-site locals+closures) since
+ * bulk callers pass a fresh `(va, kind)` per page-chunk via `call`.
+ *
+ * @param {number} ptBaseGlobal the pt_base global index
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}} checkedCtx
+ */
+function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
+  const VA = 0;
+  const KIND = 1;
+  const PGD_E = 2;
+  const PTE = 3;
+  const o = [];
+  o.push(...u(1), ...u(2), VT.i32); // locals: pgd_e, pte (both i32)
+  const emitFault = () => {
+    o.push(0x23, ...u(checkedCtx.spGlobalIdx)); // global.get __stack_pointer
+    o.push(0x10, ...u(checkedCtx.tlsFuncIdx)); // call __get_tls_base -> tp
+    o.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
+    o.push(0x20, ...u(VA)); // local.get va
+    o.push(0x20, ...u(KIND)); // local.get kind
+    o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
+    o.push(0x1a); // drop
+  };
+  o.push(0x02, VT.i32); // block $done (result i32)
+  o.push(0x03, 0x40); // loop $retry (void)
+  // level 1: pgd_e = u32[ pt_base + (va>>>22)<<2 ]
+  o.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
+  o.push(0x20, ...u(VA)); // local.get va
+  o.push(0x41, ...s(22), 0x76); // >>> 22
+  o.push(0x41, ...s(2), 0x74); // << 2
+  o.push(0x6a); // add
+  o.push(0x28, 0x02, ...u(0)); // i32.load -> pgd_e (RAW)
+  o.push(0x22, ...u(PGD_E)); // local.tee pgd_e
+  // LEVEL-1 present test is "entry != 0" (bare pte-page phys, no flags) — see
+  // the inline emitTranslate for the full rationale. Only the leaf pte tests
+  // bit 0.
+  o.push(0x45); // i32.eqz -> pgd_e == 0 ("not present")
+  o.push(0x04, 0x40); // if (void)
+  emitFault();
+  o.push(0x0c, ...u(1)); // br $retry
+  o.push(0x0b); // end if
+  // level 2: pte = u32[ (pgd_e & ~0xfff) + ((va>>>12 & 0x3ff)<<2) ]
+  o.push(0x20, ...u(PGD_E)); // local.get pgd_e
+  o.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
+  o.push(0x20, ...u(VA)); // local.get va
+  o.push(0x41, ...s(12), 0x76); // >>> 12
+  o.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff
+  o.push(0x41, ...s(2), 0x74); // << 2
+  o.push(0x6a); // add
+  o.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
+  o.push(0x22, ...u(PTE)); // local.tee pte
+  o.push(0x41, ...s(1), 0x71); // & 1 (present bit)
+  o.push(0x45); // i32.eqz -> "not present"
+  o.push(0x04, 0x40); // if (void)
+  emitFault();
+  o.push(0x0c, ...u(1)); // br $retry
+  o.push(0x0b); // end if
+  // phys = (pte & ~0xfff) + (va & 0xfff); exit with it as $done's result.
+  o.push(0x20, ...u(PTE)); // local.get pte
+  o.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+  o.push(0x20, ...u(VA)); // local.get va
+  o.push(0x41, ...s(0xfff), 0x71); // & 0xfff
+  o.push(0x6a); // add -> phys
+  o.push(0x0c, ...u(1)); // br $done (carries phys out of the loop+block)
+  o.push(0x0b); // end loop (always exited via a br — see rewriteFuncBody's
+  // identical comment on the inline checked path for why the trailing
+  // `unreachable` is needed for wasm validation)
+  o.push(0x00); // unreachable
+  o.push(0x0b); // end block -> phys left on the value stack
+  o.push(0x0b); // end function
+  return o;
+}
+
+/**
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
- * @param {{ exportControls?: boolean }} [opts]
+ * @param {{ exportControls?: boolean, checked?: boolean }} [opts]
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -846,6 +1297,10 @@ export function instrument(bytes, opts = {}) {
   const codeSec = byId(10);
   const startSec = byId(8);
   if (!codeSec) throw new Error("softmmu: no code section");
+
+  // A2 present-check context (null -> every rewritten function stays on the
+  // A1 unchecked fast path, byte-identical to before A2 existed).
+  const checkedCtx = opts.checked ? resolveCheckedImports(importSec, typeSec, byId(7)) : null;
 
   // The wasm START function (__wasm_init_memory under --shared-memory) runs
   // DURING instantiation — before the embedder can set __mmu_pt_base — so its
@@ -867,9 +1322,16 @@ export function instrument(bytes, opts = {}) {
 
   // Appended functions: the translate helper (type (i32)->i32 at nTypes), then
   // the bulk-memory helpers (type (i32,i32,i32)->() at nTypes+1): __mmu_memcpy,
-  // __mmu_memfill, one __mmu_meminit per memory.init'd data segment.
+  // __mmu_memfill, one __mmu_meminit per memory.init'd data segment. When
+  // checked, ONE more function is appended AFTER all of the above: the
+  // checked translate helper `__mmu_translate_ck(va,kind)->phys` (type
+  // (i32,i32)->i32 at nTypes+2) that the bulk helpers call instead of the
+  // plain one, so a bulk op's page-chunk present-faults with the right kind
+  // (see `emitTranslateCall`). Placing it AFTER the existing appended set
+  // keeps every unchecked index formula below untouched.
   const translateType = nTypes;
   const bulkType = nTypes + 1;
+  const checkedTranslateType = nTypes + 2;
   const translateFunc = nImpFuncs + nDefFuncs;
   const bulkFns = {
     memcpy: translateFunc + 1,
@@ -877,6 +1339,7 @@ export function instrument(bytes, opts = {}) {
     meminit: new Map(unhandled.initSegs.map((seg, k) => [seg, translateFunc + 3 + k])),
   };
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
+  const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
 
   // --- rewrite each defined function body inline -----------------------------
   const cb = codeSec.body;
@@ -890,7 +1353,7 @@ export function instrument(bytes, opts = {}) {
     const body = cb.subarray(ci, ci + size);
     ci += size;
     const numParams = paramCounts[defTypes[f]] ?? 0;
-    const rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns);
+    const rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx);
     newCodeEntries.push([...u(rewritten.length), ...rewritten]);
   }
   // append the translate helper body (RAW loads — it IS the translate):
@@ -942,18 +1405,26 @@ export function instrument(bytes, opts = {}) {
   ];
   newCodeEntries.push([...u(translateBody.length), ...translateBody]);
   for (const body of [
-    memcpyHelperBody(translateFunc),
-    memfillHelperBody(translateFunc),
-    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, seg)),
+    memcpyHelperBody(translateFunc, checkedTranslateFunc),
+    memfillHelperBody(translateFunc, checkedTranslateFunc),
+    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
   ]) {
     newCodeEntries.push([...u(body.length), ...body]);
   }
-  const newCodeBody = [...u(nCode + 1 + nAppended), ...newCodeEntries.flat()];
+  if (checkedCtx) {
+    const ckBody = checkedTranslateBody(ptBaseGlobal, checkedCtx);
+    newCodeEntries.push([...u(ckBody.length), ...ckBody]);
+  }
+  const newCodeBody = [
+    ...u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0)),
+    ...newCodeEntries.flat(),
+  ];
 
-  // --- type section: append (i32)->i32 ---------------------------------------
+  // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
+  // only) (i32,i32)->i32 -------------------------------------------------
   const typeExistingTail = typeSec ? typeSec.body.subarray(u(nTypes).length) : [];
   const newTypeBody = [
-    ...u(nTypes + 2),
+    ...u(nTypes + 2 + (checkedCtx ? 1 : 0)),
     ...typeExistingTail,
     0x60,
     ...u(1),
@@ -966,15 +1437,27 @@ export function instrument(bytes, opts = {}) {
     VT.i32,
     VT.i32,
     ...u(0), // (i32,i32,i32)->(): bulk helpers
+    ...(checkedCtx
+      ? [
+          0x60,
+          ...u(2),
+          VT.i32,
+          VT.i32,
+          ...u(1),
+          VT.i32, // (i32,i32)->i32: checked translate (va,kind)->phys
+        ]
+      : []),
   ];
 
-  // --- function section: append the translate helper's type index ------------
+  // --- function section: append the translate helper's type index, then the
+  // bulk helpers', then (checked only) the checked translate helper's -------
   const funcExistingTail = funcSec ? funcSec.body.subarray(u(nDefFuncs).length) : [];
   const newFuncBody = [
-    ...u(nDefFuncs + 1 + nAppended),
+    ...u(nDefFuncs + 1 + nAppended + (checkedCtx ? 1 : 0)),
     ...funcExistingTail,
     ...u(translateType),
     ...Array.from({ length: nAppended }, () => u(bulkType)).flat(),
+    ...(checkedCtx ? u(checkedTranslateType) : []),
   ];
 
   // --- global section: append pt_base (i32 mutable, init 0) -------------------
@@ -992,8 +1475,8 @@ export function instrument(bytes, opts = {}) {
   // --- export section (optional) ---------------------------------------------
   // __mmu_pt_base and __mmu_start are ALWAYS exported — an instrumented image
   // is only runnable if the embedder can set the table root and then run the
-  // (stripped) start function. __mmu_translate is the optional introspection
-  // control.
+  // (stripped) start function. __mmu_translate (and, when checked,
+  // __mmu_translate_ck) are the optional introspection controls.
   const exSec = byId(7);
   const nEx = exSec ? readU(exSec.body, 0)[0] : 0;
   const exTail = exSec ? exSec.body.subarray(u(nEx).length) : [];
@@ -1002,6 +1485,9 @@ export function instrument(bytes, opts = {}) {
     [...nb("__mmu_pt_base"), 0x03, ...u(ptBaseGlobal)],
     ...(startFunc !== null ? [[...nb("__mmu_start"), 0x00, ...u(startFunc)]] : []),
     ...(opts.exportControls ? [[...nb("__mmu_translate"), 0x00, ...u(translateFunc)]] : []),
+    ...(opts.exportControls && checkedCtx
+      ? [[...nb("__mmu_translate_ck"), 0x00, ...u(checkedTranslateFunc)]]
+      : []),
   ];
   const newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
 

@@ -1073,10 +1073,36 @@ CI / the linux box, per the design's "ship what works" scope):
   silently mistranslated (caught: one checksum nibble wrote 0x00 through a zero
   PTE). Engine half: ENGINE_ABI 9 — `pt_base` rides the exec ABI, applied to the
   instrumented image's `__mmu_pt_base` global at instantiation (per-task
-  instances each carry their own root). **REMAINING:** the A2 present-check in
-  the translate (runtime demand paging / stack growth beyond the initial VMA),
-  then wiring mmu-smoke into `nix-wasm.yml`. Design +
+  instances each carry their own root). Design +
   `docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md`.
+- **Track A2 — demand paging / present-checked translate: DONE + BOOT-VERIFIED
+  (2026-07-02).** `checked: true` instruments the SAME inline walk with a
+  present test after each level; on a miss it calls
+  `env.__wasm_syscall_2(NR_arch_specific_syscall=244, ea, kind)` — reusing the
+  existing syscall entry (NO new ABI; still ENGINE_ABI 9) — routed to
+  `sys_wasm_mmu_fault → __wasm_mmu_fault → handle_mm_fault`, then RE-WALKS. The
+  kernel half drops the A1 full-populate (`patches/kernel/0024`, `a2=true`:
+  removes `VM_LOCKED` def_flags + the initial-stack `mm_populate`) so pages
+  fault in for real. `nix build .#kernel-mmu-a2` + `runtime/demo/node/
+  mmu-smoke-a2.mjs` boots a CHECKED-instrumented init that demand-zero-mmaps
+  8 MiB (per-page write/read/checksum), grows the stack via deep recursion, and
+  PASSES all three (alive + bit-exact mmap checksum + stack-grow). **The
+  keystone fix, found by BOOTING (an infinite refault loop, addr `0x400002c0`
+  handler-returns-0-but-re-walk-still-faults):** the present TEST DIFFERS BY
+  LEVEL. The kernel's folded 2-level tables store the bare pte-page PHYSICAL
+  address in the pgd/pmd slot with NO flag bits (`pmd_present(pmd)=pmd_val`,
+  `pmd_none=!pmd_val`), and only the LEAF pte carries `_PAGE_PRESENT` in bit 0.
+  The pass originally tested `& 1` at BOTH levels, so a validly-populated pgd
+  entry (`0x206ed000`, bit 0 clear) read as not-present and faulted forever.
+  Fix: level-1 present = `entry != 0` (`i32.eqz`), leaf present = `pte & 1` —
+  in both the inline `emitTranslate` and the bulk-op `checkedTranslateBody`.
+  Diagnosed via a gated debug kernel (`.#kernel-mmu-a2-dbg`,
+  `patches/kernel/0025`, `debugTrace=true`) that raw-walks `mm->pgd` after
+  `handle_mm_fault` exactly as the pass does. Same wasm-can't-do-hardware theme:
+  the software walk must match the kernel's PTE/PMD format bit-for-bit. **REMAINING
+  for Track A:** COW-on-write + mprotect coverage (the fault handler already
+  routes WRITE/EXEC kinds through the generic MM, but a dedicated COW gate is
+  not yet written), then wiring mmu-smoke + mmu-smoke-a2 into `nix-wasm.yml`.
 - **Track B — asyncify fork seam: recovered + generalized.** `runtime/asyncify.js`
   (the double-return engine, 6 node tests) recovered from PR #20;
   `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in (B1). The

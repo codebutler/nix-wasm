@@ -10,7 +10,7 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { instrument, scanUnhandled } from "./softmmu-pass.js";
+import { NR_MMU_FAULT, instrument, scanUnhandled } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -332,5 +332,390 @@ describe("bulk-memory ops (0xfc) — memory.copy/fill/init through the page tabl
     b.inst.exports.bulk_fill(V + 8, 0x5a, 16);
     expect(u8[P2 + 8]).toBe(0x5a);
     expect(u8[P2 + 23]).toBe(0x5a);
+  });
+});
+
+describe("checked (A2 present-check) translate", () => {
+  // A hand-built fixture (no toolchain available here — mirrors the existing
+  // hand-crafted SIMD-refusal module above) that carries what `checked: true`
+  // now requires: an env.__wasm_syscall_2 import ((i32×5)->i32, matching
+  // musl's real arch/wasm/bits/asm.h ABI), an env.__stack_pointer import (i32
+  // mutable global), and an EXPORTED __get_tls_base() -> i32 function (the
+  // real musl/engine ABI: tp is sourced by CALLING it, not by reading an
+  // imported __tls_base global — see resolveCheckedImports). This fixture's
+  // __get_tls_base returns a fixed sentinel (0x1234) so tests can assert the
+  // fault call actually round-trips it. Two more exported funcs:
+  // load_u8(va)->i32 (a scalar load — fault kind 0) and store_u8(va,v) (a
+  // scalar store — fault kind 1).
+  function leb_u(n) {
+    const out = [];
+    let v = n >>> 0;
+    do {
+      let x = v & 0x7f;
+      v >>>= 7;
+      if (v) x |= 0x80;
+      out.push(x);
+    } while (v);
+    return out;
+  }
+  function leb_s(n) {
+    const out = [];
+    let more = true;
+    let v = n | 0;
+    while (more) {
+      let x = v & 0x7f;
+      v >>= 7;
+      if ((v === 0 && !(x & 0x40)) || (v === -1 && x & 0x40)) more = false;
+      else x |= 0x80;
+      out.push(x);
+    }
+    return out;
+  }
+  const vecb = (items) => [...leb_u(items.length), ...items.flat()];
+  const sectb = (id, payload) => [id, ...leb_u(payload.length), ...payload];
+  const strb = (str) => [...leb_u(str.length), ...[...str].map((c) => c.charCodeAt(0))];
+  const funcType = (params, results) => [
+    0x60,
+    ...leb_u(params.length),
+    ...params,
+    ...leb_u(results.length),
+    ...results,
+  ];
+  const I32 = 0x7f;
+
+  /**
+   * @param {{omitTlsExport?: boolean}} [opts] `omitTlsExport` builds the
+   *   function but does NOT export it — used to test resolveCheckedImports'
+   *   dedicated "requires __get_tls_base export" error path.
+   */
+  function buildCheckedFixture(opts = {}) {
+    const types = [
+      funcType([I32], [I32]), // 0: load_u8(va) -> i32
+      funcType([I32, I32], []), // 1: store_u8(va, v)
+      funcType([I32, I32, I32, I32, I32], [I32]), // 2: __wasm_syscall_2
+      funcType([], [I32]), // 3: __get_tls_base() -> i32
+    ];
+    const typeSec = sectb(1, vecb(types));
+
+    const imports = [
+      [...strb("env"), ...strb("__wasm_syscall_2"), 0x00, ...leb_u(2)],
+      [...strb("env"), ...strb("__stack_pointer"), 0x03, I32, 0x01],
+    ];
+    const importSec = sectb(2, vecb(imports));
+
+    // defined funcs (func idx 0 is the __wasm_syscall_2 import):
+    //   1: load_u8 (type 0)   2: store_u8 (type 1)   3: __get_tls_base (type 3)
+    const funcSec = sectb(3, vecb([leb_u(0), leb_u(1), leb_u(3)]));
+    const memSec = sectb(5, vecb([[0x00, ...leb_u(32)]]));
+
+    const exports = [
+      [...strb("memory"), 0x02, ...leb_u(0)],
+      [...strb("load_u8"), 0x00, ...leb_u(1)],
+      [...strb("store_u8"), 0x00, ...leb_u(2)],
+      ...(opts.omitTlsExport ? [] : [[...strb("__get_tls_base"), 0x00, ...leb_u(3)]]),
+    ];
+    const exportSec = sectb(7, vecb(exports));
+
+    const readBody = [...leb_u(0), 0x20, 0x00, 0x2d, 0x00, 0x00, 0x0b]; // i32.load8_u
+    const writeBody = [...leb_u(0), 0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, 0x0b]; // i32.store8
+    const tlsBody = [...leb_u(0), 0x41, ...leb_s(0x1234), 0x0b]; // i32.const 0x1234
+    const codeSec = sectb(
+      10,
+      [
+        ...leb_u(3),
+        ...leb_u(readBody.length),
+        ...readBody,
+        ...leb_u(writeBody.length),
+        ...writeBody,
+        ...leb_u(tlsBody.length),
+        ...tlsBody,
+      ].flat(),
+    );
+
+    return new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      ...typeSec,
+      ...importSec,
+      ...funcSec,
+      ...memSec,
+      ...exportSec,
+      ...codeSec,
+    ]);
+  }
+
+  const PT = 0x40000;
+  const HEAP = 0x100000;
+
+  /**
+   * Instantiate an instrumented checked-fixture module with a real two-level
+   * identity page table EXCEPT the page containing `notPresentVa` (left with
+   * a zero PTE, i.e. absent), and a mock __wasm_syscall_2 that records every
+   * call and, on the first fault for a given page, installs an identity
+   * mapping for it (so the retry succeeds) — exactly the contract a real
+   * kernel fault handler provides (make present, or don't return).
+   */
+  function bootChecked(instrumentedBytes, notPresentVa) {
+    const mod = new WebAssembly.Module(instrumentedBytes);
+    const calls = [];
+    const rawCalls = []; // full (sp, tp, nr, ea, kind) — used by the tp round-trip test
+    const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
+    let inst;
+    const fault = (sp, tp, nr, ea, kind) => {
+      rawCalls.push({
+        sp: Number(sp),
+        tp: Number(tp),
+        nr: Number(nr),
+        ea: Number(ea),
+        kind: Number(kind),
+      });
+      calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
+      const t = new Uint32Array(inst.exports.memory.buffer);
+      const va = Number(ea) >>> 0;
+      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7; // identity, present+write
+      return 0;
+    };
+    // no __tls_base import — tp is sourced by the guest CALLING its own
+    // exported __get_tls_base(), which this fixture returns as a fixed
+    // sentinel (0x1234); see buildCheckedFixture/buildCheckedBulkFixture.
+    inst = new WebAssembly.Instance(mod, {
+      env: { __wasm_syscall_2: fault, __stack_pointer: spGlobal },
+    });
+    const mem = inst.exports.memory;
+    const needPages = 64; // 4 MiB, same as the other fixtures' boot()
+    if (mem.buffer.byteLength < needPages * 65536) {
+      mem.grow(needPages - mem.buffer.byteLength / 65536);
+    }
+    const pages = mem.buffer.byteLength / PAGE;
+    const nPgd = Math.ceil(pages / 1024);
+    const t = new Uint32Array(mem.buffer);
+    for (let g = 0; g < nPgd; g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable | 3;
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
+      }
+    }
+    if (notPresentVa !== undefined) {
+      const va = notPresentVa >>> 0;
+      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = 0; // absent
+    }
+    inst.exports.__mmu_pt_base.value = PT;
+    if (inst.exports.__mmu_start) inst.exports.__mmu_start();
+    return { inst, mem, calls, rawCalls };
+  }
+
+  test("instrument({checked:true}) throws on a module missing the required imports", () => {
+    const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
+    expect(() => instrument(prog, { checked: true })).toThrow(/__wasm_syscall_2/);
+  });
+
+  test("instrument({checked:true}) throws on a module missing the __get_tls_base export", () => {
+    // Matches the new contract: tp is sourced by CALLING an exported
+    // __get_tls_base(), not by reading an imported __tls_base global — so a
+    // module with __wasm_syscall_2/__stack_pointer but no __get_tls_base
+    // export must fail this specific check (distinct from the two "entirely
+    // uninstrumented module" cases above).
+    const withoutTlsExport = buildCheckedFixture({ omitTlsExport: true });
+    expect(() => instrument(withoutTlsExport, { checked: true })).toThrow(/__get_tls_base/);
+  });
+
+  test("a not-present page faults exactly once (kind=0 load), then the load succeeds", () => {
+    const V = HEAP + 0x40000; // some page distinct from PT's own pages
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, V);
+    // seed a known byte at the (still virtual) address — the fault handler
+    // maps V identity, so this is also where the raw load will land.
+    new Uint8Array(b.mem.buffer)[V] = 0x77;
+
+    const val = b.inst.exports.load_u8(V);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 0 });
+    expect(val).toBe(0x77);
+    // tp (args[1] of __wasm_syscall_2) is sourced by CALLING the module's
+    // exported __get_tls_base(), not an imported global — this fixture's
+    // __get_tls_base returns the fixed sentinel 0x1234.
+    expect(b.rawCalls.length).toBe(1);
+    expect(b.rawCalls[0].tp).toBe(0x1234);
+  });
+
+  test("a present page never faults", () => {
+    const V = HEAP + 0x50000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes /* no notPresentVa */);
+    new Uint8Array(b.mem.buffer)[V] = 0x11;
+    expect(b.inst.exports.load_u8(V)).toBe(0x11);
+    expect(b.calls.length).toBe(0);
+  });
+
+  test("a not-present page faults exactly once (kind=1 store), then the store succeeds", () => {
+    const V = HEAP + 0x60000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, V);
+
+    b.inst.exports.store_u8(V, 0x99);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
+    expect(new Uint8Array(b.mem.buffer)[V]).toBe(0x99);
+  });
+
+  test("unchecked instrument() output is unaffected by the checked feature existing", () => {
+    // regression guard: instrument(prog) with no opts.checked must still
+    // produce the exact byte-for-byte A1 output (no accidental default flip).
+    const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
+    const a = instrument(prog, { exportControls: true });
+    const b = instrument(prog, { exportControls: true, checked: false });
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(true);
+  });
+
+  // ---- checked bulk-memory ops (memory.copy/fill through the page table) --
+  //
+  // The bulk-op fixture in test-fixtures/softmmu/ (bulk.wasm) has no
+  // toolchain here to rebuild it with the __wasm_syscall_2/__stack_pointer
+  // imports + __get_tls_base export `checked: true` requires, so — matching
+  // the SIMD- and scalar-checked fixtures already hand-built above — this
+  // hand-builds a minimal module with the same import/export surface as
+  // buildCheckedFixture() plus two bulk-op exports: bulk_fill(d,v,n)
+  // (memory.fill) and bulk_copy(d,s,n) (memory.copy).
+  function buildCheckedBulkFixture() {
+    const types = [
+      funcType([I32, I32, I32], []), // 0: bulk_fill(d,v,n) / bulk_copy(d,s,n)
+      funcType([I32, I32, I32, I32, I32], [I32]), // 1: __wasm_syscall_2
+      funcType([], [I32]), // 2: __get_tls_base() -> i32
+    ];
+    const typeSec = sectb(1, vecb(types));
+
+    const imports = [
+      [...strb("env"), ...strb("__wasm_syscall_2"), 0x00, ...leb_u(1)],
+      [...strb("env"), ...strb("__stack_pointer"), 0x03, I32, 0x01],
+    ];
+    const importSec = sectb(2, vecb(imports));
+
+    // defined funcs (func idx 0 is the __wasm_syscall_2 import):
+    //   1: bulk_fill (type 0)   2: bulk_copy (type 0)   3: __get_tls_base (type 2)
+    const funcSec = sectb(3, vecb([leb_u(0), leb_u(0), leb_u(2)]));
+    const memSec = sectb(5, vecb([[0x00, ...leb_u(64)]]));
+
+    const exports = [
+      [...strb("memory"), 0x02, ...leb_u(0)],
+      [...strb("bulk_fill"), 0x00, ...leb_u(1)],
+      [...strb("bulk_copy"), 0x00, ...leb_u(2)],
+      [...strb("__get_tls_base"), 0x00, ...leb_u(3)],
+    ];
+    const exportSec = sectb(7, vecb(exports));
+
+    // bulk_fill(d,v,n): local.get d; local.get v; local.get n; memory.fill 0
+    const fillBody = [...leb_u(0), 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0xfc, 0x0b, 0x00, 0x0b];
+    // bulk_copy(d,s,n): local.get d; local.get s; local.get n; memory.copy 0 0
+    const copyBody = [
+      ...leb_u(0),
+      0x20,
+      0x00,
+      0x20,
+      0x01,
+      0x20,
+      0x02,
+      0xfc,
+      0x0a,
+      0x00,
+      0x00,
+      0x0b,
+    ];
+    const tlsBody = [...leb_u(0), 0x41, ...leb_s(0x1234), 0x0b]; // i32.const 0x1234
+    const codeSec = sectb(
+      10,
+      [
+        ...leb_u(3),
+        ...leb_u(fillBody.length),
+        ...fillBody,
+        ...leb_u(copyBody.length),
+        ...copyBody,
+        ...leb_u(tlsBody.length),
+        ...tlsBody,
+      ].flat(),
+    );
+
+    return new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      ...typeSec,
+      ...importSec,
+      ...funcSec,
+      ...memSec,
+      ...exportSec,
+      ...codeSec,
+    ]);
+  }
+
+  test("instrument({checked:true}) throws on bulk.wasm missing the required imports", () => {
+    const bulk = new Uint8Array(readFileSync(new URL("bulk.wasm", FIX)));
+    expect(() => instrument(bulk, { checked: true })).toThrow(/__wasm_syscall_2/);
+  });
+
+  test("unchecked instrument() output for bulk.wasm is unaffected by the checked feature existing", () => {
+    const bulk = new Uint8Array(readFileSync(new URL("bulk.wasm", FIX)));
+    const a = instrument(bulk, { exportControls: true });
+    const bOut = instrument(bulk, { exportControls: true, checked: false });
+    expect(Buffer.from(a).equals(Buffer.from(bOut))).toBe(true);
+  });
+
+  test("bulk_fill on a not-present page faults exactly once (kind=1 write), then lands", () => {
+    const V = HEAP + 0x70000; // page-aligned dest, distinct from every other test's page
+    const bytes = instrument(buildCheckedBulkFixture(), { checked: true });
+    const b = bootChecked(bytes, V);
+
+    b.inst.exports.bulk_fill(V, 0xab, 16);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
+    const u8 = new Uint8Array(b.mem.buffer);
+    for (let k = 0; k < 16; k++) expect(u8[V + k]).toBe(0xab);
+  });
+
+  test("bulk_copy: not-present DEST faults kind=1 (write); present SRC never faults", () => {
+    const V = HEAP + 0x80000; // dest, not present
+    const SRC = HEAP + 0x10000; // src, present (default identity mapping)
+    const bytes = instrument(buildCheckedBulkFixture(), { checked: true });
+    const b = bootChecked(bytes, V);
+    const u8 = new Uint8Array(b.mem.buffer);
+    for (let k = 0; k < 8; k++) u8[SRC + k] = k + 1;
+
+    b.inst.exports.bulk_copy(V, SRC, 8);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
+    for (let k = 0; k < 8; k++) expect(u8[V + k]).toBe(k + 1);
+  });
+
+  test("bulk_copy: not-present SRC faults kind=0 (read), never write-faults a read-only source", () => {
+    const SRC = HEAP + 0x90000; // src, not present
+    const DST = HEAP + 0x20000; // dest, present (default identity mapping)
+    const bytes = instrument(buildCheckedBulkFixture(), { checked: true });
+    const b = bootChecked(bytes, SRC);
+    const u8 = new Uint8Array(b.mem.buffer);
+    for (let k = 0; k < 8; k++) u8[SRC + k] = k + 10;
+
+    b.inst.exports.bulk_copy(DST, SRC, 8);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: SRC, kind: 0 });
+    for (let k = 0; k < 8; k++) expect(u8[DST + k]).toBe(k + 10);
   });
 });

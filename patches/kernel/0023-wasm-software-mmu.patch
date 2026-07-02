@@ -919,7 +919,7 @@
 +EXPORT_SYMBOL(__clear_user);
 --- /dev/null
 +++ b/arch/wasm/mm/fault.c
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,108 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Software-MMU fault entry (#128 A2). The instrumented user code's EXTENDED
@@ -938,6 +938,7 @@
 +#include <linux/sched/signal.h>
 +#include <linux/ptrace.h>
 +#include <linux/sched/task_stack.h>
++#include <linux/syscalls.h>
 +
 +#define WASM_MMU_FAULT_READ	0U
 +#define WASM_MMU_FAULT_WRITE	1U
@@ -1014,6 +1015,44 @@
 +	force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)addr);
 +	return 1;
 +}
++
++/*
++ * #128 A2: the softmmu-pass CHECKED translate, on a not-present page, issues
++ * env.__wasm_syscall_2(NR_arch_specific_syscall=244, ea, kind) — reusing the
++ * syscall entry machinery (kernel-SP setup + signal FOOT) rather than a raw
++ * kernel-export call. Route it into the fault handler. Return 0 = handled,
++ * retry the access (the pass re-walks); nonzero = fatal signal queued (the
++ * pass returns; WASM_SYSCALL_FOOT_SYNC delivers it).
++ */
++SYSCALL_DEFINE2(wasm_mmu_fault, unsigned long, addr, unsigned long, kind)
++{
++	return __wasm_mmu_fault(addr, kind);
++}
+--- a/arch/wasm/kernel/syscall_table.c
++++ b/arch/wasm/kernel/syscall_table.c
+@@ -30,4 +30,8 @@
+ 	 * reference, not registered in the table). */
+ 	__SYSCALL(__NR_futex_time64, sys_futex)
+ #endif
++#ifdef CONFIG_MMU
++	/* #128 A2: softmmu present-check fault at __NR_arch_specific_syscall (244). */
++	__SYSCALL(__NR_arch_specific_syscall, sys_wasm_mmu_fault)
++#endif
+ };
+--- a/arch/wasm/include/asm/syscalls_wasm32.h
++++ b/arch/wasm/include/asm/syscalls_wasm32.h
+@@ -46,6 +46,11 @@
+ asmlinkage long sys_wasm32_futex(u32 __user *uaddr, int op, u32 val,
+ 				 const struct __kernel_timespec __user *utime);
+ 
++#ifdef CONFIG_MMU
++/* #128 A2: softmmu present-check fault (NR_arch_specific_syscall). */
++asmlinkage long sys_wasm_mmu_fault(unsigned long addr, unsigned long kind);
++#endif
++
+ #endif
+ 
+ #endif /* _ASM_WASM_SYSCALLS_WASM32_H */
 --- a/arch/wasm/Kconfig
 +++ b/arch/wasm/Kconfig
 @@ -20,7 +20,8 @@ config WASM

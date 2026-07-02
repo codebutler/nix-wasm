@@ -1,0 +1,43 @@
+# nix-wasm #128 A2 DEBUG (debugTrace=true only): trace the __wasm_mmu_fault path
+# so a silent demand-paging hang is observable. NOT for production — bounded
+# printk. After handle_mm_fault, RAW-walk mm->pgd exactly as the softmmu pass
+# does (identity phys reads) and print pgd_e+pte so a "handler returns 0 but the
+# re-walk still faults" loop is diagnosable.
+--- a/arch/wasm/mm/fault.c
++++ b/arch/wasm/mm/fault.c
+@@ -30,6 +30,7 @@ asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
+ 	struct vm_area_struct *vma;
+ 	unsigned int flags = FAULT_FLAG_DEFAULT | FAULT_FLAG_USER;
+ 	vm_fault_t fault;
++	static int dbg;
+
+ 	if (!mm || addr >= TASK_SIZE)
+ 		goto bad_area_nosemaphore;
+@@ -39,6 +40,9 @@ asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
+ 	else if (kind == WASM_MMU_FAULT_EXEC)
+ 		flags |= FAULT_FLAG_INSTRUCTION;
+
++	if (dbg < 20) { dbg++;
++		pr_info("MMUFLT[%d] addr=%08lx kind=%lu pgd=%08lx\n",
++			dbg, addr, kind, (unsigned long)mm->pgd); }
+ retry:
+ 	vma = lock_mm_and_find_vma(mm, addr, current_pt_regs());
+ 	if (!vma)
+@@ -74,6 +78,17 @@ asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
+ 		goto bad_area_nosemaphore;
+ 	}
+
++	if (dbg <= 20) {
++		/* RAW-walk mm->pgd exactly as the softmmu pass does. */
++		u32 *pgd = (u32 *)mm->pgd;
++		u32 pgd_e = pgd[addr >> 22];
++		u32 *ptp = (u32 *)(unsigned long)(pgd_e & ~0xfffU);
++		u32 pte = pgd_e ? ptp[(addr >> 12) & 0x3ff] : 0;
++		pr_info("MMUFLT walk addr=%08lx pgd_e=%08x pte=%08x vma=%c%c\n",
++			addr, pgd_e, pte,
++			(vma->vm_flags & VM_READ) ? 'r' : '-',
++			(vma->vm_flags & VM_WRITE) ? 'w' : '-');
++	}
+ 	return 0;
+
+ bad_area:
