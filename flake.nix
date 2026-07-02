@@ -29,6 +29,10 @@
       # against it.
       compilerRt = import ./toolchain/compiler-rt.nix { inherit pkgs; };
       musl = import ./toolchain/musl.nix { inherit pkgs compilerRt; };
+      # #129 Track B: the fork variant of musl — fork() over the asyncify
+      # double-return seam (patch 0010). Userspace half of real fork() on the
+      # software MMU + COW; consumed by toolchain/wasm-fork-stdenv.nix (forkStdenv).
+      muslFork = import ./toolchain/musl.nix { inherit pkgs compilerRt; fork = true; };
       kernelHeaders = import ./toolchain/kernel-headers.nix { inherit pkgs; };
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
@@ -76,6 +80,14 @@
         localSystem = system;
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; muslWasm = musl; }) ];
       };
+
+      # #129 Track B: the reusable fork-enabled cross-stdenv adapter. Links
+      # muslFork's libc.a first (so the asyncify-seam _Fork wins) + runs
+      # wasm-opt --asyncify over the final link. A package opts into real fork by
+      # building through forkStdenv.enableForkFor. (Build-verified via muslFork
+      # here; a real fork BOOT also needs the kernel dup_mmap+COW path + the
+      # engine child-in-shared-arena wiring — see the Track B status doc.)
+      forkStdenv = import ./toolchain/wasm-fork-stdenv.nix { inherit pkgs cross muslFork; };
 
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
@@ -530,6 +542,10 @@
         llvmCheck = pkgs.writeText "llvm-version" pkgs.llvmPackages_21.clang.version;
 
         inherit compilerRt musl kernelHeaders libcxx sysroot;
+
+        # #129 Track B: the fork variant of musl (fork() over the asyncify seam).
+        # Build-verifies the userspace half of real fork() compiles.
+        musl-fork = muslFork;
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;

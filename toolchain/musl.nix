@@ -9,13 +9,22 @@
 #
 # Compiled against compiler-rt (--rtlib via LIBCC). No other deps — musl is the
 # base of the sysroot.
-{ pkgs, compilerRt }:
+# `fork ? false` (#129 Track B, muslFork variant): when true, KEEP fork() and
+# route _Fork() through the asyncify double-return seam (patch 0010) instead of
+# the clone syscall. This is the userspace half of real fork() over the software
+# MMU + COW (#128). The seam is foundation-independent — _Fork() just calls
+# capture_stack() (a host import the ENGINE handles); the address-space dup +
+# kernel clone + rewind live in the engine/kernel, not here. capture_stack is an
+# undefined symbol resolved only at PROGRAM link (via forkStdenv's allow-list +
+# --asyncify pass), so the libc.a itself builds unchanged. The DEFAULT (fork =
+# false) is the standard no-fork guest libc (fork()/vfork() removed → link error).
+{ pkgs, compilerRt, fork ? false }:
 let
   llvm = pkgs.llvmPackages_21;
   bt = llvm.bintools-unwrapped;
 in
 pkgs.stdenv.mkDerivation {
-  pname = "musl-wasm32-nommu";
+  pname = if fork then "musl-wasm32-nommu-fork" else "musl-wasm32-nommu";
   version = "1.2.5";
 
   # musl 1.2.5 official release tarball (== git tag v1.2.5 = 7fd8de89, which the
@@ -44,6 +53,13 @@ pkgs.stdenv.mkDerivation {
     # __dlsym_time64 import (dlfcn.h's time64 __REDIR of dlsym) to a REAL
     # dlsym. dlclose is leak-until-exit (table slots can't be reclaimed).
     ../patches/musl/0009-wasm-dlopen-dlsym-host-loader.patch
+  ] ++ pkgs.lib.optionals fork [
+    # 0010 (#129 Track B, muslFork only): _Fork() over the asyncify double-return
+    # seam — fork() no longer issues the clone syscall; it calls capture_stack()
+    # (a host import) which the engine unwinds + dual-rewinds so fork() returns
+    # twice. Applies on top of 0007's clone-arity baseline. Only in the fork
+    # variant; the default guest libc has fork() removed (postPatch below).
+    ../patches/musl/0010-fork-asyncify-seam.patch
   ];
 
   nativeBuildInputs = [ bt ];
@@ -76,9 +92,13 @@ pkgs.stdenv.mkDerivation {
     # SIGILL/abort at runtime. posix_spawn (clone-with-fn) is the spawn contract;
     # musl's system()/popen() already route through it.
     # fork(): drop the function (lines `pid_t fork(void)` … first column-0 `}`),
-    # keeping fork.c's lock/atfork weak-aliases that other TUs depend on.
-    sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c
+    # keeping fork.c's lock/atfork weak-aliases that other TUs depend on. SKIPPED
+    # in the fork variant (#129) — there fork() is kept and _Fork() routes through
+    # the asyncify seam (patch 0010) instead of removed.
+    ${pkgs.lib.optionalString (!fork) "sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c"}
     # vfork(): the whole TU is just the function — empty it so no symbol remains.
+    # (Removed in BOTH variants — vfork's return-twice-into-parent isn't the fork
+    # seam; posix_spawn/fork cover the spawn contract.)
     : > src/process/vfork.c
     # posix_fallocate: emulate when the filesystem has no fallocate, like glibc.
     # On the NOMMU wasm guest CONFIG_SHMEM is gated off behind MMU (kernel.nix),

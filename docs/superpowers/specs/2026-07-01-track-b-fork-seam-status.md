@@ -96,9 +96,17 @@ page tables. On this foundation a correct `fork()` is:
    child + verifying the child's fresh `pgd` is set as its `pt_base` at
    `switch_mm` (already wired). NO per-process Memory mint, NO `user_as_*`.
 2. **musl** — the fork-asyncify seam (`_Fork` → `capture_stack`), recovered as
-   `patches/musl/0008-fork-asyncify-seam.patch` in PR #20; must be renumbered
-   past the current 0008 (`__unmapself`) / 0009 (dlopen) to **0010** and
-   build-verified against master's musl series (world build).
+   `patches/musl/0008-fork-asyncify-seam.patch` in PR #20; renumbered past the
+   current 0008 (`__unmapself`) / 0009 (dlopen) to **0010**. ✅ **DONE +
+   BUILD-VERIFIED (2026-07-02):** `toolchain/musl.nix` gained a `fork ? false`
+   arg (keeps `fork()`, applies 0010 on top of 0007's clone-arity baseline);
+   `.#musl-fork` builds and its `libc.a` has `fork`/`_Fork` **defined** with
+   `capture_stack` as the sole undefined import (the default `.#musl` still has
+   `fork` removed). `forkStdenv` (`toolchain/wasm-fork-stdenv.nix`) is wired into
+   the flake consuming `muslFork`. The seam is foundation-independent — this
+   compiles the userspace half regardless of the MMU-vs-NOMMU engine/kernel
+   difference. `capture_stack` resolves only at PROGRAM link (forkStdenv's
+   allow-list + `--asyncify`), so the archive builds clean.
 3. **Engine** — the asyncify double-return must run the child **in the SAME
    shared wasm Memory** with the child's `pt_base` (not a duplicated Memory as
    PR #20's `wasm_user_mem_dup` did). This is the genuinely NEW piece: the child
