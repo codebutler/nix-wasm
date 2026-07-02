@@ -81,11 +81,34 @@ wall. Error surface progression: dozens (generic pgtable.h) → 8 → 947 (swap/
   correct, since the instrumented module translates every access through the
   page table the kernel built for that VMA.
 
-## Remaining before it BOOTS
+## Update (fourth pass): exec handoff + A2 fault entry — KERNEL SIDE COMPLETE
 
-3. **exec engine handoff under MMU** (kernel buffer for the binary bytes, see
-   above) + **engine set_pt_base / instrumented-instantiate** (kernel-worker.js,
-   ENGINE_ABI bump): build the per-process page tables +
+- **Exec engine handoff — DONE (kernel side).** Engine-source audit
+  (kernel-worker.js): `wasm_load_executable` copies the bytes synchronously,
+  BUT the dlopen loader re-reads the live `user_executable_range` lazily and
+  clone first-run re-reads `mm->start_code` — so the bytes must stay valid for
+  the mm's LIFETIME. Under MMU exec therefore reads the binary into a
+  physically-contiguous kernel buffer (`alloc_pages_exact` + `kernel_read`)
+  owned by the new `mm_context_t` (`asm/mmu.h`) and freed in
+  `destroy_context`; `mm->start_code/end_code` point at it (the engine reads
+  identity); dylink.0 meminfo parses from the kernel copy
+  (`parse_dylink0_meminfo`); the file is never user-mapped. **A1 lever:**
+  `mm->def_flags |= VM_LOCKED` — every VMA (data, stack, future user mmaps) is
+  populated at creation, because the A1 fast translate has NO present check.
+- **A2 fault entry — DONE (kernel side).** `arch/wasm/mm/fault.c`
+  `__wasm_mmu_fault(addr, kind)` (kind: 0=read 1=write 2=exec) →
+  `lock_mm_and_find_vma` (+`select LOCK_MM_AND_FIND_VMA if MMU`) →
+  `handle_mm_fault` with retry/COMPLETED/OOM/SIGBUS/SIGSEGV handling — the
+  standard modern arch fault shape. Verified EXPORTED in the built vmlinux.
+  Return 0 = retry the translate; nonzero = fatal signal queued.
+
+## Remaining before it BOOTS — ONLY the engine half now
+
+3. **engine (kernel-worker.js, ENGINE_ABI bump)**: provide the
+   `env.__mmu_set_pt_base` import (write the user module's `__mmu_pt_base`
+   global); instrument the user binary at exec (or ship pre-instrumented
+   userspace); route user `env.__mmu_fault` into the `__wasm_mmu_fault` kernel
+   export on the task's context (A2): build the per-process page tables +
    VMAs mapping the user image; the engine instantiates the softmmu-instrumented
    user module.
 4. **fault entry** (A2): `__mmu_fault(va,kind)` host import → `do_page_fault` →

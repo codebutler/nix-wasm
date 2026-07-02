@@ -1,16 +1,27 @@
 # WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
-# STATUS: compiles + links end-to-end (vmlinux built); NOMMU build unregressed.
-# Semantic pieces IN: switch_mm/activate_mm -> env.__mmu_set_pt_base (verified
-# in the vmlinux import section); software uaccess table-walk with
-# fixup_user_fault retry (demand-paging/COW-aware; UACCESS_MEMCPY now
-# NOMMU-only); binfmt_wasm auxv copy via copy_to_user (raw memcpy only worked
-# on flat NOMMU — the loader is otherwise already MMU-ready upstream:
-# setup_arg_pages/create_wasm_tables under #ifdef CONFIG_MMU).
-# NOT YET BOOTING / NOT wired into kernel.nix — remaining: the engine handoff
-# (wasm_load_executable gets USER VAs of a demand-paged file VMA under MMU;
-# the kernel must pass the binary bytes physically, e.g. a kernel buffer),
-# __mmu_fault -> do_page_fault (A2), engine set_pt_base + instrumented exec.
-# Apply AFTER patches 0004-0022.
+# STATUS: compiles + links end-to-end (vmlinux built); NOMMU build unregressed
+# (byte-identical). KERNEL SIDE of the port is now feature-complete for an A1
+# identity boot:
+#   • switch_mm/activate_mm -> env.__mmu_set_pt_base (verified in the vmlinux
+#     import section); init_new_context/destroy_context manage the mm context.
+#   • software uaccess table-walk with fixup_user_fault retry (demand-paging/
+#     COW-aware); UACCESS_MEMCPY is NOMMU-only.
+#   • exec (fs/binfmt_wasm.c): under MMU the binary is read into a physically-
+#     contiguous KERNEL buffer (alloc_pages_exact + kernel_read) that lives as
+#     long as the mm (mm_context_t.bin_copy, freed in destroy_context) — the
+#     engine consumes the bytes at exec, at clone first-run, and lazily at
+#     dlopen, so mm->start_code/end_code point at the kernel copy. dylink.0
+#     meminfo parses from the kernel buffer; no user mapping of the file.
+#     A1 lever: mm->def_flags |= VM_LOCKED (every VMA populated at creation —
+#     the A1 fast translate has no present check). auxv via copy_to_user.
+#   • A2 fault entry: arch/wasm/mm/fault.c __wasm_mmu_fault(addr, kind) ->
+#     lock_mm_and_find_vma + handle_mm_fault (COW/demand/growth), SIGSEGV/
+#     SIGBUS on error; exported in the vmlinux (verified). A1 never calls it.
+# REMAINING (engine half, kernel-worker.js + ENGINE_ABI bump): provide
+# __mmu_set_pt_base (write the user module's __mmu_pt_base global), instrument
+# the user binary at exec (softmmu pass or pre-instrumented userspace), route
+# env.__mmu_fault from user code into the __wasm_mmu_fault kernel export.
+# Apply AFTER patches 0004-0022. NOT wired into kernel.nix (does not boot yet).
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -214,7 +225,7 @@
  /*
 --- a/arch/wasm/include/asm/mmu_context.h
 +++ b/arch/wasm/include/asm/mmu_context.h
-@@ -1,8 +1,39 @@
+@@ -1,8 +1,59 @@
  /* SPDX-License-Identifier: GPL-2.0-only */
 -
  #ifndef _ASM_WASM_MMU_CONTEXT_H
@@ -223,6 +234,7 @@
 +#ifdef CONFIG_MMU
 +#include <linux/mm_types.h>
 +#include <linux/sched.h>
++#include <linux/gfp.h>
 +#include <asm-generic/mm_hooks.h>
 +
 +/*
@@ -249,6 +261,25 @@
 +	__mmu_set_pt_base((unsigned long)next->pgd);
 +}
 +
++#define init_new_context init_new_context
++static inline int init_new_context(struct task_struct *tsk,
++				   struct mm_struct *mm)
++{
++	mm->context.bin_copy = NULL;
++	mm->context.bin_size = 0;
++	return 0;
++}
++
++/* Free the kernel copy of the process binary (see asm/mmu.h). */
++#define destroy_context destroy_context
++static inline void destroy_context(struct mm_struct *mm)
++{
++	if (mm->context.bin_copy) {
++		free_pages_exact(mm->context.bin_copy, mm->context.bin_size);
++		mm->context.bin_copy = NULL;
++	}
++}
++
 +#include <asm-generic/mmu_context.h>
 +#else
  #include <asm-generic/nommu_context.h>
@@ -261,7 +292,7 @@
  # SPDX-License-Identifier: GPL-2.0-only
  
  obj-y += init.o
-+obj-$(CONFIG_MMU) += pgtable.o uaccess.o
++obj-$(CONFIG_MMU) += pgtable.o uaccess.o fault.o
 --- a/fs/binfmt_wasm.c
 +++ b/fs/binfmt_wasm.c
 @@ -20,7 +20,17 @@
@@ -294,6 +325,137 @@
  
  	return 0;
  }
+@@ -170,6 +182,67 @@
+ 	return !(chunk & 0x80);
+ }
+ 
++
++#ifdef CONFIG_MMU
++/*
++ * Software MMU (#128): parse the dylink.0 MEMINFO subsections from the KERNEL
++ * copy of the binary (under MMU there is no flat user mapping to get_user
++ * through — see the CONFIG_MMU branch in load_wasm_file). Mirrors the user-
++ * side walk below; `p` points just past the "dylink.0" name.
++ */
++static int parse_dylink0_meminfo(char *p, char *end,
++		unsigned int *data_size, unsigned int *data_align,
++		unsigned int *table_size, unsigned int *table_align)
++{
++	u8 subsection_id;
++	unsigned int subsection_length;
++	char *subsection_end;
++
++	for (;;) {
++		if (p == end) {
++			pr_err("No dylink.0 subsection id");
++			return -ENOEXEC;
++		}
++		subsection_id = *(u8 *)(p++);
++
++		if (!wasm_consume_varU32(&p, &subsection_length,
++				min_t(unsigned long, 5UL, end - p))) {
++			pr_err("Failed to read dylink.0 subsection length");
++			return -ENOEXEC;
++		}
++		subsection_end = p + subsection_length;
++		if (subsection_end < p || subsection_end > end) {
++			pr_err("dylink.0 subsection length overflow");
++			return -ENOEXEC;
++		}
++
++		if (subsection_id == WASM_DYLINK_MEMINFO) {
++			if (!wasm_consume_varU32(&p, data_size,
++					min_t(unsigned long, 5UL, subsection_end - p)))
++				return -ENOEXEC;
++			*data_size = PAGE_ALIGN(*data_size);
++			if (!wasm_consume_varU32(&p, data_align,
++					min_t(unsigned long, 5UL, subsection_end - p))
++					|| *data_align > 31U)
++				return -ENOEXEC;
++			*data_align = 1UL << (int)*data_align;
++			if (!wasm_consume_varU32(&p, table_size,
++					min_t(unsigned long, 5UL, subsection_end - p)))
++				return -ENOEXEC;
++			*table_size = PAGE_ALIGN(*table_size);
++			if (!wasm_consume_varU32(&p, table_align,
++					min_t(unsigned long, 5UL, subsection_end - p))
++					|| *table_align > 31U)
++				return -ENOEXEC;
++			*table_align = 1UL << (int)*table_align;
++			return 0;
++		}
++
++		p = subsection_end;
++	}
++}
++#endif /* CONFIG_MMU */
++
+ static int load_wasm_file(struct linux_binprm *bprm, unsigned long extra_stack)
+ {
+ 	unsigned long data_start = 0; /* Will contain data and bss */
+@@ -244,6 +317,52 @@
+ 	set_personality(PER_LINUX_32BIT);
+ 	setup_new_exec(bprm);
+ 
++#ifdef CONFIG_MMU
++	/*
++	 * Software MMU (#128, A1): the fast-path translate has NO present
++	 * check (the __mmu_fault demand-paging path is A2), so every user
++	 * mapping must be POPULATED at creation. VM_LOCKED on def_flags makes
++	 * all VMAs of this image mlockall-style populated.
++	 */
++	current->mm->def_flags |= VM_LOCKED;
++
++	{
++		/*
++		 * The engine consumes the binary BYTES from kernel memory (see
++		 * asm/mmu.h): read the file into a physically-contiguous
++		 * kernel buffer that lives as long as the mm, and parse the
++		 * dylink.0 meminfo there. No user mapping of the file at all.
++		 */
++		void *bin = alloc_pages_exact(whole_size, GFP_KERNEL);
++		loff_t pos = 0;
++		ssize_t nread;
++
++		if (!bin)
++			return -ENOMEM;
++		nread = kernel_read(bprm->file, bin, whole_size, &pos);
++		if (nread != (ssize_t)whole_size) {
++			free_pages_exact(bin, whole_size);
++			return nread < 0 ? (int)nread : -EIO;
++		}
++
++		ret = parse_dylink0_meminfo(
++			(char *)bin + ((unsigned long)parsed -
++				       (unsigned long)bprm->buf),
++			(char *)bin + whole_size,
++			&data_size, &data_align, &table_size, &table_align);
++		if (ret) {
++			free_pages_exact(bin, whole_size);
++			return ret;
++		}
++		has_meminfo = true;
++
++		current->mm->context.bin_copy = bin;
++		current->mm->context.bin_size = whole_size;
++		whole_start = (unsigned long)bin;
++		whole_end = whole_start + whole_size;
++	}
++	if (0) /* the NOMMU user-mapping walk below is compiled out */
++#endif
+ 	whole_start = vm_mmap(bprm->file, 0, whole_size,
+ 			PROT_READ | PROT_EXEC, MAP_PRIVATE, 0);
+ 	if (!whole_start || IS_ERR_VALUE(whole_start)) {
+@@ -381,6 +500,9 @@
+ 	return 0;
+ 
+ out_unmap:
++	/* Under CONFIG_MMU whole_start is the KERNEL binary copy — owned by
++	 * mm->context (freed in destroy_context when this failed exec's mm
++	 * dies); vm_munmap finds no VMA there and is a harmless -EINVAL. */
+ 	vm_munmap(whole_start, whole_size);
+ 	if (data_start)
+ 		vm_munmap(data_start, data_size);
 --- /dev/null
 +++ b/arch/wasm/include/asm/tlbflush.h
 @@ -0,0 +1,18 @@
@@ -378,6 +540,33 @@
 +#endif
 +
 +#endif /* _ASM_WASM_UACCESS_H */
+--- /dev/null
++++ b/arch/wasm/include/asm/mmu.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_MMU_H
++#define _ASM_WASM_MMU_H
++
++#ifdef CONFIG_MMU
++/*
++ * Software MMU (#128): the engine consumes the process's wasm binary BYTES
++ * from kernel (physical/identity) memory — at exec (wasm_load_executable
++ * compiles from the range), at first-run of a clone (wasm_create_and_run_task
++ * re-reads mm->start_code), and lazily at first dlopen (the side-module
++ * loader re-reads the main image). Under MMU the file mmap is a demand-paged
++ * USER mapping the engine cannot read, so exec keeps a physically-contiguous
++ * KERNEL copy alive for the mm's lifetime; mm->start_code/end_code point at
++ * it, and destroy_context() frees it.
++ */
++typedef struct {
++	void *bin_copy;			/* alloc_pages_exact() */
++	unsigned long bin_size;
++} mm_context_t;
++#else
++#include <asm-generic/mmu.h>
++#endif
++
++#endif /* _ASM_WASM_MMU_H */
 --- /dev/null
 +++ b/arch/wasm/mm/pgtable.c
 @@ -0,0 +1,32 @@
@@ -543,18 +732,116 @@
 +	return 0;
 +}
 +EXPORT_SYMBOL(__clear_user);
+--- /dev/null
++++ b/arch/wasm/mm/fault.c
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Software-MMU fault entry (#128 A2). The instrumented user code's EXTENDED
++ * translate variant calls env.__mmu_fault(addr, kind) on a not-present or
++ * permission miss; the engine routes it here on the faulting task's kernel
++ * context (the same shape as a syscall entry). We resolve through the generic
++ * MM — demand paging, COW, stack growth, mprotect — and return 0 to RETRY the
++ * translate, or queue the fatal signal and return nonzero (the engine then
++ * lets the normal signal path run instead of retrying).
++ *
++ * A1 boots do not call this (the fast-path translate has no present check and
++ * every VMA is VM_LOCKED-populated at creation); it is compiled in so the
++ * kernel side of A2 is complete and gate-able.
++ */
++#include <linux/mm.h>
++#include <linux/sched/signal.h>
++#include <linux/ptrace.h>
++#include <linux/sched/task_stack.h>
++
++#define WASM_MMU_FAULT_READ	0U
++#define WASM_MMU_FAULT_WRITE	1U
++#define WASM_MMU_FAULT_EXEC	2U
++
++asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
++					  unsigned long kind);
++asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
++					  unsigned long kind)
++{
++	struct mm_struct *mm = current->mm;
++	struct vm_area_struct *vma;
++	unsigned int flags = FAULT_FLAG_DEFAULT | FAULT_FLAG_USER;
++	vm_fault_t fault;
++
++	if (!mm || addr >= TASK_SIZE)
++		goto bad_area_nosemaphore;
++
++	if (kind == WASM_MMU_FAULT_WRITE)
++		flags |= FAULT_FLAG_WRITE;
++	else if (kind == WASM_MMU_FAULT_EXEC)
++		flags |= FAULT_FLAG_INSTRUCTION;
++
++retry:
++	vma = lock_mm_and_find_vma(mm, addr, current_pt_regs());
++	if (!vma)
++		goto bad_area_nosemaphore;
++
++	if (kind == WASM_MMU_FAULT_WRITE) {
++		if (!(vma->vm_flags & VM_WRITE))
++			goto bad_area;
++	} else if (kind == WASM_MMU_FAULT_EXEC) {
++		if (!(vma->vm_flags & VM_EXEC))
++			goto bad_area;
++	} else {
++		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))
++			goto bad_area;
++	}
++
++	fault = handle_mm_fault(vma, addr, flags, current_pt_regs());
++
++	if (fault_signal_pending(fault, current_pt_regs()))
++		return 1;
++
++	/* The fault is fully completed (including releasing mmap lock) */
++	if (fault & VM_FAULT_COMPLETED)
++		return 0;
++
++	if (unlikely(fault & VM_FAULT_RETRY)) {
++		flags |= FAULT_FLAG_TRIED;
++		goto retry;
++	}
++
++	mmap_read_unlock(mm);
++
++	if (unlikely(fault & VM_FAULT_ERROR)) {
++		if (fault & VM_FAULT_OOM) {
++			pagefault_out_of_memory();
++			return 1;
++		}
++		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON |
++			     VM_FAULT_HWPOISON_LARGE)) {
++			force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)addr);
++			return 1;
++		}
++		goto bad_area_nosemaphore;
++	}
++
++	return 0;
++
++bad_area:
++	mmap_read_unlock(mm);
++bad_area_nosemaphore:
++	force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)addr);
++	return 1;
++}
 --- a/arch/wasm/Kconfig
 +++ b/arch/wasm/Kconfig
-@@ -20,7 +20,7 @@ config WASM
+@@ -20,7 +20,8 @@ config WASM
  
  	select THREAD_INFO_IN_TASK
  	select GENERIC_SMP_IDLE_THREAD
 -	select UACCESS_MEMCPY
 +	select UACCESS_MEMCPY if !MMU
++	select LOCK_MM_AND_FIND_VMA if MMU
  	select ARCH_USE_QUEUED_RWLOCKS
  	select GENERIC_CPU_DEVICES
  	select GENERIC_CSUM
-@@ -122,6 +122,13 @@ config PGTABLE_LEVELS
+@@ -122,6 +123,13 @@ config PGTABLE_LEVELS
  	int
  	default 2
  
