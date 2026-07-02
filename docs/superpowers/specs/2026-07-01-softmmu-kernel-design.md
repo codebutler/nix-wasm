@@ -125,12 +125,18 @@ was the rejected helper-call design — see `spikes/softmmu/REAL-BINARY.md`).
    per-process tables. **Needs the kernel source + nix/LLVM build.**
 3. **A2** — permission bits in the PTE + the `__mmu_fault` path → COW fork,
    demand paging, mprotect (the extended pass variant + `do_page_fault`).
-4. **Atomics/SIMD in the pass** — the guest's musl pthread uses atomics heavily,
-   so the pass's atomic-translate variant (currently a loud refusal) gates a
-   real-guest boot. Design: an atomic access translates its address the same way
-   (the translate is a pure read), then does the RAW atomic at `phys` — the only
-   subtlety is that the page-table load itself must not tear, which a plain
-   aligned `i32.load` guarantees.
+4. **Atomics in the pass** — DONE (`runtime/softmmu-pass.js`, commit for #128).
+   The guest's musl pthread is atomics-heavy, so this gated instrumenting any
+   real guest binary. An atomic (`0xfe` prefix) translates its address the same
+   way (the translate is a pure read: an aligned `i32.load` of the PTE, which
+   cannot tear), then re-emits the RAW atomic at `phys` keeping the ORIGINAL
+   alignment (atomics require natural alignment; the translate preserves it) and
+   folding the offset into `phys`. Operands above the address are stashed
+   top-first into disjoint scratch locals across the translate, then restored.
+   Verified with an `atomics.wasm` fixture (load/store/add/xchg/cas/i64 add):
+   instrumented == original under an identity table, and a remapped page
+   redirects the atomic. `scanUnhandled` now refuses only SIMD (a documented
+   follow-up — the guest has no SIMD memory ops today).
 
 ## 6. What stays true regardless (the honest floor)
 
