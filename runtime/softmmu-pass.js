@@ -34,9 +34,11 @@
 // never calls it — it is inlined.
 //
 // WHAT IS EXEMPTED: the emitted page-table load + the appended helper use RAW
-// (uninstrumented) access — they ARE the translate. The pass ABORTS LOUDLY on
-// SIMD or atomic memory ops (each needs its own translate variant — a documented
-// follow-up) rather than silently emitting an untranslated access.
+// (uninstrumented) access — they ARE the translate. Scalar loads/stores AND
+// atomic memory ops (0xfe: load/store/rmw/cmpxchg/notify/wait — the guest's
+// musl pthread) are translated; the pass ABORTS LOUDLY on SIMD (0xfd) memory
+// ops (a vector translate variant — a documented follow-up) rather than
+// silently emitting an untranslated access.
 
 // ---- memory opcodes we translate -------------------------------------------
 
@@ -80,6 +82,44 @@ const VALTYPE = {
 };
 
 const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+
+// ---- atomic memory ops (0xfe prefix) ---------------------------------------
+//
+// The guest's musl pthread is atomics-heavy, so a real-guest instrumented boot
+// requires translating these too. An atomic access translates its address
+// EXACTLY like a scalar one (a pure page-table read) and then does the RAW
+// atomic at `phys` — atomicity is preserved because the translate doesn't touch
+// the accessed word. TWO differences from scalars:
+//   • the address is the DEEPEST operand (under 0–2 value operands), so the
+//     emit stashes the value operands into scratch locals, translates, restores;
+//   • atomics REQUIRE natural alignment — the emitted raw op keeps the ORIGINAL
+//     memarg `align` (not 0), and the translate preserves alignment (phys =
+//     4K-aligned page base + low bits of ea, so phys is aligned iff ea is).
+//
+// ATOMIC_OPS[sub] = { opsAbove: [type,…] (bottom→top, above the address), result }.
+// Built programmatically from the wasm threads opcode layout to avoid a ~50-row
+// hand transcription. atomic.fence (0x03) has no memarg and is copied verbatim.
+const ATOMIC_OPS = (() => {
+  const t = {};
+  t[0x00] = { opsAbove: ["i32"], result: true }; // memory.atomic.notify(count)
+  t[0x01] = { opsAbove: ["i32", "i64"], result: true }; // wait32(expected,timeout)
+  t[0x02] = { opsAbove: ["i64", "i64"], result: true }; // wait64(expected,timeout)
+  // 0x03 atomic.fence — no memarg (handled separately)
+  // loads 0x10..0x16: no value operand, push a result
+  for (let op = 0x10; op <= 0x16; op++) t[op] = { opsAbove: [], result: true };
+  // the 7-wide width→type pattern shared by store/rmw/cmpxchg groups:
+  //   [i32.full, i64.full, i32.8, i32.16, i64.8, i64.16, i64.32]
+  const W = ["i32", "i64", "i32", "i32", "i64", "i64", "i64"];
+  // stores 0x17..0x1d: one value operand, no result
+  for (let k = 0; k < 7; k++) t[0x17 + k] = { opsAbove: [W[k]], result: false };
+  // rmw add/sub/and/or/xor/xchg — six groups of 7 (0x1e..0x47): one value, result
+  for (let g = 0; g < 6; g++) {
+    for (let k = 0; k < 7; k++) t[0x1e + g * 7 + k] = { opsAbove: [W[k]], result: true };
+  }
+  // cmpxchg 0x48..0x4e: two operands (expected, replacement) same width, result
+  for (let k = 0; k < 7; k++) t[0x48 + k] = { opsAbove: [W[k], W[k]], result: true };
+  return t;
+})();
 
 // ---- leb + section helpers --------------------------------------------------
 
@@ -330,20 +370,28 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal) {
   const localsEnd = i;
 
   // scratch locals appended after params + existing locals:
-  //   base+0 ea (i32), base+1 val_i32 (i32), base+2 val_i64,
-  //   base+3 val_f32, base+4 val_f64
+  //   base+0 ea (i32) — the effective address for the translate
+  //   base+1 val_i32, base+2 val_i64, base+3 val_f32, base+4 val_f64
+  //     — operand SLOT A (a scalar store's value; an atomic's first operand)
+  //   base+5 b_i32, base+6 b_i64
+  //     — operand SLOT B (an atomic's second operand: cmpxchg replacement /
+  //       wait timeout). Slot A and B use disjoint locals so a two-operand
+  //       atomic with same-typed operands never clobbers.
   const base = numParams + existingLocalCount;
   const EA = base;
   const VAL = { i32: base + 1, i64: base + 2, f32: base + 3, f64: base + 4 };
+  const B = { i32: base + 5, i64: base + 6 };
 
   const out = [];
-  // new local-decl vec: existing groups + 4 appended groups
-  out.push(...u(nLocals + 4));
+  // new local-decl vec: existing groups + 6 appended groups
+  out.push(...u(nLocals + 6));
   for (let k = localsStart; k < localsEnd; k++) out.push(code[k]);
   out.push(...u(2), VT.i32); // ea + val_i32
-  out.push(...u(1), VT.i64);
-  out.push(...u(1), VT.f32);
-  out.push(...u(1), VT.f64);
+  out.push(...u(1), VT.i64); // val_i64
+  out.push(...u(1), VT.f32); // val_f32
+  out.push(...u(1), VT.f64); // val_f64
+  out.push(...u(1), VT.i32); // b_i32
+  out.push(...u(1), VT.i64); // b_i64
 
   // emit the inline translate producing `phys` on the stack from `ea` in $EA.
   const emitTranslate = () => {
@@ -383,6 +431,42 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal) {
         out.push(0x20, ...u(vl)); // local.get val
         out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
       }
+      i = j;
+      continue;
+    }
+    if (op === 0xfe) {
+      // atomic op (0xfe prefix). fence (0x03) has no memarg → copy verbatim.
+      let sub;
+      let j = i + 1;
+      [sub, j] = readU(code, j);
+      const a = ATOMIC_OPS[sub];
+      if (!a) {
+        // atomic.fence or an unmodeled atomic — copy the whole instr verbatim.
+        const next = skipInstr(code, i);
+        for (let k = i; k < next; k++) out.push(code[k]);
+        i = next;
+        continue;
+      }
+      let align, offset;
+      [align, j] = readU(code, j);
+      [offset, j] = readU(code, j);
+      // stack: addr, [op0], [op1]  (op1 on top). Pop operands top-first into
+      // scratch (slot 0 = VAL[type], slot 1 = B[type]).
+      const scratch = a.opsAbove.map((tp, idx) => (idx === 0 ? VAL[tp] : B[tp]));
+      for (let k = a.opsAbove.length - 1; k >= 0; k--) {
+        out.push(0x21, ...u(scratch[k])); // local.set
+      }
+      // addr on top → ea = addr + offset
+      if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
+      out.push(0x21, ...u(EA)); // local.set ea
+      emitTranslate(); // -> phys
+      // restore operands in order
+      for (let k = 0; k < a.opsAbove.length; k++) {
+        out.push(0x20, ...u(scratch[k])); // local.get
+      }
+      // raw atomic at phys. Atomics REQUIRE natural alignment → keep the
+      // ORIGINAL align (translate preserves it); offset folded into phys → 0.
+      out.push(0xfe, ...u(sub), ...u(align), ...u(0));
       i = j;
       continue;
     }
@@ -505,13 +589,7 @@ export function scanUnhandled(bytes) {
 export function instrument(bytes, opts = {}) {
   const unhandled = scanUnhandled(bytes);
   if (unhandled.simd) throw new Error("softmmu: module uses SIMD memory ops (unhandled)");
-  if (unhandled.atomics) {
-    throw new Error(
-      "softmmu: module uses atomic memory ops — the atomic translate is a " +
-        "documented follow-up (see softmmu-pass.js); refuse rather than emit an " +
-        "untranslated atomic access",
-    );
-  }
+  // atomics ARE translated (ATOMIC_OPS / the 0xfe path in rewriteFuncBody).
 
   const secs = splitSections(bytes);
   const byId = (id) => secs.find((x) => x.id === id);

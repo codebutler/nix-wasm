@@ -135,20 +135,111 @@ describe("instrument()", () => {
     expect(u[V / 4]).toBe(0);
   });
 
-  test("refuses a module containing atomics (documented follow-up)", () => {
-    // Hand-craft a tiny module with an i32.atomic.load (0xfe 0x10).
-    const atomicMod = new Uint8Array([
-      0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
-      // type: () -> i32
-      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
-      // func: 1 func type 0
-      0x03, 0x02, 0x01, 0x00,
-      // memory: 1, shared, min 1 max 1
-      0x05, 0x04, 0x01, 0x03, 0x01, 0x01,
-      // code: 1 body: i32.const 0; i32.atomic.load align=2 off=0; end
-      0x0a, 0x0b, 0x01, 0x09, 0x00, 0x41, 0x00, 0xfe, 0x10, 0x02, 0x00, 0x0b,
+  test("refuses a module containing SIMD memory ops (documented follow-up)", () => {
+    // Hand-craft a module with a v128.load (0xfd 0x00) so scanUnhandled flags SIMD.
+    const simdMod = new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      0x01,
+      0x05,
+      0x01,
+      0x60,
+      0x00,
+      0x01,
+      0x7b, // type () -> v128
+      0x03,
+      0x02,
+      0x01,
+      0x00, // func 0
+      0x05,
+      0x03,
+      0x01,
+      0x00,
+      0x01, // memory min 1
+      // code: i32.const 0; v128.load align=0 off=0; end
+      0x0a,
+      0x0b,
+      0x01,
+      0x09,
+      0x00,
+      0x41,
+      0x00,
+      0xfd,
+      0x00,
+      0x00,
+      0x00,
+      0x0b,
     ]);
-    expect(scanUnhandled(atomicMod).atomics).toBe(true);
-    expect(() => instrument(atomicMod)).toThrow(/atomic/);
+    expect(scanUnhandled(simdMod).simd).toBe(true);
+    expect(() => instrument(simdMod)).toThrow(/SIMD/);
+  });
+});
+
+describe("atomic ops (0xfe) — the musl-pthread path", () => {
+  const atomics = new Uint8Array(readFileSync(new URL("atomics.wasm", FIX)));
+
+  // atomics.wasm exports a SHARED memory; boot() grows it + lays the identity PT.
+  test("scanUnhandled reports atomics present but NOT simd", () => {
+    const u = scanUnhandled(atomics);
+    expect(u.atomics).toBe(true);
+    expect(u.simd).toBe(false);
+  });
+
+  test("instrumented atomics == original under an identity page table", () => {
+    const orig = boot(atomics, {});
+    const insn = boot(instrument(atomics, { exportControls: true }), { instrumented: true });
+    const P = 0x100000; // a mapped word address (i32-aligned) in the HEAP region
+    const Q = 0x100008;
+
+    for (const h of [orig, insn]) {
+      const dv = new DataView(h.mem.buffer);
+      dv.setUint32(P, 7, true);
+      // a_load
+      expect(h.inst.exports.a_load(P)).toBe(7);
+      // a_add returns old (7), leaves 7+5=12
+      expect(h.inst.exports.a_add(P, 5) >>> 0).toBe(7);
+      expect(dv.getUint32(P, true)).toBe(12);
+      // a_store
+      h.inst.exports.a_store(P, 100);
+      expect(dv.getUint32(P, true)).toBe(100);
+      // a_xchg returns old (100), leaves 200
+      expect(h.inst.exports.a_xchg(P, 200) >>> 0).toBe(100);
+      expect(dv.getUint32(P, true)).toBe(200);
+      // a_cas: expected 200 matches → observed old 200, store 300
+      expect(h.inst.exports.a_cas(P, 200, 300) >>> 0).toBe(200);
+      expect(dv.getUint32(P, true)).toBe(300);
+      // a_cas: expected 999 mismatches → observed old 300, no store
+      expect(h.inst.exports.a_cas(P, 999, 42) >>> 0).toBe(300);
+      expect(dv.getUint32(P, true)).toBe(300);
+      // a_add64 (i64 atomic): old 0, leaves 1000000000000
+      dv.setBigUint64(Q, 0n, true);
+      expect(h.inst.exports.a_add64(Q, 1000000000000n)).toBe(0n);
+      expect(dv.getBigUint64(Q, true)).toBe(1000000000000n);
+    }
+  });
+
+  test("atomics honor the page table: a remapped page redirects the atomic", () => {
+    const V = 0x200000; // virtual page 0x200
+    const P2 = 0x220000; // physical page 0x220
+    const b = boot(instrument(atomics, { exportControls: true }), {
+      instrumented: true,
+      remap: (t, ptWord) => {
+        t[ptWord + (V >>> 12)] = P2;
+      },
+    });
+    const dv = new DataView(b.mem.buffer);
+    // atomic store to V lands in P2 (identity page V left untouched).
+    b.inst.exports.a_store(V, 0xabcd);
+    expect(dv.getUint32(P2, true)).toBe(0xabcd);
+    expect(dv.getUint32(V, true)).toBe(0);
+    // atomic rmw through the remap too: add 1 → old 0xabcd, P2 now 0xabce.
+    expect(b.inst.exports.a_add(V, 1) >>> 0).toBe(0xabcd);
+    expect(dv.getUint32(P2, true)).toBe(0xabce);
   });
 });
