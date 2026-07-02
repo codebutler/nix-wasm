@@ -1,9 +1,12 @@
 # WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
 # STATUS: compiles + links end-to-end (vmlinux built); NOMMU build unregressed.
-# NOT YET BOOTING and NOT yet wired into kernel.nix — the semantic core
-# (fault handler, uaccess table-walk, exec/binfmt address-space setup, engine
-# pt_base integration) is still to come. Apply AFTER patches 0004-0022.
-# Regenerate/boot-complete on the linux box before adding to kernel.nix.
+# Includes the semantic pieces: switch_mm/activate_mm -> env.__mmu_set_pt_base
+# (verified present in the vmlinux import section), and the software uaccess
+# table-walk (raw_copy_{to,from}_user/__clear_user walk the user page table;
+# UACCESS_MEMCPY is now NOMMU-only). NOT YET BOOTING and NOT wired into
+# kernel.nix — still to come: exec/binfmt_wasm address-space setup, the
+# __mmu_fault -> do_page_fault entry (A2), the pass 2-level walk, and the
+# engine's set_pt_base + instrumented-exec integration. Apply AFTER 0004-0022.
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -205,13 +208,56 @@
  #include <uapi/asm/elf.h>
  
  /*
+--- a/arch/wasm/include/asm/mmu_context.h
++++ b/arch/wasm/include/asm/mmu_context.h
+@@ -1,8 +1,39 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+-
+ #ifndef _ASM_WASM_MMU_CONTEXT_H
+ #define _ASM_WASM_MMU_CONTEXT_H
+ 
++#ifdef CONFIG_MMU
++#include <linux/mm_types.h>
++#include <linux/sched.h>
++#include <asm-generic/mm_hooks.h>
++
++/*
++ * The ONE hot ABI action of the software MMU (#128 design §4): on context
++ * switch, hand the incoming process's page-table root to the engine, which
++ * writes it into the instrumented user module's __mmu_pt_base global (the
++ * per-access translate reads it). Host import provided by kernel-worker.js;
++ * the kernel links with --import-undefined so this materializes as an env
++ * import. No TLB to flush — the pass re-reads PTEs on every access.
++ */
++void __mmu_set_pt_base(unsigned long pt_base);
++
++#define switch_mm switch_mm
++static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
++			     struct task_struct *tsk)
++{
++	if (prev != next)
++		__mmu_set_pt_base((unsigned long)next->pgd);
++}
++
++#define activate_mm activate_mm
++static inline void activate_mm(struct mm_struct *prev, struct mm_struct *next)
++{
++	__mmu_set_pt_base((unsigned long)next->pgd);
++}
++
++#include <asm-generic/mmu_context.h>
++#else
+ #include <asm-generic/nommu_context.h>
++#endif
+ 
+ #endif /* _ASM_WASM_MMU_CONTEXT_H */
 --- a/arch/wasm/mm/Makefile
 +++ b/arch/wasm/mm/Makefile
 @@ -1,3 +1,4 @@
  # SPDX-License-Identifier: GPL-2.0-only
  
  obj-y += init.o
-+obj-$(CONFIG_MMU) += pgtable.o
++obj-$(CONFIG_MMU) += pgtable.o uaccess.o
 --- /dev/null
 +++ b/arch/wasm/include/asm/tlbflush.h
 @@ -0,0 +1,18 @@
@@ -251,6 +297,52 @@
 +#endif /* CONFIG_MMU */
 +#endif
 --- /dev/null
++++ b/arch/wasm/include/asm/uaccess.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_UACCESS_H
++#define _ASM_WASM_UACCESS_H
++
++#ifdef CONFIG_MMU
++/*
++ * Software-MMU uaccess (#128). The KERNEL runs uninstrumented in physical/
++ * identity space; USER pointers are virtual (translated by the instrumented
++ * user code via the per-process page table). So kernel<->user copies must WALK
++ * the user page table in software (arch/wasm/mm/uaccess.c) — the equivalent of
++ * a hardware arch taking a fault on a bad user pointer, here a soft lookup.
++ * Kernel-nofault access stays plain (kernel addresses are identity).
++ */
++#include <linux/string.h>
++#include <linux/unaligned.h>
++#include <asm-generic/access_ok.h>
++
++unsigned long raw_copy_from_user(void *to, const void __user *from, unsigned long n);
++unsigned long raw_copy_to_user(void __user *to, const void *from, unsigned long n);
++unsigned long __clear_user(void __user *to, unsigned long n);
++#define __clear_user __clear_user
++
++#define __get_kernel_nofault(dst, src, type, err_label)			\
++do {									\
++	*((type *)dst) = get_unaligned((type *)(src));			\
++	if (0) /* make sure the label looks used to the compiler */	\
++		goto err_label;						\
++} while (0)
++
++#define __put_kernel_nofault(dst, src, type, err_label)			\
++do {									\
++	put_unaligned(*((type *)src), (type *)(dst));			\
++	if (0) /* make sure the label looks used to the compiler */	\
++		goto err_label;						\
++} while (0)
++
++#include <asm-generic/uaccess.h>
++
++#else /* !CONFIG_MMU — the historical flat path (UACCESS_MEMCPY) */
++#include <asm-generic/uaccess.h>
++#endif
++
++#endif /* _ASM_WASM_UACCESS_H */
+--- /dev/null
 +++ b/arch/wasm/mm/pgtable.c
 @@ -0,0 +1,32 @@
 +// SPDX-License-Identifier: GPL-2.0-only
@@ -285,8 +377,123 @@
 +void __init paging_init(void)
 +{
 +}
+--- /dev/null
++++ b/arch/wasm/mm/uaccess.c
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Software-MMU uaccess (#128): kernel<->user copies walk the user page table.
++ * The kernel is identity-mapped (phys); a user va resolves through the
++ * current mm's 2-level table (asm/pgtable.h). An unmapped/absent page is a
++ * fault -> return the remaining byte count, exactly the raw_copy contract.
++ * (A2 will route the miss through handle_mm_fault for demand paging/COW;
++ * A1 exec populates the table up front, so a miss here is a real EFAULT.)
++ */
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/string.h>
++#include <linux/export.h>
++#include <asm/pgtable.h>
++#include <linux/uaccess.h>
++
++/* Resolve one user page; returns false if unmapped/not-present (or, for
++ * writes, write-protected). *phys gets the physical byte address of va. */
++static bool user_page_phys(unsigned long va, bool write, unsigned long *phys)
++{
++	struct mm_struct *mm = current->mm;
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++	if (!mm || va >= TASK_SIZE)
++		return false;
++	pgd = pgd_offset(mm, va);
++	if (pgd_none(*pgd) || pgd_bad(*pgd))
++		return false;
++	p4d = p4d_offset(pgd, va);
++	if (p4d_none(*p4d))
++		return false;
++	pud = pud_offset(p4d, va);
++	if (pud_none(*pud))
++		return false;
++	pmd = pmd_offset(pud, va);
++	if (pmd_none(*pmd) || pmd_bad(*pmd))
++		return false;
++	pte = pte_offset_kernel(pmd, va);
++	if (!pte_present(*pte))
++		return false;
++	if (write && !pte_write(*pte))
++		return false;
++	*phys = (pte_val(*pte) & PAGE_MASK) + (va & ~PAGE_MASK);
++	return true;
++}
++
++/* Copy n bytes across the user boundary, page by page. dir_to_user picks the
++ * direction; returns the number of bytes NOT copied (0 = full success). */
++static unsigned long walk_copy(void *kaddr, unsigned long uva, unsigned long n,
++			       bool to_user)
++{
++	while (n) {
++		unsigned long phys;
++		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
++
++		if (!user_page_phys(uva, to_user, &phys))
++			return n;
++		if (to_user)
++			memcpy((void *)phys, kaddr, chunk);
++		else
++			memcpy(kaddr, (void *)phys, chunk);
++		kaddr += chunk;
++		uva += chunk;
++		n -= chunk;
++	}
++	return 0;
++}
++
++unsigned long raw_copy_from_user(void *to, const void __user *from,
++				 unsigned long n)
++{
++	return walk_copy(to, (unsigned long)from, n, false);
++}
++EXPORT_SYMBOL(raw_copy_from_user);
++
++unsigned long raw_copy_to_user(void __user *to, const void *from,
++			       unsigned long n)
++{
++	return walk_copy((void *)from, (unsigned long)to, n, true);
++}
++EXPORT_SYMBOL(raw_copy_to_user);
++
++unsigned long __clear_user(void __user *to, unsigned long n)
++{
++	unsigned long uva = (unsigned long)to;
++
++	while (n) {
++		unsigned long phys;
++		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
++
++		if (!user_page_phys(uva, true, &phys))
++			return n;
++		memset((void *)phys, 0, chunk);
++		uva += chunk;
++		n -= chunk;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(__clear_user);
 --- a/arch/wasm/Kconfig
 +++ b/arch/wasm/Kconfig
+@@ -20,7 +20,7 @@ config WASM
+ 
+ 	select THREAD_INFO_IN_TASK
+ 	select GENERIC_SMP_IDLE_THREAD
+-	select UACCESS_MEMCPY
++	select UACCESS_MEMCPY if !MMU
+ 	select ARCH_USE_QUEUED_RWLOCKS
+ 	select GENERIC_CPU_DEVICES
+ 	select GENERIC_CSUM
 @@ -122,6 +122,13 @@ config PGTABLE_LEVELS
  	int
  	default 2

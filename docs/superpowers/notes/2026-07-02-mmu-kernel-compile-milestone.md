@@ -41,16 +41,23 @@ wall. Error surface progression: dozens (generic pgtable.h) → 8 → 947 (swap/
   not ELF; binfmt_elf's `START_THREAD` wants a 3-arg `start_thread` the arch
   doesn't have).
 
-## Remaining before it BOOTS (the semantic core — none compile-checkable alone)
+## Update (2026-07-02, second pass): items 1+2 are IN the WIP patch
 
-1. **`switch_mm` → set `pt_base`** (design §4): write the incoming mm's flat
-   table root into the user module's `__mmu_pt_base` global via a
-   `kernel-worker.js` host trampoline. Real `asm/mmu_context.h`.
-2. **uaccess table-walk**: the arch is `UACCESS_MEMCPY` today (flat). With MMU
-   the kernel (uninstrumented) must WALK the user page table in
-   `copy_to/from_user`/`get/put_user`/`strncpy_from_user` — the kernel accesses
-   physical memory; user pointers are virtual. Drop `select UACCESS_MEMCPY`
-   under MMU and provide `raw_copy_{to,from}_user`.
+1. **`switch_mm` → set `pt_base`** — DONE (kernel side): `asm/mmu_context.h`
+   defines `switch_mm`/`activate_mm` calling a `__mmu_set_pt_base(pgd)` host
+   import (the kernel links `--import-undefined`, and the import is VERIFIED
+   present in the built vmlinux's import section as `env.__mmu_set_pt_base`).
+   The ENGINE half (kernel-worker.js providing it + writing the user module's
+   `__mmu_pt_base` global) is still to come, WITH an ENGINE_ABI bump.
+2. **uaccess table-walk** — DONE (kernel side): `select UACCESS_MEMCPY if !MMU`;
+   `asm/uaccess.h` (MMU branch) + `arch/wasm/mm/uaccess.c` implement
+   `raw_copy_{to,from}_user`/`__clear_user` as a software walk of the current
+   mm's 2-level table, page-chunked, write-protect-aware; unmapped → remaining
+   bytes (the raw_copy fault contract). Kernel-nofault access stays identity.
+   A2 will route misses through handle_mm_fault for demand paging.
+
+## Remaining before it BOOTS
+
 3. **exec/binfmt_wasm address-space setup**: build the per-process page tables +
    VMAs mapping the user image; the engine instantiates the softmmu-instrumented
    user module.
