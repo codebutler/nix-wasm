@@ -362,6 +362,13 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # dltest (#126 Track C / #130): in-guest dlopen/dlsym acceptance — the
+      # plain (raw-signature) and dynsym+fpcast (canonical-thunk) dl paths, over
+      # musl patch 0009 + the runtime/dylink.js loader. In systemPackages (via
+      # extraSystemPackages) so its side-module store paths ride the served
+      # closure; also in extraBins for the /bin shortcut.
+      wasmDltest = import ./userspace/dltest.nix { inherit cross; };
+
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
@@ -370,6 +377,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
+        extraSystemPackages = [ wasmDltest ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -398,7 +406,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -677,6 +685,10 @@
         # wasm crossSystem. Build with `nix build .#wasm-nixpkgs-channel`; verify it
         # evaluates with e.g. `nix eval --raw -f <out>/default.nix file.drvPath`.
         wasm-nixpkgs-channel = wasmNixpkgsChannel;
+
+        # In-guest dlopen/dlsym acceptance (#130): $out/bin/{dltest,dltest-fpcast}
+        # + $out/share/dltest/*.so. Gate: runtime demo/node/dlopen-smoke.mjs.
+        dltest = wasmDltest;
 
         # The single versioned `linux` boot bundle (pc#315): $out/iso/linux.iso.
         linux-image = linuxImage;

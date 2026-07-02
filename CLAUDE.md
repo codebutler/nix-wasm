@@ -1007,6 +1007,64 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - Known-good oracle: `~/lwbuild/ws/install/*-wasm32_nommu` (read-only; validate
   against it, never rebuild it here).
 
+## #126 epic — software MMU + asyncify + dlopen (off NOMMU)
+
+The umbrella effort to run the guest as normal MMU Linux and delete the
+NOMMU/no-fork/no-dlopen accommodation layer (#126; sub-issues #127–#131; design
+`docs/superpowers/specs/2026-07-01-software-mmu-asyncify-design.md`). What has
+LANDED on-branch (node-tested where testable; nix/kernel halves build-gated to
+CI / the linux box, per the design's "ship what works" scope):
+
+- **Track C — dlopen / dynamic linking (#130): DONE + BOOT-VERIFIED.** `runtime/demo/node/dlopen-smoke.mjs` passes in a real booted guest (both the raw and the dynsym+fpcast canonical-thunk dl paths run dlopen(NULL)/dlsym + side-module load off the guest FS + ctors); galculator builds with the dynsym seam (carries a `cb.dynsym` section) and its selftest passes. The general
+  runtime side-module loader is `runtime/dylink.js` (`DynamicLoader`:
+  instantiate PIC `SIDE_MODULE`s against the process Memory + shared table, GOT
+  resolution, elem-slot `dlsym` per the fpcast rule, fork/clone REPLAY per Track
+  0 §4). Host surface `__wasm_dl_probe`/`__wasm_dlopen`/`__wasm_dlsym` in
+  `kernel-worker.js`; guest side is musl **patch 0009** (`src/ldso/wasm/`), which
+  also finally DEFINES `__dlsym_time64` (was a dangling stub). `dlsym` of a
+  function returns a **canonical-thunk elem slot** — so a fpcast'd binary whose
+  handlers are resolved BY NAME (GtkBuilder/GModule) needs the **dynsym-inject
+  seam** (`userspace/dynsym.nix` + `scripts/wasm-dynsym-inject.py`, run BEFORE
+  fpcast): it appends every exported function to the elem segment + records a
+  `cb.dynsym` name→slot map the loader treats as authoritative. Wired into
+  galculator. Gate: `runtime/demo/node/dlopen-smoke.mjs` + `userspace/dltest*`.
+  **ENGINE_ABI bumped 7→8** for the dl host surface (needs `sync-to-pc.sh`).
+- **Track C — libffi runtime codegen: DONE + tested.** `runtime/ffi-codegen.js`
+  generates a wasm trampoline module per call signature at runtime (the same
+  instantiate-into-the-shared-table primitive dlopen uses), removing the fixed
+  `wasm32-raw-ffi.c` table's K/M bound + adding structs/varargs. Two ABIs: raw,
+  and the **canonical (i64×128)→i64** path for fpcast'd targets (marshals via
+  binaryen's exact toABI/fromABI). `wasm32-raw-ffi.c` keeps the static table as
+  the fast path and FALLS THROUGH to `__wasm_ffi_call` on out-of-bounds/struct/
+  varargs. `DynamicLoader.isCanonicalSlot` (structural fpcast fingerprint: a
+  `(i64×128)→i64` type) picks the ABI per call.
+- **Track A1 — software-MMU pass: DONE + measured (toolchain half).**
+  `runtime/softmmu-pass.js` rewrites every guest load/store to an INLINED
+  single-level page-table translate reading a per-process `__mmu_pt_base` global.
+  Correct on a real binary across all scalar widths + pointer-chase + real
+  page-table redirection; aborts loud on atomics/SIMD (follow-up). **Measured**
+  (`spikes/softmmu/REAL-BINARY.md`): compute-mixed code ≈free, pure-memory loops
+  ~2.2× — the spike's poles, on real compiler output. **The load-bearing lesson:
+  INLINE the translate, never a helper call** (a helper-call-per-access measured
+  ~12× under V8). The KERNEL half (CONFIG_MMU=y arch layer) is specified in
+  `docs/superpowers/specs/2026-07-01-softmmu-kernel-design.md` — needs the kernel
+  source + nix/LLVM build (the box), not authorable-and-verifiable in a sandbox.
+- **Track B — asyncify fork seam: recovered + generalized.** `runtime/asyncify.js`
+  (the double-return engine, 6 node tests) recovered from PR #20;
+  `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in (B1). The
+  **fork×dlopen replay** (the design's named hazard) is DONE in `dylink.js`.
+  LANDING gated on Track A2 (COW) + `muslFork` re-integration (world build).
+  Status: `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md`.
+- **#131 cleanup** — the payoff. Slice 2 (dlopen accommodations) is unblocked by
+  Track C; slices 1/3 gated on Track B/A world builds. Execution-ready audit
+  (each box + exact edit + verify gate): `docs/superpowers/specs/
+  2026-07-01-cleanup-131-audit.md`. NOT executed blind — the glib/gtk3 overrides
+  need a boot to verify (PRIME DIRECTIVE).
+
+The new `runtime/*.js` modules (`dylink.js`, `ffi-codegen.js`, `softmmu-pass.js`,
+`asyncify.js`) are pure + unit-tested (`bun test`); like all `kernel-worker.js`
+edits, the ABI-8 host surface needs a `sync-to-pc.sh` before a pc deploy.
+
 ## Plans & future work
 
 Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →

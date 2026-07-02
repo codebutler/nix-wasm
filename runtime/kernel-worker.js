@@ -8,6 +8,8 @@
 // pc additions (ticket #74) are marked "pc:". The 9P filesystem rides the stock
 // virtio-9p transport (issue #10), serviced by the main-thread host devices —
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
+import { DynamicLoader } from "./dylink.js";
+import { FfiTrampolines } from "./ffi-codegen.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
@@ -90,6 +92,25 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// The user executabe instance, or null. Try using the instance variable in the promise over this one if possible.
   let user_executable_instance = null;
   let user_executable_imports = null;
+
+  /// pc (#126 Track C / #130): per-process dynamic linking (dlopen/dlsym).
+  /// dyn_loader is built LAZILY on the first dl host-import call (parsing the
+  /// main image's export/elem sections costs a few ms on a huge --export-all
+  /// binary; processes that never dlopen pay nothing). user_executable_range
+  /// is the main binary's byte range in the SHARED kernel memory (the same
+  /// range the exec/clone ABI already passes around — the kernel keeps it
+  /// alive for the process lifetime), used to parse the main module's symbol
+  /// tables. dyn_replay carries a cloning parent's side-module snapshot into
+  /// this (child) worker; it is replayed right after the user instance exists,
+  /// before any user code runs (Track 0 §4 step 3).
+  let dyn_loader = null;
+  let dyn_replay = null;
+  let user_executable_range = null;
+
+  /// pc (#130): the per-process runtime-FFI trampoline cache (runtime/
+  /// ffi-codegen.js) — built lazily on the first __wasm_ffi_call, sharing this
+  /// process's Memory + function table.
+  let ffi_trampolines = null;
 
   /// Flag that a clone callback should be called instead of _start().
   let should_call_clone_callback = false;
@@ -174,6 +195,45 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       return 0;
     }
     return 0;
+  };
+
+  /// pc (#130): build the per-process dynamic loader on first use — parse the
+  /// main image's export/elem/dynsym sections from its byte range in shared
+  /// kernel memory and register it as handle 1. Requires the user instance to
+  /// exist (dl imports only fire from running user code; the replay path runs
+  /// right after instantiation).
+  const ensure_dyn_loader = () => {
+    if (!dyn_loader) {
+      dyn_loader = new DynamicLoader({
+        memory,
+        table: user_executable_imports.env.__indirect_function_table,
+        baseEnv: user_executable_imports.env,
+        archBits: arch_bits,
+        log: (m) => log(m),
+      });
+      dyn_loader.registerMain({
+        instance: user_executable_instance,
+        bytes: new Uint8Array(memory.buffer).subarray(
+          user_executable_range.bin_start,
+          user_executable_range.bin_end,
+        ),
+        memoryBase: Number(user_executable_params.data_start),
+        tableBase: Number(user_executable_params.table_start),
+      });
+    }
+    return dyn_loader;
+  };
+
+  /// pc (#130): the runtime-FFI trampoline cache, over this process's Memory +
+  /// function table (the same table dlopen'd modules install into).
+  const ensure_ffi = () => {
+    if (!ffi_trampolines) {
+      ffi_trampolines = new FfiTrampolines({
+        memory,
+        table: user_executable_imports.env.__indirect_function_table,
+      });
+    }
+    return ffi_trampolines;
   };
 
   /// Get a JS string object from a (nul-terminated) C-string in a Uint8Array.
@@ -443,6 +503,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               bin_end: bin_end,
               data_start: data_start,
               table_start: table_start,
+              // pc (#130): the parent's dynamic-linking state (side modules +
+              // table-op log). Module instances + the wasm table are engine
+              // objects OUTSIDE linear memory, so the CLONE_VM-shared memory
+              // does NOT carry them — the child worker must REPLAY them to
+              // reproduce the exact table layout the parent's function-pointer
+              // values (table indices, living in shared memory) refer to.
+              dyn: dyn_loader && dyn_loader.opLog.length > 0 ? dyn_loader.snapshot() : null,
             }
           : null,
       });
@@ -500,6 +567,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     /// it straight from that range. No host Module cache / key resolution.
     wasm_load_executable: (bin_start, bin_end, data_start, table_start) => {
       reset_syscall_trace(); // pc (#139): re-arm the per-exec syscall-trace budget
+      // pc (#130): a fresh program image — drop the old image's dynamic-linking
+      // state (side modules die with the image, like an ELF exec) and remember
+      // the new image's byte range for the lazy loader.
+      dyn_loader = null;
+      dyn_replay = null;
+      ffi_trampolines = null;
+      user_executable_range = { bin_start, bin_end };
       const bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
       user_executable = WebAssembly.compile(bytes);
       user_executable_params = {
@@ -673,6 +747,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           message.user_executable.data_start,
           message.user_executable.table_start,
         );
+        // pc (#130): a cloning parent's dynamic-linking snapshot — replayed
+        // after the user instance is created (wasm_load_executable above just
+        // reset it, so set it after).
+        if (message.user_executable.dyn) dyn_replay = message.user_executable.dyn;
       }
 
       let import_object = {
@@ -935,6 +1013,82 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             __dlsym_time64: () => 0,
             __cxa_thread_atexit_impl: () => 0,
 
+            // pc (#126 Track C / #130): the dlopen/dlsym host surface (ENGINE_ABI
+            // 8). The guest musl's wasm dlopen port drives these:
+            //   1. it reads the whole .so file into its own memory (the guest FS
+            //      just works — 9P/squashfs/initramfs alike),
+            //   2. __wasm_dl_probe parses the image's dylink.0 requirements so
+            //      the guest can malloc the module's data region itself (the
+            //      guest allocator owns the arena),
+            //   3. __wasm_dlopen instantiates the side module at that memoryBase
+            //      against this process's Memory + shared table (runtime/
+            //      dylink.js — GOT resolution, elem-slot dlsym, fpcast rule).
+            // dlopen(NULL) is __wasm_dlopen(0,0,0,flags) → handle 1 (the main
+            // program); dlsym handle 0 = RTLD_DEFAULT (global scope).
+            __wasm_dl_probe: (bufPtr, bufLen, outPtr) => {
+              const b = new Uint8Array(memory.buffer).subarray(
+                Number(bufPtr),
+                Number(bufPtr) + Number(bufLen),
+              );
+              const r = ensure_dyn_loader().probe(b);
+              if (typeof r === "number") return r;
+              const dv = new DataView(memory.buffer);
+              dv.setUint32(Number(outPtr), r.memSize, true);
+              dv.setUint32(Number(outPtr) + 4, r.memAlign, true); // log2, as in dylink.0
+              dv.setUint32(Number(outPtr) + 8, r.tableSize, true);
+              return 0;
+            },
+            __wasm_dlopen: (bufPtr, bufLen, memoryBase, flags) => {
+              if (Number(bufPtr) === 0) return 1; // dlopen(NULL) → the main program
+              const b = new Uint8Array(memory.buffer).subarray(
+                Number(bufPtr),
+                Number(bufPtr) + Number(bufLen),
+              );
+              // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
+              // serve symbols to later loads or RTLD_DEFAULT searches.
+              return ensure_dyn_loader().load(b, Number(memoryBase), {
+                name: `dlopen@${Number(bufPtr)}`,
+                global: (Number(flags) & 0x100) !== 0,
+              });
+            },
+            __wasm_dlsym: (handle, namePtr) => {
+              return ensure_dyn_loader().dlsym(
+                Number(handle),
+                get_cstring(memory, Number(namePtr)),
+              );
+            },
+
+            // pc (#126 Track C / #130): runtime libffi. The in-tree
+            // wasm32-raw-ffi.c backend enumerates call signatures at BUILD time
+            // (a fixed trampoline table, bounded K=24/M=2, no structs/varargs);
+            // a call whose signature falls outside that table lands here. We
+            // generate + cache a wasm trampoline module for the EXACT signature
+            // (runtime/ffi-codegen.js — the same runtime-instantiation primitive
+            // dlopen uses) and invoke it. The signature is a byte descriptor at
+            // sigPtr: [nparams, retcode, p0code, …] where a code is 0=void
+            // (ret only), 1=i32, 2=i64, 3=f32, 4=f64. argPtr/retPtr are the
+            // 8-byte-slotted arg buffer + result slot the C backend prepared.
+            // Canonical-thunk targets (fpcast'd modules) get the (i64×128)->i64
+            // ABI; the loader decides from which module owns table[funcIndex].
+            __wasm_ffi_call: (funcIndex, argPtr, retPtr, sigPtr, sigLen) => {
+              const u8 = new Uint8Array(memory.buffer);
+              const base = Number(sigPtr);
+              const CODES = [null, "i32", "i64", "f32", "f64"];
+              const np = u8[base];
+              const ret = CODES[u8[base + 1]];
+              const params = [];
+              for (let i = 0; i < np; i++) params.push(CODES[u8[base + 2 + i]]);
+              const canonical = ensure_dyn_loader().isCanonicalSlot(Number(funcIndex));
+              ensure_ffi().call(
+                { params, result: ret },
+                canonical,
+                Number(funcIndex),
+                Number(argPtr),
+                Number(retPtr),
+              );
+              return 0;
+            },
+
             // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's
             // LeakSanitizer hooks, declared weak-undefined and called behind a
             // `&sym != NULL` guard (glib/glib-private.h). wasm-ld -shared turns a
@@ -1029,6 +1183,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             instance.exports.__set_tls_base(tls_base);
           }
           user_executable_instance = instance;
+
+          // pc (#130): a cloning parent had dlopen'd side modules / handed out
+          // dynamic table slots — replay them into this child NOW, before any
+          // user code runs, so every function-pointer value in the (shared)
+          // memory resolves identically here (Track 0 §4 step 3). Relocs and
+          // ctors are skipped by the replay path — the shared memory already
+          // holds the parent's initialized data.
+          if (dyn_replay) {
+            const snap = dyn_replay;
+            dyn_replay = null;
+            ensure_dyn_loader().replay(snap);
+          }
           return instance;
         });
 
