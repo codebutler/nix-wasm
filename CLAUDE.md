@@ -1115,12 +1115,25 @@ CI / the linux box, per the design's "ship what works" scope):
   mmu-smoke + mmu-smoke-a2 are now GATED in `nix-wasm.yml`'s boot-smoke job.
   **REMAINING for Track A:** none — demand paging + COW + mprotect all boot-
   verified and gated; the fork COW replay is exercised by Track B.
-- **Track B — asyncify fork seam: recovered + generalized.** `runtime/asyncify.js`
-  (the double-return engine, 6 node tests) recovered from PR #20;
-  `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in (B1). The
-  **fork×dlopen replay** (the design's named hazard) is DONE in `dylink.js`.
-  LANDING gated on Track A2 (COW) + `muslFork` re-integration (world build).
-  Status: `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md`.
+- **Track B — asyncify fork seam: recovered + generalized; COW gate now MET.**
+  `runtime/asyncify.js` (the double-return engine, 6 node tests) recovered from
+  PR #20; `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in
+  (B1). The **fork×dlopen replay** (the design's named hazard) is DONE in
+  `dylink.js`. Track B's **COW dependency is now satisfied** (Track A2 above —
+  the write-protect fault path COWs, boot-verified). **BUT PR #20's kernel fork
+  (`patches/kernel/0026`) is the WRONG model for the new foundation** and must
+  NOT be applied: it mints a separate wasm `Memory` per process + tracks
+  `user_as_owner_pid` — the NOMMU per-process-Memory model the software MMU
+  (#128) *replaces* with a single shared arena + per-process page tables. The
+  MMU-native fork is: (1) kernel — generic `dup_mm`→`pgd_alloc`→`dup_mmap`→
+  `copy_page_range` (COW via `is_cow_mapping`, now that write-faults work; the
+  arch already has `pgd_alloc`/`switch_mm→pt_base`), plus `copy_thread` for the
+  non-CLONE_VM child; (2) musl — the fork-asyncify seam renumbered to
+  `patches/musl/0010` + a world build; (3) engine — run the asyncify child **in
+  the SAME shared Memory** with its own `pt_base` (NOT a minted Memory), wired
+  into `kernel-worker.js`'s task model. Full analysis + why #0026 is retired:
+  `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md` (UPDATE
+  2026-07-02). LANDING remains a multi-part world+kernel+engine build.
 - **#131 cleanup** — the payoff. Slice 2 (dlopen accommodations) is unblocked by
   Track C; slices 1/3 gated on Track B/A world builds. Execution-ready audit
   (each box + exact edit + verify gate): `docs/superpowers/specs/
