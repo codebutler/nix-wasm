@@ -1046,9 +1046,37 @@ CI / the linux box, per the design's "ship what works" scope):
   (`spikes/softmmu/REAL-BINARY.md`): compute-mixed code ≈free, pure-memory loops
   ~2.2× — the spike's poles, on real compiler output. **The load-bearing lesson:
   INLINE the translate, never a helper call** (a helper-call-per-access measured
-  ~12× under V8). The KERNEL half (CONFIG_MMU=y arch layer) is specified in
-  `docs/superpowers/specs/2026-07-01-softmmu-kernel-design.md` — needs the kernel
-  source + nix/LLVM build (the box), not authorable-and-verifiable in a sandbox.
+  ~12× under V8). The pass also translates **atomics** (0xfe) + **bulk-memory**
+  (memory.copy/fill/init, page-chunked) and does the standard 2-level walk
+  matching the kernel tables; it strips the wasm start section → `__mmu_start`
+  (init-memory must run after `pt_base` is set).
+- **Track A1 — CONFIG_MMU=y kernel half: DONE + IT BOOTS (2026-07-02).**
+  `nix build .#kernel-mmu` builds the software-MMU vmlinux (`kernel.nix`
+  `mmu=true` applies `patches/kernel/0023-wasm-software-mmu.patch`); the
+  `runtime/demo/node/mmu-smoke.mjs` gate boots the NIX-BUILT kernel + a
+  softmmu-instrumented init (`.#mmu-init`) to completion and PASSES with a
+  bit-exact translated checksum (`0x98c9e000`), bulk ops, and uaccess across the
+  boundary — on the FULL production config. Arch layer: `asm/{pgtable,pgalloc,
+  tlbflush,mmu_context,mmu}.h` (2-level over the §1 PTE format; `switch_mm` →
+  `env.__mmu_set_pt_base`; init/destroy_context own the kernel binary buffer),
+  software uaccess table-walk (`mm/uaccess.c` + `fixup_user_fault`), A2 fault
+  entry (`mm/fault.c __wasm_mmu_fault`), `protection_map`. **Two keystone fixes
+  found by BOOTING:** (1) **`mm/vmalloc.c` contiguous-identity under
+  CONFIG_WASM** — an identity-mapped kernel can't reach scattered vmalloc pages,
+  so vmalloc == NOMMU's contiguous `kmalloc`/`kfree`/`virt_to_page` (the arch
+  already commits to MAX_ORDER=16 blocks). This is the RIGHT design for a
+  *software* MMU, not a workaround — and strictly better than instrumenting the
+  kernel (Option B), which would tax every kernel memory access at ~3-4× AND
+  still need the uaccess soft-walk. Unblocked bpf/tty/all vmalloc users. (2)
+  **full initial-stack population at exec** (`fs/binfmt_wasm.c`) — the A1
+  fast-path translate has no present check, so a demand-paged (grown) stack page
+  silently mistranslated (caught: one checksum nibble wrote 0x00 through a zero
+  PTE). Engine half: ENGINE_ABI 9 — `pt_base` rides the exec ABI, applied to the
+  instrumented image's `__mmu_pt_base` global at instantiation (per-task
+  instances each carry their own root). **REMAINING:** the A2 present-check in
+  the translate (runtime demand paging / stack growth beyond the initial VMA),
+  then wiring mmu-smoke into `nix-wasm.yml`. Design +
+  `docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md`.
 - **Track B — asyncify fork seam: recovered + generalized.** `runtime/asyncify.js`
   (the double-return engine, 6 node tests) recovered from PR #20;
   `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in (B1). The
