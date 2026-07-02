@@ -54,6 +54,8 @@
       # boot yet (runtime forward-port pending).
       kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
       kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
+      # #128 Track A: the CONFIG_MMU=y software-MMU vmlinux (applies patch 0023).
+      kernelMmu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
@@ -528,6 +530,7 @@
 
         # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
         kernel = kernel;
+        kernel-mmu = kernelMmu;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;

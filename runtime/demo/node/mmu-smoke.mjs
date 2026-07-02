@@ -67,9 +67,7 @@ function cpioNewc(entries) {
 // ---- assemble the artifacts dir ---------------------------------------------
 const initRaw = new Uint8Array(readFileSync(initPath));
 const initInstr = instrument(initRaw, { exportControls: true });
-console.log(
-  `[mmu-smoke] instrumented init: ${initRaw.length} -> ${initInstr.length} bytes`,
-);
+console.log(`[mmu-smoke] instrumented init: ${initRaw.length} -> ${initInstr.length} bytes`);
 
 const cpio = cpioNewc([
   { name: "dev", mode: 0o040755 },

@@ -19,9 +19,9 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC }:
+{ pkgs, kernelSrc, kernelCC, mmu ? false }:
 pkgs.stdenv.mkDerivation {
-  pname = "vmlinux-wasm";
+  pname = if mmu then "vmlinux-wasm-mmu" else "vmlinux-wasm";
   version = "7.0-039e5f3e";
 
   src = kernelSrc;
@@ -116,6 +116,9 @@ pkgs.stdenv.mkDerivation {
     # inode set up for shared mmap, re-allocate a larger contiguous block and copy
     # the data across (only marked inodes; ordinary ramfs growth is unaffected).
     ./patches/kernel/0022-wasm-nommu-ramfs-regrow-shared-mmap.patch
+  ] ++ pkgs.lib.optionals mmu [
+    # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
+    ./patches/kernel/0023-wasm-software-mmu.patch
   ];
 
   # Guard against silent patch-fuzz corruption of the virtio device enum (the #84
@@ -335,7 +338,19 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_VIRTIO_VSOCKETS \
       --enable CONFIG_VIRTIO_VSOCKETS_COMMON
 
+    ${pkgs.lib.optionalString mmu ''
+      # #128: enable the software MMU + disable binfmt_elf (the guest execs wasm).
+      bash ./scripts/config --file build/.config \
+        --enable CONFIG_MMU \
+        --disable CONFIG_BINFMT_ELF
+    ''}
+
     make $makeFlags olddefconfig
+
+    ${pkgs.lib.optionalString mmu ''
+      grep -qE "^CONFIG_MMU=y" build/.config \
+        || { echo "ERROR: CONFIG_MMU did not stick" >&2; exit 1; }
+    ''}
 
     runHook postConfigure
   '';

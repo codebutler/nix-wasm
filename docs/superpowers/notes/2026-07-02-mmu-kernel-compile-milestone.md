@@ -30,9 +30,15 @@ in advance became empirical, then got its correct fix):
    one checksum nibble wrote 0x00 through a zero PTE). Runtime stack GROWTH
    beyond the initial VMA is the A2 present-check generalization.
 
-Everything is in `mmu-wip-0023-arch-layer.patch` (validated; applies after
-0004-0022; NOMMU byte-identical). Next: wire a `.#kernel-mmu` flake attr so the
-smoke is a reproducible CI gate, then the A2 present-check for demand paging.
+Everything is in `patches/kernel/0023-wasm-software-mmu.patch`, wired REPRODUCIBLY:
+`nix build .#kernel-mmu` builds the CONFIG_MMU=y vmlinux (kernel.nix `mmu=true`
+applies 0023 + flips the config), and the mmu-smoke boots the NIX-BUILT kernel +
+`nix build .#mmu-init` to PASS — even on the FULL production config (net/bpf/tty),
+because contiguous-vmalloc unblocks bpf_prog_alloc too. CI gate:
+`KM=$(nix build .#kernel-mmu --print-out-paths); MI=$(nix build .#mmu-init --print-out-paths);
+MMU_VMLINUX=$KM/vmlinux.wasm MMU_INIT=$MI/bin/mmu-init node runtime/demo/node/mmu-smoke.mjs`.
+Next: the A2 present-check in the translate for demand paging (runtime stack
+growth beyond the initial VMA), then wiring mmu-smoke into nix-wasm.yml.
 
 ---
 

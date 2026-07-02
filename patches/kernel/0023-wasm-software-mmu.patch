@@ -1,0 +1,1042 @@
+# nix-wasm #128 Track A — CONFIG_MMU=y software-MMU arch layer (mmu=true only).
+# Applied by kernel.nix after 0004-0022 when mmu==true. See
+# docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md.
+--- a/arch/wasm/include/asm/pgtable.h
++++ b/arch/wasm/include/asm/pgtable.h
+@@ -3,17 +3,16 @@
+ #ifndef _ASM_WASM_PGTABLE_H
+ #define _ASM_WASM_PGTABLE_H
+ 
+-#include <asm-generic/pgtable-nopmd.h>
+-
+ #include <linux/slab.h>
+ #include <asm/processor.h>
+ #include <asm/page.h>
+ #include <asm/io.h>
+ 
+-/*
+- * No MMU support so do nothing...
+- * Inspired by the various other NOMMU implementations in the kernel.
+- */
++#ifndef CONFIG_MMU
++/* ----------------------------------------------------------------------------
++ * NOMMU: no MMU support, everything is a no-op (the historical wasm path).
++ * -------------------------------------------------------------------------- */
++#include <asm-generic/pgtable-nopmd.h>
+ 
+ #define pgd_present(pgd)	(1)
+ #define pgd_none(pgd)		(0)
+@@ -34,11 +33,125 @@
+ extern void paging_init(void);
+ #define swapper_pg_dir ((pgd_t *) 0)
+ 
+-/*
+- * ZERO_PAGE is a global shared page that is always zero: used
+- * for zero-mapped memory areas etc..
+- */
+ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
+ #define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
+ 
++#else /* CONFIG_MMU */
++/* ----------------------------------------------------------------------------
++ * Software MMU (Track A, #128). Classic 32-bit 2-level split matching the
++ * instrumentation pass's translate (docs/.../softmmu-kernel-design.md §1/§2):
++ *   pgd_e = u32[ pt_base + (va>>22)<<2 ]                   level 1 (PTE-table base)
++ *   pte   = u32[ (pgd_e & ~0xfff) + ((va>>12 & 0x3ff)<<2) ] level 2
++ *   phys  = (pte & ~0xfff) + (va & 0xfff)
++ * PTE: bits 0-11 flags, bits 12-31 physical page base. The kernel runs in
++ * physical (identity) space; only instrumented USER code translates.
++ * -------------------------------------------------------------------------- */
++#include <asm-generic/pgtable-nopmd.h>
++
++/* 2-level: PGD (1024 entries, each covers 4MiB) -> PTE (1024 entries/page). */
++#define PGDIR_SHIFT	22
++#define PTRS_PER_PGD	1024
++#define PTRS_PER_PTE	1024
++#define PGDIR_SIZE	(1UL << PGDIR_SHIFT)
++#define PGDIR_MASK	(~(PGDIR_SIZE - 1))
++#define PFN_PTE_SHIFT	PAGE_SHIFT
++#define USER_PTRS_PER_PGD	(TASK_SIZE >> PGDIR_SHIFT)
++
++/* PTE flag bits (low 12, ignored by the A1 fast-path translate). */
++#define _PAGE_PRESENT	(1UL << 0)
++#define _PAGE_WRITE	(1UL << 1)
++#define _PAGE_USER	(1UL << 2)
++#define _PAGE_ACCESSED	(1UL << 3)
++#define _PAGE_DIRTY	(1UL << 4)
++#define _PAGE_CHG_MASK	(PAGE_MASK | _PAGE_ACCESSED | _PAGE_DIRTY)
++
++#define _PAGE_TABLE	(_PAGE_PRESENT | _PAGE_WRITE | _PAGE_USER | _PAGE_ACCESSED)
++
++#define PAGE_NONE	__pgprot(_PAGE_PRESENT | _PAGE_ACCESSED)
++#define PAGE_SHARED	__pgprot(_PAGE_PRESENT | _PAGE_WRITE | _PAGE_USER | _PAGE_ACCESSED)
++#define PAGE_COPY	__pgprot(_PAGE_PRESENT | _PAGE_USER | _PAGE_ACCESSED)
++#define PAGE_READONLY	__pgprot(_PAGE_PRESENT | _PAGE_USER | _PAGE_ACCESSED)
++#define PAGE_KERNEL	__pgprot(_PAGE_PRESENT | _PAGE_WRITE | _PAGE_ACCESSED)
++
++#define VMALLOC_START	0xC0000000UL
++#define VMALLOC_END	0xFF000000UL
++#define KMAP_START	0
++#define KMAP_END	0xFFFFFFFF
++
++extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
++extern void paging_init(void);
++
++extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
++#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
++
++/* ---- PTE queries / constructors ---- */
++static inline int pte_none(pte_t pte)		{ return !pte_val(pte); }
++static inline int pte_present(pte_t pte)	{ return pte_val(pte) & _PAGE_PRESENT; }
++static inline int pte_write(pte_t pte)		{ return pte_val(pte) & _PAGE_WRITE; }
++static inline int pte_dirty(pte_t pte)		{ return pte_val(pte) & _PAGE_DIRTY; }
++static inline int pte_young(pte_t pte)		{ return pte_val(pte) & _PAGE_ACCESSED; }
++
++static inline pte_t pte_wrprotect(pte_t pte)	{ pte_val(pte) &= ~_PAGE_WRITE; return pte; }
++static inline pte_t pte_mkclean(pte_t pte)	{ pte_val(pte) &= ~_PAGE_DIRTY; return pte; }
++static inline pte_t pte_mkold(pte_t pte)	{ pte_val(pte) &= ~_PAGE_ACCESSED; return pte; }
++static inline pte_t pte_mkwrite_novma(pte_t pte){ pte_val(pte) |= _PAGE_WRITE; return pte; }
++static inline pte_t pte_mkdirty(pte_t pte)	{ pte_val(pte) |= _PAGE_DIRTY; return pte; }
++static inline pte_t pte_mkyoung(pte_t pte)	{ pte_val(pte) |= _PAGE_ACCESSED; return pte; }
++
++#define pte_pfn(pte)		(pte_val(pte) >> PAGE_SHIFT)
++#define pfn_pte(pfn, prot)	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
++#define pte_page(pte)		pfn_to_page(pte_pfn(pte))
++
++static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
++{
++	pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot);
++	return pte;
++}
++
++#define set_pte(ptep, pte)	(*(ptep) = (pte))
++#define pte_clear(mm, addr, ptep) set_pte((ptep), __pte(0))
++
++/* ---- PMD (folded into PGD by nopmd) ---- */
++static inline int pmd_none(pmd_t pmd)		{ return !pmd_val(pmd); }
++static inline int pmd_bad(pmd_t pmd)		{ return 0; }
++static inline int pmd_present(pmd_t pmd)	{ return pmd_val(pmd); }
++static inline void pmd_clear(pmd_t *pmdp)	{ pmd_val(*pmdp) = 0; }
++static inline unsigned long pmd_page_vaddr(pmd_t pmd)
++{
++	return (unsigned long)__va(pmd_val(pmd) & PAGE_MASK);
++}
++#define pmd_pfn(pmd)		(pmd_val(pmd) >> PAGE_SHIFT)
++#define set_pmd(pmdp, pmd)	(*(pmdp) = (pmd))
++#define pmd_page(pmd)		pfn_to_page(pmd_pfn(pmd))
++
++/* pte table pointer from a (folded) pmd entry */
++#define pte_offset_kernel(pmd, addr) \
++	((pte_t *)pmd_page_vaddr(*(pmd)) + pte_index(addr))
++
++
++
++/* ---- swap entry encoding (present=0 PTEs). type:bits3-7, offset:bits8-31 ---- */
++#define _PAGE_SWP_EXCLUSIVE	_PAGE_USER
++#define __swp_type(x)		(((x).val >> 3) & 0x1f)
++#define __swp_offset(x)		((x).val >> 8)
++#define __swp_entry(type, offset) \
++	((swp_entry_t){ ((type) << 3) | ((offset) << 8) })
++#define __pte_to_swp_entry(pte)	((swp_entry_t){ pte_val(pte) })
++#define __swp_entry_to_pte(x)	((pte_t){ (x).val })
++static inline int pte_swp_exclusive(pte_t pte)
++{ return pte_val(pte) & _PAGE_SWP_EXCLUSIVE; }
++static inline pte_t pte_swp_mkexclusive(pte_t pte)
++{ pte_val(pte) |= _PAGE_SWP_EXCLUSIVE; return pte; }
++static inline pte_t pte_swp_clear_exclusive(pte_t pte)
++{ pte_val(pte) &= ~_PAGE_SWP_EXCLUSIVE; return pte; }
++
++#define pgd_ERROR(e) \
++	pr_err("%s:%d: bad pgd %08lx.\n", __FILE__, __LINE__, pgd_val(e))
++
++
++#define update_mmu_cache_range(vmf, vma, addr, ptep, nr) do { } while (0)
++#define update_mmu_cache(vma, addr, ptep) do { } while (0)
++#endif /* CONFIG_MMU */
++
++#include <asm-generic/getorder.h>
+ #endif /* _ASM_WASM_PGTABLE_H */
+--- a/arch/wasm/include/asm/processor.h
++++ b/arch/wasm/include/asm/processor.h
+@@ -12,6 +12,11 @@
+ 
+ /* 3 GB RAM for userspace, 1 GB for the kernel. */
+ #define TASK_SIZE (0xC0000000)
++#ifdef CONFIG_MMU
++#define STACK_TOP	TASK_SIZE
++#define STACK_TOP_MAX	STACK_TOP
++#define TASK_UNMAPPED_BASE	(PAGE_ALIGN(TASK_SIZE / 3))
++#endif
+ 
+ /*
+  * We run interrupts on CPU 1, keep it clear. Why not CPU 0? Because init needs
+--- a/arch/wasm/include/asm/io.h
++++ b/arch/wasm/include/asm/io.h
+@@ -6,6 +6,11 @@
+ /* asm-generic/io.h defines this as NULL which leads to compiler warnings. */
+ #define PCI_IOBASE ((void __iomem *)sizeof(long))
+ 
++#ifdef CONFIG_MMU
++#define ioremap(addr, size)	((void __iomem *)(unsigned long)(addr))
++#define iounmap(addr)		do { } while (0)
++#endif
++
+ #include <asm-generic/io.h>
+ 
+ #endif /* _ASM_WASM_IO_H */
+--- a/arch/wasm/include/asm/elf.h
++++ b/arch/wasm/include/asm/elf.h
+@@ -3,6 +3,15 @@
+ #ifndef _ASM_WASM_ELF_H
+ #define _ASM_WASM_ELF_H
+ 
++#define elf_check_arch(x) (1)
++#define ELF_HWCAP	(0)
++#define ELF_PLATFORM	(NULL)
++#define ELF_EXEC_PAGESIZE	PAGE_SIZE
++
++#ifdef CONFIG_MMU
++#define ELF_ET_DYN_BASE	0x08000000UL
++#endif
++
+ #include <uapi/asm/elf.h>
+ 
+ /*
+--- a/arch/wasm/include/asm/mmu_context.h
++++ b/arch/wasm/include/asm/mmu_context.h
+@@ -1,8 +1,59 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+-
+ #ifndef _ASM_WASM_MMU_CONTEXT_H
+ #define _ASM_WASM_MMU_CONTEXT_H
+ 
++#ifdef CONFIG_MMU
++#include <linux/mm_types.h>
++#include <linux/sched.h>
++#include <linux/gfp.h>
++#include <asm-generic/mm_hooks.h>
++
++/*
++ * The ONE hot ABI action of the software MMU (#128 design §4): on context
++ * switch, hand the incoming process's page-table root to the engine, which
++ * writes it into the instrumented user module's __mmu_pt_base global (the
++ * per-access translate reads it). Host import provided by kernel-worker.js;
++ * the kernel links with --import-undefined so this materializes as an env
++ * import. No TLB to flush — the pass re-reads PTEs on every access.
++ */
++void __mmu_set_pt_base(unsigned long pt_base);
++
++#define switch_mm switch_mm
++static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
++			     struct task_struct *tsk)
++{
++	if (prev != next)
++		__mmu_set_pt_base((unsigned long)next->pgd);
++}
++
++#define activate_mm activate_mm
++static inline void activate_mm(struct mm_struct *prev, struct mm_struct *next)
++{
++	__mmu_set_pt_base((unsigned long)next->pgd);
++}
++
++#define init_new_context init_new_context
++static inline int init_new_context(struct task_struct *tsk,
++				   struct mm_struct *mm)
++{
++	mm->context.bin_copy = NULL;
++	mm->context.bin_size = 0;
++	return 0;
++}
++
++/* Free the kernel copy of the process binary (see asm/mmu.h). */
++#define destroy_context destroy_context
++static inline void destroy_context(struct mm_struct *mm)
++{
++	if (mm->context.bin_copy) {
++		free_pages_exact(mm->context.bin_copy, mm->context.bin_size);
++		mm->context.bin_copy = NULL;
++	}
++}
++
++#include <asm-generic/mmu_context.h>
++#else
+ #include <asm-generic/nommu_context.h>
++#endif
+ 
+ #endif /* _ASM_WASM_MMU_CONTEXT_H */
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -14,13 +14,15 @@
+ extern struct task_struct *wasm_create_and_run_task(
+ 	struct task_struct *prev_task, struct task_struct *new_task,
+ 	const char *name, unsigned long bin_start, unsigned long bin_end,
+-	unsigned long data_start, unsigned long table_start);
++	unsigned long data_start, unsigned long table_start,
++	unsigned long pt_base); /* #128: page-table root, 0 on NOMMU */
+ extern void wasm_release_task(struct task_struct *dead_task);
+ extern struct task_struct *wasm_serialize_tasks(struct task_struct *prev_task,
+ 	struct task_struct *next_task);
+ 
+ extern void wasm_load_executable(unsigned long bin_start, unsigned long bin_end,
+-	unsigned long data_start, unsigned long table_start);
++	unsigned long data_start, unsigned long table_start,
++	unsigned long pt_base); /* #128: page-table root, 0 on NOMMU */
+ extern void wasm_reload_program(void);
+ 
+ extern void wasm_clone_callback(void);
+--- a/arch/wasm/mm/Makefile
++++ b/arch/wasm/mm/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+ obj-y += init.o
++obj-$(CONFIG_MMU) += pgtable.o uaccess.o fault.o
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -55,6 +55,7 @@
+ 	unsigned long bin_start = 0U;
+ 	unsigned long bin_end = 0U;
+ 	unsigned long data_start = 0U;
++	unsigned long pt_base = 0U; /* #128: MMU page-table root (0 = NOMMU) */
+ 
+ 	if (task_thread_info(next_task)->flags & _TIF_NEVER_RUN) {
+ 		task_thread_info(next_task)->flags &= ~_TIF_NEVER_RUN;
+@@ -68,11 +69,17 @@
+ 			bin_start = next_task->mm->start_code;
+ 			bin_end = next_task->mm->end_code;
+ 			data_start = next_task->mm->start_data;
++#ifdef CONFIG_MMU
++			/* #128: the new task's instance gets ITS mm's table
++			 * root at instantiation — per-instance global, no
++			 * shared MMU register to swap on context switch. */
++			pt_base = (unsigned long)next_task->mm->pgd;
++#endif
+ 		}
+ 
+ 		/* This is called instead of serialize the first time. */
+ 		last_task = wasm_create_and_run_task(prev_task, next_task, name,
+-			bin_start, bin_end, data_start, 0U);
++			bin_start, bin_end, data_start, 0U, pt_base);
+ 	} else {
+ 		last_task = wasm_serialize_tasks(prev_task, next_task);
+ 	}
+@@ -213,8 +220,15 @@
+ 	regs->stack_pointer = stack_pointer;
+ 	regs->cpuflags = CPUFLAGS_USER_TASK_DEFAULT;
+ 
+-	wasm_load_executable(current->mm->start_code, current->mm->end_code,
+-		current->mm->start_data, 0U);
++	{
++		unsigned long pt_base = 0U;
++#ifdef CONFIG_MMU
++		pt_base = (unsigned long)current->mm->pgd; /* #128 */
++#endif
++		wasm_load_executable(current->mm->start_code,
++			current->mm->end_code, current->mm->start_data, 0U,
++			pt_base);
++	}
+ 
+ 	/* Reload the program when the current syscall exits. */
+ 	current_thread_info()->flags |= _TIF_RELOAD_PROGRAM;
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -108,7 +108,9 @@
+ 		return -EFAULT;
+ 	current->mm->env_end = (unsigned long)p;
+ 
+-	memcpy(sp, wasm_auxv, sizeof(wasm_auxv));
++	/* sp is a USER pointer — a raw memcpy only worked on flat NOMMU. */
++	if (copy_to_user(sp, wasm_auxv, sizeof(wasm_auxv)))
++		return -EFAULT;
+ 
+ 	return 0;
+ }
+@@ -180,6 +182,67 @@
+ 	return !(chunk & 0x80);
+ }
+ 
++
++#ifdef CONFIG_MMU
++/*
++ * Software MMU (#128): parse the dylink.0 MEMINFO subsections from the KERNEL
++ * copy of the binary (under MMU there is no flat user mapping to get_user
++ * through — see the CONFIG_MMU branch in load_wasm_file). Mirrors the user-
++ * side walk below; `p` points just past the "dylink.0" name.
++ */
++static int parse_dylink0_meminfo(char *p, char *end,
++		unsigned int *data_size, unsigned int *data_align,
++		unsigned int *table_size, unsigned int *table_align)
++{
++	u8 subsection_id;
++	unsigned int subsection_length;
++	char *subsection_end;
++
++	for (;;) {
++		if (p == end) {
++			pr_err("No dylink.0 subsection id");
++			return -ENOEXEC;
++		}
++		subsection_id = *(u8 *)(p++);
++
++		if (!wasm_consume_varU32(&p, &subsection_length,
++				min_t(unsigned long, 5UL, end - p))) {
++			pr_err("Failed to read dylink.0 subsection length");
++			return -ENOEXEC;
++		}
++		subsection_end = p + subsection_length;
++		if (subsection_end < p || subsection_end > end) {
++			pr_err("dylink.0 subsection length overflow");
++			return -ENOEXEC;
++		}
++
++		if (subsection_id == WASM_DYLINK_MEMINFO) {
++			if (!wasm_consume_varU32(&p, data_size,
++					min_t(unsigned long, 5UL, subsection_end - p)))
++				return -ENOEXEC;
++			*data_size = PAGE_ALIGN(*data_size);
++			if (!wasm_consume_varU32(&p, data_align,
++					min_t(unsigned long, 5UL, subsection_end - p))
++					|| *data_align > 31U)
++				return -ENOEXEC;
++			*data_align = 1UL << (int)*data_align;
++			if (!wasm_consume_varU32(&p, table_size,
++					min_t(unsigned long, 5UL, subsection_end - p)))
++				return -ENOEXEC;
++			*table_size = PAGE_ALIGN(*table_size);
++			if (!wasm_consume_varU32(&p, table_align,
++					min_t(unsigned long, 5UL, subsection_end - p))
++					|| *table_align > 31U)
++				return -ENOEXEC;
++			*table_align = 1UL << (int)*table_align;
++			return 0;
++		}
++
++		p = subsection_end;
++	}
++}
++#endif /* CONFIG_MMU */
++
+ static int load_wasm_file(struct linux_binprm *bprm, unsigned long extra_stack)
+ {
+ 	unsigned long data_start = 0; /* Will contain data and bss */
+@@ -254,6 +317,52 @@
+ 	set_personality(PER_LINUX_32BIT);
+ 	setup_new_exec(bprm);
+ 
++#ifdef CONFIG_MMU
++	/*
++	 * Software MMU (#128, A1): the fast-path translate has NO present
++	 * check (the __mmu_fault demand-paging path is A2), so every user
++	 * mapping must be POPULATED at creation. VM_LOCKED on def_flags makes
++	 * all VMAs of this image mlockall-style populated.
++	 */
++	current->mm->def_flags |= VM_LOCKED;
++
++	{
++		/*
++		 * The engine consumes the binary BYTES from kernel memory (see
++		 * asm/mmu.h): read the file into a physically-contiguous
++		 * kernel buffer that lives as long as the mm, and parse the
++		 * dylink.0 meminfo there. No user mapping of the file at all.
++		 */
++		void *bin = alloc_pages_exact(whole_size, GFP_KERNEL);
++		loff_t pos = 0;
++		ssize_t nread;
++
++		if (!bin)
++			return -ENOMEM;
++		nread = kernel_read(bprm->file, bin, whole_size, &pos);
++		if (nread != (ssize_t)whole_size) {
++			free_pages_exact(bin, whole_size);
++			return nread < 0 ? (int)nread : -EIO;
++		}
++
++		ret = parse_dylink0_meminfo(
++			(char *)bin + ((unsigned long)parsed -
++				       (unsigned long)bprm->buf),
++			(char *)bin + whole_size,
++			&data_size, &data_align, &table_size, &table_align);
++		if (ret) {
++			free_pages_exact(bin, whole_size);
++			return ret;
++		}
++		has_meminfo = true;
++
++		current->mm->context.bin_copy = bin;
++		current->mm->context.bin_size = whole_size;
++		whole_start = (unsigned long)bin;
++		whole_end = whole_start + whole_size;
++	}
++	if (0) /* the NOMMU user-mapping walk below is compiled out */
++#endif
+ 	whole_start = vm_mmap(bprm->file, 0, whole_size,
+ 			PROT_READ | PROT_EXEC, MAP_PRIVATE, 0);
+ 	if (!whole_start || IS_ERR_VALUE(whole_start)) {
+@@ -391,6 +500,9 @@
+ 	return 0;
+ 
+ out_unmap:
++	/* Under CONFIG_MMU whole_start is the KERNEL binary copy — owned by
++	 * mm->context (freed in destroy_context when this failed exec's mm
++	 * dies); vm_munmap finds no VMA there and is a harmless -EINVAL. */
+ 	vm_munmap(whole_start, whole_size);
+ 	if (data_start)
+ 		vm_munmap(data_start, data_size);
+@@ -434,6 +546,21 @@
+ 	res = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
+ 	if (!res)
+ 		res = create_wasm_tables(bprm, bprm->p);
++	if (!res) {
++		/*
++		 * A1 (#128): the fast-path translate has NO present check, so
++		 * every page the program can touch must be POPULATED before the
++		 * instrumented code runs. setup_arg_pages leaves the stack VMA
++		 * demand-paged (MAP_GROWSDOWN); populate its whole initial
++		 * extent now (VM_LOCKED is already on def_flags). Runtime stack
++		 * GROWTH beyond this initial VMA needs the A2 present-check +
++		 * __wasm_mmu_fault path — see arch/wasm/mm/fault.c.
++		 */
++		struct vm_area_struct *vma = find_vma(current->mm, bprm->p);
++
++		if (vma)
++			mm_populate(vma->vm_start, vma->vm_end - vma->vm_start);
++	}
+ #else
+ 	res = transfer_args_to_stack(bprm, &current->mm->start_stack);
+ 	if (!res)
+--- a/drivers/virtio/virtio_wl.c
++++ b/drivers/virtio/virtio_wl.c
+@@ -1126,10 +1126,13 @@
+ 	return (unsigned long)vfd->shm_buf + (pgoff << PAGE_SHIFT);
+ }
+ 
++#ifndef CONFIG_MMU
++/* NOMMU-only fops hook (fs.h defines the field only under !CONFIG_MMU). */
+ static unsigned int virtwl_vfd_mmap_capabilities(struct file *filp)
+ {
+ 	return NOMMU_MAP_DIRECT | NOMMU_MAP_READ | NOMMU_MAP_WRITE;
+ }
++#endif /* !CONFIG_MMU */
+ 
+ static unsigned int virtwl_vfd_poll(struct file *filp,
+ 				    struct poll_table_struct *wait)
+@@ -1520,7 +1523,9 @@
+ 	.write = virtwl_vfd_write,
+ 	.mmap = virtwl_vfd_mmap,
+ 	.get_unmapped_area = virtwl_vfd_get_unmapped_area,
++#ifndef CONFIG_MMU
+ 	.mmap_capabilities = virtwl_vfd_mmap_capabilities,
++#endif
+ 	.poll = virtwl_vfd_poll,
+ 	.unlocked_ioctl = virtwl_ioctl,
+ 	.compat_ioctl = virtwl_ioctl_compat,
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -798,6 +798,10 @@
+  */
+ struct page *vmalloc_to_page(const void *vmalloc_addr)
+ {
++#ifdef CONFIG_WASM
++	/* #128: contiguous identity — the address is a normal linear address. */
++	return virt_to_page(vmalloc_addr);
++#endif
+ 	unsigned long addr = (unsigned long) vmalloc_addr;
+ 	struct page *page = NULL;
+ 	pgd_t *pgd = pgd_offset_k(addr);
+@@ -3067,6 +3071,12 @@
+  */
+ void *vm_map_ram(struct page **pages, unsigned int count, int node)
+ {
++#ifdef CONFIG_WASM
++	/* #128: no kernel address translation — cannot make scattered pages
++	 * virtually contiguous. Unused in the wasm config; loud if reached. */
++	BUG();
++	return NULL;
++#endif
+ 	unsigned long size = (unsigned long)count << PAGE_SHIFT;
+ 	unsigned long addr;
+ 	void *mem;
+@@ -3407,6 +3417,10 @@
+  */
+ void vfree_atomic(const void *addr)
+ {
++#ifdef CONFIG_WASM
++	kfree(addr); /* #128 */
++	return;
++#endif
+ 	struct vfree_deferred *p = raw_cpu_ptr(&vfree_deferred);
+ 
+ 	BUG_ON(in_nmi());
+@@ -3441,6 +3455,10 @@
+  */
+ void vfree(const void *addr)
+ {
++#ifdef CONFIG_WASM
++	kfree(addr); /* #128: vmalloc == contiguous kmalloc; kfree handles NULL + IRQ */
++	return;
++#endif
+ 	struct vm_struct *vm;
+ 	int i;
+ 
+@@ -3532,6 +3550,12 @@
+ void *vmap(struct page **pages, unsigned int count,
+ 	   unsigned long flags, pgprot_t prot)
+ {
++#ifdef CONFIG_WASM
++	/* #128: no kernel address translation — cannot make scattered pages
++	 * virtually contiguous. Unused in the wasm config; loud if reached. */
++	BUG();
++	return NULL;
++#endif
+ 	struct vm_struct *area;
+ 	unsigned long addr;
+ 	unsigned long size;		/* In bytes */
+@@ -3988,6 +4012,19 @@
+ 			pgprot_t prot, unsigned long vm_flags, int node,
+ 			const void *caller)
+ {
++#ifdef CONFIG_WASM
++	/*
++	 * Software MMU (#128): the kernel runs in physical/identity space (it is
++	 * NOT instrumented — see docs/.../softmmu-kernel-design.md), so a
++	 * "virtually contiguous but physically scattered" mapping is
++	 * unreachable by kernel code. vmalloc therefore returns physically-
++	 * CONTIGUOUS memory at its identity address — exactly NOMMU's vmalloc
++	 * (mm/nommu.c: kmalloc + __GFP_COMP). The arch already commits to large
++	 * contiguous blocks (CONFIG_ARCH_FORCE_MAX_ORDER=16), so this is
++	 * consistent, not a workaround. vfree() mirrors with kfree().
++	 */
++	return kmalloc_noprof(size, (gfp_mask | __GFP_COMP) & ~__GFP_HIGHMEM);
++#endif
+ 	struct vm_struct *area;
+ 	void *ret;
+ 	kasan_vmalloc_flags_t kasan_flags = KASAN_VMALLOC_NONE;
+--- /dev/null
++++ b/arch/wasm/include/asm/tlbflush.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_TLBFLUSH_H
++#define _ASM_WASM_TLBFLUSH_H
++#ifdef CONFIG_MMU
++#include <linux/mm_types.h>
++/* No hardware TLB: the instrumentation pass re-reads the PTE on every access,
++ * so a mapping change is visible immediately. All flushes are no-ops (#128). */
++static inline void flush_tlb_all(void) {}
++static inline void flush_tlb_mm(struct mm_struct *mm) {}
++static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long a) {}
++static inline void flush_tlb_range(struct vm_area_struct *vma,
++				   unsigned long s, unsigned long e) {}
++static inline void flush_tlb_kernel_range(unsigned long s, unsigned long e) {}
++static inline void local_flush_tlb_all(void) {}
++#else
++#include <asm-generic/tlbflush.h>
++#endif
++#endif
+--- /dev/null
++++ b/arch/wasm/include/asm/pgalloc.h
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_PGALLOC_H
++#define _ASM_WASM_PGALLOC_H
++#ifdef CONFIG_MMU
++#include <linux/mm.h>
++#include <asm-generic/pgalloc.h>
++static inline void pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd, pte_t *pte)
++{ set_pmd(pmd, __pmd((unsigned long)pte)); }
++static inline void pmd_populate(struct mm_struct *mm, pmd_t *pmd, pgtable_t pte)
++{ set_pmd(pmd, __pmd((unsigned long)page_address(pte))); }
++extern pgd_t *pgd_alloc(struct mm_struct *mm);
++#define __pte_free_tlb(tlb, pte, addr) tlb_remove_ptdesc((tlb), page_ptdesc(pte))
++#endif /* CONFIG_MMU */
++#endif
+--- /dev/null
++++ b/arch/wasm/include/asm/uaccess.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_UACCESS_H
++#define _ASM_WASM_UACCESS_H
++
++#ifdef CONFIG_MMU
++/*
++ * Software-MMU uaccess (#128). The KERNEL runs uninstrumented in physical/
++ * identity space; USER pointers are virtual (translated by the instrumented
++ * user code via the per-process page table). So kernel<->user copies must WALK
++ * the user page table in software (arch/wasm/mm/uaccess.c) — the equivalent of
++ * a hardware arch taking a fault on a bad user pointer, here a soft lookup.
++ * Kernel-nofault access stays plain (kernel addresses are identity).
++ */
++#include <linux/string.h>
++#include <linux/unaligned.h>
++#include <asm-generic/access_ok.h>
++
++unsigned long raw_copy_from_user(void *to, const void __user *from, unsigned long n);
++unsigned long raw_copy_to_user(void __user *to, const void *from, unsigned long n);
++unsigned long __clear_user(void __user *to, unsigned long n);
++#define __clear_user __clear_user
++
++#define __get_kernel_nofault(dst, src, type, err_label)			\
++do {									\
++	*((type *)dst) = get_unaligned((type *)(src));			\
++	if (0) /* make sure the label looks used to the compiler */	\
++		goto err_label;						\
++} while (0)
++
++#define __put_kernel_nofault(dst, src, type, err_label)			\
++do {									\
++	put_unaligned(*((type *)src), (type *)(dst));			\
++	if (0) /* make sure the label looks used to the compiler */	\
++		goto err_label;						\
++} while (0)
++
++#include <asm-generic/uaccess.h>
++
++#else /* !CONFIG_MMU — the historical flat path (UACCESS_MEMCPY) */
++#include <asm-generic/uaccess.h>
++#endif
++
++#endif /* _ASM_WASM_UACCESS_H */
+--- /dev/null
++++ b/arch/wasm/include/asm/mmu.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_WASM_MMU_H
++#define _ASM_WASM_MMU_H
++
++#ifdef CONFIG_MMU
++/*
++ * Software MMU (#128): the engine consumes the process's wasm binary BYTES
++ * from kernel (physical/identity) memory — at exec (wasm_load_executable
++ * compiles from the range), at first-run of a clone (wasm_create_and_run_task
++ * re-reads mm->start_code), and lazily at first dlopen (the side-module
++ * loader re-reads the main image). Under MMU the file mmap is a demand-paged
++ * USER mapping the engine cannot read, so exec keeps a physically-contiguous
++ * KERNEL copy alive for the mm's lifetime; mm->start_code/end_code point at
++ * it, and destroy_context() frees it.
++ */
++typedef struct {
++	void *bin_copy;			/* alloc_pages_exact() */
++	unsigned long bin_size;
++} mm_context_t;
++#else
++#include <asm-generic/mmu.h>
++#endif
++
++#endif /* _ASM_WASM_MMU_H */
+--- /dev/null
++++ b/arch/wasm/mm/pgtable.c
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Software-MMU page-table bringup (Track A, #128). */
++#include <linux/mm.h>
++#include <linux/memblock.h>
++#include <linux/gfp.h>
++#include <linux/string.h>
++#include <asm/pgtable.h>
++#include <asm/pgalloc.h>
++
++/* The master kernel page directory. */
++pgd_t swapper_pg_dir[PTRS_PER_PGD] __page_aligned_bss;
++EXPORT_SYMBOL(swapper_pg_dir);
++
++pgd_t *pgd_alloc(struct mm_struct *mm)
++{
++	pgd_t *pgd = (pgd_t *)__get_free_page(GFP_KERNEL);
++
++	if (!pgd)
++		return NULL;
++	/* User half zeroed; kernel half copied from the master table. */
++	memset(pgd, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
++	memcpy(pgd + USER_PTRS_PER_PGD, swapper_pg_dir + USER_PTRS_PER_PGD,
++	       (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
++	return pgd;
++}
++
++/* Zones are initialised by the generic free_area_init() -> arch_zone_limits_init()
++ * (arch/wasm/mm/init.c). The kernel runs in physical/identity space (uninstrumented),
++ * so swapper_pg_dir needs no kernel mappings; paging_init stays a no-op. */
++void __init paging_init(void)
++{
++}
++
++/*
++ * The software MMU has no per-page execute distinction the hardware would
++ * enforce (execution is wasm code, not data reads) — map the 16 vm_flags
++ * combinations onto the four real cases: none / read-only / shared-writable /
++ * private-copy. Found the hard way: without this, vm_get_page_prot stayed an
++ * undefined symbol that --import-undefined silently turned into a dangling
++ * env import and the vmlinux failed to INSTANTIATE (LinkError) — check the
++ * MMU/NOMMU import-section diff when touching kernel symbols.
++ */
++static const pgprot_t protection_map[16] = {
++	[VM_NONE]					= PAGE_NONE,
++	[VM_READ]					= PAGE_READONLY,
++	[VM_WRITE]					= PAGE_COPY,
++	[VM_WRITE | VM_READ]				= PAGE_COPY,
++	[VM_EXEC]					= PAGE_READONLY,
++	[VM_EXEC | VM_READ]				= PAGE_READONLY,
++	[VM_EXEC | VM_WRITE]				= PAGE_COPY,
++	[VM_EXEC | VM_WRITE | VM_READ]			= PAGE_COPY,
++	[VM_SHARED]					= PAGE_NONE,
++	[VM_SHARED | VM_READ]				= PAGE_READONLY,
++	[VM_SHARED | VM_WRITE]				= PAGE_SHARED,
++	[VM_SHARED | VM_WRITE | VM_READ]		= PAGE_SHARED,
++	[VM_SHARED | VM_EXEC]				= PAGE_READONLY,
++	[VM_SHARED | VM_EXEC | VM_READ]			= PAGE_READONLY,
++	[VM_SHARED | VM_EXEC | VM_WRITE]		= PAGE_SHARED,
++	[VM_SHARED | VM_EXEC | VM_WRITE | VM_READ]	= PAGE_SHARED,
++};
++DECLARE_VM_GET_PAGE_PROT
+--- /dev/null
++++ b/arch/wasm/mm/uaccess.c
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Software-MMU uaccess (#128): kernel<->user copies walk the user page table.
++ * The kernel is identity-mapped (phys); a user va resolves through the
++ * current mm's 2-level table (asm/pgtable.h). An unmapped/absent page is a
++ * fault -> return the remaining byte count, exactly the raw_copy contract.
++ * (A2 will route the miss through handle_mm_fault for demand paging/COW;
++ * A1 exec populates the table up front, so a miss here is a real EFAULT.)
++ */
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/string.h>
++#include <linux/export.h>
++#include <asm/pgtable.h>
++#include <linux/uaccess.h>
++
++/* On a soft-walk miss, fault the page in through the generic MM (demand
++ * paging, COW, stack growth) and retry — the software analog of a hardware
++ * uaccess fault + fixup. fixup_user_fault is the standard API (futex uses it).
++ */
++static bool user_fault_in(unsigned long va, bool write)
++{
++	struct mm_struct *mm = current->mm;
++	unsigned int flags = FAULT_FLAG_KILLABLE | (write ? FAULT_FLAG_WRITE : 0);
++	int ret;
++
++	if (!mm)
++		return false;
++	mmap_read_lock(mm);
++	ret = fixup_user_fault(mm, va, flags, NULL);
++	mmap_read_unlock(mm);
++	return ret == 0;
++}
++
++/* Resolve one user page; returns false if unmapped/not-present (or, for
++ * writes, write-protected). *phys gets the physical byte address of va. */
++static bool user_page_phys(unsigned long va, bool write, unsigned long *phys)
++{
++	struct mm_struct *mm = current->mm;
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++	if (!mm || va >= TASK_SIZE)
++		return false;
++	pgd = pgd_offset(mm, va);
++	if (pgd_none(*pgd) || pgd_bad(*pgd))
++		return false;
++	p4d = p4d_offset(pgd, va);
++	if (p4d_none(*p4d))
++		return false;
++	pud = pud_offset(p4d, va);
++	if (pud_none(*pud))
++		return false;
++	pmd = pmd_offset(pud, va);
++	if (pmd_none(*pmd) || pmd_bad(*pmd))
++		return false;
++	pte = pte_offset_kernel(pmd, va);
++	if (!pte_present(*pte))
++		return false;
++	if (write && !pte_write(*pte))
++		return false;
++	*phys = (pte_val(*pte) & PAGE_MASK) + (va & ~PAGE_MASK);
++	return true;
++}
++
++/* Copy n bytes across the user boundary, page by page. dir_to_user picks the
++ * direction; returns the number of bytes NOT copied (0 = full success). */
++static unsigned long walk_copy(void *kaddr, unsigned long uva, unsigned long n,
++			       bool to_user)
++{
++	while (n) {
++		unsigned long phys;
++		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
++
++		if (!user_page_phys(uva, to_user, &phys)) {
++			if (!user_fault_in(uva, to_user) ||
++			    !user_page_phys(uva, to_user, &phys))
++				return n;
++		}
++		if (to_user)
++			memcpy((void *)phys, kaddr, chunk);
++		else
++			memcpy(kaddr, (void *)phys, chunk);
++		kaddr += chunk;
++		uva += chunk;
++		n -= chunk;
++	}
++	return 0;
++}
++
++unsigned long raw_copy_from_user(void *to, const void __user *from,
++				 unsigned long n)
++{
++	return walk_copy(to, (unsigned long)from, n, false);
++}
++EXPORT_SYMBOL(raw_copy_from_user);
++
++unsigned long raw_copy_to_user(void __user *to, const void *from,
++			       unsigned long n)
++{
++	return walk_copy((void *)from, (unsigned long)to, n, true);
++}
++EXPORT_SYMBOL(raw_copy_to_user);
++
++unsigned long __clear_user(void __user *to, unsigned long n)
++{
++	unsigned long uva = (unsigned long)to;
++
++	while (n) {
++		unsigned long phys;
++		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
++
++		if (!user_page_phys(uva, true, &phys)) {
++			if (!user_fault_in(uva, true) ||
++			    !user_page_phys(uva, true, &phys))
++				return n;
++		}
++		memset((void *)phys, 0, chunk);
++		uva += chunk;
++		n -= chunk;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(__clear_user);
+--- /dev/null
++++ b/arch/wasm/mm/fault.c
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Software-MMU fault entry (#128 A2). The instrumented user code's EXTENDED
++ * translate variant calls env.__mmu_fault(addr, kind) on a not-present or
++ * permission miss; the engine routes it here on the faulting task's kernel
++ * context (the same shape as a syscall entry). We resolve through the generic
++ * MM — demand paging, COW, stack growth, mprotect — and return 0 to RETRY the
++ * translate, or queue the fatal signal and return nonzero (the engine then
++ * lets the normal signal path run instead of retrying).
++ *
++ * A1 boots do not call this (the fast-path translate has no present check and
++ * every VMA is VM_LOCKED-populated at creation); it is compiled in so the
++ * kernel side of A2 is complete and gate-able.
++ */
++#include <linux/mm.h>
++#include <linux/sched/signal.h>
++#include <linux/ptrace.h>
++#include <linux/sched/task_stack.h>
++
++#define WASM_MMU_FAULT_READ	0U
++#define WASM_MMU_FAULT_WRITE	1U
++#define WASM_MMU_FAULT_EXEC	2U
++
++asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
++					  unsigned long kind);
++asmlinkage unsigned long __wasm_mmu_fault(unsigned long addr,
++					  unsigned long kind)
++{
++	struct mm_struct *mm = current->mm;
++	struct vm_area_struct *vma;
++	unsigned int flags = FAULT_FLAG_DEFAULT | FAULT_FLAG_USER;
++	vm_fault_t fault;
++
++	if (!mm || addr >= TASK_SIZE)
++		goto bad_area_nosemaphore;
++
++	if (kind == WASM_MMU_FAULT_WRITE)
++		flags |= FAULT_FLAG_WRITE;
++	else if (kind == WASM_MMU_FAULT_EXEC)
++		flags |= FAULT_FLAG_INSTRUCTION;
++
++retry:
++	vma = lock_mm_and_find_vma(mm, addr, current_pt_regs());
++	if (!vma)
++		goto bad_area_nosemaphore;
++
++	if (kind == WASM_MMU_FAULT_WRITE) {
++		if (!(vma->vm_flags & VM_WRITE))
++			goto bad_area;
++	} else if (kind == WASM_MMU_FAULT_EXEC) {
++		if (!(vma->vm_flags & VM_EXEC))
++			goto bad_area;
++	} else {
++		if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))
++			goto bad_area;
++	}
++
++	fault = handle_mm_fault(vma, addr, flags, current_pt_regs());
++
++	if (fault_signal_pending(fault, current_pt_regs()))
++		return 1;
++
++	/* The fault is fully completed (including releasing mmap lock) */
++	if (fault & VM_FAULT_COMPLETED)
++		return 0;
++
++	if (unlikely(fault & VM_FAULT_RETRY)) {
++		flags |= FAULT_FLAG_TRIED;
++		goto retry;
++	}
++
++	mmap_read_unlock(mm);
++
++	if (unlikely(fault & VM_FAULT_ERROR)) {
++		if (fault & VM_FAULT_OOM) {
++			pagefault_out_of_memory();
++			return 1;
++		}
++		if (fault & (VM_FAULT_SIGBUS | VM_FAULT_HWPOISON |
++			     VM_FAULT_HWPOISON_LARGE)) {
++			force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *)addr);
++			return 1;
++		}
++		goto bad_area_nosemaphore;
++	}
++
++	return 0;
++
++bad_area:
++	mmap_read_unlock(mm);
++bad_area_nosemaphore:
++	force_sig_fault(SIGSEGV, SEGV_MAPERR, (void __user *)addr);
++	return 1;
++}
+--- a/arch/wasm/Kconfig
++++ b/arch/wasm/Kconfig
+@@ -20,7 +20,8 @@ config WASM
+ 
+ 	select THREAD_INFO_IN_TASK
+ 	select GENERIC_SMP_IDLE_THREAD
+-	select UACCESS_MEMCPY
++	select UACCESS_MEMCPY if !MMU
++	select LOCK_MM_AND_FIND_VMA if MMU
+ 	select ARCH_USE_QUEUED_RWLOCKS
+ 	select GENERIC_CPU_DEVICES
+ 	select GENERIC_CSUM
+@@ -122,6 +123,13 @@ config PGTABLE_LEVELS
+ 	int
+ 	default 2
+ 
++config MMU
++	bool "MMU support (software MMU via instrumentation)"
++	default n
++	help
++	  Enable the software MMU (Track A, #128): per-process page tables with
++	  a per-access translate baked into userspace by the instrumentation pass.
++
+ config ARCH_FORCE_MAX_ORDER
+ 	int "Maximum zone order"
+ 	range 10 17
