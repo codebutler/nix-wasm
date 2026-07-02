@@ -102,13 +102,39 @@ wall. Error surface progression: dozens (generic pgtable.h) → 8 → 947 (swap/
   standard modern arch fault shape. Verified EXPORTED in the built vmlinux.
   Return 0 = retry the translate; nonzero = fatal signal queued.
 
-## Remaining before it BOOTS — ONLY the engine half now
+## Update (fifth pass): ENGINE HALF WIRED (ENGINE_ABI 9)
 
-3. **engine (kernel-worker.js, ENGINE_ABI bump)**: provide the
-   `env.__mmu_set_pt_base` import (write the user module's `__mmu_pt_base`
-   global); instrument the user binary at exec (or ship pre-instrumented
-   userspace); route user `env.__mmu_fault` into the `__wasm_mmu_fault` kernel
-   export on the task's context (A2): build the per-process page tables +
+The engine handoff is implemented in `runtime/kernel-worker.js` (ABI 8→9):
+
+- **pt_base rides the exec ABI**: `wasm_load_executable` and
+  `wasm_create_and_run_task` grew a trailing `pt_base` arg (kernel passes
+  `mm->pgd` under MMU, 0 on NOMMU — extra trailing args are ignored by JS, so
+  NOMMU images stay compatible both directions); clone task-creation messages
+  carry it to the child worker.
+- **Applied at instantiation**: a softmmu-instrumented image exports the
+  mutable `__mmu_pt_base` global — the engine sets it right after
+  `user_executable_instance` is created. **Per-task instances each carry their
+  own root**, so context switches swap nothing (the engine-model insight:
+  there is no shared MMU register — `switch_mm` becomes a write-through via
+  the new `env.__mmu_set_pt_base` kernel import, provided unconditionally and
+  imported only by MMU vmlinux builds).
+- **Userspace is instrumented at BUILD time** (a softmmu nix seam like
+  fpcast/dynsym), NOT by the engine at exec — no per-exec instrumentation cost
+  on a 57 MB clang. The engine only reacts to the `__mmu_pt_base` export.
+- **A2 fault routing decision (recorded, not yet wired)**: user
+  `env.__mmu_fault` must enter the kernel through the SYSCALL ENTRY machinery
+  (entry.S kernel-SP setup) — a raw call to the `__wasm_mmu_fault` kernel
+  export from user context would run kernel C on a stale kernel stack pointer
+  (the kernel instance's `__stack_pointer` global is not set up for this
+  task). Reserve an arch-private nr or a dedicated entry.S stub; A2 work.
+
+## Remaining before a BOOT
+
+- An **instrumented test userspace** (softmmu-pass over a minimal init or the
+  busybox initramfs — a nix seam) + an `mmu-smoke` (`CONFIG_MMU=y` vmlinux +
+  instrumented userspace, identity boot to a shell). This is the first point
+  the whole stack is verifiable — and where the vmalloc hazard gets its
+  empirical answer.: build the per-process page tables +
    VMAs mapping the user image; the engine instantiates the softmmu-instrumented
    user module.
 4. **fault entry** (A2): `__mmu_fault(va,kind)` host import → `do_page_fault` →

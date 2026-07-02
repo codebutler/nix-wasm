@@ -486,6 +486,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       bin_end,
       data_start,
       table_start,
+      pt_base,
     ) => {
       // Tell main to create the new task, and then run it for the first time!
       port.postMessage({
@@ -503,6 +504,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               bin_end: bin_end,
               data_start: data_start,
               table_start: table_start,
+              // pc (#128): the new task's page-table root (its mm's pgd).
+              pt_base: Number(pt_base || 0),
               // pc (#130): the parent's dynamic-linking state (side modules +
               // table-op log). Module instances + the wasm table are engine
               // objects OUTSIDE linear memory, so the CLONE_VM-shared memory
@@ -561,11 +564,27 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       }
     },
 
+    /// pc (#128 software MMU): the MMU kernel's switch_mm/activate_mm hands
+    /// over the incoming mm's page-table root. Each task's image already
+    /// carries its own root (applied to its __mmu_pt_base global at
+    /// instantiation from pt_base), so this is a write-through for the
+    /// CURRENT worker's image only — exec's activate_mm fires before
+    /// wasm_load_executable re-passes the same root, and any future pgd
+    /// change lands here. NOMMU kernels never import it (--import-undefined
+    /// materializes it only in MMU vmlinux builds).
+    __mmu_set_pt_base: (pt_base) => {
+      const v = Number(pt_base || 0);
+      if (user_executable_params) user_executable_params.pt_base = v;
+      if (user_executable_instance && user_executable_instance.exports.__mmu_pt_base) {
+        user_executable_instance.exports.__mmu_pt_base.value = v;
+      }
+    },
+
     /// Replace the currently executing image (kthread spawning init, or user process) with a new user process image.
     /// pc (new exec ABI): `bin_start`/`bin_end` are now a byte range in the
     /// SHARED kernel memory (binfmt_wasm places the user binary there); compile
     /// it straight from that range. No host Module cache / key resolution.
-    wasm_load_executable: (bin_start, bin_end, data_start, table_start) => {
+    wasm_load_executable: (bin_start, bin_end, data_start, table_start, pt_base) => {
       reset_syscall_trace(); // pc (#139): re-arm the per-exec syscall-trace budget
       // pc (#130): a fresh program image — drop the old image's dynamic-linking
       // state (side modules die with the image, like an ELF exec) and remember
@@ -579,6 +598,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       user_executable_params = {
         data_start: data_start,
         table_start: table_start,
+        // pc (#128 software MMU): this image's page-table root (0 = NOMMU /
+        // uninstrumented). Applied to the instance's __mmu_pt_base global at
+        // instantiation — per-instance, so context switches swap nothing.
+        pt_base: Number(pt_base || 0),
         // pc (#139 Gate 0.2): size the user table from the binary's import
         // section (a table smaller than declared fails instantiate).
         table_initial: table_import_initial(bytes),
@@ -746,6 +769,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           message.user_executable.bin_end,
           message.user_executable.data_start,
           message.user_executable.table_start,
+          message.user_executable.pt_base,
         );
         // pc (#130): a cloning parent's dynamic-linking snapshot — replayed
         // after the user instance is created (wasm_load_executable above just
@@ -1183,6 +1207,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             instance.exports.__set_tls_base(tls_base);
           }
           user_executable_instance = instance;
+
+          // pc (#128 software MMU): a softmmu-instrumented image exports the
+          // mutable __mmu_pt_base global its inlined translate reads — point
+          // it at this task's page-table root. Per-instance (each task's
+          // module carries its own root), so switch_mm swaps nothing here.
+          if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
+            instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
+          }
 
           // pc (#130): a cloning parent had dlopen'd side modules / handed out
           // dynamic table slots — replay them into this child NOW, before any

@@ -1,27 +1,22 @@
 # WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
-# STATUS: compiles + links end-to-end (vmlinux built); NOMMU build unregressed
-# (byte-identical). KERNEL SIDE of the port is now feature-complete for an A1
-# identity boot:
-#   • switch_mm/activate_mm -> env.__mmu_set_pt_base (verified in the vmlinux
-#     import section); init_new_context/destroy_context manage the mm context.
-#   • software uaccess table-walk with fixup_user_fault retry (demand-paging/
-#     COW-aware); UACCESS_MEMCPY is NOMMU-only.
-#   • exec (fs/binfmt_wasm.c): under MMU the binary is read into a physically-
-#     contiguous KERNEL buffer (alloc_pages_exact + kernel_read) that lives as
-#     long as the mm (mm_context_t.bin_copy, freed in destroy_context) — the
-#     engine consumes the bytes at exec, at clone first-run, and lazily at
-#     dlopen, so mm->start_code/end_code point at the kernel copy. dylink.0
-#     meminfo parses from the kernel buffer; no user mapping of the file.
-#     A1 lever: mm->def_flags |= VM_LOCKED (every VMA populated at creation —
-#     the A1 fast translate has no present check). auxv via copy_to_user.
-#   • A2 fault entry: arch/wasm/mm/fault.c __wasm_mmu_fault(addr, kind) ->
-#     lock_mm_and_find_vma + handle_mm_fault (COW/demand/growth), SIGSEGV/
-#     SIGBUS on error; exported in the vmlinux (verified). A1 never calls it.
-# REMAINING (engine half, kernel-worker.js + ENGINE_ABI bump): provide
-# __mmu_set_pt_base (write the user module's __mmu_pt_base global), instrument
-# the user binary at exec (softmmu pass or pre-instrumented userspace), route
-# env.__mmu_fault from user code into the __wasm_mmu_fault kernel export.
-# Apply AFTER patches 0004-0022. NOT wired into kernel.nix (does not boot yet).
+# STATUS: compiles + links end-to-end; NOMMU build unregressed. KERNEL side is
+# feature-complete for an A1 identity boot AND the engine handoff is wired:
+#   • switch_mm/activate_mm -> env.__mmu_set_pt_base (in the vmlinux import
+#     section); init/destroy_context manage the mm context.
+#   • exec ABI carries pt_base: wasm_load_executable + wasm_create_and_run_task
+#     grew a trailing pt_base arg (mm->pgd under MMU, 0 on NOMMU) — the engine
+#     (ENGINE_ABI 9) applies it to an instrumented image's __mmu_pt_base global
+#     at instantiation (per-task instances each carry their own root).
+#   • software uaccess table-walk with fixup_user_fault retry; UACCESS_MEMCPY
+#     NOMMU-only.
+#   • exec reads the binary into a kernel buffer owned by mm_context_t (freed
+#     in destroy_context; the engine + dlopen + clone re-read the live range);
+#     meminfo parses from the kernel copy; A1 lever mm->def_flags |= VM_LOCKED.
+#   • A2 fault entry __wasm_mmu_fault (lock_mm_and_find_vma + handle_mm_fault),
+#     exported. NOTE: routing user env.__mmu_fault into it must reuse the
+#     SYSCALL ENTRY (entry.S kernel-SP setup) — a raw kernel-export call from
+#     user context would run kernel C on a stale kernel stack. A2 wiring.
+# NOT wired into kernel.nix (no boot yet). Apply AFTER patches 0004-0022.
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -286,6 +281,26 @@
 +#endif
  
  #endif /* _ASM_WASM_MMU_CONTEXT_H */
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -14,13 +14,15 @@
+ extern struct task_struct *wasm_create_and_run_task(
+ 	struct task_struct *prev_task, struct task_struct *new_task,
+ 	const char *name, unsigned long bin_start, unsigned long bin_end,
+-	unsigned long data_start, unsigned long table_start);
++	unsigned long data_start, unsigned long table_start,
++	unsigned long pt_base); /* #128: page-table root, 0 on NOMMU */
+ extern void wasm_release_task(struct task_struct *dead_task);
+ extern struct task_struct *wasm_serialize_tasks(struct task_struct *prev_task,
+ 	struct task_struct *next_task);
+ 
+ extern void wasm_load_executable(unsigned long bin_start, unsigned long bin_end,
+-	unsigned long data_start, unsigned long table_start);
++	unsigned long data_start, unsigned long table_start,
++	unsigned long pt_base); /* #128: page-table root, 0 on NOMMU */
+ extern void wasm_reload_program(void);
+ 
+ extern void wasm_clone_callback(void);
 --- a/arch/wasm/mm/Makefile
 +++ b/arch/wasm/mm/Makefile
 @@ -1,3 +1,4 @@
@@ -293,6 +308,125 @@
  
  obj-y += init.o
 +obj-$(CONFIG_MMU) += pgtable.o uaccess.o fault.o
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -55,6 +55,7 @@
+ 	unsigned long bin_start = 0U;
+ 	unsigned long bin_end = 0U;
+ 	unsigned long data_start = 0U;
++	unsigned long pt_base = 0U; /* #128: MMU page-table root (0 = NOMMU) */
+ 
+ 	if (task_thread_info(next_task)->flags & _TIF_NEVER_RUN) {
+ 		task_thread_info(next_task)->flags &= ~_TIF_NEVER_RUN;
+@@ -68,11 +69,17 @@
+ 			bin_start = next_task->mm->start_code;
+ 			bin_end = next_task->mm->end_code;
+ 			data_start = next_task->mm->start_data;
++#ifdef CONFIG_MMU
++			/* #128: the new task's instance gets ITS mm's table
++			 * root at instantiation — per-instance global, no
++			 * shared MMU register to swap on context switch. */
++			pt_base = (unsigned long)next_task->mm->pgd;
++#endif
+ 		}
+ 
+ 		/* This is called instead of serialize the first time. */
+ 		last_task = wasm_create_and_run_task(prev_task, next_task, name,
+-			bin_start, bin_end, data_start, 0U);
++			bin_start, bin_end, data_start, 0U, pt_base);
+ 	} else {
+ 		last_task = wasm_serialize_tasks(prev_task, next_task);
+ 	}
+@@ -90,54 +97,28 @@
+ 
+ static int user_task_set_affinity(struct task_struct *p)
+ {
+-	/*
+-	 * TODO: This function needs a review of proper approach and locking!
+-	 * It's probably best to take a step back and think about how this
+-	 * should be implemented properly in the first place, instead of adding
+-	 * band aid on top of about every line that violates this and that. That
+-	 * includes fixing release_thread() and garbage collecting unused CPUs.
+-	 *
+-	 * We may also have to move kthreads to IRQ_CPU (with an option of the
+-	 * boot cpu before IRQ_CPU is up) in case they risk getting blocked.
+-	 */
+-	int retval;
+-	int cpu;
+-
+ 	/* Kthreads can be allowed to run on any online CPU. */
+ 	if (p->flags & PF_KTHREAD)
+ 		return 0;
+ 
+-hack:
+-	cpu = cpumask_first_zero(&user_cpus);
+-	if (cpu >= nr_cpu_ids)
+-		return -EBUSY;
+-
+-	if(cpu == IRQ_CPU) {
+-		/* TODO: We should mark IRQ_CPU as taken at boot instead. */
+-		cpumask_set_cpu(cpu, &user_cpus);
+-		goto hack;
+-	}
+-
+-	if (!cpu_online(cpu)) {
+-		BUG_ON(!cpu_possible(cpu));
+-
+-		/* We should add_cpu(cpu) if we properly supported hotplug... */
+-		retval = cpu_device_up(get_cpu_device(cpu));
+-		if (retval)
+-			return retval;
+-	}
+-
+-	cpumask_set_cpu(cpu, &user_cpus);
+-
+-	retval = set_cpus_allowed_ptr(p, cpumask_of(cpu));
+-	if (retval) {
+-		cpumask_clear_cpu(cpu, &user_cpus);
+-		return retval;
+-	}
+-
++	/*
++	 * pc (ticket #74, #108): pin every user task to the boot CPU and never
++	 * bring up secondary CPUs on demand. The wasm SMP path is racy — when
++	 * several worker "CPUs" run user tasks concurrently, shared kernel state
++	 * is corrupted and a kernel-mode wasm trap surfaces through the oops
++	 * path as make_task_dead() in NMI context, i.e. panic("Aiee, killing
++	 * interrupt handler!"). It reproduces whenever enough user tasks churn
++	 * across CPUs at once (e.g. several busy terminals), regardless of the
++	 * maxcpus= boot value, because the upstream affinity logic this replaces
++	 * cpu_device_up()'d a fresh CPU per concurrent task.
++	 *
++	 * Forcing cooperative single-CPU operation — the pre-SMP scheduling mode
++	 * already exercised all through boot — removes the concurrency that
++	 * triggers the race. pc's Linux is a terminal and needs no SMP
++	 * parallelism. user_cpus is left for release_thread()'s bookkeeping.
++	 */
+ 	p->flags |= PF_NO_SETAFFINITY;
+-
+-	return 0;
++	return set_cpus_allowed_ptr(p, cpumask_of(0));
+ }
+ 
+ asmlinkage unsigned
+@@ -239,8 +220,15 @@
+ 	regs->stack_pointer = stack_pointer;
+ 	regs->cpuflags = CPUFLAGS_USER_TASK_DEFAULT;
+ 
+-	wasm_load_executable(current->mm->start_code, current->mm->end_code,
+-		current->mm->start_data, 0U);
++	{
++		unsigned long pt_base = 0U;
++#ifdef CONFIG_MMU
++		pt_base = (unsigned long)current->mm->pgd; /* #128 */
++#endif
++		wasm_load_executable(current->mm->start_code,
++			current->mm->end_code, current->mm->start_data, 0U,
++			pt_base);
++	}
+ 
+ 	/* Reload the program when the current syscall exits. */
+ 	current_thread_info()->flags |= _TIF_RELOAD_PROGRAM;
 --- a/fs/binfmt_wasm.c
 +++ b/fs/binfmt_wasm.c
 @@ -20,7 +20,17 @@
