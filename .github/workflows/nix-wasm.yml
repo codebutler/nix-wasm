@@ -128,6 +128,10 @@ jobs:
             '.#wasm-base-squashfs' \
             '.#wasm-initramfs' \
             '.#linux-image' \
+            '.#kernel-mmu' \
+            '.#kernel-mmu-a2' \
+            '.#mmu-init' \
+            '.#mmu-init-a2' \
             --print-out-paths --no-link
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
@@ -261,6 +265,45 @@ jobs:
           # config-change irq; the stock driver hvc_resize()s the tty. Proven via
           # `stty size`. Gating — a regression (resize not propagating) fails.
           run_smoke demo/node/resize-smoke.mjs
+
+      # #128 Track A software MMU: boot a softmmu-instrumented init under the
+      # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
+      # present check, pages populated at exec) checksums bit-exact; A2 (checked
+      # translate, VM_LOCKED/populate dropped) demand-pages an 8 MiB mmap + grows
+      # the stack via the __wasm_mmu_fault path. Both substitute their kernels
+      # (.#kernel-mmu / .#kernel-mmu-a2) + inits (.#mmu-init / .#mmu-init-a2)
+      # from Cachix; the smokes instrument the init at runtime and boot nix:false.
+      - name: MMU smokes (#128 software MMU — A1 checksum + A2 demand paging)
+        working-directory: runtime
+        run: |
+          run_smoke() {
+            local script="$1"; shift
+            local attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt)"
+              set +e
+              env "$@" node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then
+                echo "$script inconclusive (boot panic) — retrying"; continue
+              fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"; return 2
+          }
+          A1K="$(cd .. && nix build -L '.#kernel-mmu' --no-link --print-out-paths)"
+          A1I="$(cd .. && nix build -L '.#mmu-init' --no-link --print-out-paths)"
+          A2K="$(cd .. && nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)"
+          A2I="$(cd .. && nix build -L '.#mmu-init-a2' --no-link --print-out-paths)"
+          # A1: fast-path translate, bit-exact checksum. Gating.
+          run_smoke demo/node/mmu-smoke.mjs \
+            MMU_VMLINUX="$A1K/vmlinux.wasm" MMU_INIT="$A1I/bin/mmu-init"
+          # A2: present-checked translate, demand paging + stack growth. Gating.
+          run_smoke demo/node/mmu-smoke-a2.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" MMU_INIT="$A2I/bin/mmu-init-a2"
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
