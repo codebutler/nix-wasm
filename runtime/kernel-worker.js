@@ -1190,6 +1190,21 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         );
 
         woken = woken.then((instance) => {
+          // pc (#128 software MMU): a softmmu-instrumented image exports the
+          // mutable __mmu_pt_base global its inlined translate reads — point
+          // it at this task's page-table root BEFORE any of the module's own
+          // code (start, relocs) runs. Per-task instances each carry their own
+          // root, so context switches swap nothing. The pass also STRIPS the
+          // wasm start section (__wasm_init_memory would run during
+          // instantiate, before pt_base could be set, and place data through a
+          // zero table) and re-exports it as __mmu_start — run it now, after
+          // pt_base and before relocs.
+          if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
+            instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
+          }
+          if (instance.exports.__mmu_start) {
+            instance.exports.__mmu_start();
+          }
           // wasm-ld only emits __wasm_apply_data_relocs when the module actually has
           // data relocations to apply. A program that references no relocatable data
           // (e.g. `int main(void){return 0;}` — no libc objects pulled, no embedded
@@ -1207,14 +1222,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             instance.exports.__set_tls_base(tls_base);
           }
           user_executable_instance = instance;
-
-          // pc (#128 software MMU): a softmmu-instrumented image exports the
-          // mutable __mmu_pt_base global its inlined translate reads — point
-          // it at this task's page-table root. Per-instance (each task's
-          // module carries its own root), so switch_mm swaps nothing here.
-          if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
-            instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
-          }
 
           // pc (#130): a cloning parent had dlopen'd side modules / handed out
           // dynamic table slots — replay them into this child NOW, before any

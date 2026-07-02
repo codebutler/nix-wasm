@@ -359,7 +359,7 @@ function skipAtomic(b, i) {
  * @param {number} ptBaseGlobal
  * @returns {number[]}
  */
-export function rewriteFuncBody(code, numParams, ptBaseGlobal) {
+export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns) {
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -490,6 +490,29 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal) {
       i = j;
       continue;
     }
+    if (op === 0xfc && bulkFns) {
+      // bulk memory ops write/read through USER addresses — route to the
+      // page-chunked translate helpers (stack already holds the operands in
+      // the helpers' exact param order). Everything else 0xfc (saturating
+      // truncs, data.drop, table ops) copies verbatim.
+      const [sub, at] = readU(code, i + 1);
+      if (sub === 10) {
+        out.push(0x10, ...u(bulkFns.memcpy)); // call __mmu_memcpy(d,s,n)
+        i = skipInstr(code, i);
+        continue;
+      }
+      if (sub === 11) {
+        out.push(0x10, ...u(bulkFns.memfill)); // call __mmu_memfill(d,v,n)
+        i = skipInstr(code, i);
+        continue;
+      }
+      if (sub === 8) {
+        const seg = readU(code, at)[0];
+        out.push(0x10, ...u(bulkFns.meminit.get(seg))); // call __mmu_meminit_<seg>(d,s,n)
+        i = skipInstr(code, i);
+        continue;
+      }
+    }
     const next = skipInstr(code, i);
     for (let k = i; k < next; k++) out.push(code[k]);
     i = next;
@@ -562,13 +585,18 @@ function definedFuncTypes(funcBody) {
   return out;
 }
 
-/** Does this module contain any atomic or SIMD op? (walker-based, whole module) */
+/**
+ * Whole-module op scan: atomics/SIMD/bulk presence + the set of data-segment
+ * indices used by memory.init (each gets a per-segment translate helper).
+ */
 export function scanUnhandled(bytes) {
   const secs = splitSections(bytes);
   const code = secs.find((x) => x.id === 10);
-  if (!code) return { atomics: false, simd: false };
+  if (!code) return { atomics: false, simd: false, bulk: false, initSegs: [] };
   let atomics = false;
   let simd = false;
+  let bulk = false;
+  const initSegs = new Set();
   const b = code.body;
   let i = 0;
   let n;
@@ -588,6 +616,15 @@ export function scanUnhandled(bytes) {
       const op = b[j];
       if (op === 0xfe) atomics = true;
       if (op === 0xfd) simd = true;
+      if (op === 0xfc) {
+        const [sub, at] = readU(b, j + 1);
+        if (sub === 8) {
+          bulk = true;
+          initSegs.add(readU(b, at)[0]);
+        } else if (sub === 10 || sub === 11) {
+          bulk = true;
+        }
+      }
       try {
         j = skipInstr(b, j);
       } catch {
@@ -596,7 +633,196 @@ export function scanUnhandled(bytes) {
     }
     i = end;
   }
-  return { atomics, simd };
+  return { atomics, simd, bulk, initSegs: [...initSegs].sort((a, b2) => a - b2) };
+}
+
+// ---- bulk-memory translate helpers ------------------------------------------
+//
+// Bulk ops (memory.copy/fill/init) take USER addresses spanning pages whose
+// physical backing is not contiguous, so they are lowered to page-chunked
+// helpers: chunk = the largest run that stays inside one page on every
+// translated operand, translate once per chunk via the appended $translate
+// helper (a CALL is fine here — once per PAGE, not per access; the "inline
+// the translate" rule is about per-access cost), then the RAW bulk op on
+// physical addresses. memory.copy picks a BACKWARD chunk loop when the
+// VIRTUAL ranges overlap with dest above src (wasm memory.copy is
+// memmove-like; aliased physical mappings are the user's problem, exactly as
+// on hardware).
+
+const I = {
+  block: 0x02,
+  loop: 0x03,
+  end: 0x0b,
+  br: 0x0c,
+  br_if: 0x0d,
+  ret: 0x0f,
+  call: 0x10,
+  select: 0x1b,
+  lget: 0x20,
+  lset: 0x21,
+  i32c: 0x41,
+  eqz: 0x45,
+  lt_u: 0x49,
+  le_u: 0x4d,
+  ge_u: 0x4f,
+  add: 0x6a,
+  sub: 0x6b,
+  and: 0x71,
+};
+const VOID = 0x40;
+
+// c = min(c, t) using select (locals c, t already set)
+function emitMinCT(o, c, t) {
+  o.push(
+    I.lget,
+    ...u(c),
+    I.lget,
+    ...u(t),
+    I.lget,
+    ...u(c),
+    I.lget,
+    ...u(t),
+    I.lt_u,
+    I.select,
+    I.lset,
+    ...u(c),
+  );
+}
+// c = min(c, n)
+function emitMinCN(o, c, n) {
+  o.push(
+    I.lget,
+    ...u(c),
+    I.lget,
+    ...u(n),
+    I.lget,
+    ...u(c),
+    I.lget,
+    ...u(n),
+    I.lt_u,
+    I.select,
+    I.lset,
+    ...u(c),
+  );
+}
+// t = PAGE - (x & 0xfff)   (forward chunk bound for operand x)
+function emitFwdBound(o, x, dst) {
+  o.push(I.i32c, ...s(4096), I.lget, ...u(x), I.i32c, ...s(0xfff), I.and, I.sub, I.lset, ...u(dst));
+}
+// t = ((x + n - 1) & 0xfff) + 1   (backward chunk bound)
+function emitBwdBound(o, x, n, dst) {
+  o.push(
+    I.lget,
+    ...u(x),
+    I.lget,
+    ...u(n),
+    I.add,
+    I.i32c,
+    ...s(1),
+    I.sub,
+    I.i32c,
+    ...s(0xfff),
+    I.and,
+    I.i32c,
+    ...s(1),
+    I.add,
+    I.lset,
+    ...u(dst),
+  );
+}
+
+/** __mmu_memcpy(d,s,n) body — overlap-aware page-chunked memory.copy. */
+function memcpyHelperBody(translateFunc) {
+  const d = 0,
+    sp = 1,
+    n = 2,
+    c = 3,
+    t = 4;
+  const o = [];
+  o.push(...u(1), ...u(2), VT.i32); // locals: c, t
+  // if (d > s && d < s + n) -> backward, else forward
+  o.push(I.block, VOID); // A ($forward)
+  o.push(I.lget, ...u(d), I.lget, ...u(sp), I.le_u, I.br_if, ...u(0)); // d <= s
+  o.push(I.lget, ...u(d), I.lget, ...u(sp), I.lget, ...u(n), I.add, I.ge_u, I.br_if, ...u(0)); // d >= s+n
+  //   backward chunk loop
+  o.push(I.block, VOID, I.loop, VOID); // B, C
+  o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1)); // -> B
+  emitBwdBound(o, d, n, c);
+  emitBwdBound(o, sp, n, t);
+  emitMinCT(o, c, t);
+  emitMinCN(o, c, n);
+  o.push(I.lget, ...u(n), I.lget, ...u(c), I.sub, I.lset, ...u(n)); // n -= c (chunk at base+n)
+  o.push(I.lget, ...u(d), I.lget, ...u(n), I.add, I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(sp), I.lget, ...u(n), I.add, I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(c));
+  o.push(0xfc, 0x0a, 0x00, 0x00); // raw memory.copy
+  o.push(I.br, ...u(0)); // -> C
+  o.push(I.end, I.end); // C, B
+  o.push(I.ret);
+  o.push(I.end); // A
+  // forward chunk loop
+  o.push(I.block, VOID, I.loop, VOID); // D, E
+  o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1)); // -> D
+  emitFwdBound(o, d, c);
+  emitFwdBound(o, sp, t);
+  emitMinCT(o, c, t);
+  emitMinCN(o, c, n);
+  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(sp), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(c));
+  o.push(0xfc, 0x0a, 0x00, 0x00); // raw memory.copy
+  o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
+  o.push(I.lget, ...u(sp), I.lget, ...u(c), I.add, I.lset, ...u(sp));
+  o.push(I.lget, ...u(n), I.lget, ...u(c), I.sub, I.lset, ...u(n));
+  o.push(I.br, ...u(0)); // -> E
+  o.push(I.end, I.end); // E, D
+  o.push(I.end); // function
+  return o;
+}
+
+/** __mmu_memfill(d,v,n) body. */
+function memfillHelperBody(translateFunc) {
+  const d = 0,
+    v = 1,
+    n = 2,
+    c = 3;
+  const o = [];
+  o.push(...u(1), ...u(1), VT.i32); // local: c
+  o.push(I.block, VOID, I.loop, VOID);
+  o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
+  emitFwdBound(o, d, c);
+  emitMinCN(o, c, n);
+  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(v), I.lget, ...u(c));
+  o.push(0xfc, 0x0b, 0x00); // raw memory.fill
+  o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
+  o.push(I.lget, ...u(n), I.lget, ...u(c), I.sub, I.lset, ...u(n));
+  o.push(I.br, ...u(0));
+  o.push(I.end, I.end, I.end);
+  return o;
+}
+
+/** __mmu_meminit_<seg>(d,s,n) body — s is an offset INTO segment (untranslated). */
+function meminitHelperBody(translateFunc, seg) {
+  const d = 0,
+    sp = 1,
+    n = 2,
+    c = 3;
+  const o = [];
+  o.push(...u(1), ...u(1), VT.i32); // local: c
+  o.push(I.block, VOID, I.loop, VOID);
+  o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
+  emitFwdBound(o, d, c);
+  emitMinCN(o, c, n);
+  o.push(I.lget, ...u(d), I.call, ...u(translateFunc));
+  o.push(I.lget, ...u(sp), I.lget, ...u(c));
+  o.push(0xfc, 0x08, ...u(seg), 0x00); // raw memory.init <seg>
+  o.push(I.lget, ...u(d), I.lget, ...u(c), I.add, I.lset, ...u(d));
+  o.push(I.lget, ...u(sp), I.lget, ...u(c), I.add, I.lset, ...u(sp));
+  o.push(I.lget, ...u(n), I.lget, ...u(c), I.sub, I.lset, ...u(n));
+  o.push(I.br, ...u(0));
+  o.push(I.end, I.end, I.end);
+  return o;
 }
 
 /**
@@ -618,7 +844,16 @@ export function instrument(bytes, opts = {}) {
   const funcSec = byId(3);
   const globalSec = byId(6);
   const codeSec = byId(10);
+  const startSec = byId(8);
   if (!codeSec) throw new Error("softmmu: no code section");
+
+  // The wasm START function (__wasm_init_memory under --shared-memory) runs
+  // DURING instantiation — before the embedder can set __mmu_pt_base — so its
+  // (translated) memory.init/stores would walk a zero table and place data at
+  // garbage physical addresses. Strip the start section and re-export the
+  // function as __mmu_start: the embedder sets pt_base, THEN calls it (the
+  // same manual-startup pattern as __wasm_apply_data_relocs).
+  const startFunc = startSec ? readU(startSec.body, 0)[0] : null;
 
   const nImpFuncs = importSec ? countImports(importSec.body, 0) : 0;
   const nImpGlobals = importSec ? countImports(importSec.body, 3) : 0;
@@ -630,11 +865,18 @@ export function instrument(bytes, opts = {}) {
 
   const ptBaseGlobal = nImpGlobals + nDefGlobals; // appended global's index
 
-  // Appended translate helper: type (i32)->i32 at index nTypes; func at index
-  // nImpFuncs + nDefFuncs. Used only by exportControls / the kernel — the hot
-  // path is inlined and never calls it.
+  // Appended functions: the translate helper (type (i32)->i32 at nTypes), then
+  // the bulk-memory helpers (type (i32,i32,i32)->() at nTypes+1): __mmu_memcpy,
+  // __mmu_memfill, one __mmu_meminit per memory.init'd data segment.
   const translateType = nTypes;
+  const bulkType = nTypes + 1;
   const translateFunc = nImpFuncs + nDefFuncs;
+  const bulkFns = {
+    memcpy: translateFunc + 1,
+    memfill: translateFunc + 2,
+    meminit: new Map(unhandled.initSegs.map((seg, k) => [seg, translateFunc + 3 + k])),
+  };
+  const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
 
   // --- rewrite each defined function body inline -----------------------------
   const cb = codeSec.body;
@@ -648,7 +890,7 @@ export function instrument(bytes, opts = {}) {
     const body = cb.subarray(ci, ci + size);
     ci += size;
     const numParams = paramCounts[defTypes[f]] ?? 0;
-    const rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal);
+    const rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns);
     newCodeEntries.push([...u(rewritten.length), ...rewritten]);
   }
   // append the translate helper body (RAW loads — it IS the translate):
@@ -699,23 +941,41 @@ export function instrument(bytes, opts = {}) {
     0x0b,
   ];
   newCodeEntries.push([...u(translateBody.length), ...translateBody]);
-  const newCodeBody = [...u(nCode + 1), ...newCodeEntries.flat()];
+  for (const body of [
+    memcpyHelperBody(translateFunc),
+    memfillHelperBody(translateFunc),
+    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, seg)),
+  ]) {
+    newCodeEntries.push([...u(body.length), ...body]);
+  }
+  const newCodeBody = [...u(nCode + 1 + nAppended), ...newCodeEntries.flat()];
 
   // --- type section: append (i32)->i32 ---------------------------------------
   const typeExistingTail = typeSec ? typeSec.body.subarray(u(nTypes).length) : [];
   const newTypeBody = [
-    ...u(nTypes + 1),
+    ...u(nTypes + 2),
     ...typeExistingTail,
     0x60,
     ...u(1),
     VT.i32,
     ...u(1),
+    VT.i32, // (i32)->i32: translate
+    0x60,
+    ...u(3),
     VT.i32,
+    VT.i32,
+    VT.i32,
+    ...u(0), // (i32,i32,i32)->(): bulk helpers
   ];
 
   // --- function section: append the translate helper's type index ------------
   const funcExistingTail = funcSec ? funcSec.body.subarray(u(nDefFuncs).length) : [];
-  const newFuncBody = [...u(nDefFuncs + 1), ...funcExistingTail, ...u(translateType)];
+  const newFuncBody = [
+    ...u(nDefFuncs + 1 + nAppended),
+    ...funcExistingTail,
+    ...u(translateType),
+    ...Array.from({ length: nAppended }, () => u(bulkType)).flat(),
+  ];
 
   // --- global section: append pt_base (i32 mutable, init 0) -------------------
   const globalExistingTail = globalSec ? globalSec.body.subarray(u(nDefGlobals).length) : [];
@@ -730,18 +990,20 @@ export function instrument(bytes, opts = {}) {
   ];
 
   // --- export section (optional) ---------------------------------------------
-  let newExportBody = null;
-  if (opts.exportControls) {
-    const exSec = byId(7);
-    const nEx = exSec ? readU(exSec.body, 0)[0] : 0;
-    const exTail = exSec ? exSec.body.subarray(u(nEx).length) : [];
-    const nb = (str) => vec([...str].map((c) => c.charCodeAt(0)));
-    const adds = [
-      [...nb("__mmu_pt_base"), 0x03, ...u(ptBaseGlobal)],
-      [...nb("__mmu_translate"), 0x00, ...u(translateFunc)],
-    ];
-    newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
-  }
+  // __mmu_pt_base and __mmu_start are ALWAYS exported — an instrumented image
+  // is only runnable if the embedder can set the table root and then run the
+  // (stripped) start function. __mmu_translate is the optional introspection
+  // control.
+  const exSec = byId(7);
+  const nEx = exSec ? readU(exSec.body, 0)[0] : 0;
+  const exTail = exSec ? exSec.body.subarray(u(nEx).length) : [];
+  const nb = (str) => vec([...str].map((c) => c.charCodeAt(0)));
+  const adds = [
+    [...nb("__mmu_pt_base"), 0x03, ...u(ptBaseGlobal)],
+    ...(startFunc !== null ? [[...nb("__mmu_start"), 0x00, ...u(startFunc)]] : []),
+    ...(opts.exportControls ? [[...nb("__mmu_translate"), 0x00, ...u(translateFunc)]] : []),
+  ];
+  const newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
 
   // --- reassemble (insert sections that were absent, in canonical order) -----
   const replaced = new Map([
@@ -763,6 +1025,7 @@ export function instrument(bytes, opts = {}) {
     }
   };
   for (const sec of secs) {
+    if (sec.id === 8 && startFunc !== null) continue; // start stripped -> __mmu_start
     if (sec.id !== 0) emitMissingBefore(sec.id);
     outSecs.push(replaced.has(sec.id) ? { id: sec.id, body: replaced.get(sec.id) } : sec);
   }

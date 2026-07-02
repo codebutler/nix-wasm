@@ -60,13 +60,18 @@ function boot(bytes, { instrumented, remap } = {}) {
     }
     if (remap) remap(setPte);
     inst.exports.__mmu_pt_base.value = PT;
+    // the pass strips the wasm start section (it would run before pt_base is
+    // set) and re-exports it — run it NOW, exactly like the engine does.
+    if (inst.exports.__mmu_start) inst.exports.__mmu_start();
+  } else if (inst.exports.__mmu_start) {
+    inst.exports.__mmu_start();
   }
   return { inst, mem, HEAP, PT, u32, setPte };
 }
 
 describe("scanUnhandled", () => {
-  test("prog.wasm has no atomics or SIMD", () => {
-    expect(scanUnhandled(prog)).toEqual({ atomics: false, simd: false });
+  test("prog.wasm has no atomics, SIMD, or bulk ops", () => {
+    expect(scanUnhandled(prog)).toEqual({ atomics: false, simd: false, bulk: false, initSegs: [] });
   });
 });
 
@@ -256,5 +261,76 @@ describe("atomic ops (0xfe) — the musl-pthread path", () => {
     // atomic rmw through the remap too: add 1 → old 0xabcd, P2 now 0xabce.
     expect(b.inst.exports.a_add(V, 1) >>> 0).toBe(0xabcd);
     expect(dv.getUint32(P2, true)).toBe(0xabce);
+  });
+});
+
+describe("bulk-memory ops (0xfc) — memory.copy/fill/init through the page table", () => {
+  const bulk = new Uint8Array(readFileSync(new URL("bulk.wasm", FIX)));
+
+  test("scanUnhandled reports bulk + the memory.init segment", () => {
+    const u = scanUnhandled(bulk);
+    expect(u.bulk).toBe(true);
+    expect(u.initSegs).toEqual([0]);
+  });
+
+  test("memory.init: start is STRIPPED (__mmu_start) and places the data right", () => {
+    // __wasm_init_memory (the wasm start function) would run at instantiation
+    // — BEFORE pt_base can be set — so the pass strips the start section and
+    // re-exports it as __mmu_start; the embedder sets pt_base then calls it
+    // (boot() above does exactly that). The data segment must land at the
+    // same RAW addresses as the uninstrumented module places it.
+    const insnBytes = instrument(bulk, { exportControls: true });
+    const insnMod = new WebAssembly.Module(insnBytes);
+    expect(WebAssembly.Module.exports(insnMod).some((e) => e.name === "__mmu_start")).toBe(true);
+    const orig = boot(bulk, {});
+    const insn = boot(insnBytes, { instrumented: true });
+    // strict: identical values through the accessor AND identical raw bytes
+    // in the data region (find the segment via the original: 1..8 prefix).
+    expect(insn.inst.exports.read_data(0)).toBe(1);
+    expect(insn.inst.exports.read_data(7)).toBe(8);
+    const a = new Uint8Array(orig.mem.buffer).slice(0, 0x1000);
+    const b = new Uint8Array(insn.mem.buffer).slice(0, 0x1000);
+    expect(Buffer.from(b).equals(Buffer.from(a))).toBe(true);
+  });
+
+  test("instrumented == original for copy/move(overlap)/fill", () => {
+    const orig = boot(bulk, {});
+    const insn = boot(instrument(bulk, { exportControls: true }), { instrumented: true });
+    const SRC = 0x100000;
+    const DST = 0x180000; // crosses many pages: len > PAGE
+    const N = 12345;
+    for (const h of [orig, insn]) {
+      const u8 = new Uint8Array(h.mem.buffer);
+      for (let k = 0; k < N; k++) u8[SRC + k] = (k * 131 + 7) & 0xff;
+      h.inst.exports.bulk_copy(DST, SRC, N);
+      // overlapping move: dest above src within the copied range
+      h.inst.exports.bulk_move(DST + 100, DST, N - 200);
+      // fill a page-crossing stripe
+      h.inst.exports.bulk_fill(DST + 4090, 0xab, 100);
+    }
+    const a = new Uint8Array(orig.mem.buffer).slice(DST, DST + N);
+    const b = new Uint8Array(insn.mem.buffer).slice(DST, DST + N);
+    expect(Buffer.from(b).equals(Buffer.from(a))).toBe(true);
+  });
+
+  test("bulk ops honor the page table: remapped pages redirect a copy", () => {
+    const V = 0x200000; // virtual dest page
+    const P2 = 0x240000; // physical page it maps to
+    const b = boot(instrument(bulk, { exportControls: true }), {
+      instrumented: true,
+      remap: (setPte) => setPte(V, P2),
+    });
+    const u8 = new Uint8Array(b.mem.buffer);
+    const SRC = 0x100000;
+    for (let k = 0; k < 64; k++) u8[SRC + k] = k + 1;
+    b.inst.exports.bulk_copy(V, SRC, 64);
+    // bytes landed in P2, not V
+    expect(u8[P2]).toBe(1);
+    expect(u8[P2 + 63]).toBe(64);
+    expect(u8[V]).toBe(0);
+    // fill through the remap too
+    b.inst.exports.bulk_fill(V + 8, 0x5a, 16);
+    expect(u8[P2 + 8]).toBe(0x5a);
+    expect(u8[P2 + 23]).toBe(0x5a);
   });
 });
