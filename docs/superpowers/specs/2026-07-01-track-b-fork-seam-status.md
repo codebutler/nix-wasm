@@ -123,3 +123,49 @@ boot-verified (PRIME DIRECTIVE), NOT a recovery of the NOMMU #0026 patch (which
 would be re-introducing the very per-process-Memory model #128 removed). Do NOT
 apply #0026 on the MMU kernel. `patches/kernel/0026` and the `user_as_*`
 mm-context fields are retained in git history for reference only.
+
+## UPDATE 2026-07-02 (later) — REAL FORK BOOTS: returns twice + COW ✅
+
+All three parts above are DONE and the fork MECHANISM is boot-verified end to end
+(`runtime/demo/node/fork-smoke.mjs`, gated in `nix-wasm.yml`):
+
+- **musl (0010)** — done + build-verified (above).
+- **Kernel** — `patches/kernel/0026-wasm-mmu-fork.patch` (a NEW patch, NOT PR
+  #20's retired #0026): `wasm_fork_current(user_sp, user_tls, fork_ctl)` stamps
+  the real fork-time SP/TLS into pt_regs/switch_stack (fork bypasses syscall
+  entry), arms `fork_ctl` on `current`'s `switch_stack` (copy_thread's existing
+  copy carries it to the child), and runs a plain `kernel_clone(SIGCHLD, no
+  CLONE_VM)` → the GENERIC COW mm dup. `copy_thread` forces
+  `CPUFLAGS_USER_TASK_DEFAULT` on the non-CLONE_VM child; `__switch_to` consumes
+  `fork_ctl` once and passes it via `wasm_create_and_run_task`'s new trailing arg.
+  Applied with 0023 on all `mmu` builds.
+- **Engine** — `runtime/kernel-worker.js` (ENGINE_ABI 10): `env.capture_stack`
+  per worker (`runtime/asyncify.js`), `run_user_entry` drives the fork loop
+  (parent unwind → `wasm_fork_current` → dual rewind on the SAME shared arena);
+  a fork child rewinds the captured stack at first run instead of `_start()`ing.
+
+**Boot proof (one boot):** `FORK-MMU: parent pid=0x1e witness=0x1b0` AND
+`FORK-MMU: child ret=0x0 witness=0x10c` — fork returned twice, and the private
+`witness` at ONE virtual address diverged (COW isolated each side's page to an
+independent frame via the #128 A2 write-protect fault). Unit-level: the whole
+mechanism (asyncify × softmmu × COW, two instances on one Memory) is also proven
+in `runtime/softmmu-fork.test.js` (bun test, no build).
+
+### Remaining follow-ups (deeper kernel completeness, NOT the fork mechanism)
+
+The fork itself (returns twice + COW + a real concurrent child task with its own
+pt_base) works. What's left is cross-process rendezvous AFTER fork:
+
+1. **Blocking-syscall wakeup in the rewound parent.** The parent resumes after
+   the rewind and runs + makes syscalls (write works), but a BLOCK-then-WAKE —
+   `waitpid()` of an exiting child, or `nanosleep()` — never wakes. The child is
+   correctly linked (a `waitpid(WNOHANG)` probe returns 0 / errno 0, NOT ECHILD),
+   so this is a lost-wakeup in the cooperative single-CPU scheduler for a task
+   that entered user mode via the out-of-band `wasm_fork_current` rather than a
+   syscall return (its preempt/interrupt bookkeeping likely differs). This is the
+   next concrete item for full POSIX `fork()`+`wait()`.
+2. **MAP_SHARED cross-process visibility** after fork (a shared anon page written
+   by the child isn't observed by the parent) — same cross-process class.
+
+Both are orthogonal to fork returning twice + COW, which is the Track B core and
+is DONE. `sync-to-pc.sh` (ENGINE_ABI 10) is required before a pc channel deploy.

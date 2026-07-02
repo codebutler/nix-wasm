@@ -1115,25 +1115,33 @@ CI / the linux box, per the design's "ship what works" scope):
   mmu-smoke + mmu-smoke-a2 are now GATED in `nix-wasm.yml`'s boot-smoke job.
   **REMAINING for Track A:** none — demand paging + COW + mprotect all boot-
   verified and gated; the fork COW replay is exercised by Track B.
-- **Track B — asyncify fork seam: recovered + generalized; COW gate now MET.**
-  `runtime/asyncify.js` (the double-return engine, 6 node tests) recovered from
-  PR #20; `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in
-  (B1). The **fork×dlopen replay** (the design's named hazard) is DONE in
-  `dylink.js`. Track B's **COW dependency is now satisfied** (Track A2 above —
-  the write-protect fault path COWs, boot-verified). **BUT PR #20's kernel fork
-  (`patches/kernel/0026`) is the WRONG model for the new foundation** and must
-  NOT be applied: it mints a separate wasm `Memory` per process + tracks
-  `user_as_owner_pid` — the NOMMU per-process-Memory model the software MMU
-  (#128) *replaces* with a single shared arena + per-process page tables. The
-  MMU-native fork is: (1) kernel — generic `dup_mm`→`pgd_alloc`→`dup_mmap`→
-  `copy_page_range` (COW via `is_cow_mapping`, now that write-faults work; the
-  arch already has `pgd_alloc`/`switch_mm→pt_base`), plus `copy_thread` for the
-  non-CLONE_VM child; (2) musl — the fork-asyncify seam renumbered to
-  `patches/musl/0010` + a world build; (3) engine — run the asyncify child **in
-  the SAME shared Memory** with its own `pt_base` (NOT a minted Memory), wired
-  into `kernel-worker.js`'s task model. Full analysis + why #0026 is retired:
+- **Track B — REAL fork() BOOTS on the software MMU (returns twice + COW).**
+  The MMU-native fork is DONE and boot-verified — NOT PR #20's retired NOMMU
+  per-process-Memory model. Three parts: (1) **musl** — the fork-asyncify seam
+  (`_Fork`→`capture_stack`) as `patches/musl/0010`, a `fork ? false` variant of
+  `musl.nix` (`.#musl-fork`); (2) **kernel** — `patches/kernel/0026-wasm-mmu-fork
+  .patch` (applied with 0023): `wasm_fork_current(user_sp,user_tls,fork_ctl)`
+  stamps the fork-time SP/TLS into pt_regs (fork bypasses syscall entry), arms
+  `fork_ctl` on `current`'s switch_stack (copy_thread's copy carries it to the
+  child), runs `kernel_clone(SIGCHLD, no CLONE_VM)` → generic COW `dup_mmap`;
+  `copy_thread` forces `CPUFLAGS_USER_TASK_DEFAULT` on the child; `__switch_to`
+  passes `fork_ctl` via `wasm_create_and_run_task`'s new trailing arg; (3)
+  **engine** — `kernel-worker.js` (ENGINE_ABI 10): `env.capture_stack` per
+  worker, `run_user_entry` drives the fork loop (parent unwind →
+  `wasm_fork_current` → dual rewind on the SAME shared arena with per-process
+  `pt_base`), a fork child REWINDS the captured stack at first run.
+  **Boot proof (one boot, `fork-smoke.mjs`, gated in `nix-wasm.yml`):**
+  `parent pid=0x1e witness=0x1b0` AND `child ret=0 witness=0x10c` — fork returned
+  twice, the private witness at one VA COW-diverged. Mechanism also unit-proven
+  in `softmmu-fork.test.js` (asyncify×softmmu×COW, two instances on one Memory).
+  **REMAINING follow-ups (deeper kernel completeness, NOT the fork mechanism):**
+  a BLOCKING syscall then wake in the rewound parent (`waitpid` of an exiting
+  child, `nanosleep`) is a lost-wakeup in the cooperative single-CPU scheduler —
+  the child IS linked (WNOHANG returns 0, not ECHILD); and MAP_SHARED
+  cross-process visibility. Both are cross-process rendezvous, orthogonal to fork
+  returning twice + COW. Full record:
   `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md` (UPDATE
-  2026-07-02). LANDING remains a multi-part world+kernel+engine build.
+  2026-07-02 later). ENGINE_ABI 10 needs `runtime/sync-to-pc.sh` before a pc deploy.
 - **#131 cleanup** — the payoff. Slice 2 (dlopen accommodations) is unblocked by
   Track C; slices 1/3 gated on Track B/A world builds. Execution-ready audit
   (each box + exact edit + verify gate): `docs/superpowers/specs/
