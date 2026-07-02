@@ -2,7 +2,8 @@
 // #128). Instruments a REAL compiled program (test-fixtures/softmmu/prog.wasm:
 // scalar loads/stores across widths, a pointer chase, i64/f64 mixes) and proves:
 //   1. the instrumented module still VALIDATES + INSTANTIATES;
-//   2. under an IDENTITY page table it computes bit-identically to the original
+//   2. under an IDENTITY 2-level page table (with flag bits set, proving the
+//      address mask) it computes bit-identically to the original
 //      (the translate is correct for every width);
 //   3. the page-table indirection is really exercised — remapping a page in the
 //      table redirects the access (a non-identity mapping changes the result);
@@ -32,17 +33,35 @@ function boot(bytes, { instrumented, remap } = {}) {
     mem.grow(needPages - mem.buffer.byteLength / 65536);
   }
   const u32 = () => new Uint32Array(mem.buffer);
-  const PT = 0x40000; // page table base (256 KiB in)
+  // TWO-LEVEL identity tables, laid out like the kernel builds them:
+  //   PGD (4 KiB, 1024 entries, each covers 4 MiB) at PT
+  //   one PTE table (4 KiB, 1024 entries) per used PGD slot, following.
+  // Low-bit FLAGS are deliberately set on every entry (|3, |7) to prove the
+  // pass masks them out of the address (kernel PTEs carry present/write bits).
+  const PT = 0x40000; // pgd base (256 KiB in)
   const HEAP = 0x100000; // working area (1 MiB in)
-  if (instrumented) {
-    // identity page table over the whole memory: PTE[p] = p << 12
-    const pages = mem.buffer.byteLength / PAGE;
+  // setPte(va, physBase): point va's page at physBase (flags added here).
+  const setPte = (va, physBase) => {
     const t = u32();
-    for (let p = 0; p < pages; p++) t[PT / 4 + p] = p << 12;
-    if (remap) remap(t, PT / 4);
+    const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+    t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = physBase | 7;
+  };
+  if (instrumented) {
+    const pages = mem.buffer.byteLength / PAGE;
+    const nPgd = Math.ceil(pages / 1024);
+    const t = u32();
+    for (let g = 0; g < nPgd; g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable | 3; // pgd entry -> pte table (+flag bits)
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
+      }
+    }
+    if (remap) remap(setPte);
     inst.exports.__mmu_pt_base.value = PT;
   }
-  return { inst, mem, HEAP, PT, u32 };
+  return { inst, mem, HEAP, PT, u32, setPte };
 }
 
 describe("scanUnhandled", () => {
@@ -122,9 +141,7 @@ describe("instrument()", () => {
     const P2 = 0x210000; // physical page 0x210
     const b = boot(instrument(prog, { exportControls: true }), {
       instrumented: true,
-      remap: (t, ptWord) => {
-        t[ptWord + (V >>> 12)] = P2; // PTE holds phys page BASE (P2 is page-aligned)
-      },
+      remap: (setPte) => setPte(V, P2), // PTE holds phys page BASE + flag bits
     });
     // fill 4 ints at V — with the remap they must appear at P2.
     b.inst.exports.fill(V, 4, 100);
@@ -229,9 +246,7 @@ describe("atomic ops (0xfe) — the musl-pthread path", () => {
     const P2 = 0x220000; // physical page 0x220
     const b = boot(instrument(atomics, { exportControls: true }), {
       instrumented: true,
-      remap: (t, ptWord) => {
-        t[ptWord + (V >>> 12)] = P2;
-      },
+      remap: (setPte) => setPte(V, P2),
     });
     const dv = new DataView(b.mem.buffer);
     // atomic store to V lands in P2 (identity page V left untouched).

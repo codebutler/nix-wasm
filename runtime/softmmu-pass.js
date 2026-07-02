@@ -18,16 +18,20 @@
 // it), because V8 does not inline the helper and the spike's ~1.1× assumed an
 // INLINED translate. So the pass now emits the translate INLINE at every access,
 // using per-function scratch locals — reproducing the spike's model exactly:
-//     ea   = va + memarg.offset                         ;; effective address
-//     pte  = u32[ pt_base + (ea >>> 12) << 2 ]          ;; one raw page-table load
-//     phys = pte + (ea & 0xfff)
+//     ea    = va + memarg.offset                        ;; effective address
+//     pgd_e = u32[ pt_base + (ea >>> 22) << 2 ]         ;; level 1 (PGD)
+//     pte   = u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]  ;; level 2
+//     phys  = (pte & ~0xfff) + (ea & 0xfff)             ;; flags masked
 //     <raw load/store at phys>                           ;; align 0, offset 0
 // `pt_base` is a mutable global the kernel sets on every context switch (the
 // current process's page-table root — a physical byte offset into the one shared
 // Memory that is "RAM"). An identity page table (pte = page<<12) makes phys==ea,
 // which is how the pass is correctness-tested + measured without a live kernel.
-// The single-level table matches spikes/softmmu (which measured a software TLB
-// makes it WORSE, so there is none).
+// TWO-LEVEL (not the spike's single-level flat): the kernel arch layer uses the
+// standard 32-bit split (PGDIR_SHIFT=22, page-sized PTE tables — the generic MM
+// assumes them), so the pass walks the same tables the kernel builds. Entry low
+// 12 bits are flag bits (present/write/...) and are masked out of the address.
+// No software TLB (spikes/softmmu measured a TLB makes it WORSE).
 //
 // A translate HELPER function is still appended + exported (under exportControls)
 // for the kernel's fault handler / introspection + the tests, but the hot path
@@ -394,15 +398,31 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal) {
   out.push(...u(1), VT.i64); // b_i64
 
   // emit the inline translate producing `phys` on the stack from `ea` in $EA.
+  // TWO-LEVEL walk matching the kernel arch layer (design §2 revised: the
+  // generic MM wants page-sized PTE tables, so PGDIR_SHIFT=22, 1024/1024):
+  //   pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
+  //   pte   = u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]
+  //   phys  = (pte & ~0xfff) + (ea & 0xfff)
+  // Low 12 bits of both entries are MASKED — kernel PTEs carry flag bits
+  // (present/write/accessed/dirty); the A1 fast path ignores them but must
+  // not let them corrupt the address.
   const emitTranslate = () => {
     out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
     out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(12), 0x76); // i32.const 12 ; i32.shr_u  -> page
-    out.push(0x41, ...s(2), 0x74); // i32.const 2 ; i32.shl      -> page*4
-    out.push(0x6a); // i32.add -> pt_base + page*4
-    out.push(0x28, 0x02, ...u(0)); // i32.load align=2 off=0 -> pte (RAW)
+    out.push(0x41, ...s(22), 0x76); // i32.const 22 ; i32.shr_u  -> pgd index
+    out.push(0x41, ...s(2), 0x74); // i32.const 2 ; i32.shl      -> *4
+    out.push(0x6a); // i32.add -> pt_base + pgdi*4
+    out.push(0x28, 0x02, ...u(0)); // i32.load align=2 off=0 -> pgd_e (RAW)
+    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
     out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(0xfff), 0x71); // i32.const 0xfff ; i32.and
+    out.push(0x41, ...s(12), 0x76); // >>> 12
+    out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff -> pte index
+    out.push(0x41, ...s(2), 0x74); // << 2
+    out.push(0x6a); // i32.add
+    out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
+    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
     out.push(0x6a); // i32.add -> phys
   };
 
@@ -634,14 +654,32 @@ export function instrument(bytes, opts = {}) {
   // append the translate helper body (RAW loads — it IS the translate):
   //   translate(va): pt_base + ((u32[pt_base + (va>>>12<<2)]) not inlined here)
   const translateBody = [
-    ...u(0), // no locals
+    ...u(0), // no locals — same TWO-LEVEL walk as the inline path
     0x23,
     ...u(ptBaseGlobal), // global.get pt_base
     0x20,
     ...u(0), // local.get va
     0x41,
+    ...s(22),
+    0x76, // >>> 22
+    0x41,
+    ...s(2),
+    0x74, // << 2
+    0x6a, // +
+    0x28,
+    0x02,
+    ...u(0), // i32.load pgd_e
+    0x41,
+    ...s(-4096),
+    0x71, // & ~0xfff
+    0x20,
+    ...u(0), // local.get va
+    0x41,
     ...s(12),
     0x76, // >>> 12
+    0x41,
+    ...s(0x3ff),
+    0x71, // & 0x3ff
     0x41,
     ...s(2),
     0x74, // << 2
@@ -649,6 +687,9 @@ export function instrument(bytes, opts = {}) {
     0x28,
     0x02,
     ...u(0), // i32.load pte
+    0x41,
+    ...s(-4096),
+    0x71, // & ~0xfff
     0x20,
     ...u(0), // local.get va
     0x41,

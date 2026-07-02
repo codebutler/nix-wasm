@@ -88,9 +88,12 @@ pgd_e = u32[ pt_base + (va>>22)<<2 ]          // level 1: PGD entry (PTE-table p
 pte   = u32[ (pgd_e & ~0xfff) + ((va>>12 & 0x3ff)<<2) ]   // level 2: PTE
 phys  = (pte & ~0xfff) + (va & 0xfff)
 ```
-This is a small, separable change to `runtime/softmmu-pass.js` (`emitTranslate`) +
-a re-measurement (the spike's single-level ~1.05–1.9× is the floor; the 2nd
-dependent load adds one cache-friendly access). Tracked with the kernel work.
+DONE (2026-07-02): the pass emits this 2-level walk (both the inline path and
+the `__mmu_translate` helper), masks the low-12 flag bits at both levels, and
+is re-measured on the real binary (`spikes/softmmu/REAL-BINARY.md`): pure-memory
+poles ~3–4× (up from single-level's ~2.2×), compute-mixed ≈free (1.01×) — the
+realistic shape. A flat-shadow single-level mirror kept in sync by the pte
+accessors is the recorded A3 optimization if real-guest profiling demands it.
 `PAGE_SHIFT` MUST be 12 (both the pass and this split hard-code 4KB) — select
 `HAVE_PAGE_SIZE_4KB`. PTE format: bits 0–11 flags (present/write/user/accessed/
 dirty), bits 12–31 the physical page base; the A1 fast path can ignore flags
