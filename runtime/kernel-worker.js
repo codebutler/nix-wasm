@@ -130,6 +130,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// worker; late-binds the instance (exec replaces it).
   let capture_stack_fn = null;
 
+  /// pc (#128/#129): THIS worker's own page-table root — the pt_base baked into
+  /// its user instance's __mmu_pt_base at instantiation (its task's mm->pgd).
+  /// IMMUTABLE for the life of the instance (a task's own pgd never changes; an
+  /// exec re-instantiates and re-bakes). The kernel's switch_mm calls the host
+  /// import __mmu_set_pt_base(next->pgd) on EVERY context switch, and that runs
+  /// in whatever worker is executing the scheduler — including THIS worker when
+  /// its task schedules OUT (switch_mm(self, next) sets our instance's global to
+  /// `next`'s pgd, then we park). Nothing cross-worker restores it, so on resume
+  /// we must re-apply our OWN root or the instrumented user code walks the wrong
+  /// table and every access faults forever (the #129 two-user-task fork bug —
+  /// single-task A2 smokes never switch between two user tasks, so never hit it).
+  let own_pt_base = 0;
+
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
     constructor(kind) {
@@ -272,6 +285,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const serialize_me = () => {
     // Wait for some other task or CPU to wake us up.
     lock_wait("serialize");
+    // pc (#128/#129): our task is resuming on THIS worker. Restore our own
+    // page-table root — a switch_mm while we were scheduled out (ours, when we
+    // parked, or another worker's) may have written a foreign pgd into our
+    // instance's __mmu_pt_base. Re-apply the baked root so the instrumented
+    // user code we're about to return to walks OUR table. No-op for tasks
+    // without a softmmu instance (idle/kthreads, own_pt_base 0).
+    if (own_pt_base && user_executable_instance && user_executable_instance.exports.__mmu_pt_base) {
+      user_executable_instance.exports.__mmu_pt_base.value = own_pt_base;
+    }
     return switch_to_last_task[0]; // last_task was written by the caller just prior to waking.
   };
 
@@ -1236,6 +1258,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           // pt_base and before relocs.
           if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
             instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
+            // pc (#128/#129): remember OUR immutable root so serialize_me can
+            // restore it after a context switch clobbers the instance global
+            // with a foreign pgd (see own_pt_base's declaration).
+            own_pt_base = user_executable_params.pt_base;
           }
           if (instance.exports.__mmu_start) {
             instance.exports.__mmu_start();

@@ -5,8 +5,8 @@
 // parent unwind → wasm_fork_current (kernel_clone → generic COW dup_mmap) →
 // child task spawns with fork_ctl → its worker REWINDS the captured stack
 // (fork()==0) on the SAME shared arena with its own pt_base → both sides'
-// post-fork writes COW isolate. Proves fork returns twice + COW; the
-// cross-process reap/shared-mem wakeup is a documented follow-up (status doc).
+// post-fork writes COW isolate → the parent waitpid()s and reaps the
+// child's exit(7). Proves fork returns twice + COW + blocking wait+reap.
 //
 //   MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm
 //   FORK_INIT=$(nix build .#fork-init --print-out-paths)/bin/fork-init
@@ -81,7 +81,7 @@ writeFileSync(join(dir, "initramfs.cpio.gz"), gzipSync(cpio));
 const s = await bootNode({ nix: false, baseUrl: pathToFileURL(dir + "/").href });
 let pass = false;
 try {
-  const ok = await s.waitForOutput(/FORK-MMU: child ret=0x00000000/, 150000).catch((e) => {
+  const ok = await s.waitForOutput(/FORK-MMU: OK/, 150000).catch((e) => {
     if (e && e.message === "KERNEL_PANIC") {
       console.log("[fork-smoke] INCONCLUSIVE — kernel panic on boot; re-run");
       s.kill();
@@ -94,11 +94,15 @@ try {
   // child side: fork() returned 0, PRIVATE witness COW'd to 0x10c
   const childOk = snap.includes("FORK-MMU: child ret=0x00000000 witness=0x0000010c");
   // parent side: nonzero pid, INDEPENDENT witness 0x1b0 (COW isolated from the
-  // child's 0x10c through the same virtual address). Both lines present ==
-  // fork returned twice + the child ran as a real concurrent task.
-  const parentOk = /FORK-MMU: parent pid=0x[0-9a-f]*[1-9a-f][0-9a-f]* witness=0x000001b0/.test(
-    snap,
-  );
+  // child's 0x10c through the same virtual address), and it BLOCKED in
+  // waitpid() then reaped the child's exit(7) — status 0x7. All three prove:
+  // fork returned twice + COW + a real concurrent child reaped through the
+  // kernel (the pt_base-restore-on-resume fix — a blocked task's instance root
+  // is restored on wake, else the woken parent fault-loops on a foreign table).
+  const parentOk =
+    /FORK-MMU: parent pid=0x[0-9a-f]*[1-9a-f][0-9a-f]* witness=0x000001b0 status=0x00000007/.test(
+      snap,
+    );
   pass = !!ok && alive && childOk && parentOk;
   if (ok && !childOk) console.log("[fork-smoke] CHILD side missing/incorrect");
   if (ok && !parentOk) console.log("[fork-smoke] PARENT side missing/incorrect");

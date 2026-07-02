@@ -2,34 +2,30 @@
  *
  * Runs as init under the A2 software-MMU kernel (.#kernel-mmu-a2 + patch 0026),
  * built through the asyncify seam (userspace/asyncify-cc.nix, forkSeam=true →
- * muslFork's _Fork → capture_stack) and instrumented CHECKED by the smoke
- * (runtime/demo/node/fork-smoke.mjs). Proves the MMU-native fork MECHANISM:
+ * muslFork's 0010 _Fork → capture_stack) and instrumented CHECKED by the smoke
+ * (runtime/demo/node/fork-smoke.mjs). Proves the FULL MMU-native fork:
  *   fork() → musl 0010 _Fork → capture_stack (asyncify unwind) → the engine
  *   drives wasm_fork_current (kernel_clone → generic COW dup_mmap) → the child
  *   task spawns with fork_ctl and REWINDS in its worker (fork()==0) on the SAME
- *   shared arena with its OWN pt_base → the parent rewinds with the child pid.
+ *   shared arena with its OWN pt_base → the parent rewinds with the child pid →
+ *   both sides' post-fork writes COW → the parent waitpid()s and reaps the
+ *   child's exit(7).
  *
  * PROVES (all boot-verified by fork-smoke.mjs):
  *   - RETURNS TWICE: a CHILD line (fork()==0) AND a PARENT line (fork()>0);
  *   - COW ISOLATION: the private `witness` at ONE virtual address diverges —
  *     child 0x10c, parent 0x1b0 — so each side's page table COW'd that page to
  *     an independent physical frame (the #128 A2 write-protect fault path);
- *   - CONCURRENT REAL TASK: the child runs in its own worker/pt_base and prints
- *     before the parent (which yields the single CPU via nanosleep).
- *
- * KNOWN FOLLOW-UPS (deeper kernel completeness, NOT the fork mechanism — see the
- * Track B status doc): (1) blocking waitpid() of an EXITING child does not wake
- * the blocked parent — a lost-wakeup in the cooperative single-CPU scheduler
- * (the child IS linked: a WNOHANG probe returns 0/errno 0, NOT ECHILD); (2)
- * MAP_SHARED cross-process visibility after fork. Both are cross-process
- * rendezvous, orthogonal to fork returning twice + COW, which fully work. The
- * child here _exit()s (clean, no panic) and the parent proves its side via a
- * fixed yield, so the gate depends on neither follow-up.
+ *   - REAP: the parent BLOCKS in waitpid() and is correctly woken + reaps the
+ *     child, seeing WEXITSTATUS==7. (This exercises the pt_base-restore-on-
+ *     resume fix: a blocked task's instance root, clobbered by switch_mm while
+ *     it was scheduled out, is restored on resume — without it the woken parent
+ *     fault-looped on its own stack against a foreign page table.)
  */
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mount.h>
-#include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void put(int fd, const char *s) { write(fd, s, strlen(s)); }
@@ -64,31 +60,29 @@ int main(void)
 			pause();
 	}
 	if (pid == 0) {
-		/* Child: fork() returned 0; mutate the PRIVATE witness (COW), announce,
-		 * then park. No _exit — the exiting-child→parent reap wakeup is the
-		 * documented follow-up; this gate proves the fork MECHANISM only. */
+		/* Child: fork() returned 0; mutate the PRIVATE witness (COW), exit 7. */
 		witness += 0x0c;
 		put(fd, "FORK-MMU: child ret=");
 		put_hex(fd, 0);
 		put(fd, " witness=");
 		put_hex(fd, (unsigned long)witness);
 		put(fd, "\n");
-		for (;;)
-			pause();
+		_exit(7);
 	}
 
-	/* Parent: fork() returned the child pid. Independent witness (COW). Announce
-	 * IMMEDIATELY — no blocking syscall (the rewound parent can run + write but
-	 * a block-then-wake, nanosleep/waitpid, is the documented follow-up), then
-	 * park so the single CPU yields to the child, which announces + parks too.
-	 * Both lines appearing in one boot == fork returned twice; the diverging
-	 * witness (child 0x10c / parent 0x1b0) at one VA == COW isolation. */
+	/* Parent: BLOCK in waitpid and reap the child, mutate the independent
+	 * witness (COW), report the reaped exit status. */
+	int status = 0;
+	waitpid(pid, &status, 0);
 	witness += 0xb0;
 	put(fd, "FORK-MMU: parent pid=");
 	put_hex(fd, (unsigned long)pid);
 	put(fd, " witness=");
 	put_hex(fd, (unsigned long)witness);
+	put(fd, " status=");
+	put_hex(fd, WIFEXITED(status) ? (unsigned long)WEXITSTATUS(status) : 0xdeadUL);
 	put(fd, "\n");
+
 	put(fd, "FORK-MMU: OK\n");
 	for (;;)
 		pause();
