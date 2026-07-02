@@ -30,4 +30,12 @@
 // virtio_config_changed() → hvc_resize(). New host↔guest surface (the config irq
 // + cols/rows in console config space), so an old engine can't drive a new
 // image's resize path: bump.
-export const ENGINE_ABI = 7;
+//
+// 8 (#126 Track C / #130): runtime dynamic linking — the user-instance import
+// surface grew __wasm_dl_probe / __wasm_dlopen / __wasm_dlsym (runtime/dylink.js
+// loader: side-module instantiation against the process Memory + shared table,
+// GOT resolution, elem-slot dlsym per the fpcast rule), and clone/fork task
+// creation now carries + replays the parent's side-module set (Track 0 §4). A
+// guest musl built with the wasm dlopen port fails to instantiate on an old
+// engine (missing env imports): bump.
+export const ENGINE_ABI = 8;

@@ -905,7 +905,10 @@ in
   # native galculator is untouched.
   galculator = whenWasm
     (p: p.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.binaryen ];
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [
+        final.buildPackages.binaryen
+        final.buildPackages.python3 # dynsym-inject (below)
+      ];
       # M4 proof: a --selftest source patch that loads the real .ui files from
       # PACKAGE_UI_DIR via gtk_builder_add_from_file (display-free, so it runs in
       # the compositor-less node harness) and asserts GtkWindow "main_window"
@@ -929,6 +932,15 @@ in
       '';
       postFixup = (o.postFixup or "") + ''
         if [ -f "$out/bin/galculator" ]; then
+          # dynsym-inject BEFORE fpcast (#126 Track C / #130, userspace/dynsym.nix):
+          # every exported function gets an elem slot + a cb.dynsym map entry, so
+          # the later fpcast pass thunks them and the runtime loader's dlsym can
+          # resolve GtkBuilder's .ui signal-handler names to canonical-thunk table
+          # indices — gtk_builder_connect_signals(NULL) works through the REAL
+          # GModule/dlopen(NULL)/dlsym path, no add_callback_symbol registry.
+          python3 ${./scripts/wasm-dynsym-inject.py} \
+            "$out/bin/galculator" "$out/bin/galculator.dynsym"
+          mv "$out/bin/galculator.dynsym" "$out/bin/galculator"
           wasm-opt \
             --enable-threads --enable-bulk-memory --enable-mutable-globals \
             --enable-nontrapping-float-to-int --enable-sign-ext \
