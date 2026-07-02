@@ -49,4 +49,12 @@
 // instantiate on an old engine (missing env import): bump. (NOMMU images
 // remain compatible in both directions — extra trailing args are ignored by
 // JS — but minEngine stamps conservatively from this constant as always.)
-export const ENGINE_ABI = 9;
+// 10 (#129 Track B: MMU-native fork): wasm_create_and_run_task grew a trailing
+// fork_ctl arg (the asyncify fork control-buffer pointer, 0 = not a fork
+// child), the user-instance import surface grew env.capture_stack (the musl
+// 0010 _Fork seam), and the engine gained the fork orchestration — parent
+// unwind → wasm_fork_current (kernel COW mm dup) → dual rewind on the SAME
+// shared arena with per-process pt_base. A fork-enabled guest on an old engine
+// would fail to instantiate (missing capture_stack) or _start() fork children
+// from scratch: bump.
+export const ENGINE_ABI = 10;

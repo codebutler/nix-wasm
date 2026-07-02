@@ -132,6 +132,7 @@ jobs:
             '.#kernel-mmu-a2' \
             '.#mmu-init' \
             '.#mmu-init-a2' \
+            '.#fork-init' \
             --print-out-paths --no-link
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
@@ -304,6 +305,12 @@ jobs:
           # A2: present-checked translate, demand paging + stack growth. Gating.
           run_smoke demo/node/mmu-smoke-a2.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" MMU_INIT="$A2I/bin/mmu-init-a2"
+          # #129 Track B: REAL fork() on the software MMU — fork() returns twice
+          # (parent pid + child 0) with COW-isolated memory, under .#kernel-mmu-a2
+          # (patch 0026) + the asyncify-seam .#fork-init (muslFork 0010). Gating.
+          FORKI="$(cd .. && nix build -L '.#fork-init' --no-link --print-out-paths)"
+          run_smoke demo/node/fork-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" FORK_INIT="$FORKI/bin/fork-init"
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,

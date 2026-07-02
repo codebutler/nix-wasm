@@ -88,6 +88,22 @@
       # here; a real fork BOOT also needs the kernel dup_mmap+COW path + the
       # engine child-in-shared-arena wiring — see the Track B status doc.)
       forkStdenv = import ./toolchain/wasm-fork-stdenv.nix { inherit pkgs cross muslFork; };
+      # #129: the per-source asyncify builder (the PR #20-proven seam shape) —
+      # cross cc + muslFork's libc.a first + host wasm-opt --asyncify with
+      # capture_stack as the sole unwind import. Used for the fork acceptance
+      # programs; real packages go through forkStdenv.
+      asyncifyCc = import ./userspace/asyncify-cc.nix {
+        inherit pkgs cross muslFork;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # The real-fork PID-1 for the MMU fork smoke (#129): fork() + waitpid +
+      # COW witness divergence, booted by runtime/demo/node/fork-smoke.mjs under
+      # .#kernel-mmu-a2 (patch 0026) after CHECKED softmmu instrumentation.
+      forkInit = asyncifyCc {
+        name = "fork-init";
+        src = ./userspace/fork-init.c;
+        forkSeam = true;
+      };
 
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
@@ -546,6 +562,8 @@
         # #129 Track B: the fork variant of musl (fork() over the asyncify seam).
         # Build-verifies the userspace half of real fork() compiles.
         musl-fork = muslFork;
+        # #129: the real-fork PID-1 for the MMU fork smoke → $out/bin/fork-init.
+        fork-init = forkInit;
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;

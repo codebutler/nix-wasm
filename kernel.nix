@@ -119,6 +119,12 @@ pkgs.stdenv.mkDerivation {
   ] ++ pkgs.lib.optionals mmu [
     # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
     ./patches/kernel/0023-wasm-software-mmu.patch
+    # #129 Track B: real fork() on the MMU foundation — wasm_fork_current +
+    # fork_ctl plumbing through switch_stack/wasm_create_and_run_task
+    # (ENGINE_ABI 10). COW isolation needs the A2 checked translate; the A1
+    # (populate-everything, unchecked) build carries the export but a fork
+    # there would write through shared pages — fork is exercised under a2.
+    ./patches/kernel/0026-wasm-mmu-fork.patch
   ] ++ pkgs.lib.optionals a2 [
     # #128 A2: drop the A1 full-populate so the checked translate demand-pages.
     ./patches/kernel/0024-wasm-mmu-a2-demand-paging.patch

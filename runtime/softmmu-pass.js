@@ -390,7 +390,6 @@ function s(n) {
   return out;
 }
 const vec = (items) => [...u(items.length), ...items.flat()];
-const sect = (id, payload) => [id, ...u(payload.length), ...payload];
 
 /** Split a module into [{id, body}] (body excludes id + size). */
 function splitSections(bytes) {
@@ -1544,7 +1543,21 @@ export function instrument(bytes, opts = {}) {
   }
   emitMissingBefore(11);
 
-  const bytesOut = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-  for (const sec of outSecs) bytesOut.push(...sect(sec.id, [...sec.body]));
-  return new Uint8Array(bytesOut);
+  // Assemble WITHOUT push(...spread): spreading a whole section's bytes as
+  // call arguments blows V8's argument-count limit on large binaries (a full
+  // musl-linked program is ~0.5 MB; the 22 KB test inits never tripped it).
+  /** @type {Uint8Array[]} */
+  const parts = [new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])];
+  for (const sec of outSecs) {
+    parts.push(new Uint8Array([sec.id, ...u(sec.body.length)]));
+    parts.push(sec.body instanceof Uint8Array ? sec.body : new Uint8Array(sec.body));
+  }
+  const total = parts.reduce((a, p) => a + p.length, 0);
+  const bytesOut = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    bytesOut.set(p, off);
+    off += p.length;
+  }
+  return bytesOut;
 }

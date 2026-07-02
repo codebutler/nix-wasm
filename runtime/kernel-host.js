@@ -617,6 +617,11 @@ export const linux = async ({
   make_cpu(0);
 
   return {
+    // Debug/post-mortem surface: the shared guest memory. A wedged guest can't
+    // flush its printk ring to the console — a harness can scan this for the
+    // unflushed BUG/Oops text instead (see the #129 fork-exit diagnosis).
+    memory,
+
     // Issue #83: feed host input bytes to one console's tty (stdin) over its
     // single-port virtio-console receiveq. `idx` selects the hvc line (which
     // window/shell); queued + flushed via that console's main-thread
