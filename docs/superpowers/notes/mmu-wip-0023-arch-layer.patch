@@ -1,22 +1,16 @@
 # WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
-# STATUS: compiles + links end-to-end; NOMMU build unregressed. KERNEL side is
-# feature-complete for an A1 identity boot AND the engine handoff is wired:
-#   • switch_mm/activate_mm -> env.__mmu_set_pt_base (in the vmlinux import
-#     section); init/destroy_context manage the mm context.
-#   • exec ABI carries pt_base: wasm_load_executable + wasm_create_and_run_task
-#     grew a trailing pt_base arg (mm->pgd under MMU, 0 on NOMMU) — the engine
-#     (ENGINE_ABI 9) applies it to an instrumented image's __mmu_pt_base global
-#     at instantiation (per-task instances each carry their own root).
-#   • software uaccess table-walk with fixup_user_fault retry; UACCESS_MEMCPY
-#     NOMMU-only.
-#   • exec reads the binary into a kernel buffer owned by mm_context_t (freed
-#     in destroy_context; the engine + dlopen + clone re-read the live range);
-#     meminfo parses from the kernel copy; A1 lever mm->def_flags |= VM_LOCKED.
-#   • A2 fault entry __wasm_mmu_fault (lock_mm_and_find_vma + handle_mm_fault),
-#     exported. NOTE: routing user env.__mmu_fault into it must reuse the
-#     SYSCALL ENTRY (entry.S kernel-SP setup) — a raw kernel-export call from
-#     user context would run kernel C on a stale kernel stack. A2 wiring.
-# NOT wired into kernel.nix (no boot yet). Apply AFTER patches 0004-0022.
+# STATUS: INSTANTIATES + BOOTS through driver init under the runtime engine
+# (ENGINE_ABI 9). NOMMU build byte-identical. First full-stack mmu-smoke
+# (runtime/demo/node/mmu-smoke.mjs: instrumented mmu-init as PID-1) gets the
+# kernel through virtio/console probe, then panics in vmalloc-backed code
+# (bpf_prog_alloc via ptp_classifier; n_tty_open's kvzalloc) — the DOCUMENTED
+# vmalloc-under-identity-kernel hazard, now EMPIRICAL. Resolution is the next
+# sub-task (see 2026-07-02-mmu-kernel-compile-milestone.md): instrument the
+# kernel too, OR a vmalloc->contiguous arch override.
+# Everything below compiles clean on BOTH configs and the MMU vmlinux has NO
+# stray env imports (verified: only __mmu_set_pt_base beyond the NOMMU set).
+# NOT wired into kernel.nix. Apply AFTER patches 0004-0022 (0013 creates
+# virtio_wl.c; this guards its NOMMU-only .mmap_capabilities fops field).
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -590,6 +584,32 @@
  	vm_munmap(whole_start, whole_size);
  	if (data_start)
  		vm_munmap(data_start, data_size);
+--- a/drivers/virtio/virtio_wl.c
++++ b/drivers/virtio/virtio_wl.c
+@@ -1126,10 +1126,13 @@
+ 	return (unsigned long)vfd->shm_buf + (pgoff << PAGE_SHIFT);
+ }
+ 
++#ifndef CONFIG_MMU
++/* NOMMU-only fops hook (fs.h defines the field only under !CONFIG_MMU). */
+ static unsigned int virtwl_vfd_mmap_capabilities(struct file *filp)
+ {
+ 	return NOMMU_MAP_DIRECT | NOMMU_MAP_READ | NOMMU_MAP_WRITE;
+ }
++#endif /* !CONFIG_MMU */
+ 
+ static unsigned int virtwl_vfd_poll(struct file *filp,
+ 				    struct poll_table_struct *wait)
+@@ -1520,7 +1523,9 @@
+ 	.write = virtwl_vfd_write,
+ 	.mmap = virtwl_vfd_mmap,
+ 	.get_unmapped_area = virtwl_vfd_get_unmapped_area,
++#ifndef CONFIG_MMU
+ 	.mmap_capabilities = virtwl_vfd_mmap_capabilities,
++#endif
+ 	.poll = virtwl_vfd_poll,
+ 	.unlocked_ioctl = virtwl_ioctl,
+ 	.compat_ioctl = virtwl_ioctl_compat,
 --- /dev/null
 +++ b/arch/wasm/include/asm/tlbflush.h
 @@ -0,0 +1,18 @@
@@ -703,7 +723,7 @@
 +#endif /* _ASM_WASM_MMU_H */
 --- /dev/null
 +++ b/arch/wasm/mm/pgtable.c
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,61 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/* Software-MMU page-table bringup (Track A, #128). */
 +#include <linux/mm.h>
@@ -736,6 +756,35 @@
 +void __init paging_init(void)
 +{
 +}
++
++/*
++ * The software MMU has no per-page execute distinction the hardware would
++ * enforce (execution is wasm code, not data reads) — map the 16 vm_flags
++ * combinations onto the four real cases: none / read-only / shared-writable /
++ * private-copy. Found the hard way: without this, vm_get_page_prot stayed an
++ * undefined symbol that --import-undefined silently turned into a dangling
++ * env import and the vmlinux failed to INSTANTIATE (LinkError) — check the
++ * MMU/NOMMU import-section diff when touching kernel symbols.
++ */
++static const pgprot_t protection_map[16] = {
++	[VM_NONE]					= PAGE_NONE,
++	[VM_READ]					= PAGE_READONLY,
++	[VM_WRITE]					= PAGE_COPY,
++	[VM_WRITE | VM_READ]				= PAGE_COPY,
++	[VM_EXEC]					= PAGE_READONLY,
++	[VM_EXEC | VM_READ]				= PAGE_READONLY,
++	[VM_EXEC | VM_WRITE]				= PAGE_COPY,
++	[VM_EXEC | VM_WRITE | VM_READ]			= PAGE_COPY,
++	[VM_SHARED]					= PAGE_NONE,
++	[VM_SHARED | VM_READ]				= PAGE_READONLY,
++	[VM_SHARED | VM_WRITE]				= PAGE_SHARED,
++	[VM_SHARED | VM_WRITE | VM_READ]		= PAGE_SHARED,
++	[VM_SHARED | VM_EXEC]				= PAGE_READONLY,
++	[VM_SHARED | VM_EXEC | VM_READ]			= PAGE_READONLY,
++	[VM_SHARED | VM_EXEC | VM_WRITE]		= PAGE_SHARED,
++	[VM_SHARED | VM_EXEC | VM_WRITE | VM_READ]	= PAGE_SHARED,
++};
++DECLARE_VM_GET_PAGE_PROT
 --- /dev/null
 +++ b/arch/wasm/mm/uaccess.c
 @@ -0,0 +1,127 @@

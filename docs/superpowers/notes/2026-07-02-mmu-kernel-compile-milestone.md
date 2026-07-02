@@ -128,13 +128,52 @@ The engine handoff is implemented in `runtime/kernel-worker.js` (ABI 8→9):
   (the kernel instance's `__stack_pointer` global is not set up for this
   task). Reserve an arch-private nr or a dedicated entry.S stub; A2 work.
 
-## Remaining before a BOOT
+## FIRST FULL-STACK BOOT ATTEMPT (2026-07-02) — the stack runs; vmalloc is the wall
 
-- An **instrumented test userspace** (softmmu-pass over a minimal init or the
-  busybox initramfs — a nix seam) + an `mmu-smoke` (`CONFIG_MMU=y` vmlinux +
-  instrumented userspace, identity boot to a shell). This is the first point
-  the whole stack is verifiable — and where the vmalloc hazard gets its
-  empirical answer.: build the per-process page tables +
+`runtime/demo/node/mmu-smoke.mjs` + `userspace/mmu-init.{c,nix}`: a `CONFIG_MMU=y`
+vmlinux boots a single-file initramfs whose /init is the softmmu-pass-INSTRUMENTED
+`mmu-init` (built uninstrumented via `nix build .#mmu-init`, instrumented by the
+smoke). Two real kernel bugs found + fixed on the way to a clean instantiate:
+
+- **`vm_get_page_prot` undefined** → the MMU vmlinux failed to INSTANTIATE
+  (LinkError; `--import-undefined` turned the missing symbol into a dangling env
+  import). Fixed: a `protection_map[16]` + `DECLARE_VM_GET_PAGE_PROT` in
+  `mm/pgtable.c` (the software MMU has no HW exec distinction; 16 vm_flags combos
+  map onto none/RO/shared-W/private-copy). **Lesson: diff the MMU vs NOMMU import
+  sections after any kernel-symbol change** — a missing def is silent until boot.
+- **`virtio_wl.c` `.mmap_capabilities`** — that `file_operations` field exists
+  ONLY under `!CONFIG_MMU` (fs.h). Guarded the field + its function `#ifndef
+  CONFIG_MMU` (patch 0013 created the file; the guard rides the WIP patch).
+
+With those, the MMU vmlinux **instantiates and boots** — setup_arch, mm init,
+all virtio/console probe — then panics. TWO confirmed vmalloc-path faults
+(`memory access out of bounds`):
+  1. `sock_init → ptp_classifier_init → bpf_prog_create → bpf_prog_alloc` (BPF
+     program memory is vmalloc). Dodged for the minimal smoke by `--disable
+     CONFIG_NET/PACKET/…`.
+  2. `tty_open → n_tty_open` (`kvzalloc` of the ~16 KiB n_tty_data buffers lands
+     in vmalloc). NOT dodgeable — every console open hits it.
+
+**This is the documented vmalloc-under-identity-kernel hazard, now EMPIRICAL and
+PERVASIVE.** The uninstrumented (identity) kernel reads a vmalloc address as a
+linear-memory offset, but vmalloc mapped scattered physical pages at
+`VMALLOC_START+` — garbage. It is NOT a corner case; core subsystems (tty, bpf,
+and any large kvmalloc) use vmalloc. Resolution (next sub-task), in preference
+order:
+  A. **vmalloc → contiguous identity alloc (arch override).** Under the software
+     MMU the kernel is identity, so vmalloc need not scatter: back it with a
+     physically-contiguous allocation mapped 1:1 (like NOMMU's
+     `vmalloc = __vmalloc` contiguous path, or `ARCH_HAS_...` hooks +
+     `VMALLOC_START = PAGE_OFFSET`). Smallest change; keeps the kernel identity.
+     Risk: contiguity pressure (the reason NOMMU raised MAX_ORDER).
+  B. **Instrument the kernel too** (the correct-in-general endpoint): run the
+     softmmu pass over vmlinux with `pt_base = init_mm` (linear map identity,
+     vmalloc regions genuinely mapped). Biggest change; removes the identity
+     asymmetry entirely and is what real MMU HW does.
+Decision pending the next iteration; (A) is the pragmatic A1 unblock.
+
+The harness (`mmu-smoke.mjs`, `mmu-init`) and both kernel fixes are committed;
+the vmalloc resolution is the one thing between here and a shell.: build the per-process page tables +
    VMAs mapping the user image; the engine instantiates the softmmu-instrumented
    user module.
 4. **fault entry** (A2): `__mmu_fault(va,kind)` host import → `do_page_fault` →

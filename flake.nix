@@ -179,6 +179,11 @@
 
       # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery on
       # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
+      # mmu-init — minimal instrumented PID-1 for the software-MMU smoke (#128).
+      mmuInit = import ./userspace/mmu-init.nix {
+        inherit cross;
+      };
+
       sigalrmTest = import ./userspace/sigalrm-test.nix {
         inherit cross;
       };
@@ -588,6 +593,8 @@
         # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
         # on the wasm guest (#35) → $out/bin/sigalrm-test.
         sigalrm-test = sigalrmTest;
+        # minimal PID-1 for the software-MMU smoke (#128) → $out/bin/mmu-init.
+        mmu-init = mmuInit;
 
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
