@@ -100,6 +100,32 @@ the arch's job shrinks to: keep the page tables in the §1 format, set `pt_base`
 and service faults. The generic MM does the rest (`mmap`, `mprotect`, `fork` COW,
 demand paging) — which is the whole point: **run normal MMU Linux.**
 
+### 3a. Empirical hook surface (measured, not guessed)
+
+`config MMU` was added to `arch/wasm/Kconfig` (a selectable `bool default n`) and
+survives `olddefconfig` with `CONFIG_MMU=y` — the arch Kconfig graph accepts MMU.
+Building `vmlinux` with `CONFIG_MMU=y` (full patch stack, `make -k`) then names
+the **exact** arch surface the generic `include/linux/pgtable.h` requires — this
+is the executable checklist for `asm/pgtable.h` (replacing the NOMMU
+`pgtable-nopmd.h` + no-op stubs). First wall, in order:
+
+- **Layout constants:** `PGDIR_SHIFT`, `PTRS_PER_PGD`, `PTRS_PER_PTE`,
+  `PFN_PTE_SHIFT`.
+- **PTE constructors/queries:** `set_pte`, `pte_clear`, `pte_none`, `pte_present`,
+  `pte_young`/`pte_mkold`, `pte_dirty`/`pte_mkclean`/`pte_mkdirty`,
+  `pte_write`/`pte_mkwrite`/`pte_wrprotect`, `pte_mkyoung`, `mk_pte`, `pte_page`,
+  `pte_pfn`/`pfn_pte`.
+- **PMD side (folded via `pgtable-nopmd.h`):** `pmd_none`, `pmd_present`,
+  `pmd_bad`, `pmd_page_vaddr`, `pmd_clear`, `set_pmd`.
+
+The `PGTABLE_LEVELS=2` arch config + `pgtable-nopmd.h` gives a PGD→PTE fold. To
+match the §1 SINGLE-level flat walk (`u32[pt_base + (va>>12)<<2]`), reconcile by
+making the flat 2^20-entry PTE table the level the pass reads: `PGDIR_SHIFT=12`
+region so `pt_base` (set by `switch_mm` = the incoming mm's flat table) is what
+`va>>12` indexes. A 4 MiB flat table per process (the accepted A1 cost, §2).
+`PAGE_SHIFT` MUST be 12 (the pass hard-codes `>>12`); select the 4KB page size,
+not 64KB. Probe tree: `scratch-mmu-probe/` (not committed).
+
 ## 4. Context switch — the one hot action
 
 On every `switch_to`/`switch_mm` the kernel must set the `pt_base` global to the
