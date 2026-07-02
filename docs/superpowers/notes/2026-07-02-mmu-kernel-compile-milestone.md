@@ -1,5 +1,42 @@
 # CONFIG_MMU=y wasm kernel — compile+link milestone (#128 Track A kernel half)
 
+## ★ IT BOOTS (2026-07-02) ★
+
+`runtime/demo/node/mmu-smoke.mjs` **PASSES**: a `CONFIG_MMU=y` vmlinux boots a
+softmmu-INSTRUMENTED init (`userspace/mmu-init.c`) to completion under the
+runtime engine (ENGINE_ABI 9). Proven bit-exact: a 16384-element
+store->load->sum checksum over translated memory renders `0x98c9e000` — the
+exact expected value; bulk memory.copy/fill translate; software uaccess crosses
+the user boundary. The full A1 software-MMU stack works end to end:
+CONFIG_MMU=y kernel -> contiguous-identity vmalloc -> MMU exec (kernel binary
+buffer -> engine instantiation with pt_base -> __mmu_start) -> software uaccess
+table-walk -> full stack population -> translated user execution.
+
+The two KEYSTONE fixes, both found by BOOTING (the vmalloc hazard I predicted
+in advance became empirical, then got its correct fix):
+
+1. **vmalloc contiguous-identity** (`mm/vmalloc.c`, `#ifdef CONFIG_WASM`): the
+   identity-mapped kernel cannot reach scattered vmalloc pages. The RIGHT design
+   for a SOFTWARE MMU is NOMMU's vmalloc semantics — physically contiguous
+   memory at its identity address (kmalloc/kfree/virt_to_page) — since the arch
+   already commits to large contiguous blocks (MAX_ORDER=16). NOT a workaround:
+   it is the correct completion of the identity-kernel architecture. (Option B,
+   instrumenting the kernel, was REJECTED: our ~3-4x translate would tax every
+   kernel memory access AND still need the uaccess soft-walk — strictly worse.)
+2. **full initial-stack population at exec** (`fs/binfmt_wasm.c`): the A1
+   fast-path translate has no present check, so every touchable page must be
+   populated before instrumented code runs; setup_arg_pages left the stack VMA
+   demand-paged, so a grown stack page silently mistranslated (caught precisely:
+   one checksum nibble wrote 0x00 through a zero PTE). Runtime stack GROWTH
+   beyond the initial VMA is the A2 present-check generalization.
+
+Everything is in `mmu-wip-0023-arch-layer.patch` (validated; applies after
+0004-0022; NOMMU byte-identical). Next: wire a `.#kernel-mmu` flake attr so the
+smoke is a reproducible CI gate, then the A2 present-check for demand paging.
+
+---
+
+
 Date: 2026-07-02
 
 ## What landed (verified on the x86_64 build box)

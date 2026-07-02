@@ -18,11 +18,16 @@
 static void put(int fd, const char *s) { write(fd, s, strlen(s)); }
 
 static void put_hex(int fd, unsigned long v) {
-	char b[11] = "0x00000000";
-	static const char hex[] = "0123456789abcdef";
-	for (int i = 0; i < 8; i++)
-		b[9 - i] = hex[(v >> (4 * i)) & 0xf];
-	write(fd, b, 10);
+	/* one byte per write — no local array initializer / no function-local
+	 * static (both are fragile codegen under instrumentation; the strings
+	 * + checksum loop already prove translated access, this keeps the
+	 * DISPLAY of the value robust so the host can assert the exact hex). */
+	put(fd, "0x");
+	for (int i = 7; i >= 0; i--) {
+		unsigned d = (v >> (4 * i)) & 0xf;
+		char c = d < 10 ? (char)('0' + d) : (char)('a' + d - 10);
+		write(fd, &c, 1);
+	}
 }
 
 static volatile unsigned buf[16384]; /* 64 KiB of bss — spans 16 pages */

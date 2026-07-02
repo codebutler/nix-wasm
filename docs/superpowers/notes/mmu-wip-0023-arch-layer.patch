@@ -1,16 +1,26 @@
-# WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
-# STATUS: INSTANTIATES + BOOTS through driver init under the runtime engine
-# (ENGINE_ABI 9). NOMMU build byte-identical. First full-stack mmu-smoke
-# (runtime/demo/node/mmu-smoke.mjs: instrumented mmu-init as PID-1) gets the
-# kernel through virtio/console probe, then panics in vmalloc-backed code
-# (bpf_prog_alloc via ptp_classifier; n_tty_open's kvzalloc) — the DOCUMENTED
-# vmalloc-under-identity-kernel hazard, now EMPIRICAL. Resolution is the next
-# sub-task (see 2026-07-02-mmu-kernel-compile-milestone.md): instrument the
-# kernel too, OR a vmalloc->contiguous arch override.
-# Everything below compiles clean on BOTH configs and the MMU vmlinux has NO
-# stray env imports (verified: only __mmu_set_pt_base beyond the NOMMU set).
-# NOT wired into kernel.nix. Apply AFTER patches 0004-0022 (0013 creates
-# virtio_wl.c; this guards its NOMMU-only .mmap_capabilities fops field).
+# #128 Track A kernel half — CONFIG_MMU=y arch/wasm layer. IT BOOTS.
+# The CONFIG_MMU=y vmlinux boots a softmmu-INSTRUMENTED init to completion
+# under the runtime engine (ENGINE_ABI 9); runtime/demo/node/mmu-smoke.mjs
+# PASSES: translated user execution is bit-exact (a 16384-elt store->load->sum
+# checksum matches 0x98c9e000 exactly), bulk memory ops translate, software
+# uaccess crosses the boundary. NOMMU build byte-identical.
+# Pieces: pgtable/pgalloc/tlbflush/mmu_context/mmu (2-level over the §1 PTE
+# format; switch_mm->env.__mmu_set_pt_base; init/destroy_context own the kernel
+# binary buffer), software uaccess table-walk (+fixup_user_fault), A2 fault
+# entry __wasm_mmu_fault, protection_map, and the two KEYSTONE fixes found by
+# BOOTING:
+#   • mm/vmalloc.c: under CONFIG_WASM (only compiled at CONFIG_MMU=y on wasm)
+#     the vmalloc family is CONTIGUOUS-IDENTITY (kmalloc/kfree, virt_to_page) —
+#     the identity kernel can't reach scattered vmalloc pages, and the arch
+#     already commits to large contiguous blocks (MAX_ORDER=16). This is
+#     NOMMU's vmalloc semantics; the RIGHT design for a software MMU, not a
+#     workaround. Unblocked bpf/tty/all vmalloc users.
+#   • fs/binfmt_wasm.c: under MMU, POPULATE the full initial stack VMA at exec
+#     (setup_arg_pages leaves it demand-paged; the A1 fast translate has no
+#     present check, so every touchable page must be populated up front).
+#     Runtime stack GROWTH beyond the initial VMA is the A2 present-check job.
+# NOT yet wired into kernel.nix (that is the next step — a .#kernel-mmu attr).
+# Apply AFTER patches 0004-0022 (0013 creates virtio_wl.c).
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -584,6 +594,28 @@
  	vm_munmap(whole_start, whole_size);
  	if (data_start)
  		vm_munmap(data_start, data_size);
+@@ -424,6 +546,21 @@
+ 	res = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
+ 	if (!res)
+ 		res = create_wasm_tables(bprm, bprm->p);
++	if (!res) {
++		/*
++		 * A1 (#128): the fast-path translate has NO present check, so
++		 * every page the program can touch must be POPULATED before the
++		 * instrumented code runs. setup_arg_pages leaves the stack VMA
++		 * demand-paged (MAP_GROWSDOWN); populate its whole initial
++		 * extent now (VM_LOCKED is already on def_flags). Runtime stack
++		 * GROWTH beyond this initial VMA needs the A2 present-check +
++		 * __wasm_mmu_fault path — see arch/wasm/mm/fault.c.
++		 */
++		struct vm_area_struct *vma = find_vma(current->mm, bprm->p);
++
++		if (vma)
++			mm_populate(vma->vm_start, vma->vm_end - vma->vm_start);
++	}
+ #else
+ 	res = transfer_args_to_stack(bprm, &current->mm->start_stack);
+ 	if (!res)
 --- a/drivers/virtio/virtio_wl.c
 +++ b/drivers/virtio/virtio_wl.c
 @@ -1126,10 +1126,13 @@
@@ -610,6 +642,87 @@
  	.poll = virtwl_vfd_poll,
  	.unlocked_ioctl = virtwl_ioctl,
  	.compat_ioctl = virtwl_ioctl_compat,
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -798,6 +798,10 @@
+  */
+ struct page *vmalloc_to_page(const void *vmalloc_addr)
+ {
++#ifdef CONFIG_WASM
++	/* #128: contiguous identity — the address is a normal linear address. */
++	return virt_to_page(vmalloc_addr);
++#endif
+ 	unsigned long addr = (unsigned long) vmalloc_addr;
+ 	struct page *page = NULL;
+ 	pgd_t *pgd = pgd_offset_k(addr);
+@@ -3067,6 +3071,12 @@
+  */
+ void *vm_map_ram(struct page **pages, unsigned int count, int node)
+ {
++#ifdef CONFIG_WASM
++	/* #128: no kernel address translation — cannot make scattered pages
++	 * virtually contiguous. Unused in the wasm config; loud if reached. */
++	BUG();
++	return NULL;
++#endif
+ 	unsigned long size = (unsigned long)count << PAGE_SHIFT;
+ 	unsigned long addr;
+ 	void *mem;
+@@ -3407,6 +3417,10 @@
+  */
+ void vfree_atomic(const void *addr)
+ {
++#ifdef CONFIG_WASM
++	kfree(addr); /* #128 */
++	return;
++#endif
+ 	struct vfree_deferred *p = raw_cpu_ptr(&vfree_deferred);
+ 
+ 	BUG_ON(in_nmi());
+@@ -3441,6 +3455,10 @@
+  */
+ void vfree(const void *addr)
+ {
++#ifdef CONFIG_WASM
++	kfree(addr); /* #128: vmalloc == contiguous kmalloc; kfree handles NULL + IRQ */
++	return;
++#endif
+ 	struct vm_struct *vm;
+ 	int i;
+ 
+@@ -3532,6 +3550,12 @@
+ void *vmap(struct page **pages, unsigned int count,
+ 	   unsigned long flags, pgprot_t prot)
+ {
++#ifdef CONFIG_WASM
++	/* #128: no kernel address translation — cannot make scattered pages
++	 * virtually contiguous. Unused in the wasm config; loud if reached. */
++	BUG();
++	return NULL;
++#endif
+ 	struct vm_struct *area;
+ 	unsigned long addr;
+ 	unsigned long size;		/* In bytes */
+@@ -3988,6 +4012,19 @@
+ 			pgprot_t prot, unsigned long vm_flags, int node,
+ 			const void *caller)
+ {
++#ifdef CONFIG_WASM
++	/*
++	 * Software MMU (#128): the kernel runs in physical/identity space (it is
++	 * NOT instrumented — see docs/.../softmmu-kernel-design.md), so a
++	 * "virtually contiguous but physically scattered" mapping is
++	 * unreachable by kernel code. vmalloc therefore returns physically-
++	 * CONTIGUOUS memory at its identity address — exactly NOMMU's vmalloc
++	 * (mm/nommu.c: kmalloc + __GFP_COMP). The arch already commits to large
++	 * contiguous blocks (CONFIG_ARCH_FORCE_MAX_ORDER=16), so this is
++	 * consistent, not a workaround. vfree() mirrors with kfree().
++	 */
++	return kmalloc_noprof(size, (gfp_mask | __GFP_COMP) & ~__GFP_HIGHMEM);
++#endif
+ 	struct vm_struct *area;
+ 	void *ret;
+ 	kasan_vmalloc_flags_t kasan_flags = KASAN_VMALLOC_NONE;
 --- /dev/null
 +++ b/arch/wasm/include/asm/tlbflush.h
 @@ -0,0 +1,18 @@
