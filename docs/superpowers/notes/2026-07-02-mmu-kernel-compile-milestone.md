@@ -151,8 +151,9 @@ all virtio/console probe — then panics. TWO confirmed vmalloc-path faults
   1. `sock_init → ptp_classifier_init → bpf_prog_create → bpf_prog_alloc` (BPF
      program memory is vmalloc). Dodged for the minimal smoke by `--disable
      CONFIG_NET/PACKET/…`.
-  2. `tty_open → n_tty_open` (`kvzalloc` of the ~16 KiB n_tty_data buffers lands
-     in vmalloc). NOT dodgeable — every console open hits it.
+  2. `tty_open → n_tty_open`: `vzalloc(sizeof(struct n_tty_data))` —
+     UNCONDITIONAL pure vmalloc (drivers/tty/n_tty.c:1890, not kvzalloc), so
+     EVERY console open faults. Not dodgeable by config.
 
 **This is the documented vmalloc-under-identity-kernel hazard, now EMPIRICAL and
 PERVASIVE.** The uninstrumented (identity) kernel reads a vmalloc address as a
