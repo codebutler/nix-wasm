@@ -258,3 +258,40 @@ Resolution paths (decide empirically at first boot):
    (they're raw by construction — the pass only instruments translated
    modules' own code; the kernel walking user tables through identity is
    correct since PTE tables live in linear memory).
+
+## A2 execution spec — present-checked translate (demand paging / stack growth)
+
+The A1 boot proves correctness on a FULLY-POPULATED address space. Real
+programs grow the stack / fault in mmap+heap pages at runtime, which the
+no-present-check fast translate cannot do (it silently writes through a zero
+PTE — proven by the checksum-nibble bug). A2 adds the check. Execution-ready:
+
+1. **Pass (`runtime/softmmu-pass.js`), a build-gated CHECKED variant** (keep the
+   A1 no-check emit for fully-populated images; the checked one is the default
+   for real userspace). In `emitTranslate`, after loading the level-2 PTE:
+   - test `pte & _PAGE_PRESENT (bit 0)`; if set, proceed (common path — one
+     `i32.const 1; i32.and; br_if` over the fault call).
+   - if clear: `call $__mmu_fault_sc(ea, kind)` then RE-LOAD pgd_e+pte and
+     recompute phys (a small `loop`/`block`). `kind` = 0 read / 1 write, known
+     statically per op (loads=0, stores=1, rmw/cmpxchg=1).
+   - the level-1 pgd_e can also be 0 (no PTE table) — same fault call handles it
+     (the kernel allocates the PTE table in handle_mm_fault).
+2. **Fault routing = a syscall, NOT a raw host import.** User code already
+   imports `__wasm_syscall_2`; route the fault as `__wasm_syscall_2(NR, ea, kind)`
+   with a wasm-private `NR` (e.g. an arch `__NR_wasm_mmu_fault`). This REUSES the
+   entire kernel-entry machinery (entry.S kernel-SP setup, signal delivery) —
+   avoiding the "kernel C on a stale kernel SP" hazard a direct kernel-export
+   call would hit. The kernel's syscall table maps NR → the existing
+   `__wasm_mmu_fault(addr, kind)` (arch/wasm/mm/fault.c). Ensure the pass ADDS
+   the `__wasm_syscall_2` import if a module lacks it.
+3. **Then `fs/binfmt_wasm.c` can DROP the full-stack populate** (mm_populate) —
+   demand paging handles stack growth; keep VM_LOCKED off the def_flags too
+   (real demand paging). The A2 pass makes exec's own `put_user`s fault in
+   naturally as well (uaccess already faults via fixup_user_fault).
+4. **Verify:** an mmu-smoke variant whose init recurses deep / touches a large
+   mmap region to force runtime faults (the A1 smoke stays as the
+   populated-path regression). Confirm no checksum-nibble corruption without the
+   populate hack.
+
+Perf: the common (present) path adds one `and+br_if` per access over A1 —
+measure via `spikes/softmmu/measure-real.mjs` (add a checked-variant column).
