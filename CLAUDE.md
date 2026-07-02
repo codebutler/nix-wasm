@@ -1099,10 +1099,22 @@ CI / the linux box, per the design's "ship what works" scope):
   Diagnosed via a gated debug kernel (`.#kernel-mmu-a2-dbg`,
   `patches/kernel/0025`, `debugTrace=true`) that raw-walks `mm->pgd` after
   `handle_mm_fault` exactly as the pass does. Same wasm-can't-do-hardware theme:
-  the software walk must match the kernel's PTE/PMD format bit-for-bit. **REMAINING
-  for Track A:** COW-on-write + mprotect coverage (the fault handler already
-  routes WRITE/EXEC kinds through the generic MM, but a dedicated COW gate is
-  not yet written), then wiring mmu-smoke + mmu-smoke-a2 into `nix-wasm.yml`.
+  the software walk must match the kernel's PTE/PMD format bit-for-bit. **COW +
+  mprotect DONE too:** the leaf present test is PERMISSION-AWARE — a LOAD needs
+  `_PAGE_PRESENT` (bit 0), a STORE/RMW needs `_PAGE_PRESENT|_PAGE_WRITE` (bits
+  0+1). Testing the write bit on stores is what makes COW work: a copy-on-write
+  page is mapped present-but-read-only, so a store must fault into do_wp_page to
+  duplicate it rather than walking straight through to the shared page (which
+  would corrupt it — e.g. the global zeropage). Boot-verified in mmu-smoke-a2:
+  a first-READ of a fresh anon page maps the zeropage RO (reads 0x00), the WRITE
+  write-protect-faults and COWs (reads back 0xab); an mprotect narrow→read→widen
+  →write round-trip returns 1. Unit-tested in softmmu-pass.test.js (store to a
+  present-RO page faults kind=1 then succeeds; load from it never faults). Both
+  the inline `emitTranslate` (compile-time kind) and the bulk-op
+  `checkedTranslateBody` (runtime `need = 1 | (kind<<1)`) enforce it. Both
+  mmu-smoke + mmu-smoke-a2 are now GATED in `nix-wasm.yml`'s boot-smoke job.
+  **REMAINING for Track A:** none — demand paging + COW + mprotect all boot-
+  verified and gated; the fork COW replay is exercised by Track B.
 - **Track B — asyncify fork seam: recovered + generalized.** `runtime/asyncify.js`
   (the double-return engine, 6 node tests) recovered from PR #20;
   `toolchain/wasm-fork-stdenv.nix` is the reusable cross-stdenv opt-in (B1). The

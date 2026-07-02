@@ -97,8 +97,15 @@ try {
   const alive = snap.includes("MMU-A2: checked init alive");
   const mmapOk = snap.includes(`MMU-A2: mmap checksum ${expHex}`);
   const stackOk = /MMU-A2: stack-grow 0x[0-9a-f]{8}/.test(snap);
-  pass = !!ok && alive && mmapOk && stackOk;
+  // COW via the shared zeropage: a first-READ maps the zeropage RO (sees 0x00),
+  // the WRITE write-protect-faults into do_wp_page and the re-read sees 0xab.
+  const cowOk = snap.includes("MMU-A2: cow ro-read 0x00000000 wr-read 0x000000ab");
+  // mprotect narrow->read->widen->write round-trip returned 1.
+  const mprotectOk = snap.includes("MMU-A2: mprotect 0x00000001");
+  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk;
   if (ok && !mmapOk) console.log(`[mmu-smoke-a2] mmap checksum MISMATCH (want ${expHex})`);
+  if (ok && !cowOk) console.log("[mmu-smoke-a2] COW write-protect FAULT path FAILED");
+  if (ok && !mprotectOk) console.log("[mmu-smoke-a2] mprotect round-trip FAILED");
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
   s.kill();

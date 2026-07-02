@@ -719,8 +719,21 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns, checked 
     out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
     out.push(0x22, ...u(PTE)); // local.tee pte (keep a copy on stack)
-    out.push(0x41, ...s(1), 0x71); // & 1 (present bit)
-    out.push(0x45); // i32.eqz -> "not present"
+    // LEAF present/permission test. A LOAD needs only _PAGE_PRESENT (bit 0); a
+    // STORE/RMW needs _PAGE_PRESENT|_PAGE_WRITE (bits 0+1). Testing the write
+    // bit on stores is what makes COW and mprotect WORK: a copy-on-write page is
+    // mapped present-but-read-only, so a store must FAULT (kind=1) into
+    // do_wp_page/handle_mm_fault to duplicate it — otherwise the store would
+    // walk straight through to the shared physical page and corrupt it. After
+    // the kernel resolves the write fault it installs a writable PTE (bits 0+1),
+    // so the re-walk passes.
+    if (kind === 1) {
+      out.push(0x41, ...s(3), 0x71); // & 3 (present|write)
+      out.push(0x41, ...s(3), 0x47); // i32.const 3 ; i32.ne -> (pte&3) != 3
+    } else {
+      out.push(0x41, ...s(1), 0x71); // & 1 (present)
+      out.push(0x45); // i32.eqz -> not present
+    }
     out.push(0x04, 0x40); // if (void)
     emitFaultCall(kind);
     out.push(0x0c, ...u(1)); // br $retry
@@ -1215,8 +1228,9 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const KIND = 1;
   const PGD_E = 2;
   const PTE = 3;
+  const NEED = 4;
   const o = [];
-  o.push(...u(1), ...u(2), VT.i32); // locals: pgd_e, pte (both i32)
+  o.push(...u(1), ...u(3), VT.i32); // locals: pgd_e, pte, need (all i32)
   const emitFault = () => {
     o.push(0x23, ...u(checkedCtx.spGlobalIdx)); // global.get __stack_pointer
     o.push(0x10, ...u(checkedCtx.tlsFuncIdx)); // call __get_tls_base -> tp
@@ -1253,9 +1267,22 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   o.push(0x41, ...s(2), 0x74); // << 2
   o.push(0x6a); // add
   o.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
-  o.push(0x22, ...u(PTE)); // local.tee pte
-  o.push(0x41, ...s(1), 0x71); // & 1 (present bit)
-  o.push(0x45); // i32.eqz -> "not present"
+  o.push(0x21, ...u(PTE)); // local.set pte
+  // LEAF present/permission test, kind-dependent (kind is a runtime param here,
+  // so compute the required-bit mask): a LOAD needs _PAGE_PRESENT (bit 0); a
+  // STORE needs _PAGE_PRESENT|_PAGE_WRITE (bits 0+1). need = 1 | (kind<<1) →
+  // load:1, store:3. Fault if (pte & need) != need. The write-bit test on
+  // stores is what makes COW/mprotect work through the bulk path too (a
+  // memcpy/memset dest chunk landing on a COW page write-faults + duplicates).
+  o.push(0x20, ...u(KIND)); // local.get kind
+  o.push(0x41, ...s(1), 0x74); // i32.const 1 ; i32.shl -> kind<<1
+  o.push(0x41, ...s(1), 0x72); // i32.const 1 ; i32.or  -> need
+  o.push(0x21, ...u(NEED)); // local.set need
+  o.push(0x20, ...u(PTE)); // local.get pte
+  o.push(0x20, ...u(NEED)); // local.get need
+  o.push(0x71); // i32.and -> pte & need
+  o.push(0x20, ...u(NEED)); // local.get need
+  o.push(0x47); // i32.ne -> (pte & need) != need
   o.push(0x04, 0x40); // if (void)
   emitFault();
   o.push(0x0c, ...u(1)); // br $retry

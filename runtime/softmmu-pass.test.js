@@ -461,7 +461,7 @@ describe("checked (A2 present-check) translate", () => {
    * mapping for it (so the retry succeeds) — exactly the contract a real
    * kernel fault handler provides (make present, or don't return).
    */
-  function bootChecked(instrumentedBytes, notPresentVa) {
+  function bootChecked(instrumentedBytes, notPresentVa, roVa) {
     const mod = new WebAssembly.Module(instrumentedBytes);
     const calls = [];
     const rawCalls = []; // full (sp, tp, nr, ea, kind) — used by the tp round-trip test
@@ -508,6 +508,15 @@ describe("checked (A2 present-check) translate", () => {
       const va = notPresentVa >>> 0;
       const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
       t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = 0; // absent
+    }
+    if (roVa !== undefined) {
+      // Model a COW / mprotect(PROT_READ) page: PRESENT but write-protected
+      // (flag 1 = _PAGE_PRESENT only, no _PAGE_WRITE). A load must NOT fault; a
+      // store MUST fault (kind=1) so the fault handler above upgrades it to
+      // present+write (flag 7) — exactly the do_wp_page COW upgrade.
+      const va = roVa >>> 0;
+      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 1; // present, RO
     }
     inst.exports.__mmu_pt_base.value = PT;
     if (inst.exports.__mmu_start) inst.exports.__mmu_start();
@@ -568,6 +577,31 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.calls.length).toBe(1);
     expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
     expect(new Uint8Array(b.mem.buffer)[V]).toBe(0x99);
+  });
+
+  test("a store to a PRESENT-but-read-only page faults (COW/mprotect), then succeeds", () => {
+    // The store-permission check: a copy-on-write page is mapped present but
+    // write-protected. A store must fault (kind=1) into the kernel's
+    // do_wp_page, NOT walk straight through to the shared physical page (which
+    // would corrupt it). The mock handler upgrades the PTE to present+write.
+    const V = HEAP + 0x70000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, undefined, V); // V present-but-RO
+    b.inst.exports.store_u8(V, 0xa5);
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
+    expect(new Uint8Array(b.mem.buffer)[V]).toBe(0xa5);
+  });
+
+  test("a load from a PRESENT-but-read-only page does NOT fault", () => {
+    // Loads need only _PAGE_PRESENT — a read-only (COW/mprotect-READ) page is
+    // readable without a fault. Only stores gate on the write bit.
+    const V = HEAP + 0x80000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, undefined, V); // V present-but-RO
+    new Uint8Array(b.mem.buffer)[V] = 0x5a;
+    expect(b.inst.exports.load_u8(V)).toBe(0x5a);
+    expect(b.calls.length).toBe(0);
   });
 
   test("unchecked instrument() output is unaffected by the checked feature existing", () => {

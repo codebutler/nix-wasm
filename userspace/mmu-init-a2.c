@@ -77,6 +77,49 @@ int main(void)
 	put_hex(fd, ds & 0xffffffff);
 	put(fd, "\n");
 
+	/* (3) COPY-ON-WRITE via the shared zero page. A first READ of a fresh
+	 * anonymous MAP_PRIVATE page maps the shared zeropage READ-ONLY (present,
+	 * no write bit). The subsequent WRITE must fault (the checked translate's
+	 * store-permission check: present|write) into do_wp_page, which duplicates
+	 * the page into a private writable one — NOT walk straight through to the
+	 * shared zeropage (which would corrupt it system-wide). Proof: the read
+	 * sees 0, the post-write read sees the sentinel. */
+	unsigned char *c = mmap(0, 4096, PROT_READ | PROT_WRITE,
+				MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (c == MAP_FAILED) {
+		put(fd, "MMU-A2: cow mmap FAIL\n");
+		for (;;)
+			pause();
+	}
+	unsigned roRead = c[16]; /* first touch is a READ -> zeropage, RO */
+	c[16] = 0xab; /* WRITE -> write-protect fault -> COW duplicate */
+	unsigned wrRead = c[16];
+	put(fd, "MMU-A2: cow ro-read ");
+	put_hex(fd, roRead);
+	put(fd, " wr-read ");
+	put_hex(fd, wrRead);
+	put(fd, "\n");
+
+	/* (4) mprotect round-trip: narrow a writable page to PROT_READ (the kernel
+	 * write-protects its PTE), read it back (a load needs only present), then
+	 * widen back to PROT_READ|PROT_WRITE and write again. Each write after a
+	 * re-widen resolves through the fault path; a broken protection update
+	 * would loop or corrupt. */
+	unsigned char *p = mmap(0, 4096, PROT_READ | PROT_WRITE,
+				MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	unsigned mp_ok = 0;
+	if (p != MAP_FAILED) {
+		p[32] = 0x11;
+		if (mprotect(p, 4096, PROT_READ) == 0 && p[32] == 0x11 &&
+		    mprotect(p, 4096, PROT_READ | PROT_WRITE) == 0) {
+			p[32] = 0x22;
+			mp_ok = (p[32] == 0x22);
+		}
+	}
+	put(fd, "MMU-A2: mprotect ");
+	put_hex(fd, mp_ok);
+	put(fd, "\n");
+
 	put(fd, "MMU-A2: OK\n");
 	for (;;)
 		pause();
