@@ -1,12 +1,16 @@
 # WIP (#128 Track A kernel half) — CONFIG_MMU=y arch/wasm layer.
 # STATUS: compiles + links end-to-end (vmlinux built); NOMMU build unregressed.
-# Includes the semantic pieces: switch_mm/activate_mm -> env.__mmu_set_pt_base
-# (verified present in the vmlinux import section), and the software uaccess
-# table-walk (raw_copy_{to,from}_user/__clear_user walk the user page table;
-# UACCESS_MEMCPY is now NOMMU-only). NOT YET BOOTING and NOT wired into
-# kernel.nix — still to come: exec/binfmt_wasm address-space setup, the
-# __mmu_fault -> do_page_fault entry (A2), the pass 2-level walk, and the
-# engine's set_pt_base + instrumented-exec integration. Apply AFTER 0004-0022.
+# Semantic pieces IN: switch_mm/activate_mm -> env.__mmu_set_pt_base (verified
+# in the vmlinux import section); software uaccess table-walk with
+# fixup_user_fault retry (demand-paging/COW-aware; UACCESS_MEMCPY now
+# NOMMU-only); binfmt_wasm auxv copy via copy_to_user (raw memcpy only worked
+# on flat NOMMU — the loader is otherwise already MMU-ready upstream:
+# setup_arg_pages/create_wasm_tables under #ifdef CONFIG_MMU).
+# NOT YET BOOTING / NOT wired into kernel.nix — remaining: the engine handoff
+# (wasm_load_executable gets USER VAs of a demand-paged file VMA under MMU;
+# the kernel must pass the binary bytes physically, e.g. a kernel buffer),
+# __mmu_fault -> do_page_fault (A2), engine set_pt_base + instrumented exec.
+# Apply AFTER patches 0004-0022.
 --- a/arch/wasm/include/asm/pgtable.h
 +++ b/arch/wasm/include/asm/pgtable.h
 @@ -3,17 +3,16 @@
@@ -258,6 +262,38 @@
  
  obj-y += init.o
 +obj-$(CONFIG_MMU) += pgtable.o uaccess.o
+--- a/fs/binfmt_wasm.c
++++ b/fs/binfmt_wasm.c
+@@ -20,7 +20,17 @@
+ #include <linux/uaccess.h>
+ #include <linux/vmalloc.h>
+ 
+-#define WASM_STACK_SIZE		(2UL * PAGE_SIZE)
++/*
++ * User stack (shares this region with brk; musl mallocng uses mmap not brk, so
++ * it is effectively the stack). NOMMU stacks can't grow on fault -> HARD ceiling.
++ * The original 2 pages (8 KiB) overflowed on a single musl realpath() call
++ * (char stack[PATH_MAX+1] + char output[PATH_MAX] = 8 KiB) and crashed nix
++ * (deep C++/std::filesystem stacks). Use 4 MiB: big enough for realpath/nix, and (with the arg extra) the
++ * NOMMU power-of-2 mmap rounds to an 8 MiB/order-11 block, which the buddy
++ * allocator has free (a full 8 MiB stack rounds to order-12/16 MiB, of which
++ * there are none → ENOMEM at exec).
++ */
++#define WASM_STACK_SIZE		(1024UL * PAGE_SIZE)
+ 
+ /*
+  * Userland expects the stack to be page aligned as of now, which allows it to
+@@ -98,7 +108,9 @@
+ 		return -EFAULT;
+ 	current->mm->env_end = (unsigned long)p;
+ 
+-	memcpy(sp, wasm_auxv, sizeof(wasm_auxv));
++	/* sp is a USER pointer — a raw memcpy only worked on flat NOMMU. */
++	if (copy_to_user(sp, wasm_auxv, sizeof(wasm_auxv)))
++		return -EFAULT;
+ 
+ 	return 0;
+ }
 --- /dev/null
 +++ b/arch/wasm/include/asm/tlbflush.h
 @@ -0,0 +1,18 @@
@@ -379,7 +415,7 @@
 +}
 --- /dev/null
 +++ b/arch/wasm/mm/uaccess.c
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,127 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Software-MMU uaccess (#128): kernel<->user copies walk the user page table.
@@ -395,6 +431,24 @@
 +#include <linux/export.h>
 +#include <asm/pgtable.h>
 +#include <linux/uaccess.h>
++
++/* On a soft-walk miss, fault the page in through the generic MM (demand
++ * paging, COW, stack growth) and retry — the software analog of a hardware
++ * uaccess fault + fixup. fixup_user_fault is the standard API (futex uses it).
++ */
++static bool user_fault_in(unsigned long va, bool write)
++{
++	struct mm_struct *mm = current->mm;
++	unsigned int flags = FAULT_FLAG_KILLABLE | (write ? FAULT_FLAG_WRITE : 0);
++	int ret;
++
++	if (!mm)
++		return false;
++	mmap_read_lock(mm);
++	ret = fixup_user_fault(mm, va, flags, NULL);
++	mmap_read_unlock(mm);
++	return ret == 0;
++}
 +
 +/* Resolve one user page; returns false if unmapped/not-present (or, for
 + * writes, write-protected). *phys gets the physical byte address of va. */
@@ -439,8 +493,11 @@
 +		unsigned long phys;
 +		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
 +
-+		if (!user_page_phys(uva, to_user, &phys))
-+			return n;
++		if (!user_page_phys(uva, to_user, &phys)) {
++			if (!user_fault_in(uva, to_user) ||
++			    !user_page_phys(uva, to_user, &phys))
++				return n;
++		}
 +		if (to_user)
 +			memcpy((void *)phys, kaddr, chunk);
 +		else
@@ -474,8 +531,11 @@
 +		unsigned long phys;
 +		unsigned long chunk = min(n, PAGE_SIZE - (uva & ~PAGE_MASK));
 +
-+		if (!user_page_phys(uva, true, &phys))
-+			return n;
++		if (!user_page_phys(uva, true, &phys)) {
++			if (!user_fault_in(uva, true) ||
++			    !user_page_phys(uva, true, &phys))
++				return n;
++		}
 +		memset((void *)phys, 0, chunk);
 +		uva += chunk;
 +		n -= chunk;

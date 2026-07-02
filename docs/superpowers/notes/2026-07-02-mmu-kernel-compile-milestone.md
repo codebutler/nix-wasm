@@ -56,9 +56,36 @@ wall. Error surface progression: dozens (generic pgtable.h) → 8 → 947 (swap/
    bytes (the raw_copy fault contract). Kernel-nofault access stays identity.
    A2 will route misses through handle_mm_fault for demand paging.
 
+## Update (third pass): exec-path findings + uaccess fault-in
+
+- **The upstream loader is already MMU-READY**: `fs/binfmt_wasm.c` carries
+  `#ifdef CONFIG_MMU` branches (`setup_arg_pages(bprm, STACK_TOP, …)` +
+  `create_wasm_tables(bprm, bprm->p)`) vs the NOMMU `transfer_args_to_stack`.
+  One real bug in that (never-exercised) MMU branch is FIXED in the WIP patch:
+  the auxv block was written with a raw `memcpy(sp, …)` to a USER pointer —
+  now `copy_to_user` (correct on both configs).
+- **uaccess fault-in**: the software walk now retries through
+  `fixup_user_fault` (FAULT_FLAG_KILLABLE|WRITE) on a miss — the software
+  analog of a hardware uaccess fault + fixup, demand-paging/COW-aware (futex's
+  API). Without it, exec's `put_user`s to the freshly-created stack VMA (not
+  yet faulted in) would EFAULT.
+- **The remaining exec seam is the ENGINE handoff**: `__switch_to` /
+  `start_thread` pass `(bin_start=mm->start_code, bin_end, data_start)` to
+  `wasm_create_and_run_task` / `wasm_load_executable`. On NOMMU those are
+  physical (contiguous file mmap). Under MMU `vm_mmap(file)` yields a
+  demand-paged USER VMA — the engine cannot read the binary bytes at those
+  addresses. Correct shape: under MMU the kernel reads the binary into a
+  KERNEL buffer (physical; the host "makes its copy" anyway per the loader
+  comment, so the buffer can be freed after wasm_load_executable) and passes
+  that; `data_start` (the user module's __memory_base) becomes a USER VA —
+  correct, since the instrumented module translates every access through the
+  page table the kernel built for that VMA.
+
 ## Remaining before it BOOTS
 
-3. **exec/binfmt_wasm address-space setup**: build the per-process page tables +
+3. **exec engine handoff under MMU** (kernel buffer for the binary bytes, see
+   above) + **engine set_pt_base / instrumented-instantiate** (kernel-worker.js,
+   ENGINE_ABI bump): build the per-process page tables +
    VMAs mapping the user image; the engine instantiates the softmmu-instrumented
    user module.
 4. **fault entry** (A2): `__mmu_fault(va,kind)` host import → `do_page_fault` →
