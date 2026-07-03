@@ -199,3 +199,29 @@ fork returning twice + COW isolation. Gated in `nix-wasm.yml`. Track B is DONE.
 The #131 slice-1 payoff (retire forkshell ash, busybox spawn patches, glib's
 posix_spawn-only patch; unblock #93) is now unblocked. ENGINE_ABI 10 needs
 `runtime/sync-to-pc.sh` before a pc deploy.
+
+## UPDATE 2026-07-02 (later still) — instrument-on-load: REAL busybox runs on the MMU
+
+The engine now instruments every execed binary at load (kernel-worker.js
+wasm_load_executable, gated on pt_base != 0; isInstrumented() skips
+pre-instrumented fixtures). This makes the software MMU work for ARBITRARY
+userspace, not just a hand-built init. Booting `.#kernel-mmu-a2` on the REAL
+`.#wasm-initramfs` proved, with SEGV-trace diagnostics:
+
+- **Non-forking applets WORK.** `rdinit=/bin/true` (busybox, 1.36MB → 6.35MB
+  instrumented) demand-pages in (~46 pages), runs, and exits with code 0 — a
+  real busybox binary executing correctly on the software MMU.
+- **exec WORKS.** busybox init's child faulted at 0x40000000 (a fresh image
+  load) — exec into a new mm/pgd works.
+- **fork WORKS in a real program.** busybox init spawned pid 30.
+- **The one failure:** busybox INIT's steady-state spawn/reap loop NULL-derefs
+  (`SIGSEGV pid=1 addr=0x8 kind=0` → "Attempted to kill init"). busybox here is
+  built with the **NOMMU clone-with-fn spawn hack** (the spawn patches), whose
+  vfork/CLONE_VM semantics don't fully hold under the per-process-page-table
+  MMU. The CORRECT fix is #131 slice 1 — rebuild busybox with REAL fork (now
+  that fork+wait works), retiring the spawn hack — NOT patching the NOMMU model
+  to limp under the MMU. Tracked in task #15.
+
+Net: the MMU + fork + exec + instrument-on-load foundation is validated against
+real busybox binaries. Full multi-process busybox on the MMU folds into the
+#131-slice-1 real-fork rebuild.
