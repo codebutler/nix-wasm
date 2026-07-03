@@ -10,6 +10,7 @@
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
 import { DynamicLoader } from "./dylink.js";
 import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
+import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
 import { FfiTrampolines } from "./ffi-codegen.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
@@ -637,7 +638,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       dyn_replay = null;
       ffi_trampolines = null;
       user_executable_range = { bin_start, bin_end };
-      const bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      let bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      // pc (#128 software MMU): a nonzero pt_base means the MMU kernel — the
+      // user code must go through the per-access translate. Instrument the image
+      // AT LOAD, right here, so EVERY execed binary (busybox, nix, any tool) runs
+      // on the software MMU, not just a pre-instrumented init. The pass is
+      // deterministic, so a fork child re-instruments the same range to the same
+      // layout. Skip if the image is already instrumented (a test fixture the
+      // harness pre-instrumented — isInstrumented checks the __mmu_start export).
+      // NOMMU kernels pass pt_base 0 and this is a no-op (byte-identical boot).
+      if (Number(pt_base || 0) !== 0 && !isInstrumented(bytes)) {
+        bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+      }
       user_executable = WebAssembly.compile(bytes);
       user_executable_params = {
         data_start: data_start,

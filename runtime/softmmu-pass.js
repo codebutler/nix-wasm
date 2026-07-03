@@ -1303,6 +1303,43 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
 }
 
 /**
+ * True iff `bytes` is ALREADY a softmmu-instrumented module — an instrumented
+ * image always exports `__mmu_start` (and `__mmu_pt_base`). Used by the engine's
+ * instrument-on-load path to avoid double-instrumenting a pre-instrumented
+ * binary (e.g. a test fixture). Scans only the export section; no full decode.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+export function isInstrumented(bytes) {
+  if (bytes[0] !== 0 || bytes[1] !== 0x61) return false;
+  let i = 8;
+  while (i < bytes.length) {
+    const id = bytes[i++];
+    let sz;
+    [sz, i] = readU(bytes, i);
+    if (id !== 7) {
+      i += sz;
+      continue;
+    }
+    let n;
+    let j = i;
+    [n, j] = readU(bytes, j);
+    for (let k = 0; k < n; k++) {
+      let len;
+      [len, j] = readU(bytes, j);
+      const name = new TextDecoder().decode(bytes.subarray(j, j + len));
+      if (name === "__mmu_start") return true;
+      j += len;
+      j++; // export kind
+      [, j] = readU(bytes, j); // export index
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
