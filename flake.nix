@@ -104,6 +104,16 @@
         src = ./userspace/fork-init.c;
         forkSeam = true;
       };
+      # #131/#129: fork + EXEC + wait — the capstone primitive (what busybox init
+      # does). forkExecInit (asyncify seam) fork()s, the child execve()s
+      # execChild (a raw fresh image), the parent waitpid()s. Both instrumented
+      # at load by the engine; booted by runtime/demo/node/fork-exec-smoke.mjs.
+      execChild = import ./userspace/exec-child.nix { inherit cross; };
+      forkExecInit = asyncifyCc {
+        name = "fork-exec-init";
+        src = ./userspace/fork-exec-init.c;
+        forkSeam = true;
+      };
 
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
@@ -564,6 +574,9 @@
         musl-fork = muslFork;
         # #129: the real-fork PID-1 for the MMU fork smoke → $out/bin/fork-init.
         fork-init = forkInit;
+        # #131/#129: fork+exec+wait capstone → $out/bin/fork-exec-init + exec target.
+        fork-exec-init = forkExecInit;
+        exec-child = execChild;
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;

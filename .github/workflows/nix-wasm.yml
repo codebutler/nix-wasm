@@ -133,6 +133,8 @@ jobs:
             '.#mmu-init' \
             '.#mmu-init-a2' \
             '.#fork-init' \
+            '.#fork-exec-init' \
+            '.#exec-child' \
             --print-out-paths --no-link
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
@@ -311,6 +313,14 @@ jobs:
           FORKI="$(cd .. && nix build -L '.#fork-init' --no-link --print-out-paths)"
           run_smoke demo/node/fork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" FORK_INIT="$FORKI/bin/fork-init"
+          # #131/#129: fork + EXEC + wait (what busybox init does) — the child
+          # execve()s a fresh image, the parent reaps it. RAW binaries, the
+          # engine instruments each at load. Gating.
+          FEI="$(cd .. && nix build -L '.#fork-exec-init' --no-link --print-out-paths)"
+          EC="$(cd .. && nix build -L '.#exec-child' --no-link --print-out-paths)"
+          run_smoke demo/node/fork-exec-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" \
+            FORK_EXEC_INIT="$FEI/bin/fork-exec-init" EXEC_CHILD="$EC/bin/exec-child"
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
