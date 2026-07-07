@@ -92,9 +92,10 @@ try {
   // the child's line comes from the EXEC'd fresh image (exec-child), proving
   // fork → execve into a new mm/pgd worked.
   const childExeced = snap.includes("FORK-EXEC: child exec'd a fresh image, exiting 7");
-  // the parent blocked in waitpid across the child's exec+exit and reaped 7.
+  // the parent reaped ALL N children (each exec'd a fresh image then exited 7),
+  // across N concurrent user tasks + N page tables + the pt_base-restore churn.
   const parentReaped =
-    /FORK-EXEC: parent reaped pid=0x[0-9a-f]*[1-9a-f][0-9a-f]* status=0x00000007/.test(snap);
+    /FORK-EXEC: parent reaped 0x00000003 of 0x00000003 children status=0x00000007/.test(snap);
   pass = !!ok && alive && childExeced && parentReaped;
   if (ok && !childExeced) console.log("[fork-exec-smoke] child EXEC missing/incorrect");
   if (ok && !parentReaped) console.log("[fork-exec-smoke] parent REAP missing/incorrect");

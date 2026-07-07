@@ -42,31 +42,44 @@ int main(void)
 
 	put(fd, "FORK-EXEC: init alive\n");
 
-	pid_t pid = fork();
-	if (pid < 0) {
-		put(fd, "FORK-EXEC: fork FAILED ");
-		put_hex(fd, (unsigned long)-pid);
-		put(fd, "\n");
-		for (;;)
-			pause();
-	}
-	if (pid == 0) {
-		/* Child: exec a fresh image (throws away the forked address space). */
-		char *const argv[] = { "/bin/exec-child", 0 };
-		char *const envp[] = { 0 };
-		execve("/bin/exec-child", argv, envp);
-		put(fd, "FORK-EXEC: execve FAILED\n");
-		_exit(127);
+	/* Spawn N children CONCURRENTLY (fork all, then reap all) — the pattern a
+	 * real init uses. This stresses N live user tasks each with its OWN page
+	 * table, the pt_base-restore across many context switches, and N reaps.
+	 * Each child execs a fresh image (exec-child, exit 7). */
+	enum { N = 3 };
+	pid_t kids[N];
+	for (int i = 0; i < N; i++) {
+		pid_t pid = fork();
+		if (pid < 0) {
+			put(fd, "FORK-EXEC: fork FAILED ");
+			put_hex(fd, (unsigned long)-pid);
+			put(fd, "\n");
+			for (;;)
+				pause();
+		}
+		if (pid == 0) {
+			char *const argv[] = { "/bin/exec-child", 0 };
+			char *const envp[] = { 0 };
+			execve("/bin/exec-child", argv, envp);
+			put(fd, "FORK-EXEC: execve FAILED\n");
+			_exit(127);
+		}
+		kids[i] = pid;
 	}
 
-	/* Parent: block in waitpid, reap the child (which exec'd then exited 7). */
-	int status = 0;
-	waitpid(pid, &status, 0);
-	put(fd, "FORK-EXEC: parent reaped pid=");
-	put_hex(fd, (unsigned long)pid);
-	put(fd, " status=");
-	put_hex(fd, WIFEXITED(status) ? (unsigned long)WEXITSTATUS(status) : 0xdeadUL);
-	put(fd, "\n");
+	/* Parent: reap all N, count the successful exit(7)s. */
+	int reaped = 0;
+	for (int i = 0; i < N; i++) {
+		int status = 0;
+		waitpid(kids[i], &status, 0);
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 7)
+			reaped++;
+	}
+	put(fd, "FORK-EXEC: parent reaped ");
+	put_hex(fd, (unsigned long)reaped);
+	put(fd, " of ");
+	put_hex(fd, (unsigned long)N);
+	put(fd, " children status=0x00000007\n");
 
 	put(fd, "FORK-EXEC: OK\n");
 	for (;;)
