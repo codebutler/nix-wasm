@@ -1819,7 +1819,7 @@ new file mode 100644
 index 0000000..a3b2abf
 --- /dev/null
 +++ b/src/signal/wasm/restore.S
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,112 @@
 +#include <bits/asm.h>
 +
 +.globl __restore_rt
@@ -1865,9 +1865,18 @@ index 0000000..a3b2abf
 +
 +	/* (4 bytes padding for alignment on 64-bit.) */
 +
++	/*
++	 * info_param = *(SP + 4|8). A stray extra `iLONG.const 4` here used to
++	 * turn this into *(int *)8 — an ABSOLUTE NULL-page load (the pushed SP
++	 * was orphaned; the trailing `unreachable` made the stack polymorphic,
++	 * so it still validated). On NOMMU, physical address 8 reads 0, so
++	 * info_param happened to be NULL and !SA_SIGINFO delivery worked by
++	 * luck; on the software MMU (#128) VA 8 is unmapped and the first
++	 * signal-handler delivery SIGSEGV-killed the process (the busybox-shell
++	 * fork+wait "mis-rewind", nix-wasm#131 slice 1).
++	 */
 +	/* info_param */
 +	global.get __stack_pointer
-+	iLONG.const 4
 +	INSN_32_64(i32.const 4, i64.const 8)
 +	iLONG.add
 +	iLONG.load 0

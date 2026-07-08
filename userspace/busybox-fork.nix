@@ -34,28 +34,21 @@
 # STATUS (#131 slice 1, 2026-07): builds clean; whole-module asyncify over the
 # 1.26MB module succeeds (→4.48MB, the feared -shared dylink-table break did NOT
 # occur once the full --enable-* feature set is passed). It BOOTS as PID 1 on
-# .#kernel-mmu-a2 and the FIRST fork+exec works: busybox init forks a child that
-# execs /bin/sh (runtime/demo/node/busybox-fork-smoke.mjs prints "BBFORK: init
-# alive").
+# .#kernel-mmu-a2, init fork+execs /bin/sh, and the SHELL runs full multi-command
+# scripts with forked external commands (runtime/demo/node/busybox-fork-smoke.mjs).
 #
-# KNOWN LIMITATION — the shell's fork mis-rewinds. A busybox SHELL (both hush and
-# ash, tested identically) that fork()s for a NON-last external command dies: it
-# reaches the fork, the CHILD execs + runs + exits correctly, but the PARENT
-# shell resumes at the WRONG continuation (no failing syscall, no trap) and exits
-# early instead of running the rest of the script. Isolated precisely:
-#   * the engine's 2nd-generation fork is CORRECT — a small asyncify-seam program
-#     that is fork+exec'd and then itself fork()s + waits its grandchild PASSES
-#     (.#grandfork-init/.#grandfork-child, runtime/demo/node/grandfork-smoke.mjs);
-#   * shell builtins + builtin command-lists work; a LAST external command works
-#     (hush/ash exec it in place, no fork);
-#   * only the fork+wait of a non-last external command from a shell fails.
-# => Root cause is whole-module asyncify NOT correctly preserving/restoring the
-# DEEP call stack of this large binary across the fork() unwind/rewind (the small
-# seam programs have shallow stacks and rewind fine). The fix is a binaryen-level
-# asyncify-coverage effort over busybox's shell fork call graph (the GOT-indirect
-# capture_stack defeats asyncify's default reachability — see asyncify-cc.nix) —
-# tracked as the remaining #131 slice-1 work. Until then this disc boots a
-# single-fork init but not a full interactive multi-process shell session.
+# HISTORY — the "shell fork mis-rewind" (task #5, RESOLVED 2026-07-08). A shell
+# that fork()+wait()ed a NON-last external command appeared to resume at the
+# wrong continuation and exit early. That was NEVER a fork/asyncify defect: hush
+# installs a SIGCHLD handler (CONFIG_HUSH_FAST), and musl's wasm
+# __libc_handle_signal read the sigframe's info_param through a stray-constant
+# ABSOLUTE load of address 8 (NULL page) — harmless-by-luck on NOMMU (physical
+# addr 8 reads 0), a silent SIGSEGV kill on the software MMU's first handler
+# delivery. Fixed in patches/musl/0000-harness-wasm-arch.patch (info_param =
+# [SP+4|8]); regression gates: .#deepfork-sig-child (the minimal repro — deep
+# fork+wait WITH a SIGCHLD handler) + the shell-script assertion in
+# busybox-fork-smoke. The isolation suite that disproved the fork-machinery
+# theories lives in userspace/deepfork-*.c / grandfork-*.c.
 { pkgs, cross, muslFork, busyboxKernelHeaders, binaryen ? pkgs.buildPackages.binaryen }:
 let
   cc = cross.stdenv.cc;
