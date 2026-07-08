@@ -96,10 +96,27 @@ pkgs.stdenv.mkDerivation {
     # in the fork variant (#129) — there fork() is kept and _Fork() routes through
     # the asyncify seam (patch 0010) instead of removed.
     ${pkgs.lib.optionalString (!fork) "sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c"}
-    # vfork(): the whole TU is just the function — empty it so no symbol remains.
-    # (Removed in BOTH variants — vfork's return-twice-into-parent isn't the fork
-    # seam; posix_spawn/fork cover the spawn contract.)
-    : > src/process/vfork.c
+    # vfork(): the whole TU is just an asm return-twice stub that can't work on
+    # wasm. In the DEFAULT (no-fork) guest libc, empty it so no symbol remains
+    # (posix_spawn/clone-with-fn is the spawn contract; a live vfork fails to LINK).
+    # In the FORK variant (#131), define vfork() as a REAL fork(): on the software
+    # MMU every process has its own COW page table, so vfork-as-fork is
+    # semantically safe (vfork is only an optimization of fork; correct vforking
+    # code execs or _exits in the child before touching shared state, and the
+    # shared-memory error-reporting trick that would break is a BB_MMU=0-only
+    # path busybox does NOT use when built CONFIG_NOMMU=n). This lets stock
+    # busybox — which still calls vfork() directly in init's run() and a few other
+    # sites even with BB_MMU=1 — spawn every child through the asyncify fork seam
+    # instead of the NOMMU clone-with-fn hack. fork() itself returns twice via the
+    # seam (patch 0010); vfork() inherits that by delegating.
+    ${if fork then ''
+      cat > src/process/vfork.c <<'EOF'
+#include <unistd.h>
+pid_t fork(void);
+/* vfork-as-fork: safe on the COW software MMU (see musl.nix rationale). */
+pid_t vfork(void) { return fork(); }
+EOF
+'' else ": > src/process/vfork.c"}
     # posix_fallocate: emulate when the filesystem has no fallocate, like glibc.
     # On the NOMMU wasm guest CONFIG_SHMEM is gated off behind MMU (kernel.nix),
     # so tmpfs falls back to ramfs and NO mounted fs implements ->fallocate — the

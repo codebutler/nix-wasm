@@ -114,6 +114,19 @@
         src = ./userspace/fork-exec-init.c;
         forkSeam = true;
       };
+      # #131 diagnosis: the exec'd-task-forks path (a fork+exec'd task that
+      # itself fork()s + waits — what busybox sh does, and the one path the
+      # fork-exec gate never covered). Both are asyncify-seam programs.
+      grandforkInit = asyncifyCc {
+        name = "grandfork-init";
+        src = ./userspace/grandfork-init.c;
+        forkSeam = true;
+      };
+      grandforkChild = asyncifyCc {
+        name = "grandfork-child";
+        src = ./userspace/grandfork-child.c;
+        forkSeam = true;
+      };
 
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
@@ -125,6 +138,13 @@
       };
       wasmBusybox = import ./userspace/busybox.nix {
         inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # #131 slice 1: the REAL-FORK busybox — stock fork()+exec (CONFIG_NOMMU=n),
+      # muslFork seam + whole-module asyncify, no clone-spawn hack. Boots as init
+      # on .#kernel-mmu-a2 for a genuine multi-process system. See busybox-fork.nix.
+      wasmBusyboxFork = import ./userspace/busybox-fork.nix {
+        inherit pkgs cross muslFork;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
       # busybox ASH — the autoconf-capable guest shell (forkshell, NOMMU
@@ -577,6 +597,9 @@
         # #131/#129: fork+exec+wait capstone → $out/bin/fork-exec-init + exec target.
         fork-exec-init = forkExecInit;
         exec-child = execChild;
+        # #131 diagnosis: exec'd-task-forks isolation test.
+        grandfork-init = grandforkInit;
+        grandfork-child = grandforkChild;
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;
@@ -614,6 +637,8 @@
         make-wasm = makeWasm;
 
         userspace-busybox = wasmBusybox;
+        # #131 slice 1: real-fork busybox (CONFIG_NOMMU=n + muslFork + asyncify).
+        userspace-busybox-fork = wasmBusyboxFork;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
 
         # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
