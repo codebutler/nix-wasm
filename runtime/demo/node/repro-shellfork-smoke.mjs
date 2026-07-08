@@ -1,19 +1,15 @@
-// busybox-fork-smoke.mjs — #131 slice 1: boot the REAL-FORK busybox as PID 1 on
-// the software MMU and prove a full multi-process SHELL SCRIPT runs.
+// repro-shellfork-smoke.mjs — parameterizable busybox shell-script harness
+// (task #5 diagnosis tool, kept for future shell debugging on the MMU).
 //
-// This is the payoff of the fork+exec foundation (fork-exec-smoke): the NOMMU
-// clone-with-fn busybox (userspace/busybox.nix) NULL-derefs in its steady-state
-// spawn/reap loop under the per-process-page-table MMU. The real-fork busybox
-// (userspace/busybox-fork.nix — CONFIG_NOMMU=n, stock fork()+exec, muslFork
-// asyncify seam, no clone hack) instead spawns children through real COW-fork.
-// We boot it with a minimal inittab whose ::sysinit action forks a child that
-// execs /bin/sh -c '<script>'; the script runs a builtin, then a NON-LAST
-// EXTERNAL command (/bin/date — hush fork+execs it and WAITS, with hush's
-// HUSH_FAST SIGCHLD handler live), then a final witness echo. The final witness
-// proves the WHOLE multi-process chain: init fork+exec, shell fork+exec+wait of
-// an external command, SIGCHLD handler delivery (the musl __libc_handle_signal
-// NULL-page bug this once exposed — see userspace/busybox-fork.nix HISTORY),
-// and the parent shell resuming correctly after the wait.
+// Boots the REAL-FORK busybox (userspace/busybox-fork.nix) as PID 1 and runs
+// `/bin/sh -c 'echo REPRO_START; $REPRO_BODY; echo REPRO_DONE'` from inittab.
+// REPRO_DONE printing asserts the parent shell survived whatever REPRO_BODY did
+// (fork+wait of an external command by default). This harness is how the
+// "shell fork mis-rewind" was bisected down to the musl __libc_handle_signal
+// NULL-page load (see userspace/busybox-fork.nix HISTORY) — vary REPRO_BODY to
+// isolate a failing shell construct ("(:)" = subshell fork of a builtin, no
+// exec; "cmd &" = fork without wait; ...). The default case is also gated in CI
+// by busybox-fork-smoke.mjs; this file is the freeform variant.
 //
 //   MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm
 //   BUSYBOX_FORK=$(nix build .#userspace-busybox-fork --print-out-paths)/bin
@@ -86,17 +82,22 @@ function cpioNewc(entries) {
 // Minimal inittab. busybox init runs ::sysinit actions in order, forking a child
 // per action (run()/run_child — the path that clone-hacked before). The first
 // mounts devtmpfs so /dev/console exists; the second FORKS a child that EXECs
-// /bin/sh running the script below. `/bin/date` is a NON-LAST external command:
-// hush fork+execs it and blocks in wait with its SIGCHLD handler installed —
-// exactly the path that used to die on the musl __libc_handle_signal NULL-page
-// load (task #5). "BBFORK: script done" printing after date proves the parent
-// shell survived the delivery and resumed at the correct continuation.
-const initScript = [
-  "exec >/dev/console 2>&1",
-  'echo "BBFORK: init alive pid=$$"',
-  "/bin/date",
-  'echo "BBFORK: script done"',
-].join("; ");
+// /bin/sh — the milestone this gate asserts: busybox init boots as PID 1 and its
+// steady-state fork()+exec() (which the NOMMU clone-hack could not do under the
+// MMU) works. The shell then prints a builtin witness line.
+//
+// NOTE: a FULL multi-process shell session (the shell itself fork+waiting for
+// non-last external commands) does NOT yet work — see the KNOWN LIMITATION in
+// userspace/busybox-fork.nix (whole-module asyncify mis-rewinds busybox's deep
+// shell fork stack). So the script deliberately stops at a builtin echo; this
+// gate proves the init fork+exec milestone, not a full shell.
+// REPRO_BODY (env-overridable) is the middle of the script — the case under
+// test — bracketed by REPRO_START / REPRO_DONE witnesses. Default = fork+exec
+// of a non-last external command (hush forks + waits, SIGCHLD handler live).
+const body = process.env.REPRO_BODY || "/bin/date";
+const initScript = ["exec >/dev/console 2>&1", "echo REPRO_START", body, "echo REPRO_DONE"].join(
+  "; ",
+);
 const inittab =
   "::sysinit:/bin/mount -t devtmpfs devtmpfs /dev\n" +
   "::sysinit:/bin/sh -c '" +
@@ -141,11 +142,10 @@ writeFileSync(join(dir, "initramfs.cpio.gz"), gzipSync(cpio));
 const s = await bootNode({ nix: false, baseUrl: pathToFileURL(dir + "/").href });
 let pass = false;
 try {
-  // The final witness line is printed by the shell AFTER fork+wait-ing the
-  // external /bin/date — proving the full multi-process script chain.
-  const ok = await s.waitForOutput(/BBFORK: script done/, 180000).catch((e) => {
+  // REPRO_DONE = the shell survived REPRO_BODY and resumed correctly.
+  const ok = await s.waitForOutput(/REPRO_DONE/, 180000).catch((e) => {
     if (e && e.message === "KERNEL_PANIC") {
-      console.log("[busybox-fork-smoke] INCONCLUSIVE — kernel panic on boot; re-run");
+      console.log("[repro-shellfork-smoke] INCONCLUSIVE — kernel panic on boot; re-run");
       s.kill();
       process.exit(2);
     }
@@ -155,12 +155,12 @@ try {
   if (pass) {
     const snap = s.snapshot();
     for (const line of snap.split("\n")) {
-      if (/BBFORK:|Run \/init/.test(line)) console.log("  " + line.trim());
+      if (/REPRO_|Run \/init/.test(line)) console.log("  " + line.trim());
     }
   }
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-4000));
   s.kill();
 }
-console.log("\n[busybox-fork-smoke] " + (pass ? "PASS (multi-process shell script)" : "FAIL"));
+console.log("\n[repro-shellfork-smoke] " + (pass ? "PASS" : "FAIL"));
 process.exit(pass ? 0 : 1);

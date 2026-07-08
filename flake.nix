@@ -127,6 +127,33 @@
         src = ./userspace/grandfork-child.c;
         forkSeam = true;
       };
+      # deepfork-init (#131 diagnosis): fork()+wait() from a DEEP call stack, then
+      # return all the way back up. Isolates stack-depth-at-fork as the variable
+      # (grandfork forks from a shallow main and passes; busybox sh forks deep).
+      deepforkInit = asyncifyCc {
+        name = "deepfork-init";
+        src = ./userspace/deepfork-init.c;
+        forkSeam = true;
+      };
+      # The exec'd+deep cell: an init fork+execs deepfork-child, which forks from
+      # a DEEP stack. Isolates whether exec'd-task + deep-fork is the busybox trigger.
+      deepforkChild = asyncifyCc {
+        name = "deepfork-child";
+        src = ./userspace/deepfork-child.c;
+        forkSeam = true;
+      };
+      deepforkExecInit = asyncifyCc {
+        name = "deepfork-exec-init";
+        src = ./userspace/deepfork-exec-init.c;
+        forkSeam = true;
+      };
+      # The MINIMAL repro of the busybox shell-fork failure (task #5): the same
+      # exec'd+deep fork+wait, PLUS a SIGCHLD handler (hush's HUSH_FAST ingredient).
+      deepforkSigChild = asyncifyCc {
+        name = "deepfork-sig-child";
+        src = ./userspace/deepfork-sig-child.c;
+        forkSeam = true;
+      };
 
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
@@ -600,6 +627,10 @@
         # #131 diagnosis: exec'd-task-forks isolation test.
         grandfork-init = grandforkInit;
         grandfork-child = grandforkChild;
+        deepfork-init = deepforkInit;
+        deepfork-child = deepforkChild;
+        deepfork-exec-init = deepforkExecInit;
+        deepfork-sig-child = deepforkSigChild;
 
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;
