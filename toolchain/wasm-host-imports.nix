@@ -24,6 +24,15 @@
 # (the runtime/dylink.js side-module loader), consumed by musl's wasm dlopen
 # port (patches/musl/0009).
 #
+# capture_stack (#129 Track B, ENGINE_ABI 10) is deliberately NOT here yet:
+# adding it changes this file's store path, which is baked into the cross
+# cc-wrapper (wasm-cross.nix) — a FULL cross.* world rebuild (verified: the
+# crossZlib drvPath flips). The fork ACCEPTANCE programs link through
+# userspace/asyncify-cc.nix, which (like make.nix / guest-cc-fork.nix, the
+# pre-existing in-tree exceptions) passes --import-undefined per-program.
+# Add capture_stack here in the PR that ships the first REAL fork package
+# through forkStdenv — a deliberate, CI-planned world rebuild.
+#
 # __wasm_ffi_call (#126 Track C / #130): the runtime-libffi host surface —
 # runtime/kernel-worker.js → runtime/ffi-codegen.js generates a trampoline
 # module for a call signature the static wasm32-raw-ffi.c table can't express

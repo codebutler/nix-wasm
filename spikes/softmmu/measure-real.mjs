@@ -19,9 +19,19 @@ function boot(bytes, instrumented) {
   const pages = 512; // 32 MiB
   if (mem.buffer.byteLength < pages * 65536) mem.grow(pages - mem.buffer.byteLength / 65536);
   if (instrumented) {
+    // TWO-LEVEL identity tables (kernel layout: PGD at PT, page-sized PTE
+    // tables following; flag bits set to exercise the pass's address mask).
     const t = new Uint32Array(mem.buffer);
     const np = mem.buffer.byteLength / PAGE;
-    for (let p = 0; p < np; p++) t[PT / 4 + p] = p << 12;
+    const nPgd = Math.ceil(np / 1024);
+    for (let g = 0; g < nPgd; g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable | 3;
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < np ? (p << 12) | 7 : 0;
+      }
+    }
     inst.exports.__mmu_pt_base.value = PT;
   }
   return { inst, mem };

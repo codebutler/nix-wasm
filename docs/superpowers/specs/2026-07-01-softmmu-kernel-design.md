@@ -75,6 +75,30 @@ arena ("physical RAM"); `pt_base` points at it.
 pages from the arena (the same allocator NOMMU uses today, now backing "physical"
 pages). `mm_struct` gains the table root; `pt_base` = that root's arena offset.
 
+**REVISED for A1 (empirical, 2026-07-02): standard 2-level, NOT single-level flat.**
+The `CONFIG_MMU=y` compile probe (§3a) showed the generic MM assumes a **page-sized**
+PTE table (`pte_alloc_one` returns a `struct page`; `pte_offset_*` masks within one
+page). A single flat 2^20-entry table is 4 MiB = 1024 pages, which fights every
+generic PTE-table helper. So A1 uses the **classic 32-bit 2-level split**
+(`PGDIR_SHIFT=22`, `PTRS_PER_PGD=1024`, `PTRS_PER_PTE=1024`, each PTE table one 4KB
+page) — fully standard, no fight with the generic MM. The cost is the pass grows
+from a **one-load** to a **two-load** walk:
+```
+pgd_e = u32[ pt_base + (va>>22)<<2 ]          // level 1: PGD entry (PTE-table phys base)
+pte   = u32[ (pgd_e & ~0xfff) + ((va>>12 & 0x3ff)<<2) ]   // level 2: PTE
+phys  = (pte & ~0xfff) + (va & 0xfff)
+```
+DONE (2026-07-02): the pass emits this 2-level walk (both the inline path and
+the `__mmu_translate` helper), masks the low-12 flag bits at both levels, and
+is re-measured on the real binary (`spikes/softmmu/REAL-BINARY.md`): pure-memory
+poles ~3–4× (up from single-level's ~2.2×), compute-mixed ≈free (1.01×) — the
+realistic shape. A flat-shadow single-level mirror kept in sync by the pte
+accessors is the recorded A3 optimization if real-guest profiling demands it.
+`PAGE_SHIFT` MUST be 12 (both the pass and this split hard-code 4KB) — select
+`HAVE_PAGE_SIZE_4KB`. PTE format: bits 0–11 flags (present/write/user/accessed/
+dirty), bits 12–31 the physical page base; the A1 fast path can ignore flags
+(identity-clean), A2's extended pass masks `(pte & ~0xfff)` + checks present/write.
+
 ## 3. What `CONFIG_MMU=y` unlocks (and the arch must supply)
 
 Flipping the wasm arch from NOMMU to MMU means the generic Linux MM (which is
@@ -99,6 +123,46 @@ Because the *translate* is in the instrumented guest code (not a hardware walker
 the arch's job shrinks to: keep the page tables in the §1 format, set `pt_base`,
 and service faults. The generic MM does the rest (`mmap`, `mprotect`, `fork` COW,
 demand paging) — which is the whole point: **run normal MMU Linux.**
+
+### 3a. Empirical hook surface (measured, not guessed)
+
+`config MMU` was added to `arch/wasm/Kconfig` (a selectable `bool default n`) and
+survives `olddefconfig` with `CONFIG_MMU=y` — the arch Kconfig graph accepts MMU.
+Building `vmlinux` with `CONFIG_MMU=y` (full patch stack, `make -k`) then names
+the **exact** arch surface the generic `include/linux/pgtable.h` requires — this
+is the executable checklist for `asm/pgtable.h` (replacing the NOMMU
+`pgtable-nopmd.h` + no-op stubs). First wall, in order:
+
+- **Layout constants:** `PGDIR_SHIFT`, `PTRS_PER_PGD`, `PTRS_PER_PTE`,
+  `PFN_PTE_SHIFT`.
+- **PTE constructors/queries:** `set_pte`, `pte_clear`, `pte_none`, `pte_present`,
+  `pte_young`/`pte_mkold`, `pte_dirty`/`pte_mkclean`/`pte_mkdirty`,
+  `pte_write`/`pte_mkwrite`/`pte_wrprotect`, `pte_mkyoung`, `mk_pte`, `pte_page`,
+  `pte_pfn`/`pfn_pte`.
+- **PMD side (folded via `pgtable-nopmd.h`):** `pmd_none`, `pmd_present`,
+  `pmd_bad`, `pmd_page_vaddr`, `pmd_clear`, `set_pmd`.
+
+The `PGTABLE_LEVELS=2` arch config + `pgtable-nopmd.h` gives a PGD→PTE fold. To
+match the §1 SINGLE-level flat walk (`u32[pt_base + (va>>12)<<2]`), reconcile by
+making the flat 2^20-entry PTE table the level the pass reads: `PGDIR_SHIFT=12`
+region so `pt_base` (set by `switch_mm` = the incoming mm's flat table) is what
+`va>>12` indexes. A 4 MiB flat table per process (the accepted A1 cost, §2).
+`PAGE_SHIFT` MUST be 12 (the pass hard-codes `>>12`); select the 4KB page size,
+not 64KB.
+
+**MILESTONE (2026-07-02): the arch MMU layer COMPILES + LINKS end-to-end** —
+`vmlinux` builds with `CONFIG_MMU=y` (4.1 MB); the default NOMMU build is
+unregressed (3.8 MB; every edit is `#ifdef CONFIG_MMU`-guarded, verified by
+rebuilding both). Error-surface progression while advancing the walls: generic
+`pgtable.h` (dozens) → swap/tlb (947) → 44 → 4 (elf macros) → 1 (binfmt_elf
+`start_thread`, fixed by `--disable CONFIG_BINFMT_ELF` since the guest execs
+wasm) → **0**. The layer is preserved as
+`docs/superpowers/notes/mmu-wip-0023-arch-layer.patch` (validated: reverse-applies
+cleanly; apply AFTER patches 0004–0022; **NOT yet wired into `kernel.nix`** — it
+does not BOOT yet). The remaining semantic core (switch_mm→pt_base, uaccess
+table-walk, exec address-space setup, fault entry, the pass 2-level walk, engine
+integration) is enumerated in
+`docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md`.
 
 ## 4. Context switch — the one hot action
 
@@ -125,12 +189,18 @@ was the rejected helper-call design — see `spikes/softmmu/REAL-BINARY.md`).
    per-process tables. **Needs the kernel source + nix/LLVM build.**
 3. **A2** — permission bits in the PTE + the `__mmu_fault` path → COW fork,
    demand paging, mprotect (the extended pass variant + `do_page_fault`).
-4. **Atomics/SIMD in the pass** — the guest's musl pthread uses atomics heavily,
-   so the pass's atomic-translate variant (currently a loud refusal) gates a
-   real-guest boot. Design: an atomic access translates its address the same way
-   (the translate is a pure read), then does the RAW atomic at `phys` — the only
-   subtlety is that the page-table load itself must not tear, which a plain
-   aligned `i32.load` guarantees.
+4. **Atomics in the pass** — DONE (`runtime/softmmu-pass.js`, commit for #128).
+   The guest's musl pthread is atomics-heavy, so this gated instrumenting any
+   real guest binary. An atomic (`0xfe` prefix) translates its address the same
+   way (the translate is a pure read: an aligned `i32.load` of the PTE, which
+   cannot tear), then re-emits the RAW atomic at `phys` keeping the ORIGINAL
+   alignment (atomics require natural alignment; the translate preserves it) and
+   folding the offset into `phys`. Operands above the address are stashed
+   top-first into disjoint scratch locals across the translate, then restored.
+   Verified with an `atomics.wasm` fixture (load/store/add/xchg/cas/i64 add):
+   instrumented == original under an identity table, and a remapped page
+   redirects the atomic. `scanUnhandled` now refuses only SIMD (a documented
+   follow-up — the guest has no SIMD memory ops today).
 
 ## 6. What stays true regardless (the honest floor)
 

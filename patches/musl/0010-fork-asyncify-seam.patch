@@ -1,0 +1,87 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 20 Jun 2026 00:00:00 +0000
+Subject: [PATCH] wasm: real fork() over the asyncify double-return seam (musl-fork)
+
+Phase 2 (musl-fork variant only — canonical musl is unchanged). The NOMMU wasm
+port cannot fork a running instance via SYS_clone, so fork() no longer issues the
+clone syscall. Instead _Fork() arms a {cur,end} asyncify control buffer over a
+static 16 KiB stack-image region and calls capture_stack(), a host import that
+unwinds this instance's call stack to the runtime; the runtime duplicates the
+address space + drives the kernel clone (wasm_fork_current) and REWINDS both this
+instance and the child, so capture_stack() returns the child pid in the parent
+and 0 in the child. __post_Fork() then runs once per side; the sig-block + abort
+LOCK taken before the unwind are balanced by __post_Fork's UNLOCK + restore on
+both sides (the child's copied memory resumes with them held — fork-time state).
+
+capture_stack is the sole asyncify-imports unwind point, so wasm-opt --asyncify
+(applied at the fork program's link by userspace/asyncify-cc.nix) instruments only
+the fork call graph; the generic typed-syscall path stays asyncify-free, so
+posix_spawn / vfork+exec (clone-with-fn) pay no asyncify cost. The control buffer
++ stack region live in BSS so they ride along in the runtime's verbatim memory
+copy and the child rewinds the identical image.
+
+Contract: docs/superpowers/specs/2026-06-20-fork-host-abi-v3.md.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+diff --git a/src/process/_Fork.c b/src/process/_Fork.c
+index ac59b14..f4ffac2 100644
+--- a/src/process/_Fork.c
++++ b/src/process/_Fork.c
+@@ -7,6 +7,23 @@
+ #include "aio_impl.h"
+ #include "fork_impl.h"
+ 
++/*
++ * Phase 2 (musl-fork variant only): real fork() over the asyncify double-return
++ * seam. The NOMMU wasm port cannot fork a running instance via SYS_clone, so
++ * fork() does NOT issue the clone syscall — it calls capture_stack(), a host
++ * import that unwinds this instance's call stack to the runtime, which then
++ * duplicates the address space + drives the kernel clone (wasm_fork_current) and
++ * REWINDS both this instance and the child so capture_stack() returns the child
++ * pid here and 0 in the child. capture_stack is the sole asyncify-imports unwind
++ * point (the generic syscall path stays asyncify-free). The control buffer is a
++ * {cur,end} cursor over a static 16 KiB stack-image region; both live in BSS, so
++ * they ride along in the runtime's verbatim memory copy and the child rewinds
++ * the identical image. Contract: docs/.../2026-06-20-fork-host-abi-v3.md.
++ */
++extern int capture_stack(void *ctl);
++static struct { unsigned cur, end; } __wasm_fork_ctl;
++static char __wasm_fork_stack[16384] __attribute__((aligned(16)));
++
+ static void dummy(int x) { }
+ weak_alias(dummy, __aio_atfork);
+ 
+@@ -32,18 +49,20 @@ pid_t _Fork(void)
+ 	sigset_t set;
+ 	__block_all_sigs(&set);
+ 	LOCK(__abort_lock);
+-#ifdef SYS_fork
+-	ret = __syscall(SYS_fork);
+-#else
+-	/* pc (linux-wasm #139): pad clone to the kernel's 5-arg arity. On wasm,
+-	 * syscalls are typed indirect calls — a 2-arg call site into 5-arg
+-	 * sys_clone (SYSCALL_DEFINE5) is a signature mismatch -> kernel-mode
+-	 * trap -> "Aiee" panic. fork() was the last unpadded clone shortcut
+-	 * (the clone() library path is already full-arity); Nix's builder
+-	 * fork()s, so every in-guest derivation hit this. The extra ptid/tls/
+-	 * ctid are 0 (no CLONE_*_SETTID/SETTLS set) so semantics are unchanged. */
+-	ret = __syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+-#endif
++	/*
++	 * Phase 2 seam (see the banner above). Arm the asyncify control buffer at
++	 * the base of the stack-image region, then unwind via capture_stack(). On the
++	 * unwind pass this RETURNS UP the stack (so the lines below don't run yet);
++	 * the runtime rewinds us, re-entering at this call site, where capture_stack
++	 * returns the child pid (parent) / 0 (child). __post_Fork then runs once per
++	 * side. The sig-block + LOCK above were taken on the unwind pass and are
++	 * balanced by __post_Fork's UNLOCK + __restore_sigs below on BOTH sides (the
++	 * child's copied memory resumes with them held — fork-time state).
++	 */
++	__wasm_fork_ctl.cur = (unsigned)(unsigned long)__wasm_fork_stack;
++	__wasm_fork_ctl.end = (unsigned)(unsigned long)__wasm_fork_stack
++		+ sizeof __wasm_fork_stack;
++	ret = capture_stack(&__wasm_fork_ctl);
+ 	__post_Fork(ret);
+ 	__restore_sigs(&set);
+ 	return __syscall_ret(ret);

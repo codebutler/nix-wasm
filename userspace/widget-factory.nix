@@ -1,24 +1,30 @@
-# gtk3-widget-factory — the headline GTK3 app (#33). GTK's own widget showcase,
-# built standalone against the cross gtk3 (no gtk3 rebuild; demos stay off in the
-# library build). It is the proof that GtkBuilder signal autoconnect works on the
-# statically-linked wasm guest, where there is no working GModule (no dlopen(NULL)/
-# dlsym): widget-factory registers its .ui handlers with gtk_builder_add_callback_
-# symbol() so gtk_builder_connect_signals() resolves them from the callback scope
-# and never touches GModule. Upstream already registers 17 of its 18 handlers; our
-# patch adds the one it leaves to GModule (gtk_widget_hide_on_delete) so the real
-# app autoconnects fully, AND adds a display-free --selftest (GtkTextBuffer signal)
-# that is the headless #33 gate. See patches/widget-factory/0001-*.
+# gtk3-widget-factory — the headline GTK3 app (#33 → #130). GTK's own widget
+# showcase, built standalone against the cross gtk3 (no gtk3 rebuild; demos stay
+# off in the library build).
 #
-# Why this and not galculator: galculator's .ui references 115 handlers (115
-# registrations); widget-factory needs ONE — GTK's sanctioned static-linking API
-# applied to GTK's own showcase. The dead-end host/musl dlsym approach (and why it
-# cannot work under the --fpcast-emu seam) is recorded in issue #33.
+# WAS the proof that GtkBuilder autoconnect works WITHOUT a working GModule (via
+# gtk_builder_add_callback_symbol registering every handler in the callback
+# scope). Track C (#130) makes GModule REAL — g_module_open(NULL)/g_module_symbol
+# → musl dlopen(NULL)/dlsym (patch 0009 + the runtime side-module loader) — so the
+# add_callback_symbol workaround is GONE: the --selftest now resolves its .ui
+# <signal> handler purely through gtk_builder_connect_signals(builder, NULL) →
+# GModule, the real path, and asserts the handler fires. This is #131 slice 2's
+# widget-factory box.
+#
+# Two build requirements for the by-name GModule resolution:
+#   • --export-dynamic (via --export-all in the cross cc-wrapper, already on) so
+#     the handler is in the module's exports for the loader to find.
+#   • dynsym-inject (userspace/dynsym.nix) BEFORE fpcast, so every exported
+#     function gets a canonical-thunk elem slot — dlsym returns the fpcast-correct
+#     &handler (the #33 revert's core fix, now productized in Track C).
 #
 # gtk is gobject → C function-pointer casts; the binary goes through the SHARED
-# --fpcast-emu seam (userspace/fpcast-emu.nix), same as gtk-hello/galculator.
+# --fpcast-emu seam (userspace/fpcast-emu.nix), same as gtk-hello/galculator,
+# with dynsym-inject run first (the #130 build order).
 { cross, gtk3, glib, pango, cairo, gdk-pixbuf, atk, libepoxy, harfbuzz, fontconfig
 , freetype, fribidi, pixman, wayland, wayland-protocols, libxkbcommon, libffi, zlib
-, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
+, fpcast ? import ./fpcast-emu.nix { inherit cross; }
+, dynsym ? import ./dynsym.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gtk3-widget-factory";
   version = "3.24.52";
@@ -33,6 +39,7 @@ cross.stdenv.mkDerivation {
     cross.buildPackages.glib    # glib-compile-resources (native)
     cross.buildPackages.libxml2 # xmllint, for the gresource xml-stripblanks step
     fpcast.binaryen
+    dynsym.python3 # dynsym-inject (below)
   ];
   buildInputs = [ gtk3 glib pango cairo gdk-pixbuf atk libepoxy harfbuzz fontconfig
     freetype fribidi pixman wayland wayland-protocols libxkbcommon libffi zlib ];
@@ -42,6 +49,7 @@ cross.stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     ${fpcast.shellFn}
+    ${dynsym.shellFn}
     cd demos/widget-factory
 
     # widget-factory.c #include "config.h" — it only reads PACKAGE_VERSION (about
@@ -60,7 +68,10 @@ cross.stdenv.mkDerivation {
     CFLAGS="$($PKG_CONFIG --cflags gtk+-3.0) -I. -O2 -Wno-deprecated-declarations"
     LDLIBS="$($PKG_CONFIG --libs gtk+-3.0) -lffi -lm"
     $CC $CFLAGS widget-factory.c widgetfactory_resources.c $LDLIBS -o gtk3-widget-factory.pre
-    fpcast_emu gtk3-widget-factory.pre gtk3-widget-factory
+    # #130: dynsym-inject BEFORE fpcast so the .ui handlers are dlsym-able by
+    # name (canonical-thunk elem slots + cb.dynsym map); then the fpcast seam.
+    dynsym_inject gtk3-widget-factory.pre gtk3-widget-factory.dyn
+    fpcast_emu gtk3-widget-factory.dyn gtk3-widget-factory
     runHook postBuild
   '';
 

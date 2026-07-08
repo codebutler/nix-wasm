@@ -32,21 +32,28 @@ port (`patches/musl/0009`), the dynsym-inject seam (`userspace/dynsym.nix` +
 (`runtime/ffi-codegen.js`). So these accommodations can be removed — each is a
 nix/patch edit whose PROOF is the `dlopen-smoke.mjs` + GTK smokes on the box:
 
-- [ ] **`deps-overlay.nix` glib — gio modules loadable again.** The override
-  forces gio's modules built INTO libgio (the old "NOMMU can't dlopen" reason).
-  Change: drop the `-Ddefault_library`/gio-into-libgio forcing so gio builds its
-  loadable modules, now that `dlopen` works. **Risk:** gio module discovery uses
-  `GIO_MODULE_DIR` + `g_io_modules_scan_all_in_directory` → many `dlopen`s at
-  startup; verify boot doesn't regress (the loader must resolve each `.so`
-  against the process). **Verify:** `glib-smoke.mjs` still passes + a gio module
-  (e.g. the inotify/gvfs shim) loads.
-- [ ] **`deps-overlay.nix` gtk3 — gdk-pixbuf loadable loaders.** The override
-  uses gdk-pixbuf built-in loaders (no `loaders.cache`). Change: restore the
-  normal loadable-loader build + ship `loaders.cache`; gdk-pixbuf `dlopen`s each
-  loader on demand. **Verify:** `gtk-smoke.mjs` / a PNG-loading path in the
-  browser.
-- [ ] **`patches/widget-factory/0001` — drop `add_callback_symbol`.** (Mechanism
-  already BOOT-VERIFIED: `g_module_open(NULL)`/`g_module_symbol` reduce to
+- [ ] **`deps-overlay.nix` glib — gio modules loadable again.** DEFERRED, low
+  value. NOT a meson-flag flip: the guest is `isStatic = true` platform-wide
+  (`-Ddefault_library=static` everywhere), so gio's modules build INTO libgio.
+  Making them loadable means building each as a PIC `SIDE_MODULE`, installing to
+  `GIO_MODULE_DIR`, and shipping the scan — a real per-module packaging effort,
+  while the **built-in** modules work fine (the guest is not missing
+  functionality). The MECHANISM that made this a wall (no dlopen) is gone —
+  proven by `dlopen-smoke` + widget-factory — so this is now purely a
+  stock-shapedness cleanup, correctly deprioritized behind Track A (the actual
+  remaining value). If pursued: `glib-smoke.mjs` + a booted gio-module load is
+  the gate.
+- [ ] **`deps-overlay.nix` gtk3 — gdk-pixbuf loadable loaders.** DEFERRED, same
+  reasoning: built-in loaders work; loadable loaders are a side-module packaging
+  effort (`loaders.cache` + PIC loader modules), not a flag flip, with marginal
+  value now that the dlopen wall is gone.
+- [x] **`patches/widget-factory/0001` — drop `add_callback_symbol`. DONE +
+  BOOT-VERIFIED.** The `--selftest` now resolves its `.ui` handler purely via
+  `gtk_builder_connect_signals(NULL)` → `g_module_open(NULL)`/`g_module_symbol` →
+  `dlopen(NULL)`/`dlsym`; the build adds dynsym-inject before fpcast + relies on
+  `--export-all`. `widget-factory-smoke` PASSES in a booted guest
+  (`connected_via_gmodule=1 handler_ran=1`), the binary carries `cb.dynsym`. This
+  is the definitive proof the GModule wall is gone. (Mechanism note: `g_module_open(NULL)`/`g_module_symbol` reduce to
   `dlopen(NULL)`/`dlsym`, exactly the path `dlopen-smoke` proves — the old #33
   error was `g_module_open(NULL)` failing because dlopen was stubbed, now real.
   This box is the widget-factory INTEGRATION: it needs the handlers exported

@@ -49,3 +49,26 @@ pass carries the comment that it must never regress to a helper call.
   and is where the end-to-end guest-with-MMU boot happens — that requires the
   joelseverin/linux source + nix/LLVM builds, i.e. the teleported box / CI, not
   this measurement.
+
+## 2026-07-02 — TWO-LEVEL walk re-measurement (kernel-layout tables)
+
+The pass now emits the kernel's standard 2-level walk (PGDIR_SHIFT=22,
+page-sized PTE tables, flag bits masked — design §2 revised: the generic MM
+assumes page-sized PTE tables, so the kernel cannot cheaply keep a 4 MiB flat
+table per process). Same harness, same binary, 2-level identity tables:
+
+| kernel                          | base(ms) | instr(ms) | overhead |
+|---------------------------------|---------:|----------:|---------:|
+| sum_scan (i32 load, 8MB DRAM)   |      7.4 |      22.3 | 3.01× |
+| fill (i32 store, 8MB DRAM)      |      4.8 |      19.9 | 4.10× |
+| chase (ptr-chase, 4MB DRAM)     |     26.1 |      94.2 | 3.60× |
+| mixed (ALU per load, 8MB)       |     57.2 |      57.8 | **1.01×** |
+
+Honest read: the second dependent load + masks roughly moved the PURE-MEMORY
+poles from ~2.2× (single-level) to ~3–4×, while compute-mixed code — the
+realistic shape per FINDINGS.md — stays ≈free. Accepted for A1 (correctness +
+standard MM first). If real-guest profiling shows the memory pole matters, the
+recorded optimization option is a FLAT SHADOW table: arch set_pte/pte_clear
+additionally maintain a flattened single-level mirror the pass walks in one
+load (cost: 4 MiB/process + a shadow-sync line in the pte accessors) — an A3
+optimization, not a correctness need.

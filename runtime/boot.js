@@ -73,6 +73,7 @@ const enc = new TextEncoder();
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
+ *   memory: WebAssembly.Memory,
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
@@ -186,6 +187,9 @@ export async function bootLinux(opts) {
   return {
     /** How many hvc consoles this kernel exposes (hvc0..hvc{N-1}). */
     consoleCount,
+
+    /** Debug/post-mortem: the shared guest memory (see kernel-host.js). */
+    memory: os.memory,
 
     /** A byte duplex bound to one console port (vtermno = port/hvc index). */
     console(vtermno) {
