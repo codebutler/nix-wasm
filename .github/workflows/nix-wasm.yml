@@ -137,6 +137,10 @@ jobs:
             '.#exec-child' \
             '.#grandfork-init' \
             '.#grandfork-child' \
+            '.#deepfork-init' \
+            '.#deepfork-child' \
+            '.#deepfork-exec-init' \
+            '.#deepfork-sig-child' \
             '.#userspace-busybox-fork' \
             --print-out-paths --no-link
 
@@ -332,11 +336,22 @@ jobs:
           run_smoke demo/node/grandfork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" \
             GRANDFORK_INIT="$GI/bin/grandfork-init" GRANDFORK_CHILD="$GC/bin/grandfork-child"
-          # #131 slice 1: the REAL-FORK busybox boots as PID 1 and its steady-state
-          # fork()+exec() works (init forks a child that execs /bin/sh) — the thing
-          # the NOMMU clone-hack could not do under the MMU. (A full multi-process
-          # shell session is still gated on the asyncify deep-stack fix — see the
-          # KNOWN LIMITATION in userspace/busybox-fork.nix.) Gating on the milestone.
+          # task #5 regression: signal-handler delivery to a deep fork+wait parent.
+          # deepfork-sig-child installs a SIGCHLD handler (hush's HUSH_FAST
+          # ingredient) — the minimal repro of the musl __libc_handle_signal
+          # NULL-page load that silently SIGSEGV-killed the busybox shell on the
+          # MMU (harmless-by-luck on NOMMU). Gating.
+          DEI="$(cd .. && nix build -L '.#deepfork-exec-init' --no-link --print-out-paths)"
+          DSC="$(cd .. && nix build -L '.#deepfork-sig-child' --no-link --print-out-paths)"
+          run_smoke demo/node/deepfork-exec-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" \
+            DEEPFORK_EXEC_INIT="$DEI/bin/deepfork-exec-init" \
+            DEEPFORK_CHILD="$DSC/bin/deepfork-sig-child"
+          # #131 slice 1: the REAL-FORK busybox boots as PID 1, init fork+execs
+          # /bin/sh, and the SHELL runs a multi-command script including a forked
+          # NON-LAST external command (/bin/date) + SIGCHLD delivery — the full
+          # multi-process chain the NOMMU clone-hack could not do under the MMU.
+          # Gating.
           BBF="$(cd .. && nix build -L '.#userspace-busybox-fork' --no-link --print-out-paths)"
           run_smoke demo/node/busybox-fork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin"
