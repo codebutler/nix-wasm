@@ -1,0 +1,22 @@
+patches/musl/0000-harness-wasm-arch.patch
+  s_2fff1049ab5e4f::t_cbc4217d3de010 1868-1877
+  s_2fff1049ab5e4f::t_7ca0d8618624a2 1822
+userspace/busybox-fork.nix
+  s_2fff1049ab5e4f::t_f438815f5eaf29 37-38,40-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "93fdd62e1d3935f8077b4a446bdd1b8f34960507",
+  "prompts": {},
+  "sessions": {
+    "s_2fff1049ab5e4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e7c8fba-1047-43cf-b025-6d4c2fd79d0c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
