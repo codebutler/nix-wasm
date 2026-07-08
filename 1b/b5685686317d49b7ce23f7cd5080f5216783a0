@@ -1,0 +1,20 @@
+.github/workflows/nix-wasm.yml
+  s_2fff1049ab5e4f::t_3ec28e32564fc9 140-143
+  s_2fff1049ab5e4f::t_6909abaf6e2ec9 339-354
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1bb5685686317d49b7ce23f7cd5080f5216783a0",
+  "prompts": {},
+  "sessions": {
+    "s_2fff1049ab5e4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e7c8fba-1047-43cf-b025-6d4c2fd79d0c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
