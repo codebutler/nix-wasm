@@ -267,3 +267,47 @@ coverage effort (audit which functions asyncify instrumented via `wasm-dis` on t
 4.48MB module; add an explicit addlist for the shell fork call graph). Tracked as
 task #5 / the remaining #131 slice-1 work. Until then the disc boots a single-fork
 init but not a full interactive multi-process shell.
+
+---
+
+## Update 2026-07-08 — task #5 RESOLVED: it was never a fork bug
+
+The "shell fork mis-rewind" above is root-caused and fixed, and the root-cause
+hypothesis it closed on (whole-module asyncify under-instrumenting the deep
+fork stack) is **refuted**. The isolation chain that got there:
+
+| experiment | result | kills theory |
+|---|---|---|
+| host-walk the `{cur,end}` ctl after the shell's unwind | 1.6 KiB used of 16 KiB | buffer capacity |
+| `deepfork-init` — 256-deep fork+wait at the bottom, return all the way up (9.4 KiB image) | PASS | stack depth |
+| `deepfork-exec-init` + `deepfork-child` — the same, from an exec'd task | PASS | exec'd-task state |
+| `cmd &` from hush's same deep stack | PASS | fork/rewind machinery |
+| `deepfork-sig-child` — the same deep fork+wait **plus a SIGCHLD handler** | deterministic SIGSEGV | — the minimal repro |
+
+Lossless probe tracing (worker `console.error` is dropped on quick worker death;
+probes moved to a synchronous `MMU_FORK_TRACE_FILE` append) showed the parent
+died on a **read fault at VA 0x8** immediately after signal delivery, with the
+kernel-written sigframe intact; `new Error().stack` in the fault import pinned
+the faulting function as `__libc_handle_signal`, and `wasm-dis` showed the
+literal `(i32.load (i32.const 8))`.
+
+**Root cause:** musl's wasm `__libc_handle_signal` (`src/signal/wasm/restore.S`,
+added by `patches/musl/0000-harness-wasm-arch.patch`) read the sigframe's
+`info_param` with a stray extra `iLONG.const 4` — `SP; 4; 4; add; load` =
+`*(int *)8`, an absolute NULL-page load (the orphaned SP validated only because
+the function ends in `unreachable`). On NOMMU, physical address 8 reads 0, so
+`info_param` came back NULL and `!SA_SIGINFO` delivery worked **by luck** for
+the project's entire life (ping's SIGALRM, all signal smokes). On the software
+MMU, VA 8 is unmapped: the first signal-handler delivery SIGSEGV-killed the
+process silently. hush installs a SIGCHLD handler (`CONFIG_HUSH_FAST`), so the
+shell died on the first child-exit delivery — which *looked* like a wrong-continuation
+resume after fork+wait. `cmd &` "worked" because the script finished before the
+SIGCHLD landed; every no-handler gate (fork/fork-exec/grandfork/deepfork) passed
+because no delivery ever happened.
+
+**Fix:** one line in patch 0000 (`info_param = [SP + 4|8]`, stray const removed,
+comment documents the history). **Gates:** `.#deepfork-sig-child` (deep fork+wait
+with a SIGCHLD handler — the minimal repro, was deterministic-FAIL) and
+`busybox-fork-smoke` upgraded to assert a full shell script with a forked
+non-last external command (`/bin/date`) completing. With this, #131 slice 1's
+real acceptance — a multi-process shell script on the software MMU — holds.
