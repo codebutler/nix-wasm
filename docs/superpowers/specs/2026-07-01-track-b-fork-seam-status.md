@@ -225,3 +225,45 @@ userspace, not just a hand-built init. Booting `.#kernel-mmu-a2` on the REAL
 Net: the MMU + fork + exec + instrument-on-load foundation is validated against
 real busybox binaries. Full multi-process busybox on the MMU folds into the
 #131-slice-1 real-fork rebuild.
+
+## UPDATE 2026-07-08 — #131 slice 1: real-fork busybox BOOTS (init fork+exec); shell-fork mis-rewind isolated
+
+The real-fork busybox rebuild landed (commit c20bd2b), on a real build box:
+
+- **muslFork vfork-as-fork** — the fork variant defines `vfork()` as a real
+  `fork()` (safe on the COW MMU), so stock busybox (which still calls `vfork()`
+  directly even with `BB_MMU=1`) routes every spawn through the asyncify seam.
+- **`userspace/busybox-fork.nix`** — `CONFIG_NOMMU=n`, stock `fork()`+exec, built
+  against muslFork, whole-module `wasm-opt --asyncify`. The feared `-shared`
+  dylink-table break did NOT happen once the full `--enable-*` feature set is
+  passed (1.26MB → 4.48MB). Arch-only patch = 0001 minus its five clone-spawn
+  files; 0003–0008 dropped. It **boots as PID 1** and its **steady-state
+  fork()+exec() works** (init forks a child that execs `/bin/sh` →
+  `busybox-fork-smoke` "BBFORK: init alive"). This is exactly what the clone-hack
+  could not do under the per-process MMU.
+- **Second-generation fork PROVEN** — `grandfork-{init,child}` +
+  `grandfork-smoke`: a task that was itself `fork()+exec()`'d then `fork()`s a
+  grandchild and waits → PASS. The engine's fork works from a non-primary
+  (exec'd) task, not just PID 1 (the prior gates only forked from init).
+
+**The one remaining defect (precisely isolated):** a busybox SHELL (hush AND ash,
+tested identically) that `fork+wait`s for a **non-last external command**
+mis-rewinds. The child execs + runs + exits correctly; the PARENT shell resumes
+at the WRONG continuation (no failing syscall, no trap) and exits early instead
+of running the rest of the script. Localization:
+- engine 2nd-gen fork is correct (grandfork PASS);
+- shell builtins + builtin command-lists work; a LAST external command works
+  (exec-in-place, no fork);
+- only shell fork+wait of a non-last external command fails — and BOTH hush and
+  ash fail identically, so it is NOT shell-specific.
+
+=> Root cause: **whole-module asyncify does not correctly preserve/restore
+busybox's DEEP fork call stack** across the `fork()` unwind/rewind. The small
+seam programs (fork-init, grandfork-child) have shallow stacks and rewind fine;
+busybox's deep shell fork path does not. The GOT-indirect `capture_stack` defeats
+asyncify's default reachability (see `userspace/asyncify-cc.nix`), so some frame
+on the shell's fork path is likely under-instrumented. The fix is a binaryen-level
+coverage effort (audit which functions asyncify instrumented via `wasm-dis` on the
+4.48MB module; add an explicit addlist for the shell fork call graph). Tracked as
+task #5 / the remaining #131 slice-1 work. Until then the disc boots a single-fork
+init but not a full interactive multi-process shell.
