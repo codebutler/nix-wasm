@@ -65,4 +65,9 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: bash scripts/publish-linux-channel.sh | tee -a "$GITHUB_STEP_SUMMARY"
+        # pipefail so the script's exit code propagates through `tee` — without it
+        # a failed publish (e.g. the verify's `exit 1`) is masked by tee's 0 and the
+        # job goes green despite publishing nothing.
+        run: |
+          set -o pipefail
+          bash scripts/publish-linux-channel.sh | tee -a "$GITHUB_STEP_SUMMARY"
