@@ -114,7 +114,17 @@ class Cursor {
     return v;
   }
   name() {
-    return textDecoder.decode(this.bytes(this.uleb()));
+    // Browsers reject SAB-backed views in TextDecoder.decode() ("The provided
+    // ArrayBufferView value must not be shared") — and the exec-ABI loader
+    // parses straight out of the SHARED kernel memory (kernel-worker's
+    // ensure_dyn_loader passes a memory.buffer subarray). Node's TextDecoder
+    // ACCEPTS shared views, so the Node boot smokes can't catch this; in a
+    // browser it crashed every dlopen/dlsym (pc: gtk3-demo exit 132). Names
+    // are tiny (section/dep/symbol names), so copying shared views is free.
+    // Same hazard convention as load()'s "compile from an owned, non-shared
+    // copy".
+    const v = this.bytes(this.uleb());
+    return textDecoder.decode(v.buffer instanceof ArrayBuffer ? v : v.slice());
   }
   skip(n) {
     this.i += n;

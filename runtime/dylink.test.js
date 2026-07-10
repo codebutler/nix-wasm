@@ -89,6 +89,38 @@ describe("parseDylinkModule", () => {
   test("rejects non-wasm bytes", () => {
     expect(() => parseDylinkModule(new Uint8Array([1, 2, 3, 4]))).toThrow(/magic/);
   });
+
+  // The exec-ABI loader parses straight out of the SHARED kernel memory, and
+  // BROWSERS reject SAB-backed views in TextDecoder.decode() while Node accepts
+  // them — so the Node smokes shipped a parser that crashed every in-browser
+  // dlopen/dlsym (pc: gtk3-demo exit 132). Emulate the browser restriction by
+  // patching TextDecoder.prototype.decode (dispatch is via the prototype, so
+  // dylink's module-level instance is covered), then parse from a SAB copy.
+  test("parses from a SharedArrayBuffer-backed view (browser TextDecoder rules)", () => {
+    const plain = fixture("side.wasm");
+    const sab = new SharedArrayBuffer(plain.length);
+    const shared = new Uint8Array(sab);
+    shared.set(plain);
+
+    const proto = TextDecoder.prototype;
+    const realDecode = proto.decode;
+    proto.decode = function (input, options) {
+      if (input && input.buffer instanceof SharedArrayBuffer) {
+        throw new TypeError(
+          "Failed to execute 'decode' on 'TextDecoder': The provided ArrayBufferView value must not be shared.",
+        );
+      }
+      return realDecode.call(this, input, options);
+    };
+    try {
+      const info = parseDylinkModule(shared);
+      expect(info.dylink).not.toBeNull();
+      const slots = exportedElemSlots(info);
+      expect(slots.has("side_taken")).toBe(true);
+    } finally {
+      proto.decode = realDecode;
+    }
+  });
 });
 
 describe("DynamicLoader.load", () => {
