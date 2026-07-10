@@ -27,6 +27,28 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
 
+  // pc: report a worker's uncaught error/rejection to the host WITH its real
+  // message + stack. A blob-URL module worker (the shape pc loads under COEP)
+  // delivers an uncaught error to the parent as a DETAIL-LESS ErrorEvent, so the
+  // host's worker.onerror can only log "[object Event]" and the boot would hang.
+  // Capturing it here — where message/stack are intact — and cancelling the
+  // event so the opaque one is suppressed lets the host surface a real cause.
+  // Errors thrown BEFORE this handler registers still reach worker.onerror as a
+  // backstop (kernel-host.js), so a failure is never silent.
+  const reportFatal = (detail) => {
+    try {
+      self.postMessage({ method: "fatal", detail: String(detail) });
+    } catch {}
+  };
+  self.addEventListener("error", (e) => {
+    reportFatal((e.error && (e.error.stack || e.error.message)) || e.message || e);
+    e.preventDefault();
+  });
+  self.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    reportFatal((r && (r.stack || r.message)) || r || "unhandledrejection");
+  });
+
   // pc (#139): per-syscall console tracing is a DEEP-DEBUG aid for bisecting
   // guest failures (Gate 0.2 surfaced silent -ENOMEM; Phase B located the fork
   // arity/signature-mismatch traps this way). It is OFF BY DEFAULT — emitting a
