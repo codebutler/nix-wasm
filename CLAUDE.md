@@ -1007,6 +1007,160 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - Known-good oracle: `~/lwbuild/ws/install/*-wasm32_nommu` (read-only; validate
   against it, never rebuild it here).
 
+## #126 epic — software MMU + asyncify + dlopen (off NOMMU)
+
+The umbrella effort to run the guest as normal MMU Linux and delete the
+NOMMU/no-fork/no-dlopen accommodation layer (#126; sub-issues #127–#131; design
+`docs/superpowers/specs/2026-07-01-software-mmu-asyncify-design.md`). What has
+LANDED on-branch (node-tested where testable; nix/kernel halves build-gated to
+CI / the linux box, per the design's "ship what works" scope):
+
+- **Track C — dlopen / dynamic linking (#130): DONE + BOOT-VERIFIED.** `runtime/demo/node/dlopen-smoke.mjs` passes in a real booted guest (both the raw and the dynsym+fpcast canonical-thunk dl paths run dlopen(NULL)/dlsym + side-module load off the guest FS + ctors); galculator builds with the dynsym seam (carries a `cb.dynsym` section) and its selftest passes. The general
+  runtime side-module loader is `runtime/dylink.js` (`DynamicLoader`:
+  instantiate PIC `SIDE_MODULE`s against the process Memory + shared table, GOT
+  resolution, elem-slot `dlsym` per the fpcast rule, fork/clone REPLAY per Track
+  0 §4). Host surface `__wasm_dl_probe`/`__wasm_dlopen`/`__wasm_dlsym` in
+  `kernel-worker.js`; guest side is musl **patch 0009** (`src/ldso/wasm/`), which
+  also finally DEFINES `__dlsym_time64` (was a dangling stub). `dlsym` of a
+  function returns a **canonical-thunk elem slot** — so a fpcast'd binary whose
+  handlers are resolved BY NAME (GtkBuilder/GModule) needs the **dynsym-inject
+  seam** (`userspace/dynsym.nix` + `scripts/wasm-dynsym-inject.py`, run BEFORE
+  fpcast): it appends every exported function to the elem segment + records a
+  `cb.dynsym` name→slot map the loader treats as authoritative. Wired into
+  galculator. Gate: `runtime/demo/node/dlopen-smoke.mjs` + `userspace/dltest*`.
+  **ENGINE_ABI bumped 7→8** for the dl host surface (needs `sync-to-pc.sh`).
+- **Track C — libffi runtime codegen: DONE + tested.** `runtime/ffi-codegen.js`
+  generates a wasm trampoline module per call signature at runtime (the same
+  instantiate-into-the-shared-table primitive dlopen uses), removing the fixed
+  `wasm32-raw-ffi.c` table's K/M bound + adding structs/varargs. Two ABIs: raw,
+  and the **canonical (i64×128)→i64** path for fpcast'd targets (marshals via
+  binaryen's exact toABI/fromABI). `wasm32-raw-ffi.c` keeps the static table as
+  the fast path and FALLS THROUGH to `__wasm_ffi_call` on out-of-bounds/struct/
+  varargs. `DynamicLoader.isCanonicalSlot` (structural fpcast fingerprint: a
+  `(i64×128)→i64` type) picks the ABI per call.
+- **Track A1 — software-MMU pass: DONE + measured (toolchain half).**
+  `runtime/softmmu-pass.js` rewrites every guest load/store to an INLINED
+  single-level page-table translate reading a per-process `__mmu_pt_base` global.
+  Correct on a real binary across all scalar widths + pointer-chase + real
+  page-table redirection; aborts loud on atomics/SIMD (follow-up). **Measured**
+  (`spikes/softmmu/REAL-BINARY.md`): compute-mixed code ≈free, pure-memory loops
+  ~2.2× — the spike's poles, on real compiler output. **The load-bearing lesson:
+  INLINE the translate, never a helper call** (a helper-call-per-access measured
+  ~12× under V8). The pass also translates **atomics** (0xfe) + **bulk-memory**
+  (memory.copy/fill/init, page-chunked) and does the standard 2-level walk
+  matching the kernel tables; it strips the wasm start section → `__mmu_start`
+  (init-memory must run after `pt_base` is set).
+- **Track A1 — CONFIG_MMU=y kernel half: DONE + IT BOOTS (2026-07-02).**
+  `nix build .#kernel-mmu` builds the software-MMU vmlinux (`kernel.nix`
+  `mmu=true` applies `patches/kernel/0023-wasm-software-mmu.patch`); the
+  `runtime/demo/node/mmu-smoke.mjs` gate boots the NIX-BUILT kernel + a
+  softmmu-instrumented init (`.#mmu-init`) to completion and PASSES with a
+  bit-exact translated checksum (`0x98c9e000`), bulk ops, and uaccess across the
+  boundary — on the FULL production config. Arch layer: `asm/{pgtable,pgalloc,
+  tlbflush,mmu_context,mmu}.h` (2-level over the §1 PTE format; `switch_mm` →
+  `env.__mmu_set_pt_base`; init/destroy_context own the kernel binary buffer),
+  software uaccess table-walk (`mm/uaccess.c` + `fixup_user_fault`), A2 fault
+  entry (`mm/fault.c __wasm_mmu_fault`), `protection_map`. **Two keystone fixes
+  found by BOOTING:** (1) **`mm/vmalloc.c` contiguous-identity under
+  CONFIG_WASM** — an identity-mapped kernel can't reach scattered vmalloc pages,
+  so vmalloc == NOMMU's contiguous `kmalloc`/`kfree`/`virt_to_page` (the arch
+  already commits to MAX_ORDER=16 blocks). This is the RIGHT design for a
+  *software* MMU, not a workaround — and strictly better than instrumenting the
+  kernel (Option B), which would tax every kernel memory access at ~3-4× AND
+  still need the uaccess soft-walk. Unblocked bpf/tty/all vmalloc users. (2)
+  **full initial-stack population at exec** (`fs/binfmt_wasm.c`) — the A1
+  fast-path translate has no present check, so a demand-paged (grown) stack page
+  silently mistranslated (caught: one checksum nibble wrote 0x00 through a zero
+  PTE). Engine half: ENGINE_ABI 9 — `pt_base` rides the exec ABI, applied to the
+  instrumented image's `__mmu_pt_base` global at instantiation (per-task
+  instances each carry their own root). Design +
+  `docs/superpowers/notes/2026-07-02-mmu-kernel-compile-milestone.md`.
+- **Track A2 — demand paging / present-checked translate: DONE + BOOT-VERIFIED
+  (2026-07-02).** `checked: true` instruments the SAME inline walk with a
+  present test after each level; on a miss it calls
+  `env.__wasm_syscall_2(NR_arch_specific_syscall=244, ea, kind)` — reusing the
+  existing syscall entry (NO new ABI; still ENGINE_ABI 9) — routed to
+  `sys_wasm_mmu_fault → __wasm_mmu_fault → handle_mm_fault`, then RE-WALKS. The
+  kernel half drops the A1 full-populate (`patches/kernel/0024`, `a2=true`:
+  removes `VM_LOCKED` def_flags + the initial-stack `mm_populate`) so pages
+  fault in for real. `nix build .#kernel-mmu-a2` + `runtime/demo/node/
+  mmu-smoke-a2.mjs` boots a CHECKED-instrumented init that demand-zero-mmaps
+  8 MiB (per-page write/read/checksum), grows the stack via deep recursion, and
+  PASSES all three (alive + bit-exact mmap checksum + stack-grow). **The
+  keystone fix, found by BOOTING (an infinite refault loop, addr `0x400002c0`
+  handler-returns-0-but-re-walk-still-faults):** the present TEST DIFFERS BY
+  LEVEL. The kernel's folded 2-level tables store the bare pte-page PHYSICAL
+  address in the pgd/pmd slot with NO flag bits (`pmd_present(pmd)=pmd_val`,
+  `pmd_none=!pmd_val`), and only the LEAF pte carries `_PAGE_PRESENT` in bit 0.
+  The pass originally tested `& 1` at BOTH levels, so a validly-populated pgd
+  entry (`0x206ed000`, bit 0 clear) read as not-present and faulted forever.
+  Fix: level-1 present = `entry != 0` (`i32.eqz`), leaf present = `pte & 1` —
+  in both the inline `emitTranslate` and the bulk-op `checkedTranslateBody`.
+  Diagnosed via a gated debug kernel (`.#kernel-mmu-a2-dbg`,
+  `patches/kernel/0025`, `debugTrace=true`) that raw-walks `mm->pgd` after
+  `handle_mm_fault` exactly as the pass does. Same wasm-can't-do-hardware theme:
+  the software walk must match the kernel's PTE/PMD format bit-for-bit. **COW +
+  mprotect DONE too:** the leaf present test is PERMISSION-AWARE — a LOAD needs
+  `_PAGE_PRESENT` (bit 0), a STORE/RMW needs `_PAGE_PRESENT|_PAGE_WRITE` (bits
+  0+1). Testing the write bit on stores is what makes COW work: a copy-on-write
+  page is mapped present-but-read-only, so a store must fault into do_wp_page to
+  duplicate it rather than walking straight through to the shared page (which
+  would corrupt it — e.g. the global zeropage). Boot-verified in mmu-smoke-a2:
+  a first-READ of a fresh anon page maps the zeropage RO (reads 0x00), the WRITE
+  write-protect-faults and COWs (reads back 0xab); an mprotect narrow→read→widen
+  →write round-trip returns 1. Unit-tested in softmmu-pass.test.js (store to a
+  present-RO page faults kind=1 then succeeds; load from it never faults). Both
+  the inline `emitTranslate` (compile-time kind) and the bulk-op
+  `checkedTranslateBody` (runtime `need = 1 | (kind<<1)`) enforce it. Both
+  mmu-smoke + mmu-smoke-a2 are now GATED in `nix-wasm.yml`'s boot-smoke job.
+  **REMAINING for Track A:** none — demand paging + COW + mprotect all boot-
+  verified and gated; the fork COW replay is exercised by Track B.
+- **Track B — REAL fork() BOOTS on the software MMU (returns twice + COW).**
+  The MMU-native fork is DONE and boot-verified — NOT PR #20's retired NOMMU
+  per-process-Memory model. Three parts: (1) **musl** — the fork-asyncify seam
+  (`_Fork`→`capture_stack`) as `patches/musl/0010`, a `fork ? false` variant of
+  `musl.nix` (`.#musl-fork`); (2) **kernel** — `patches/kernel/0026-wasm-mmu-fork
+  .patch` (applied with 0023): `wasm_fork_current(user_sp,user_tls,fork_ctl)`
+  stamps the fork-time SP/TLS into pt_regs (fork bypasses syscall entry), arms
+  `fork_ctl` on `current`'s switch_stack (copy_thread's copy carries it to the
+  child), runs `kernel_clone(SIGCHLD, no CLONE_VM)` → generic COW `dup_mmap`;
+  `copy_thread` forces `CPUFLAGS_USER_TASK_DEFAULT` on the child; `__switch_to`
+  passes `fork_ctl` via `wasm_create_and_run_task`'s new trailing arg; (3)
+  **engine** — `kernel-worker.js` (ENGINE_ABI 10): `env.capture_stack` per
+  worker, `run_user_entry` drives the fork loop (parent unwind →
+  `wasm_fork_current` → dual rewind on the SAME shared arena with per-process
+  `pt_base`), a fork child REWINDS the captured stack at first run.
+  **FULL POSIX fork()+wait() (one boot, `fork-smoke.mjs`, gated in `nix-wasm.yml`):**
+  `child ret=0 witness=0x10c` AND `parent pid=0x1e witness=0x1b0 status=0x7` —
+  fork returned twice, the private witness at one VA COW-diverged, and the parent
+  BLOCKED in `waitpid()`, was woken, and reaped the child's `exit(7)`. Mechanism
+  also unit-proven in `softmmu-fork.test.js` (asyncify×softmmu×COW, two instances
+  on one Memory).
+  **The keystone engine fix (a GENERAL software-MMU correctness bug, not
+  fork-specific):** the kernel's `switch_mm` calls `__mmu_set_pt_base(next->pgd)`
+  on every context switch, running in whatever worker executes the scheduler —
+  including a task's OWN worker when it schedules out (`switch_mm(self, next)`
+  writes `next`'s pgd into self's instance `__mmu_pt_base`, then self parks).
+  Nothing cross-worker restored it, so a woken task walked the WRONG page table
+  and fault-looped on its own stack (found via a fault-rate boot trace: 130M+
+  faults at one stack addr). A worker's instance `pt_base` is IMMUTABLE after
+  instantiation, so `kernel-worker.js` remembers it as `own_pt_base` and
+  re-applies it in `serialize_me` after each wake. Single-task A2 smokes never
+  switch between two user tasks, so never hit it — the fork smoke is the first
+  two-user-task test. This unblocks the **#131 slice-1 payoff** (retire forkshell
+  ash, busybox spawn patches, glib's posix_spawn-only patch; #93). Full record:
+  `docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md` (UPDATE
+  2026-07-02 final). ENGINE_ABI 10 needs `runtime/sync-to-pc.sh` before a pc deploy.
+- **#131 cleanup** — the payoff. Slice 2 (dlopen accommodations) is unblocked by
+  Track C; slices 1/3 gated on Track B/A world builds. Execution-ready audit
+  (each box + exact edit + verify gate): `docs/superpowers/specs/
+  2026-07-01-cleanup-131-audit.md`. NOT executed blind — the glib/gtk3 overrides
+  need a boot to verify (PRIME DIRECTIVE).
+
+The new `runtime/*.js` modules (`dylink.js`, `ffi-codegen.js`, `softmmu-pass.js`,
+`asyncify.js`) are pure + unit-tested (`bun test`); like all `kernel-worker.js`
+edits, the ABI-8 host surface needs a `sync-to-pc.sh` before a pc deploy.
+
 ## Plans & future work
 
 Phases 1–4 of the "NixOS in wasm" vision are done (toolchain → userspace →

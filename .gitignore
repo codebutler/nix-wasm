@@ -3,3 +3,7 @@ result-*
 .direnv/
 .artifacts/
 .superpowers/
+
+# CONFIG_MMU=y kernel probe tree (reproducible: kernelSrc + patches/kernel/* +
+# docs/superpowers/notes/mmu-wip-0023-arch-layer.patch; see the milestone note)
+/scratch-mmu-probe/

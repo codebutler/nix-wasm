@@ -38,4 +38,31 @@
 // virtio_config_changed() → hvc_resize(). New host↔guest surface (the config irq
 // + cols/rows in console config space), so an old engine can't drive a new
 // image's resize path: bump.
-export const ENGINE_ABI = 7;
+//
+// 8 (#126 Track C / #130): runtime dynamic linking — the user-instance import
+// surface grew __wasm_dl_probe / __wasm_dlopen / __wasm_dlsym (runtime/dylink.js
+// loader: side-module instantiation against the process Memory + shared table,
+// GOT resolution, elem-slot dlsym per the fpcast rule), and clone/fork task
+// creation now carries + replays the parent's side-module set (Track 0 §4). A
+// guest musl built with the wasm dlopen port fails to instantiate on an old
+// engine (missing env imports): bump.
+//
+// 9 (#126 Track A / #128): software MMU — the KERNEL import surface grew
+// env.__mmu_set_pt_base (an MMU vmlinux's switch_mm/activate_mm hands over the
+// incoming mm's page-table root; --import-undefined materializes the import
+// only in CONFIG_MMU=y builds), the exec ABI grew a trailing pt_base arg on
+// wasm_load_executable / wasm_create_and_run_task (the engine applies it to a
+// softmmu-instrumented image's __mmu_pt_base global at instantiation), and
+// clone task-creation messages carry pt_base. An MMU vmlinux fails to
+// instantiate on an old engine (missing env import): bump. (NOMMU images
+// remain compatible in both directions — extra trailing args are ignored by
+// JS — but minEngine stamps conservatively from this constant as always.)
+// 10 (#129 Track B: MMU-native fork): wasm_create_and_run_task grew a trailing
+// fork_ctl arg (the asyncify fork control-buffer pointer, 0 = not a fork
+// child), the user-instance import surface grew env.capture_stack (the musl
+// 0010 _Fork seam), and the engine gained the fork orchestration — parent
+// unwind → wasm_fork_current (kernel COW mm dup) → dual rewind on the SAME
+// shared arena with per-process pt_base. A fork-enabled guest on an old engine
+// would fail to instantiate (missing capture_stack) or _start() fork children
+// from scratch: bump.
+export const ENGINE_ABI = 10;

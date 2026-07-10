@@ -128,6 +128,20 @@ jobs:
             '.#wasm-base-squashfs' \
             '.#wasm-initramfs' \
             '.#linux-image' \
+            '.#kernel-mmu' \
+            '.#kernel-mmu-a2' \
+            '.#mmu-init' \
+            '.#mmu-init-a2' \
+            '.#fork-init' \
+            '.#fork-exec-init' \
+            '.#exec-child' \
+            '.#grandfork-init' \
+            '.#grandfork-child' \
+            '.#deepfork-init' \
+            '.#deepfork-child' \
+            '.#deepfork-exec-init' \
+            '.#deepfork-sig-child' \
+            '.#userspace-busybox-fork' \
             --print-out-paths --no-link
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
@@ -261,6 +275,86 @@ jobs:
           # config-change irq; the stock driver hvc_resize()s the tty. Proven via
           # `stty size`. Gating — a regression (resize not propagating) fails.
           run_smoke demo/node/resize-smoke.mjs
+
+      # #128 Track A software MMU: boot a softmmu-instrumented init under the
+      # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
+      # present check, pages populated at exec) checksums bit-exact; A2 (checked
+      # translate, VM_LOCKED/populate dropped) demand-pages an 8 MiB mmap + grows
+      # the stack via the __wasm_mmu_fault path. Both substitute their kernels
+      # (.#kernel-mmu / .#kernel-mmu-a2) + inits (.#mmu-init / .#mmu-init-a2)
+      # from Cachix; the smokes instrument the init at runtime and boot nix:false.
+      - name: MMU smokes (#128 software MMU — A1 checksum + A2 demand paging)
+        working-directory: runtime
+        run: |
+          run_smoke() {
+            local script="$1"; shift
+            local attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt)"
+              set +e
+              env "$@" node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then
+                echo "$script inconclusive (boot panic) — retrying"; continue
+              fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"; return 2
+          }
+          A1K="$(cd .. && nix build -L '.#kernel-mmu' --no-link --print-out-paths)"
+          A1I="$(cd .. && nix build -L '.#mmu-init' --no-link --print-out-paths)"
+          A2K="$(cd .. && nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)"
+          A2I="$(cd .. && nix build -L '.#mmu-init-a2' --no-link --print-out-paths)"
+          # A1: fast-path translate, bit-exact checksum. Gating.
+          run_smoke demo/node/mmu-smoke.mjs \
+            MMU_VMLINUX="$A1K/vmlinux.wasm" MMU_INIT="$A1I/bin/mmu-init"
+          # A2: present-checked translate, demand paging + stack growth. Gating.
+          run_smoke demo/node/mmu-smoke-a2.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" MMU_INIT="$A2I/bin/mmu-init-a2"
+          # #129 Track B: REAL fork() on the software MMU — fork() returns twice
+          # (parent pid + child 0) with COW-isolated memory, under .#kernel-mmu-a2
+          # (patch 0026) + the asyncify-seam .#fork-init (muslFork 0010). Gating.
+          FORKI="$(cd .. && nix build -L '.#fork-init' --no-link --print-out-paths)"
+          run_smoke demo/node/fork-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" FORK_INIT="$FORKI/bin/fork-init"
+          # #131/#129: fork + EXEC + wait (what busybox init does) — the child
+          # execve()s a fresh image, the parent reaps it. RAW binaries, the
+          # engine instruments each at load. Gating.
+          FEI="$(cd .. && nix build -L '.#fork-exec-init' --no-link --print-out-paths)"
+          EC="$(cd .. && nix build -L '.#exec-child' --no-link --print-out-paths)"
+          run_smoke demo/node/fork-exec-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" \
+            FORK_EXEC_INIT="$FEI/bin/fork-exec-init" EXEC_CHILD="$EC/bin/exec-child"
+          # #131: second-GENERATION fork — a task that was itself fork()+exec()'d
+          # then fork()s a grandchild and waits. Proves the engine's fork machinery
+          # works from a non-primary (exec'd) task, not just PID 1. Gating.
+          GI="$(cd .. && nix build -L '.#grandfork-init' --no-link --print-out-paths)"
+          GC="$(cd .. && nix build -L '.#grandfork-child' --no-link --print-out-paths)"
+          run_smoke demo/node/grandfork-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" \
+            GRANDFORK_INIT="$GI/bin/grandfork-init" GRANDFORK_CHILD="$GC/bin/grandfork-child"
+          # task #5 regression: signal-handler delivery to a deep fork+wait parent.
+          # deepfork-sig-child installs a SIGCHLD handler (hush's HUSH_FAST
+          # ingredient) — the minimal repro of the musl __libc_handle_signal
+          # NULL-page load that silently SIGSEGV-killed the busybox shell on the
+          # MMU (harmless-by-luck on NOMMU). Gating.
+          DEI="$(cd .. && nix build -L '.#deepfork-exec-init' --no-link --print-out-paths)"
+          DSC="$(cd .. && nix build -L '.#deepfork-sig-child' --no-link --print-out-paths)"
+          run_smoke demo/node/deepfork-exec-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" \
+            DEEPFORK_EXEC_INIT="$DEI/bin/deepfork-exec-init" \
+            DEEPFORK_CHILD="$DSC/bin/deepfork-sig-child"
+          # #131 slice 1: the REAL-FORK busybox boots as PID 1, init fork+execs
+          # /bin/sh, and the SHELL runs a multi-command script including a forked
+          # NON-LAST external command (/bin/date) + SIGCHLD delivery — the full
+          # multi-process chain the NOMMU clone-hack could not do under the MMU.
+          # Gating.
+          BBF="$(cd .. && nix build -L '.#userspace-busybox-fork' --no-link --print-out-paths)"
+          run_smoke demo/node/busybox-fork-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin"
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,

@@ -7,7 +7,7 @@
 # pinned nixpkgs rev (which modules declare/read which options moves between
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
-{ nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix }:
+{ nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix, extraSystemPackages ? [ ] }:
 let
   lib = cross.lib;
   modulesPath = nixpkgs + "/nixos/modules";
@@ -107,7 +107,7 @@ let
                             # initramfs extraBins) so its store path — and thus its
                             # $out/share/galculator/ui/*.ui, loaded at runtime from the
                             # hardcoded PACKAGE_UI_DIR — enters the served /nix closure.
-        ] ++ toolchain);  # nix, clang+wasm-ld, cc, make — the in-guest toolchain, on PATH from the closure
+        ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
         # NIX_PATH for the in-guest `nixpkgs` channel (userspace/wasm-nixpkgs-channel.nix):

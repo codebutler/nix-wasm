@@ -9,13 +9,22 @@
 #
 # Compiled against compiler-rt (--rtlib via LIBCC). No other deps — musl is the
 # base of the sysroot.
-{ pkgs, compilerRt }:
+# `fork ? false` (#129 Track B, muslFork variant): when true, KEEP fork() and
+# route _Fork() through the asyncify double-return seam (patch 0010) instead of
+# the clone syscall. This is the userspace half of real fork() over the software
+# MMU + COW (#128). The seam is foundation-independent — _Fork() just calls
+# capture_stack() (a host import the ENGINE handles); the address-space dup +
+# kernel clone + rewind live in the engine/kernel, not here. capture_stack is an
+# undefined symbol resolved only at PROGRAM link (via forkStdenv's allow-list +
+# --asyncify pass), so the libc.a itself builds unchanged. The DEFAULT (fork =
+# false) is the standard no-fork guest libc (fork()/vfork() removed → link error).
+{ pkgs, compilerRt, fork ? false }:
 let
   llvm = pkgs.llvmPackages_21;
   bt = llvm.bintools-unwrapped;
 in
 pkgs.stdenv.mkDerivation {
-  pname = "musl-wasm32-nommu";
+  pname = if fork then "musl-wasm32-nommu-fork" else "musl-wasm32-nommu";
   version = "1.2.5";
 
   # musl 1.2.5 official release tarball (== git tag v1.2.5 = 7fd8de89, which the
@@ -36,6 +45,21 @@ pkgs.stdenv.mkDerivation {
     # dance on wasm (CRTJMP abort()s) → munmap+exit inline instead. Fixes GLib
     # GThreadPool worker exit → SIGILL that blocked GTK apps (gtk3-widget-factory).
     ../patches/musl/0008-wasm-unmapself-no-stack-switch.patch
+    # 0009 (#126 Track C / #130): real dlopen/dlsym/dlclose on wasm. The libc
+    # reads the side-module file + allocates its data region from the process
+    # arena; the ENGINE instantiates/links it (runtime/dylink.js via the
+    # __wasm_dl_probe/__wasm_dlopen/__wasm_dlsym host imports — ENGINE_ABI 8,
+    # allow-listed in wasm-host-imports.nix). Also resolves the long-dangling
+    # __dlsym_time64 import (dlfcn.h's time64 __REDIR of dlsym) to a REAL
+    # dlsym. dlclose is leak-until-exit (table slots can't be reclaimed).
+    ../patches/musl/0009-wasm-dlopen-dlsym-host-loader.patch
+  ] ++ pkgs.lib.optionals fork [
+    # 0010 (#129 Track B, muslFork only): _Fork() over the asyncify double-return
+    # seam — fork() no longer issues the clone syscall; it calls capture_stack()
+    # (a host import) which the engine unwinds + dual-rewinds so fork() returns
+    # twice. Applies on top of 0007's clone-arity baseline. Only in the fork
+    # variant; the default guest libc has fork() removed (postPatch below).
+    ../patches/musl/0010-fork-asyncify-seam.patch
   ];
 
   nativeBuildInputs = [ bt ];
@@ -68,10 +92,31 @@ pkgs.stdenv.mkDerivation {
     # SIGILL/abort at runtime. posix_spawn (clone-with-fn) is the spawn contract;
     # musl's system()/popen() already route through it.
     # fork(): drop the function (lines `pid_t fork(void)` … first column-0 `}`),
-    # keeping fork.c's lock/atfork weak-aliases that other TUs depend on.
-    sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c
-    # vfork(): the whole TU is just the function — empty it so no symbol remains.
-    : > src/process/vfork.c
+    # keeping fork.c's lock/atfork weak-aliases that other TUs depend on. SKIPPED
+    # in the fork variant (#129) — there fork() is kept and _Fork() routes through
+    # the asyncify seam (patch 0010) instead of removed.
+    ${pkgs.lib.optionalString (!fork) "sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c"}
+    # vfork(): the whole TU is just an asm return-twice stub that can't work on
+    # wasm. In the DEFAULT (no-fork) guest libc, empty it so no symbol remains
+    # (posix_spawn/clone-with-fn is the spawn contract; a live vfork fails to LINK).
+    # In the FORK variant (#131), define vfork() as a REAL fork(): on the software
+    # MMU every process has its own COW page table, so vfork-as-fork is
+    # semantically safe (vfork is only an optimization of fork; correct vforking
+    # code execs or _exits in the child before touching shared state, and the
+    # shared-memory error-reporting trick that would break is a BB_MMU=0-only
+    # path busybox does NOT use when built CONFIG_NOMMU=n). This lets stock
+    # busybox — which still calls vfork() directly in init's run() and a few other
+    # sites even with BB_MMU=1 — spawn every child through the asyncify fork seam
+    # instead of the NOMMU clone-with-fn hack. fork() itself returns twice via the
+    # seam (patch 0010); vfork() inherits that by delegating.
+    ${if fork then ''
+      cat > src/process/vfork.c <<'EOF'
+#include <unistd.h>
+pid_t fork(void);
+/* vfork-as-fork: safe on the COW software MMU (see musl.nix rationale). */
+pid_t vfork(void) { return fork(); }
+EOF
+'' else ": > src/process/vfork.c"}
     # posix_fallocate: emulate when the filesystem has no fallocate, like glibc.
     # On the NOMMU wasm guest CONFIG_SHMEM is gated off behind MMU (kernel.nix),
     # so tmpfs falls back to ramfs and NO mounted fs implements ->fallocate — the

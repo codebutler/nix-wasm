@@ -29,6 +29,10 @@
       # against it.
       compilerRt = import ./toolchain/compiler-rt.nix { inherit pkgs; };
       musl = import ./toolchain/musl.nix { inherit pkgs compilerRt; };
+      # #129 Track B: the fork variant of musl — fork() over the asyncify
+      # double-return seam (patch 0010). Userspace half of real fork() on the
+      # software MMU + COW; consumed by toolchain/wasm-fork-stdenv.nix (forkStdenv).
+      muslFork = import ./toolchain/musl.nix { inherit pkgs compilerRt; fork = true; };
       kernelHeaders = import ./toolchain/kernel-headers.nix { inherit pkgs; };
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
@@ -54,6 +58,12 @@
       # boot yet (runtime forward-port pending).
       kernelSrc = import ./toolchain/kernel-src.nix { inherit pkgs; };
       kernel = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; };
+      # #128 Track A: the CONFIG_MMU=y software-MMU vmlinux (applies patch 0023).
+      kernelMmu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; };
+      # #128 A2: demand-paging kernel (VM_LOCKED/populate dropped) for checked userspace.
+      kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
+      # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
+      kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
@@ -71,6 +81,80 @@
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; muslWasm = musl; }) ];
       };
 
+      # #129 Track B: the reusable fork-enabled cross-stdenv adapter. Links
+      # muslFork's libc.a first (so the asyncify-seam _Fork wins) + runs
+      # wasm-opt --asyncify over the final link. A package opts into real fork by
+      # building through forkStdenv.enableForkFor. (Build-verified via muslFork
+      # here; a real fork BOOT also needs the kernel dup_mmap+COW path + the
+      # engine child-in-shared-arena wiring — see the Track B status doc.)
+      forkStdenv = import ./toolchain/wasm-fork-stdenv.nix { inherit pkgs cross muslFork; };
+      # #129: the per-source asyncify builder (the PR #20-proven seam shape) —
+      # cross cc + muslFork's libc.a first + host wasm-opt --asyncify with
+      # capture_stack as the sole unwind import. Used for the fork acceptance
+      # programs; real packages go through forkStdenv.
+      asyncifyCc = import ./userspace/asyncify-cc.nix {
+        inherit pkgs cross muslFork;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # The real-fork PID-1 for the MMU fork smoke (#129): fork() + waitpid +
+      # COW witness divergence, booted by runtime/demo/node/fork-smoke.mjs under
+      # .#kernel-mmu-a2 (patch 0026) after CHECKED softmmu instrumentation.
+      forkInit = asyncifyCc {
+        name = "fork-init";
+        src = ./userspace/fork-init.c;
+        forkSeam = true;
+      };
+      # #131/#129: fork + EXEC + wait — the capstone primitive (what busybox init
+      # does). forkExecInit (asyncify seam) fork()s, the child execve()s
+      # execChild (a raw fresh image), the parent waitpid()s. Both instrumented
+      # at load by the engine; booted by runtime/demo/node/fork-exec-smoke.mjs.
+      execChild = import ./userspace/exec-child.nix { inherit cross; };
+      forkExecInit = asyncifyCc {
+        name = "fork-exec-init";
+        src = ./userspace/fork-exec-init.c;
+        forkSeam = true;
+      };
+      # #131 diagnosis: the exec'd-task-forks path (a fork+exec'd task that
+      # itself fork()s + waits — what busybox sh does, and the one path the
+      # fork-exec gate never covered). Both are asyncify-seam programs.
+      grandforkInit = asyncifyCc {
+        name = "grandfork-init";
+        src = ./userspace/grandfork-init.c;
+        forkSeam = true;
+      };
+      grandforkChild = asyncifyCc {
+        name = "grandfork-child";
+        src = ./userspace/grandfork-child.c;
+        forkSeam = true;
+      };
+      # deepfork-init (#131 diagnosis): fork()+wait() from a DEEP call stack, then
+      # return all the way back up. Isolates stack-depth-at-fork as the variable
+      # (grandfork forks from a shallow main and passes; busybox sh forks deep).
+      deepforkInit = asyncifyCc {
+        name = "deepfork-init";
+        src = ./userspace/deepfork-init.c;
+        forkSeam = true;
+      };
+      # The exec'd+deep cell: an init fork+execs deepfork-child, which forks from
+      # a DEEP stack. Isolates whether exec'd-task + deep-fork is the busybox trigger.
+      deepforkChild = asyncifyCc {
+        name = "deepfork-child";
+        src = ./userspace/deepfork-child.c;
+        forkSeam = true;
+      };
+      deepforkExecInit = asyncifyCc {
+        name = "deepfork-exec-init";
+        src = ./userspace/deepfork-exec-init.c;
+        forkSeam = true;
+      };
+      # The MINIMAL repro of the busybox shell-fork failure (task #5): the same
+      # exec'd+deep fork+wait, PLUS a SIGCHLD handler (hush's HUSH_FAST ingredient).
+      deepforkSigChild = asyncifyCc {
+        name = "deepfork-sig-child";
+        src = ./userspace/deepfork-sig-child.c;
+        forkSeam = true;
+      };
+
       # ---- the guest busybox: 1.36.1 + the harness wasm-arch/clone-spawn patch,
       # built with kernelCC over the musl sysroot. THE fix for in-guest spawn —
       # stock cross.busybox forks/vforks (impossible on the wasm NOMMU clone-with-
@@ -81,6 +165,13 @@
       };
       wasmBusybox = import ./userspace/busybox.nix {
         inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+      # #131 slice 1: the REAL-FORK busybox — stock fork()+exec (CONFIG_NOMMU=n),
+      # muslFork seam + whole-module asyncify, no clone-spawn hack. Boots as init
+      # on .#kernel-mmu-a2 for a genuine multi-process system. See busybox-fork.nix.
+      wasmBusyboxFork = import ./userspace/busybox-fork.nix {
+        inherit pkgs cross muslFork;
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
       # busybox ASH — the autoconf-capable guest shell (forkshell, NOMMU
@@ -179,6 +270,16 @@
 
       # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery on
       # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
+      # mmu-init — minimal instrumented PID-1 for the software-MMU smoke (#128).
+      mmuInit = import ./userspace/mmu-init.nix {
+        inherit cross;
+      };
+
+      # #128 A2: demand-paging PID-1 (checked-instrumented by the A2 smoke).
+      mmuInitA2 = import ./userspace/mmu-init-a2.nix {
+        inherit cross;
+      };
+
       sigalrmTest = import ./userspace/sigalrm-test.nix {
         inherit cross;
       };
@@ -362,6 +463,13 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # dltest (#126 Track C / #130): in-guest dlopen/dlsym acceptance — the
+      # plain (raw-signature) and dynsym+fpcast (canonical-thunk) dl paths, over
+      # musl patch 0009 + the runtime/dylink.js loader. In systemPackages (via
+      # extraSystemPackages) so its side-module store paths ride the served
+      # closure; also in extraBins for the /bin shortcut.
+      wasmDltest = import ./userspace/dltest.nix { inherit cross; };
+
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
@@ -370,6 +478,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
+        extraSystemPackages = [ wasmDltest ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -398,7 +507,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -507,6 +616,22 @@
 
         inherit compilerRt musl kernelHeaders libcxx sysroot;
 
+        # #129 Track B: the fork variant of musl (fork() over the asyncify seam).
+        # Build-verifies the userspace half of real fork() compiles.
+        musl-fork = muslFork;
+        # #129: the real-fork PID-1 for the MMU fork smoke → $out/bin/fork-init.
+        fork-init = forkInit;
+        # #131/#129: fork+exec+wait capstone → $out/bin/fork-exec-init + exec target.
+        fork-exec-init = forkExecInit;
+        exec-child = execChild;
+        # #131 diagnosis: exec'd-task-forks isolation test.
+        grandfork-init = grandforkInit;
+        grandfork-child = grandforkChild;
+        deepfork-init = deepforkInit;
+        deepfork-child = deepforkChild;
+        deepfork-exec-init = deepforkExecInit;
+        deepfork-sig-child = deepforkSigChild;
+
         # Kernel-only patched lld with wasm-ld GNU linker-script support.
         patched-lld = patchedLld;
 
@@ -515,6 +640,9 @@
 
         # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
         kernel = kernel;
+        kernel-mmu = kernelMmu;
+        kernel-mmu-a2 = kernelMmuA2;
+        kernel-mmu-a2-dbg = kernelMmuA2Dbg;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
@@ -540,6 +668,8 @@
         make-wasm = makeWasm;
 
         userspace-busybox = wasmBusybox;
+        # #131 slice 1: real-fork busybox (CONFIG_NOMMU=n + muslFork + asyncify).
+        userspace-busybox-fork = wasmBusyboxFork;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
 
         # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
@@ -580,6 +710,10 @@
         # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
         # on the wasm guest (#35) → $out/bin/sigalrm-test.
         sigalrm-test = sigalrmTest;
+        # minimal PID-1 for the software-MMU smoke (#128) → $out/bin/mmu-init.
+        mmu-init = mmuInit;
+        # demand-paging PID-1 for the A2 smoke (#128) → $out/bin/mmu-init-a2.
+        mmu-init-a2 = mmuInitA2;
 
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
@@ -677,6 +811,10 @@
         # wasm crossSystem. Build with `nix build .#wasm-nixpkgs-channel`; verify it
         # evaluates with e.g. `nix eval --raw -f <out>/default.nix file.drvPath`.
         wasm-nixpkgs-channel = wasmNixpkgsChannel;
+
+        # In-guest dlopen/dlsym acceptance (#130): $out/bin/{dltest,dltest-fpcast}
+        # + $out/share/dltest/*.so. Gate: runtime demo/node/dlopen-smoke.mjs.
+        dltest = wasmDltest;
 
         # The single versioned `linux` boot bundle (pc#315): $out/iso/linux.iso.
         linux-image = linuxImage;

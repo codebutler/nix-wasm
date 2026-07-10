@@ -1,0 +1,167 @@
+# nix-wasm #129 (Track B, MMU fork — applied with 0023 on mmu=true builds):
+# real fork() on the software-MMU foundation. wasm_fork_current(user_sp,
+# user_tls, fork_ctl) is a host->kernel export the runtime calls after the
+# user instance unwound its fork() stack (asyncify double-return, musl patch
+# 0010): it stamps the true fork-time SP/TLS into pt_regs/switch_stack (fork
+# bypasses syscall entry), arms fork_ctl on current's switch_stack (so
+# copy_thread's existing switch_stack copy carries it into the child), and
+# runs a plain kernel_clone(SIGCHLD, no CLONE_VM) -> the GENERIC COW mm dup
+# (dup_mm -> pgd_alloc -> dup_mmap -> copy_page_range; write faults COW via
+# #128 A2). __switch_to consumes fork_ctl once at the child's first run and
+# reports it via wasm_create_and_run_task's new trailing arg (ENGINE_ABI 10)
+# so the child worker REWINDS the captured stack instead of _start()ing.
+# NO per-process Memory mint, NO user_as machinery — PR #20's #0026 (the
+# NOMMU model) is retired; see the Track B status doc.
+--- a/arch/wasm/include/uapi/asm/ptrace.h
++++ b/arch/wasm/include/uapi/asm/ptrace.h
+@@ -27,6 +27,18 @@
+ 
+ 	/*  When user task, the __tls_base global. Unused by the kernel. */
+ 	unsigned long tls;
++
++	/*
++	 * #129 (MMU fork): the asyncify control-buffer pointer of an in-flight
++	 * fork(). Set on CURRENT by wasm_fork_current() just before
++	 * kernel_clone() so copy_thread()'s switch_stack copy carries it into
++	 * the fork child; cleared on the parent right after, and consumed once
++	 * at the child's first run (__switch_to reports it to the runtime via
++	 * wasm_create_and_run_task, whose worker asyncify-REWINDS the captured
++	 * fork() stack instead of _start()ing). 0 = not a fork child. Unused by
++	 * the kernel itself.
++	 */
++	unsigned long fork_ctl;
+ };
+ 
+ /* Registers for user processes (gdb etc.), stable ABI compared to pt_regs. */
+--- a/arch/wasm/include/asm/wasm.h
++++ b/arch/wasm/include/asm/wasm.h
+@@ -15,7 +15,8 @@
+ 	struct task_struct *prev_task, struct task_struct *new_task,
+ 	const char *name, unsigned long bin_start, unsigned long bin_end,
+ 	unsigned long data_start, unsigned long table_start,
+-	unsigned long pt_base); /* #128: page-table root, 0 on NOMMU */
++	unsigned long pt_base, /* #128: page-table root, 0 on NOMMU */
++	unsigned long fork_ctl); /* #129: asyncify fork ctl, 0 = not a fork child */
+ extern void wasm_release_task(struct task_struct *dead_task);
+ extern struct task_struct *wasm_serialize_tasks(struct task_struct *prev_task,
+ 	struct task_struct *next_task);
+--- a/arch/wasm/include/asm/entry.h
++++ b/arch/wasm/include/asm/entry.h
+@@ -26,4 +26,14 @@
+ 
+ __visible void raise_exception(void);
+ 
++/*
++ * #129 (MMU fork): host -> kernel export. The runtime calls this on the forking
++ * task's worker AFTER the user instance has unwound its fork() stack
++ * (asyncify), to allocate the child task/pid/mm (kernel_clone, SIGCHLD, no
++ * CLONE_VM -> generic COW mm dup under CONFIG_MMU). __visible so --export-all
++ * keeps it through gc-sections. Returns the child pid (or -errno).
++ */
++__visible long wasm_fork_current(unsigned long user_sp, unsigned long user_tls,
++				 unsigned long fork_ctl);
++
+ #endif /* _ASM_WASM_ENTRY_H */
+--- a/arch/wasm/kernel/process.c
++++ b/arch/wasm/kernel/process.c
+@@ -4,6 +4,7 @@
+ #include <linux/ptrace.h>
+ #include <linux/sched.h>
+ #include <linux/sched/debug.h>
++#include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/printk.h>
+ #include <asm/cpuflags.h>
+@@ -56,6 +57,7 @@
+ 	unsigned long bin_end = 0U;
+ 	unsigned long data_start = 0U;
+ 	unsigned long pt_base = 0U; /* #128: MMU page-table root (0 = NOMMU) */
++	unsigned long fork_ctl = 0U; /* #129: asyncify fork ctl (0 = not a fork child) */
+ 
+ 	if (task_thread_info(next_task)->flags & _TIF_NEVER_RUN) {
+ 		task_thread_info(next_task)->flags &= ~_TIF_NEVER_RUN;
+@@ -75,11 +77,21 @@
+ 			 * shared MMU register to swap on context switch. */
+ 			pt_base = (unsigned long)next_task->mm->pgd;
+ #endif
++			/*
++			 * #129 (MMU fork): consume-once. Nonzero only for a fork
++			 * child (set by wasm_fork_current on the parent, carried
++			 * by copy_thread's switch_stack copy). The child worker
++			 * asyncify-REWINDS the captured fork() stack at this ctl
++			 * instead of _start()ing; clearing it here keeps a later
++			 * exec/rerun of the same task from rewinding again.
++			 */
++			fork_ctl = task_switch_stack(next_task)->fork_ctl;
++			task_switch_stack(next_task)->fork_ctl = 0;
+ 		}
+ 
+ 		/* This is called instead of serialize the first time. */
+ 		last_task = wasm_create_and_run_task(prev_task, next_task, name,
+-			bin_start, bin_end, data_start, 0U, pt_base);
++			bin_start, bin_end, data_start, 0U, pt_base, fork_ctl);
+ 	} else {
+ 		last_task = wasm_serialize_tasks(prev_task, next_task);
+ 	}
+@@ -197,6 +209,19 @@
+ 		child_switch_stack->fn_arg = NULL;
+ 		if (args->flags & CLONE_SETTLS)
+ 			child_switch_stack->tls = args->tls;
++
++		if (!(args->flags & CLONE_VM)) {
++			/*
++			 * #129 (MMU fork): fork() is driven host-side
++			 * (wasm_fork_current), NOT through syscall entry, so the
++			 * parent's saved cpuflags may be stale kernel-mode —
++			 * which would trip "Syscall called when in kernel mode"
++			 * on the child's first post-rewind syscall. The child
++			 * resumes USER code; force the user-task default.
++			 * (fork_ctl already rode the switch_stack copy above.)
++			 */
++			child_pt_regs->cpuflags = CPUFLAGS_USER_TASK_DEFAULT;
++		}
+ 	}
+ 
+ 	if (!p->mm->binfmt) {
+@@ -212,6 +237,41 @@
+ }
+ 
+ /*
++ * #129 (MMU fork): host -> kernel export (kept by --export-all). The runtime
++ * calls this on the FORKING task's worker AFTER the user instance has unwound
++ * its fork() stack (the asyncify double-return; runtime/asyncify.js + musl
++ * patch 0010's _Fork -> capture_stack seam). An ordinary kernel_clone() for
++ * `current` — SIGCHLD, no CLONE_VM — so the GENERIC mm dup runs under
++ * CONFIG_MMU: dup_mm -> pgd_alloc -> dup_mmap -> copy_page_range, which
++ * write-protects both sides' private pages (COW; the checked softmmu
++ * translate's store-permission test faults them into do_wp_page — #128 A2).
++ * The child spawns lazily via the normal __switch_to ->
++ * wasm_create_and_run_task path, carrying fork_ctl so its worker REWINDS the
++ * captured stack (fork() returns 0 there) instead of _start()ing.
++ *
++ * user_sp/user_tls are the parent worker's live __stack_pointer/__tls_base at
++ * the fork call site — the state a real syscall entry would have saved; fork()
++ * here bypasses syscall entry (the unwind returned out of _start), so pt_regs
++ * would otherwise hold the LAST syscall's stale values and the child would
++ * resume on a dead stack frame.
++ */
++__visible long wasm_fork_current(unsigned long user_sp, unsigned long user_tls,
++				 unsigned long fork_ctl)
++{
++	struct kernel_clone_args args = {
++		.exit_signal = SIGCHLD,
++	};
++	long pid;
++
++	current_pt_regs()->stack_pointer = user_sp;
++	current_switch_stack()->tls = user_tls;
++	current_switch_stack()->fork_ctl = fork_ctl;
++	pid = kernel_clone(&args);
++	current_switch_stack()->fork_ctl = 0;
++	return pid;
++}
++
++/*
+  * Set up a thread for executing a new program.
+  */
+ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)

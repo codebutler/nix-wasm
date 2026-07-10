@@ -8,6 +8,10 @@
 // pc additions (ticket #74) are marked "pc:". The 9P filesystem rides the stock
 // virtio-9p transport (issue #10), serviced by the main-thread host devices —
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
+import { DynamicLoader } from "./dylink.js";
+import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
+import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
+import { FfiTrampolines } from "./ffi-codegen.js";
 import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
@@ -118,8 +122,54 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   let user_executable_instance = null;
   let user_executable_imports = null;
 
+  /// pc (#126 Track C / #130): per-process dynamic linking (dlopen/dlsym).
+  /// dyn_loader is built LAZILY on the first dl host-import call (parsing the
+  /// main image's export/elem sections costs a few ms on a huge --export-all
+  /// binary; processes that never dlopen pay nothing). user_executable_range
+  /// is the main binary's byte range in the SHARED kernel memory (the same
+  /// range the exec/clone ABI already passes around — the kernel keeps it
+  /// alive for the process lifetime), used to parse the main module's symbol
+  /// tables. dyn_replay carries a cloning parent's side-module snapshot into
+  /// this (child) worker; it is replayed right after the user instance exists,
+  /// before any user code runs (Track 0 §4 step 3).
+  let dyn_loader = null;
+  let dyn_replay = null;
+  let user_executable_range = null;
+
+  /// pc (#130): the per-process runtime-FFI trampoline cache (runtime/
+  /// ffi-codegen.js) — built lazily on the first __wasm_ffi_call, sharing this
+  /// process's Memory + function table.
+  let ffi_trampolines = null;
+
   /// Flag that a clone callback should be called instead of _start().
   let should_call_clone_callback = false;
+
+  /// pc (#129 MMU fork): nonzero when THIS worker's task is a fork child — the
+  /// asyncify ctl pointer to REWIND at first run (fork() returns 0 there)
+  /// instead of _start()ing. Set from the create message, consumed once.
+  let fork_rewind_ctl = 0;
+  /// What capture_stack returns on the REWIND side: the child pid in a forking
+  /// parent (set from wasm_fork_current's return), 0 in a fork child. Read
+  /// lazily by the capture fn below.
+  let fork_result = 0;
+  /// The env.capture_stack host import (runtime/asyncify.js) — the musl 0010
+  /// _Fork seam calls it; asyncify unwinds the caller's stack and the run loop
+  /// (run_user_entry) drives the kernel clone + the dual rewind. One fn per
+  /// worker; late-binds the instance (exec replaces it).
+  let capture_stack_fn = null;
+
+  /// pc (#128/#129): THIS worker's own page-table root — the pt_base baked into
+  /// its user instance's __mmu_pt_base at instantiation (its task's mm->pgd).
+  /// IMMUTABLE for the life of the instance (a task's own pgd never changes; an
+  /// exec re-instantiates and re-bakes). The kernel's switch_mm calls the host
+  /// import __mmu_set_pt_base(next->pgd) on EVERY context switch, and that runs
+  /// in whatever worker is executing the scheduler — including THIS worker when
+  /// its task schedules OUT (switch_mm(self, next) sets our instance's global to
+  /// `next`'s pgd, then we park). Nothing cross-worker restores it, so on resume
+  /// we must re-apply our OWN root or the instrumented user code walks the wrong
+  /// table and every access faults forever (the #129 two-user-task fork bug —
+  /// single-task A2 smokes never switch between two user tasks, so never hit it).
+  let own_pt_base = 0;
 
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
@@ -203,6 +253,45 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     return 0;
   };
 
+  /// pc (#130): build the per-process dynamic loader on first use — parse the
+  /// main image's export/elem/dynsym sections from its byte range in shared
+  /// kernel memory and register it as handle 1. Requires the user instance to
+  /// exist (dl imports only fire from running user code; the replay path runs
+  /// right after instantiation).
+  const ensure_dyn_loader = () => {
+    if (!dyn_loader) {
+      dyn_loader = new DynamicLoader({
+        memory,
+        table: user_executable_imports.env.__indirect_function_table,
+        baseEnv: user_executable_imports.env,
+        archBits: arch_bits,
+        log: (m) => log(m),
+      });
+      dyn_loader.registerMain({
+        instance: user_executable_instance,
+        bytes: new Uint8Array(memory.buffer).subarray(
+          user_executable_range.bin_start,
+          user_executable_range.bin_end,
+        ),
+        memoryBase: Number(user_executable_params.data_start),
+        tableBase: Number(user_executable_params.table_start),
+      });
+    }
+    return dyn_loader;
+  };
+
+  /// pc (#130): the runtime-FFI trampoline cache, over this process's Memory +
+  /// function table (the same table dlopen'd modules install into).
+  const ensure_ffi = () => {
+    if (!ffi_trampolines) {
+      ffi_trampolines = new FfiTrampolines({
+        memory,
+        table: user_executable_imports.env.__indirect_function_table,
+      });
+    }
+    return ffi_trampolines;
+  };
+
   /// Get a JS string object from a (nul-terminated) C-string in a Uint8Array.
   const get_cstring = (memory, index) => {
     const memory_u8 = new Uint8Array(memory.buffer);
@@ -224,6 +313,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   const serialize_me = () => {
     // Wait for some other task or CPU to wake us up.
     lock_wait("serialize");
+    // pc (#128/#129): our task is resuming on THIS worker. Restore our own
+    // page-table root — a switch_mm while we were scheduled out (ours, when we
+    // parked, or another worker's) may have written a foreign pgd into our
+    // instance's __mmu_pt_base. Re-apply the baked root so the instrumented
+    // user code we're about to return to walks OUR table. No-op for tasks
+    // without a softmmu instance (idle/kthreads, own_pt_base 0).
+    if (own_pt_base && user_executable_instance && user_executable_instance.exports.__mmu_pt_base) {
+      user_executable_instance.exports.__mmu_pt_base.value = own_pt_base;
+    }
     return switch_to_last_task[0]; // last_task was written by the caller just prior to waking.
   };
 
@@ -453,6 +551,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       bin_end,
       data_start,
       table_start,
+      pt_base,
+      fork_ctl,
     ) => {
       // Tell main to create the new task, and then run it for the first time!
       port.postMessage({
@@ -470,6 +570,21 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               bin_end: bin_end,
               data_start: data_start,
               table_start: table_start,
+              // pc (#128): the new task's page-table root (its mm's pgd).
+              pt_base: Number(pt_base || 0),
+              // pc (#129 MMU fork): the asyncify fork control-buffer pointer.
+              // Nonzero ONLY for a fork child (stamped by wasm_fork_current,
+              // consumed once by __switch_to): the child worker REWINDS the
+              // captured fork() stack at this ctl — fork() returns 0 there —
+              // instead of _start()ing a fresh program.
+              fork_ctl: Number(fork_ctl || 0),
+              // pc (#130): the parent's dynamic-linking state (side modules +
+              // table-op log). Module instances + the wasm table are engine
+              // objects OUTSIDE linear memory, so the CLONE_VM-shared memory
+              // does NOT carry them — the child worker must REPLAY them to
+              // reproduce the exact table layout the parent's function-pointer
+              // values (table indices, living in shared memory) refer to.
+              dyn: dyn_loader && dyn_loader.opLog.length > 0 ? dyn_loader.snapshot() : null,
             }
           : null,
       });
@@ -521,17 +636,55 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       }
     },
 
+    /// pc (#128 software MMU): the MMU kernel's switch_mm/activate_mm hands
+    /// over the incoming mm's page-table root. Each task's image already
+    /// carries its own root (applied to its __mmu_pt_base global at
+    /// instantiation from pt_base), so this is a write-through for the
+    /// CURRENT worker's image only — exec's activate_mm fires before
+    /// wasm_load_executable re-passes the same root, and any future pgd
+    /// change lands here. NOMMU kernels never import it (--import-undefined
+    /// materializes it only in MMU vmlinux builds).
+    __mmu_set_pt_base: (pt_base) => {
+      const v = Number(pt_base || 0);
+      if (user_executable_params) user_executable_params.pt_base = v;
+      if (user_executable_instance && user_executable_instance.exports.__mmu_pt_base) {
+        user_executable_instance.exports.__mmu_pt_base.value = v;
+      }
+    },
+
     /// Replace the currently executing image (kthread spawning init, or user process) with a new user process image.
     /// pc (new exec ABI): `bin_start`/`bin_end` are now a byte range in the
     /// SHARED kernel memory (binfmt_wasm places the user binary there); compile
     /// it straight from that range. No host Module cache / key resolution.
-    wasm_load_executable: (bin_start, bin_end, data_start, table_start) => {
+    wasm_load_executable: (bin_start, bin_end, data_start, table_start, pt_base) => {
       reset_syscall_trace(); // pc (#139): re-arm the per-exec syscall-trace budget
-      const bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      // pc (#130): a fresh program image — drop the old image's dynamic-linking
+      // state (side modules die with the image, like an ELF exec) and remember
+      // the new image's byte range for the lazy loader.
+      dyn_loader = null;
+      dyn_replay = null;
+      ffi_trampolines = null;
+      user_executable_range = { bin_start, bin_end };
+      let bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      // pc (#128 software MMU): a nonzero pt_base means the MMU kernel — the
+      // user code must go through the per-access translate. Instrument the image
+      // AT LOAD, right here, so EVERY execed binary (busybox, nix, any tool) runs
+      // on the software MMU, not just a pre-instrumented init. The pass is
+      // deterministic, so a fork child re-instruments the same range to the same
+      // layout. Skip if the image is already instrumented (a test fixture the
+      // harness pre-instrumented — isInstrumented checks the __mmu_start export).
+      // NOMMU kernels pass pt_base 0 and this is a no-op (byte-identical boot).
+      if (Number(pt_base || 0) !== 0 && !isInstrumented(bytes)) {
+        bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+      }
       user_executable = WebAssembly.compile(bytes);
       user_executable_params = {
         data_start: data_start,
         table_start: table_start,
+        // pc (#128 software MMU): this image's page-table root (0 = NOMMU /
+        // uninstrumented). Applied to the instance's __mmu_pt_base global at
+        // instantiation — per-instance, so context switches swap nothing.
+        pt_base: Number(pt_base || 0),
         // pc (#139 Gate 0.2): size the user table from the binary's import
         // section (a table smaller than declared fails instantiate).
         table_initial: table_import_initial(bytes),
@@ -699,7 +852,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           message.user_executable.bin_end,
           message.user_executable.data_start,
           message.user_executable.table_start,
+          message.user_executable.pt_base,
         );
+        // pc (#130): a cloning parent's dynamic-linking snapshot — replayed
+        // after the user instance is created (wasm_load_executable above just
+        // reset it, so set it after).
+        if (message.user_executable.dyn) dyn_replay = message.user_executable.dyn;
+        // pc (#129 MMU fork): a fork child rewinds the captured fork() stack
+        // at this ctl on first run instead of _start()ing.
+        if (message.user_executable.fork_ctl) fork_rewind_ctl = message.user_executable.fork_ctl;
       }
 
       let import_object = {
@@ -938,6 +1099,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               throw WebAssembly.RuntimeError("abort");
             },
 
+            // pc (#129 MMU fork): the asyncify fork seam (musl patch 0010's
+            // _Fork -> capture_stack). Only fork-built binaries import it;
+            // providing it unconditionally is harmless (wasm wires only the
+            // imports a module asks for). One fn per worker, late-binding the
+            // instance; ctlPtr is recorded per call for the run loop's rewind.
+            capture_stack: (capture_stack_fn ||= makeCaptureStack(
+              () => user_executable_instance,
+              () => fork_result,
+            )),
+
             // pc additions (#139 Gate 0.1 — C++ programs in-guest):
             // * __cpp_exception — wasm-ld links guest programs with -shared
             //   (dylink), which IMPORTS the C++ wasm-EH exception tag instead
@@ -961,6 +1132,82 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             //   revisit if in-guest tools start leaking per-thread state.
             __dlsym_time64: () => 0,
             __cxa_thread_atexit_impl: () => 0,
+
+            // pc (#126 Track C / #130): the dlopen/dlsym host surface (ENGINE_ABI
+            // 8). The guest musl's wasm dlopen port drives these:
+            //   1. it reads the whole .so file into its own memory (the guest FS
+            //      just works — 9P/squashfs/initramfs alike),
+            //   2. __wasm_dl_probe parses the image's dylink.0 requirements so
+            //      the guest can malloc the module's data region itself (the
+            //      guest allocator owns the arena),
+            //   3. __wasm_dlopen instantiates the side module at that memoryBase
+            //      against this process's Memory + shared table (runtime/
+            //      dylink.js — GOT resolution, elem-slot dlsym, fpcast rule).
+            // dlopen(NULL) is __wasm_dlopen(0,0,0,flags) → handle 1 (the main
+            // program); dlsym handle 0 = RTLD_DEFAULT (global scope).
+            __wasm_dl_probe: (bufPtr, bufLen, outPtr) => {
+              const b = new Uint8Array(memory.buffer).subarray(
+                Number(bufPtr),
+                Number(bufPtr) + Number(bufLen),
+              );
+              const r = ensure_dyn_loader().probe(b);
+              if (typeof r === "number") return r;
+              const dv = new DataView(memory.buffer);
+              dv.setUint32(Number(outPtr), r.memSize, true);
+              dv.setUint32(Number(outPtr) + 4, r.memAlign, true); // log2, as in dylink.0
+              dv.setUint32(Number(outPtr) + 8, r.tableSize, true);
+              return 0;
+            },
+            __wasm_dlopen: (bufPtr, bufLen, memoryBase, flags) => {
+              if (Number(bufPtr) === 0) return 1; // dlopen(NULL) → the main program
+              const b = new Uint8Array(memory.buffer).subarray(
+                Number(bufPtr),
+                Number(bufPtr) + Number(bufLen),
+              );
+              // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
+              // serve symbols to later loads or RTLD_DEFAULT searches.
+              return ensure_dyn_loader().load(b, Number(memoryBase), {
+                name: `dlopen@${Number(bufPtr)}`,
+                global: (Number(flags) & 0x100) !== 0,
+              });
+            },
+            __wasm_dlsym: (handle, namePtr) => {
+              return ensure_dyn_loader().dlsym(
+                Number(handle),
+                get_cstring(memory, Number(namePtr)),
+              );
+            },
+
+            // pc (#126 Track C / #130): runtime libffi. The in-tree
+            // wasm32-raw-ffi.c backend enumerates call signatures at BUILD time
+            // (a fixed trampoline table, bounded K=24/M=2, no structs/varargs);
+            // a call whose signature falls outside that table lands here. We
+            // generate + cache a wasm trampoline module for the EXACT signature
+            // (runtime/ffi-codegen.js — the same runtime-instantiation primitive
+            // dlopen uses) and invoke it. The signature is a byte descriptor at
+            // sigPtr: [nparams, retcode, p0code, …] where a code is 0=void
+            // (ret only), 1=i32, 2=i64, 3=f32, 4=f64. argPtr/retPtr are the
+            // 8-byte-slotted arg buffer + result slot the C backend prepared.
+            // Canonical-thunk targets (fpcast'd modules) get the (i64×128)->i64
+            // ABI; the loader decides from which module owns table[funcIndex].
+            __wasm_ffi_call: (funcIndex, argPtr, retPtr, sigPtr, sigLen) => {
+              const u8 = new Uint8Array(memory.buffer);
+              const base = Number(sigPtr);
+              const CODES = [null, "i32", "i64", "f32", "f64"];
+              const np = u8[base];
+              const ret = CODES[u8[base + 1]];
+              const params = [];
+              for (let i = 0; i < np; i++) params.push(CODES[u8[base + 2 + i]]);
+              const canonical = ensure_dyn_loader().isCanonicalSlot(Number(funcIndex));
+              ensure_ffi().call(
+                { params, result: ret },
+                canonical,
+                Number(funcIndex),
+                Number(argPtr),
+                Number(retPtr),
+              );
+              return 0;
+            },
 
             // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's
             // LeakSanitizer hooks, declared weak-undefined and called behind a
@@ -1039,6 +1286,25 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         );
 
         woken = woken.then((instance) => {
+          // pc (#128 software MMU): a softmmu-instrumented image exports the
+          // mutable __mmu_pt_base global its inlined translate reads — point
+          // it at this task's page-table root BEFORE any of the module's own
+          // code (start, relocs) runs. Per-task instances each carry their own
+          // root, so context switches swap nothing. The pass also STRIPS the
+          // wasm start section (__wasm_init_memory would run during
+          // instantiate, before pt_base could be set, and place data through a
+          // zero table) and re-exports it as __mmu_start — run it now, after
+          // pt_base and before relocs.
+          if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
+            instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
+            // pc (#128/#129): remember OUR immutable root so serialize_me can
+            // restore it after a context switch clobbers the instance global
+            // with a foreign pgd (see own_pt_base's declaration).
+            own_pt_base = user_executable_params.pt_base;
+          }
+          if (instance.exports.__mmu_start) {
+            instance.exports.__mmu_start();
+          }
           // wasm-ld only emits __wasm_apply_data_relocs when the module actually has
           // data relocations to apply. A program that references no relocatable data
           // (e.g. `int main(void){return 0;}` — no libc objects pulled, no embedded
@@ -1056,21 +1322,83 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             instance.exports.__set_tls_base(tls_base);
           }
           user_executable_instance = instance;
+
+          // pc (#130): a cloning parent had dlopen'd side modules / handed out
+          // dynamic table slots — replay them into this child NOW, before any
+          // user code runs, so every function-pointer value in the (shared)
+          // memory resolves identically here (Track 0 §4 step 3). Relocs and
+          // ctors are skipped by the replay path — the shared memory already
+          // holds the parent's initialized data.
+          if (dyn_replay) {
+            const snap = dyn_replay;
+            dyn_replay = null;
+            ensure_dyn_loader().replay(snap);
+          }
           return instance;
         });
 
         return woken;
       };
 
+      // pc (#129 MMU fork): drive a user entry export, orchestrating forks.
+      // An entry export returns ONLY when a fork() unwound it (asyncify parks
+      // the instance mid-unwind); anything else is the legacy "should never
+      // return" error. On an unwind: finish it, drive the kernel clone
+      // (wasm_fork_current — the generic COW mm dup; the child task spawns
+      // lazily with fork_ctl and rewinds in ITS worker), then REWIND this
+      // (parent) instance so capture_stack returns the child pid, re-entering
+      // through the SAME export. Loops so nested forks just work.
+      const run_user_entry = (instance, enter, label) => {
+        for (;;) {
+          enter();
+          if (!isPendingUnwind(instance)) {
+            throw new Error("Wasm function " + label + " returned (it should never return)!");
+          }
+          stopUnwind(instance);
+          const ctl = capture_stack_fn.ctlPtr;
+          // The true fork-time user SP/TLS — fork bypasses syscall entry (the
+          // unwind returned out of the entry export), so the kernel's pt_regs
+          // still hold the LAST syscall's stale values; wasm_fork_current
+          // stamps these before kernel_clone so the child resumes correctly.
+          const sp = user_executable_imports.env.__stack_pointer.value;
+          const tls = instance.exports.__get_tls_base ? instance.exports.__get_tls_base() : 0;
+          const pid = vmlinux_instance.exports.wasm_fork_current(Ulong(sp), Ulong(tls), Ulong(ctl));
+          fork_result = Number(pid); // -errno on failure; musl __syscall_ret handles it
+          startRewind(instance, ctl);
+          // loop: re-enter the same export; asyncify fast-forwards to the
+          // fork() call site, where capture_stack (REWINDING) returns the pid.
+        }
+      };
+
       const user_executable_run = (instance) => {
-        if (should_call_clone_callback) {
+        if (fork_rewind_ctl) {
+          // pc (#129 MMU fork): this task IS a fork child. Its memory image is
+          // the parent's via the kernel's COW page tables (same shared arena,
+          // own pt_base — applied at instantiation), including the captured
+          // fork() stack at the ctl. Rewind it: fork() returns 0 here. SP/TLS
+          // were stamped by wasm_fork_current and already restored by the
+          // standard setup (get_user_stack_pointer / __set_tls_base via the
+          // clone-callback path — ret_from_fork returns 1 for fork children
+          // too, which is why this check PRECEDES the clone-callback branch).
+          // NOTE: re-entry is via _start — a fork from inside a clone-with-fn
+          // child (__libc_clone_callback) is NOT supported (the captured image
+          // would not match _start's frame); posix_spawn children exec
+          // immediately, so that path has no fork.
+          const ctl = fork_rewind_ctl;
+          fork_rewind_ctl = 0; // consume-once: a later exec must _start fresh
+          should_call_clone_callback = false;
+          fork_result = 0;
+          startRewind(instance, ctl);
+          run_user_entry(instance, () => instance.exports._start(), "_start (fork rewind)");
+        } else if (should_call_clone_callback) {
           // We have to reset this state, because if the clone callback calls exec, we have to run _start() instead!
           should_call_clone_callback = false;
 
           if (instance.exports.__libc_clone_callback) {
-            instance.exports.__libc_clone_callback();
-            throw new Error(
-              "Wasm function __libc_clone_callback() returned (it should never return)!",
+            run_user_entry(
+              instance,
+              () => instance.exports.__libc_clone_callback(),
+              "__libc_clone_callback()",
             );
           } else {
             throw new Error("Wasm function __libc_clone_callback() not defined!");
@@ -1086,8 +1414,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 
             // TLS: somewhat incorrectly contains 0 instead of the TP before exec(). Since we will anyway not care about
             // its value (__wasm_apply_data_relocs() called would have overwritten it in this case) it does not matter.
-            instance.exports._start();
-            throw new Error("Wasm function _start() returned (it should never return)!");
+            run_user_entry(instance, () => instance.exports._start(), "_start()");
           } else {
             throw new Error("Wasm function _start() not defined!");
           }

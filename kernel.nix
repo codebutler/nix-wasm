@@ -19,9 +19,9 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC }:
+{ pkgs, kernelSrc, kernelCC, mmu ? false, a2 ? false, debugTrace ? false }:
 pkgs.stdenv.mkDerivation {
-  pname = "vmlinux-wasm";
+  pname = if a2 then "vmlinux-wasm-mmu-a2" else if mmu then "vmlinux-wasm-mmu" else "vmlinux-wasm";
   version = "7.0-039e5f3e";
 
   src = kernelSrc;
@@ -116,6 +116,21 @@ pkgs.stdenv.mkDerivation {
     # inode set up for shared mmap, re-allocate a larger contiguous block and copy
     # the data across (only marked inodes; ordinary ramfs growth is unaffected).
     ./patches/kernel/0022-wasm-nommu-ramfs-regrow-shared-mmap.patch
+  ] ++ pkgs.lib.optionals mmu [
+    # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
+    ./patches/kernel/0023-wasm-software-mmu.patch
+    # #129 Track B: real fork() on the MMU foundation — wasm_fork_current +
+    # fork_ctl plumbing through switch_stack/wasm_create_and_run_task
+    # (ENGINE_ABI 10). COW isolation needs the A2 checked translate; the A1
+    # (populate-everything, unchecked) build carries the export but a fork
+    # there would write through shared pages — fork is exercised under a2.
+    ./patches/kernel/0026-wasm-mmu-fork.patch
+  ] ++ pkgs.lib.optionals a2 [
+    # #128 A2: drop the A1 full-populate so the checked translate demand-pages.
+    ./patches/kernel/0024-wasm-mmu-a2-demand-paging.patch
+  ] ++ pkgs.lib.optionals debugTrace [
+    # #128 A2 DEBUG: bounded printk trace of the __wasm_mmu_fault path.
+    ./patches/kernel/0025-mmu-debug-trace.patch
   ];
 
   # Guard against silent patch-fuzz corruption of the virtio device enum (the #84
@@ -335,7 +350,19 @@ pkgs.stdenv.mkDerivation {
       --enable CONFIG_VIRTIO_VSOCKETS \
       --enable CONFIG_VIRTIO_VSOCKETS_COMMON
 
+    ${pkgs.lib.optionalString mmu ''
+      # #128: enable the software MMU + disable binfmt_elf (the guest execs wasm).
+      bash ./scripts/config --file build/.config \
+        --enable CONFIG_MMU \
+        --disable CONFIG_BINFMT_ELF
+    ''}
+
     make $makeFlags olddefconfig
+
+    ${pkgs.lib.optionalString mmu ''
+      grep -qE "^CONFIG_MMU=y" build/.config \
+        || { echo "ERROR: CONFIG_MMU did not stick" >&2; exit 1; }
+    ''}
 
     runHook postConfigure
   '';
