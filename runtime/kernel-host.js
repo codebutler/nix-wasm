@@ -483,6 +483,18 @@ export const linux = async ({
     log: (message) => {
       log(message.message);
     },
+
+    // pc: a worker's uncaught error/rejection, forwarded from the worker with its
+    // real message + stack (see kernel-worker.js). A blob-URL module worker's
+    // uncaught error reaches worker.onerror as a DETAIL-LESS ErrorEvent
+    // ("[object Event]"), so the worker reports it here instead. Log through the
+    // same "[worker error]" channel that hosts (pc's kernel-service) watch to
+    // fail a hung boot — now carrying the real cause instead of the opaque event.
+    fatal: (message) => {
+      const detail = message.detail || "unknown worker error";
+      console.error("[kernel worker error]", detail);
+      log("[worker error] " + detail);
+    },
   };
 
   /// Memory shared between all CPUs.

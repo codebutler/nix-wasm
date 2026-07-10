@@ -3,9 +3,17 @@
 // Bump ENGINE_ABI by 1 ONLY on a real, incompatible change to the
 // kernel/guest ↔ engine-JS contract (exec ABI, syscall/loader stubs, the
 // virtio/9P device models). The published guest image (`.#linux-image`) stamps
-// THIS number as its `manifest.json` + `latest.json` `minEngine`. pc refuses to
-// boot an image whose `minEngine` exceeds the vendored engine's ENGINE_ABI,
-// surfacing a "reload pc" message instead of a silent boot crash.
+// THIS number as its `manifest.json` + `latest.json` `minEngine`.
+//
+// The image and the engine must speak the EXACT SAME ABI. Every bump below is an
+// incompatible change, so there is NO forward/backward compatibility — a newer
+// engine does not run an older image any more than an older engine runs a newer
+// one (e.g. ABI 8's MMU-native fork rewrote the exec run loop, so an ABI-10
+// engine crashes an ABI-7 image mid-boot). pc enforces an EXACT match and reports
+// the stale side: image `minEngine` > engine ABI → "reload pc"; image `minEngine`
+// < engine ABI → "the Linux image is out of date, rebuild it". `minEngine` names
+// the exact engine an image requires, NOT a floor — always ship a matching engine
+// and image together.
 //
 // `userspace/linux-image.nix` parses this exact line, so keep the form
 // `export const ENGINE_ABI = <int>;` on one line.
