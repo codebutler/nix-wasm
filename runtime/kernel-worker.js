@@ -40,14 +40,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       self.postMessage({ method: "fatal", detail: String(detail) });
     } catch {}
   };
-  self.addEventListener("error", (e) => {
-    reportFatal((e.error && (e.error.stack || e.error.message)) || e.message || e);
-    e.preventDefault();
-  });
-  self.addEventListener("unhandledrejection", (e) => {
-    const r = e.reason;
-    reportFatal((r && (r.stack || r.message)) || r || "unhandledrejection");
-  });
+  // Browser worker only. The Node smoke harness shims `self` as a plain object
+  // with no addEventListener (runtime/demo/node/worker-bootstrap.mjs), and the
+  // detail-less-ErrorEvent problem this works around is browser-specific.
+  if (typeof self.addEventListener === "function") {
+    self.addEventListener("error", (e) => {
+      reportFatal((e.error && (e.error.stack || e.error.message)) || e.message || e);
+      e.preventDefault();
+    });
+    self.addEventListener("unhandledrejection", (e) => {
+      const r = e.reason;
+      reportFatal((r && (r.stack || r.message)) || r || "unhandledrejection");
+    });
+  }
 
   // pc (#139): per-syscall console tracing is a DEEP-DEBUG aid for bisecting
   // guest failures (Gate 0.2 surfaced silent -ENOMEM; Phase B located the fork
