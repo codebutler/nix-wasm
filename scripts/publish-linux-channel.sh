@@ -8,18 +8,20 @@
 # the live site with NO pc deploy — pc fetches latest.json (served no-cache) on the
 # next Linux-app open.
 #
-# R2 layout (bucket `pc-previews`, served by infra/preview-worker with CORP+CORS):
-#   packages/linux/<v>/linux.iso        — the channel image (.#linux-image):
-#                                         vmlinux.wasm + initramfs.cpio.gz +
-#                                         base.squashfs + manifest.json bundled
-#   packages/linux/<v>/nix-cache/       — ONLY pkgs.nix + paths.nix (the nix-wasm
-#                                         `nix-env -iA` / new-CLI catalogs, NOT in
-#                                         Cachix). The heavy nars + *.narinfo +
-#                                         nix-cache-info are NOT uploaded — the guest
-#                                         gets them from Cachix through the worker's
-#                                         /cachix/<v> proxy (nix-wasm#78).
-#   packages/linux/latest.json          — the pointer pc reads (no-cache route);
-#                                         its nixCacheBaseUrl points at /cachix/<v>
+# R2 layout — the DEDICATED `pc-packages` bucket (pc#416), served by
+# infra/preview-worker with CORP+CORS. Keys are FLATTENED (no `packages/` prefix):
+# the worker's `/packages/<id>/…` route drops the `/packages` segment and reads
+# `<id>/…` from env.PACKAGES, so the R2 key for the linux channel is `linux/…`
+# while the public URL pc fetches stays `…/packages/linux/…`.
+#   linux/<v>/linux.iso        — the channel image (.#linux-image): vmlinux.wasm +
+#                                initramfs.cpio.gz + base.squashfs + manifest.json
+#   linux/<v>/nix-cache/       — ONLY pkgs.nix + paths.nix (the nix-wasm `nix-env
+#                                -iA` / new-CLI catalogs, NOT in Cachix). The heavy
+#                                nars + *.narinfo + nix-cache-info are NOT uploaded
+#                                — the guest gets them from Cachix through the
+#                                worker's /cachix/<v> proxy (nix-wasm#78).
+#   linux/latest.json          — the pointer pc reads (no-cache route);
+#                                its nixCacheBaseUrl points at /cachix/<v>
 #
 # <v> = the linux.iso sha256 (content-addressed → immutable, safe to cache forever;
 # republishing identical bytes is idempotent, new bytes get a fresh key).
@@ -45,7 +47,9 @@ set -euo pipefail
 
 NIX_CMD="${NIX_CMD:-nix}"
 NIX="$NIX_CMD --extra-experimental-features 'nix-command flakes'"
-BUCKET="${PREVIEW_BUCKET:-pc-previews}"
+# The dedicated disc-packages bucket (pc#416). The linux channel image + pointer
+# live here, NOT in pc-previews (which now only holds the site preview overlay).
+BUCKET="${PACKAGES_BUCKET:-pc-packages}"
 # Public origin the worker serves R2 under (used to build the absolute URLs pc fetches).
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://pc-previews.eric-c6b.workers.dev}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -119,19 +123,19 @@ fi
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "==> DRY-RUN (CLOUDFLARE_API_TOKEN unset or DRY_RUN=true) — wrangler commands that WOULD run:"
   echo ""
-  echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/linux.iso\" \\"
+  echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/linux.iso\" \\"
   echo "    --file \"$ISO\" --content-type application/x-iso9660-image --remote"
   echo ""
   echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
   ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
-      echo "  bunx wrangler r2 object put \"$BUCKET/packages/linux/$VERSION/nix-cache/$REL\" \\"
+      echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
       echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
     done )
   echo ""
   echo "  # flip the pointer LAST (served no-cache → picked up immediately)"
   echo "  printf '%s' '<latest.json above>' | bunx wrangler r2 object put \\"
-  echo "    \"$BUCKET/packages/linux/latest.json\" --file - --content-type application/json --remote"
+  echo "    \"$BUCKET/linux/latest.json\" --file - --content-type application/json --remote"
   echo ""
   echo "==> version=$VERSION minEngine=$MIN_ENGINE bytes=$BYTES"
   exit 0
@@ -155,8 +159,8 @@ case "$WRANGLER_OUT" in
 esac
 echo "    wrangler $WRANGLER_OUT"
 
-echo "==> Uploading linux.iso → $BUCKET/packages/linux/$VERSION/linux.iso …"
-bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/linux.iso" \
+echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
+bunx wrangler r2 object put "$BUCKET/linux/$VERSION/linux.iso" \
   --file "$ISO" --content-type application/x-iso9660-image --remote
 
 # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
@@ -167,11 +171,11 @@ bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/linux.iso" \
 # already does. Precondition: nix-wasm CI pushed the .#wasm-binary-cache closure
 # to nix-wasm.cachix.org — the nix-wasm.yml artifacts job does, on this commit;
 # this publish substitutes that same closure, so it is guaranteed present.
-echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/packages/linux/$VERSION/nix-cache/ …"
+echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$VERSION/nix-cache/ …"
 ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
-    bunx wrangler r2 object put "$BUCKET/packages/linux/$VERSION/nix-cache/$REL" \
+    bunx wrangler r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
       --file "$CACHE/$REL" --content-type application/octet-stream --remote
   done )
 
@@ -184,11 +188,11 @@ echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/package
 PREV_LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
 PREV_VERSION="$(printf '%s' "$PREV_LIVE" | sed -n 's/.*"version":"\([0-9a-f]*\)".*/\1/p')"
 
-echo "==> Flipping pointer → $BUCKET/packages/linux/latest.json …"
+echo "==> Flipping pointer → $BUCKET/linux/latest.json …"
 TMP_LATEST="$(mktemp)"
 trap 'rm -f "$TMP_LATEST"' EXIT
 printf '%s' "$LATEST_JSON" > "$TMP_LATEST"
-bunx wrangler r2 object put "$BUCKET/packages/linux/latest.json" \
+bunx wrangler r2 object put "$BUCKET/linux/latest.json" \
   --file "$TMP_LATEST" --content-type application/json --remote
 
 # Verify the flip actually landed (latest.json is served no-cache). Belt-and-
