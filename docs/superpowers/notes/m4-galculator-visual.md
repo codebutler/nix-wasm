@@ -1,6 +1,23 @@
 # M4 — galculator visual acceptance: click 7 × 6 = 42
 
-**Status: PENDING — manual browser verification not yet run.**
+**Status: VERIFIED 2026-07-11 — click-to-42 confirmed in a real browser.**
+
+![galculator showing 42 after clicking 7 × 6](./m4-galculator-42.png)
+
+Verified on the headless-Chromium rig (`runtime/demo/web/` + `serve.mjs`,
+SwiftShader GL, runtime at master `2d1ed94`, the live channel image artifacts):
+boot to the shell, `galculator &` → a full GTK3 calculator window maps (menu
+bar, display, button grid, Adwaita theme). Playwright mouse clicks on `7`,
+`×`, `6` land through Greenfield → sommelier → wl_pointer → the GtkBuilder
+**autoconnected** handlers (the 115 deferred `.ui` signals now resolve through
+real GModule → `dlopen(NULL)`/`dlsym`, nix-wasm#130 Track C — no
+`add_callback_symbol` workaround), and a keyboard `Enter` (the `=` button row
+was clipped by the compositor viewport) evaluates: **the display reads 42**.
+No engine crash lines, no GModule/signal-connect failures in the terminal log.
+This also closes the note's original caveat era: the browser-only engine bugs
+that used to sit between the green node selftest and a working window
+(#137 SAB decode, #139 canonical dynSlot thunks) are fixed and CI-gated by the
+browser smoke (#140).
 
 The headless `galculator --selftest` gate is GREEN in the node harness
 (`runtime/node/galculator-smoke.mjs` PASS):
@@ -81,5 +98,10 @@ WAYLAND_DISPLAY=wayland-0 /bin/galculator
 #    Close the window (× button or Ctrl-Q) — gtk_main exits cleanly.
 ```
 
-Until a person runs the browser check and confirms the rendered window and
-arithmetic, this note stays PENDING.
+~~Until a person runs the browser check and confirms the rendered window and
+arithmetic, this note stays PENDING.~~ Verified 2026-07-11 — see the status
+block at the top. The rig procedure that replaced the manual steps above:
+serve `runtime/demo/web/` with the channel artifacts symlinked, drive headless
+Chromium (`--use-angle=swiftshader --enable-unsafe-swiftshader`) with
+Playwright, type into the terminal, click the compositor canvas (sommelier is
+autostarted from inittab — no manual waylandproxyd step anymore).

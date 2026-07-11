@@ -1,6 +1,16 @@
 # M3b — GTK3 hello-window visual render: verification record
 
-**Status: PENDING — manual browser verification not yet run.**
+**Status: VERIFIED 2026-07-11 — window + label render in a real browser.**
+
+![gtk-hello window with the Hello, GTK on wasm! label](./m3b-gtk-hello.png)
+
+Verified on the headless-Chromium rig (`runtime/demo/web/` + `serve.mjs`,
+SwiftShader GL, runtime at master `2d1ed94`, the live channel image
+artifacts): `gtk-hello &` maps a real decorated toplevel through
+Greenfield/sommelier with the `GtkLabel` **"Hello, GTK on wasm!"** painted.
+(gtk3-demo and galculator render on the same rig — see
+`gtk3-demo-browser.png` / `m4-galculator-visual.md` — so the full stack above
+this hello-window is verified too.)
 
 The headless `gtk-hello --selftest` gate is GREEN in the node harness (GTK
 initializes, registers its GTypes, and the gobject class_init paths run through the
