@@ -58,6 +58,18 @@ cross.stdenv.mkDerivation {
   # (same posture as the galculator override).
   strictDeps = false;
 
+  # The strictDeps=false PATH leak puts the CROSS xz (a wasm binary, from the
+  # gtk3 dep closure) ahead of any native xz, and unpackPhase's `.tar.xz`
+  # decompress dies with "cannot execute binary file: Exec format error" —
+  # the same trap galculator's preAutoreconf shim documents, hit one phase
+  # earlier. Prepend a native-xz shim before unpack; the PATH export persists
+  # for the whole builder run, covering any later bare `xz` call too.
+  preUnpack = ''
+    mkdir -p "$TMPDIR/native-xz-bin"
+    ln -sf ${cross.buildPackages.xz}/bin/xz "$TMPDIR/native-xz-bin/xz"
+    export PATH="$TMPDIR/native-xz-bin:$PATH"
+  '';
+
   # configure AC_SUBSTs GLIB_MKENUMS from `pkg-config --variable=glib_mkenums
   # glib-2.0`, which resolves into the CROSS glib .dev — not guaranteed
   # runnable on the build host. Override the make variable with the native one
