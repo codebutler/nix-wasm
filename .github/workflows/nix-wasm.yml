@@ -477,3 +477,89 @@ jobs:
           run_smoke demo/node/galculator-smoke.mjs
           run_smoke demo/node/widget-factory-smoke.mjs
           run_smoke demo/node/gtk-demo-smoke.mjs
+
+  # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
+  # just under Node. Two engine bugs shipped through green Node smokes because
+  # only a browser hits them end-to-end: TextDecoder rejecting SAB-backed views
+  # (#137) and fpcast callers call_indirect'ing dlsym'd raw exports (#139 —
+  # surfaced only by a REAL gtk3-demo run reaching pango text shaping; the Node
+  # gtk smokes run display-free --selftest variants that stop short of it).
+  # demo/web/smoke.mjs boots the full nix system in headless Chromium (real
+  # COOP/COEP from serve.mjs, software GL), runs `echo WEB_OK` → `gtk3-demo &`
+  # → `echo AFTER_OK`, and FAILS on any `[user-exec] Wasm crash` / SAB
+  # rejection on the page console. Verified to fail on the pre-#139 engine and
+  # pass on the fixed one.
+  browser-smoke:
+    name: boot in Chromium + dlopen smoke
+    needs: [toolchain, artifacts]
+    runs-on: namespace-profile-default
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Same nix:true artifact set as the full-system smoke; the web demo reads
+      # it via the demo/web/artifacts symlink instead of LINUX_WASM_ARTIFACTS.
+      - name: Assemble nix:true artifacts (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts-nix
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-nix/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-nix/initramfs.cpio.gz
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+            .artifacts-nix/base.squashfs
+          ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
+            .artifacts-nix/nix-cache
+          ls -lL .artifacts-nix
+
+      - name: Install runtime deps + Chromium
+        working-directory: runtime
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
+      # One retry absorbs a boot-panic flake; a genuine engine crash fails both
+      # attempts (the crash-line check runs from the first console message).
+      - name: Browser boot + dlopen smoke
+        working-directory: runtime
+        run: |
+          ln -sfn "${{ github.workspace }}/.artifacts-nix" demo/web/artifacts
+          for attempt in 1 2; do
+            echo "::group::browser smoke (attempt $attempt)"
+            set +e
+            node demo/web/smoke.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] && exit 0
+            echo "attempt $attempt failed (rc=$rc)"
+          done
+          exit 1
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-screenshot
+          path: runtime/demo/web/demo.png
+          if-no-files-found: ignore
