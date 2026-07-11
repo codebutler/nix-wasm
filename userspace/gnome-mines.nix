@@ -65,6 +65,23 @@ cross.stdenv.mkDerivation {
   GLIB_COMPILE_SCHEMAS = "${cross.buildPackages.glib.dev}/bin/glib-compile-schemas";
   GLIB_COMPILE_RESOURCES = "${cross.buildPackages.glib.dev}/bin/glib-compile-resources";
 
+  # glib-compile-resources/glib-mkenums are AC_SUBST'd from pkg-config's
+  # gio-2.0/glib-2.0 variables — which resolve into the CROSS glib (wasm
+  # binaries, Exec format error). Override the make variables with the native
+  # tools (the gcalctool GLIB_MKENUMS lesson; env presets only reach
+  # AC_PATH_PROG-style checks).
+  makeFlags = [
+    "GLIB_COMPILE_RESOURCES=${cross.buildPackages.glib.dev}/bin/glib-compile-resources"
+    "GLIB_MKENUMS=${cross.buildPackages.glib.dev}/bin/glib-mkenums"
+  ];
+
+  # valac-0.32-era generated C assigns GMarkup/Builder callbacks with const-
+  # qualification drift (gchar** vs const gchar**); clang >=16 promotes
+  # incompatible-function-pointer-types to a hard error. ABI-identical —
+  # demote it back to a warning for the GENERATED code (hand-written-C games
+  # stay strict and get real patches instead).
+  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types";
+
   enableParallelBuilding = true;
 
   postInstall = ''

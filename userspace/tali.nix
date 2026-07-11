@@ -62,6 +62,16 @@ cross.stdenv.mkDerivation {
   GLIB_COMPILE_SCHEMAS = "${cross.buildPackages.glib.dev}/bin/glib-compile-schemas";
   GLIB_COMPILE_RESOURCES = "${cross.buildPackages.glib.dev}/bin/glib-compile-resources";
 
+  # glib-compile-resources/glib-mkenums are AC_SUBST'd from pkg-config's
+  # gio-2.0/glib-2.0 variables — which resolve into the CROSS glib (wasm
+  # binaries, Exec format error). Override the make variables with the native
+  # tools (the gcalctool GLIB_MKENUMS lesson; env presets only reach
+  # AC_PATH_PROG-style checks).
+  makeFlags = [
+    "GLIB_COMPILE_RESOURCES=${cross.buildPackages.glib.dev}/bin/glib-compile-resources"
+    "GLIB_MKENUMS=${cross.buildPackages.glib.dev}/bin/glib-mkenums"
+  ];
+
   enableParallelBuilding = true;
 
   postInstall = ''
