@@ -507,7 +507,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator cross.gcalctool pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -770,6 +770,12 @@
         # signal autoconnect (C g_signal_connect). --selftest is the headless gate;
         # the full browser window renders in the browser. → $out/bin/gtk3-demo.
         gtk-demo = gtkDemo;
+
+        # gcalctool — the classic GNOME calculator (6.6.2, pure C + GTK3), the
+        # first app USING the Track C GModule/dlopen autoconnect (#130). Also
+        # installs /bin/gcalccmd, the console engine front-end that the headless
+        # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
+        gcalctool = cross.gcalctool;
 
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.

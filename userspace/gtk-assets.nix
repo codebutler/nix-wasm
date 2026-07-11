@@ -26,6 +26,14 @@ pkgs.buildPackages.runCommand "gtk-assets" { nativeBuildInputs = [ pkgs.buildPac
     [ -d "$d" ] && cp "$d"/*.gschema.xml $out/share/glib-2.0/schemas/ 2>/dev/null || true
   done
 
+  # App schemas: gcalctool's org.gnome.gcalctool (g_settings_new aborts at
+  # startup if it's missing from the compiled dir). Probe both the canonical
+  # and the nixpkgs gsettings-schemas install layouts, same as gtk3 above.
+  for d in ${cross.gcalctool}/share/glib-2.0/schemas \
+           ${cross.gcalctool}/share/gsettings-schemas/*/glib-2.0/schemas; do
+    [ -d "$d" ] && cp "$d"/*.gschema.xml $out/share/glib-2.0/schemas/ 2>/dev/null || true
+  done
+
   glib-compile-schemas $out/share/glib-2.0/schemas
 
   # Minimal icon theme: hicolor index + empty per-size dirs.

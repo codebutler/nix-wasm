@@ -107,6 +107,12 @@ let
                             # initramfs extraBins) so its store path — and thus its
                             # $out/share/galculator/ui/*.ui, loaded at runtime from the
                             # hardcoded PACKAGE_UI_DIR — enters the served /nix closure.
+          cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
+                            # end). Same reason as galculator: its buttons-*.ui panels
+                            # load at runtime from the baked UI_DIR store path, and its
+                            # org.gnome.gcalctool schema must ride the closure for the
+                            # gtk-assets compiled-schema dir (g_settings_new aborts if
+                            # the schema is missing).
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -139,6 +145,9 @@ let
           "/share/icons"
           "/share/galculator"   # M4: galculator .ui files (profile symlink; the
                                 # binary loads them from its own store path directly)
+          "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
+                                # binary reads its baked UI_DIR store path; the
+                                # profile symlink is for discoverability)
         ];
         environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
         # fontconfig: point at the baked-in conf + cache so FcInit resolves

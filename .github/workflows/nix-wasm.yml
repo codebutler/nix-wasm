@@ -477,6 +477,11 @@ jobs:
           run_smoke demo/node/galculator-smoke.mjs
           run_smoke demo/node/widget-factory-smoke.mjs
           run_smoke demo/node/gtk-demo-smoke.mjs
+          # gcalctool (classic GNOME calculator): computes 7*6=42 with gcalccmd,
+          # the console front-end sharing the GUI's equation engine — a real
+          # headless gate with no source patch. Light (no GTK init) but kept
+          # one-per-boot with its GTK siblings for isolation. Gating.
+          run_smoke demo/node/gcalctool-smoke.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because
