@@ -46,13 +46,24 @@ cross.stdenv.mkDerivation {
     cross.buildPackages.pkg-config
     cross.buildPackages.intltool # .desktop/.gschema.xml.in merges (IT_PROG_INTLTOOL)
     cross.buildPackages.itstool # help/ page translations (YELP_HELP_INIT probes it)
-    cross.buildPackages.libxml2 # xmllint (itstool's validator)
+    cross.buildPackages.libxml2.bin # xmllint only (itstool's validator) — NOT the
+    # full package: its dev output would put the NATIVE libxml-2.0.pc on the
+    # pkg-config path ahead of the cross one (see the glib note below).
     cross.buildPackages.gettext # msgfmt for po/
-    cross.buildPackages.glib # native glib-compile-schemas + glib-mkenums (below)
     cross.buildPackages.python3 # wasm-dynsym-inject.py
     fpcast.binaryen
   ];
   buildInputs = [ cross.gtk3 cross.glib cross.libxml2 ];
+
+  # Native glib is deliberately NOT in nativeBuildInputs: under the
+  # strictDeps=false loose PATH its dev output lands on the pkg-config search
+  # path, and the NATIVE glib-2.0.pc requires sysprof-capture-4 (our cross glib
+  # is built -Dsysprof=disabled and doesn't) — so configure's PKG_CHECK_MODULES
+  # resolved the wrong glib and died on the missing sysprof .pc. The two native
+  # glib TOOLS the build needs are passed by absolute path instead:
+  # GLIB_COMPILE_SCHEMAS here (AC_PATH_PROG honors a preset env var) and
+  # GLIB_MKENUMS via makeFlags below.
+  GLIB_COMPILE_SCHEMAS = "${cross.buildPackages.glib.dev}/bin/glib-compile-schemas";
 
   # The intltool/AM_GLIB macro layer predates strictDeps; keep the loose PATH
   # (same posture as the galculator override).
