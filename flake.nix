@@ -771,6 +771,12 @@
         # the full browser window renders in the browser. → $out/bin/gtk3-demo.
         gtk-demo = gtkDemo;
 
+        # gcalctool — the classic GNOME calculator (6.6.2, pure C + GTK3), the
+        # first app USING the Track C GModule/dlopen autoconnect (#130). Also
+        # installs /bin/gcalccmd, the console engine front-end that the headless
+        # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
+        gcalctool = cross.gcalctool;
+
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.
         inherit sommelier;

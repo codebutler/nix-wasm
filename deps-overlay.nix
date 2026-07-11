@@ -972,6 +972,25 @@ in
     }))
     prev.galculator;
 
+  # --- gcalctool: the classic GNOME calculator (6.6.2, the last pre-rename ----
+  # release — pure C + GTK3). NOT an override: nixpkgs dropped gcalctool long
+  # ago, so this is a from-scratch derivation over the GNOME release tarball
+  # (userspace/gcalctool.nix). Lives in the overlay (not a flake let-binding)
+  # so system.nix / gtk-assets.nix / flake.nix all reach it as cross.gcalctool,
+  # exactly like galculator. First app to USE the Track C GModule/dlopen
+  # capability (#130): its .ui button panels autoconnect via
+  # gtk_builder_connect_signals. isWasm-guarded like everything here (there is
+  # no prev.gcalctool to fall back to — the native attr stays null and, by
+  # laziness, is never evaluated).
+  gcalctool =
+    if isWasm then
+      import ./userspace/gcalctool.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.gcalctool or null;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):
