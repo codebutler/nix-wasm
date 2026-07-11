@@ -26,7 +26,13 @@ cross.stdenv.mkDerivation {
     export PATH="$TMPDIR/native-xz-bin:$PATH"
   '';
 
-  configureFlags = [ "--disable-gtk-doc" ];
+  configureFlags = [
+    "--disable-gtk-doc"
+    # Same check as librsvg: -Wl,-Bsymbolic-functions is an ELF dynamic-link
+    # flag wasm-ld doesn't have, and libcroco's configure hard-errors on it
+    # ("requested but not supported by ld") instead of just skipping.
+    "--disable-Bsymbolic"
+  ];
 
   enableParallelBuilding = true;
 
