@@ -69,6 +69,18 @@ cross.stdenv.mkDerivation {
 
   enableParallelBuilding = true;
 
+  postInstall = ''
+    # STATIC-LINK REQUIRES FIX: upstream's .pc assumes shared linking (the .so
+    # would carry libxml2/libcroco/pango internally), so consumers linking the
+    # static librsvg-2.a underlink — wasm-ld: undefined xmlCreatePushParserCtxt /
+    # cr_doc_handler_new at every game's link. Everything on this platform is
+    # static-only, so promote librsvg's real dependencies into public Requires.
+    pc="$out/lib/pkgconfig/librsvg-2.0.pc"
+    grep -q '^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$' "$pc" \
+      || (echo "librsvg .pc Requires line moved — update the sed" >&2; exit 1)
+    sed -i 's/^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$/Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0/' "$pc"
+  '';
+
   postFixup = ''
     ${fpcast.shellFn}
     # rsvg-convert is a gobject/pango binary → the standard indirect-call
