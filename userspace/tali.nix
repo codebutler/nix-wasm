@@ -72,11 +72,6 @@ cross.stdenv.mkDerivation {
     "GLIB_MKENUMS=${cross.buildPackages.glib.dev}/bin/glib-mkenums"
   ];
 
-  # -fcommon: same-era hand-written C with tentative definitions in shared
-  # headers (the four-in-a-row player_active class of duplicate-symbol break
-  # under clang's default -fno-common).
-  NIX_CFLAGS_COMPILE = "-fcommon";
-
   enableParallelBuilding = true;
 
   postInstall = ''
