@@ -5,9 +5,24 @@
 # the bytes. The compiler toolchain (nix-cache) is NOT in here — it stays a
 # lazily-fetched R2 cache so opening a shell/GUI app doesn't pull the ~29 MB
 # toolchain. See docs/superpowers/specs/2026-06-24-linux-bundle-channel-design.md.
-{ pkgs, nixpkgs, kernel, initramfs, squashfs, version ? 1 }:
+{ pkgs, nixpkgs, kernel, initramfs, squashfs, systemPath ? null, version ? 1 }:
 let
   lib = pkgs.lib;
+
+  # The launcher surface: the system profile's merged share/applications
+  # (every GUI app's .desktop entry), grafted into the image as REAL FILES so
+  # the HOST can enumerate the guest's apps by reading the mounted ISO through
+  # its ordinary VFS — same way it reads manifest.json. Deliberately raw
+  # freedesktop data, not a generated manifest: pc parses the .desktop entries
+  # itself, so launcher/menu changes never need an image rebuild. The profile
+  # entries are symlinks into the store; an ISO member must be a real file, so
+  # dereference with cp -rL.
+  applicationsDir = pkgs.runCommand "guest-applications" { } ''
+    mkdir -p $out
+    if [ -d ${systemPath}/share/applications ]; then
+      cp -rL ${systemPath}/share/applications/. $out/
+    fi
+  '';
 
   # minEngine is parsed from runtime/abi.js so it can never drift from the engine
   # ENGINE_ABI the JS actually implements. Match the ACTUAL export line, not the
@@ -42,6 +57,7 @@ makeIso {
     { source = "${initramfs}/initramfs.cpio.gz";  target = "/initramfs.cpio.gz"; }
     { source = "${squashfs}/base.squashfs";       target = "/base.squashfs"; }
     { source = manifest;                           target = "/manifest.json"; }
-  ];
+  ] ++ lib.optional (systemPath != null)
+    { source = applicationsDir;                    target = "/applications"; };
 }
 

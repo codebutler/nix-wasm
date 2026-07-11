@@ -602,6 +602,10 @@
         inherit pkgs nixpkgs kernel;
         initramfs = wasmInitramfs;
         squashfs = wasmBaseSquashfs;
+        # The system profile — its merged share/applications is grafted into
+        # the image as real files (the host reads the .desktop entries
+        # directly off the mounted ISO; no generated manifest).
+        systemPath = wasmSystem.config.system.path;
       };
         in
         {
