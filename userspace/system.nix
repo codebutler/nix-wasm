@@ -168,6 +168,13 @@ let
           "/share/tali"           # tali dice SVGs
           "/share/gnome-mines"    # mines css + interface.ui
           "/share/four-in-a-row"  # four-in-a-row .ui + pixmaps
+          "/share/applications"   # every GUI app's .desktop entry (GNOME
+                                  # games, gcalctool, galculator all install
+                                  # one) merged at /run/current-system/sw/
+                                  # share/applications — the enumeration
+                                  # surface for a future launcher/app-menu in
+                                  # the pc shell (Name/Icon/Exec, with icons
+                                  # already merged via /share/icons above).
           "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
                                 # binary reads its baked UI_DIR store path; the
                                 # profile symlink is for discoverability)
