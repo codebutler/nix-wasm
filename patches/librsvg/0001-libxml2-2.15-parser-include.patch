@@ -1,0 +1,39 @@
+Build against modern libxml2 (2.13+): <libxml/SAX.h> is a deprecated stub
+that no longer transitively includes the parser headers, so xmlParserCtxtPtr
+is undeclared everywhere rsvg-private.h/rsvg-mask.h/rsvg-styles.h relied on
+it. Include <libxml/parser.h> (the header that actually declares the type)
+instead. The same fix distros carry for old librsvg on new libxml2.
+
+--- a/rsvg-private.h
++++ b/rsvg-private.h
+@@ -31,7 +31,7 @@
+ 
+ #include "rsvg.h"
+ 
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ #include <libxml/xmlmemory.h>
+ #include <pango/pango.h>
+ #include <glib.h>
+--- a/rsvg-mask.h
++++ b/rsvg-mask.h
+@@ -31,7 +31,7 @@
+ #include "rsvg-css.h"
+ #include "rsvg-styles.h"
+ #include "rsvg-shapes.h"
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ 
+ G_BEGIN_DECLS 
+ 
+--- a/rsvg-styles.h
++++ b/rsvg-styles.h
+@@ -31,7 +31,7 @@
+ #include "rsvg.h"
+ #include "rsvg-paint-server.h"
+ 
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ #include <pango/pango.h>
+ 
+ G_BEGIN_DECLS 

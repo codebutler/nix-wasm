@@ -25,6 +25,10 @@ cross.stdenv.mkDerivation {
     hash = "sha256-92KJBfHK2oTofisUiD7VfYCU3KMoHVvLJOzkJ56akro=";
   };
 
+  # Modern-libxml2 compatibility (our cross libxml2 is 2.15): SAX.h no longer
+  # pulls in the parser types. See the patch header.
+  patches = [ ../patches/librsvg/0001-libxml2-2.15-parser-include.patch ];
+
   nativeBuildInputs = [
     cross.buildPackages.pkg-config
     fpcast.binaryen
