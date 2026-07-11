@@ -1,0 +1,87 @@
+# tali 3.22.0 — GNOME Tali (Yahtzee-style dice), third of the GNOME games
+# tier and the pure-C member alongside five-or-more (its src/ is hand-written
+# C — no Vala at all, autotools throughout). Deps are the tier minimum:
+# gtk3 + librsvg (userspace/librsvg.nix) only.
+#
+# Assets: dice pixmaps install to $(datadir)/tali — loaded at runtime from
+# the baked store path, riding the served closure (the galculator/gcalctool
+# pattern). GSettings schema (org.gnome.tali) is compiled centrally in
+# gtk-assets.nix.
+{ cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
+cross.stdenv.mkDerivation {
+  pname = "tali";
+  version = "3.22.0";
+
+  src = pkgs.fetchurl {
+    url = "https://download.gnome.org/sources/tali/3.22/tali-3.22.0.tar.xz";
+    hash = "sha256-W6F3lNb7BreU2q/6Yqaqo3K33oiGzl7FlsN+Yrtxcos=";
+  };
+
+  nativeBuildInputs = [
+    cross.buildPackages.pkg-config
+    cross.buildPackages.intltool # .desktop/.appdata merges
+    cross.buildPackages.itstool # help/ pages (YELP_HELP_INIT)
+    cross.buildPackages.libxml2.bin # xmllint only — NOT the dev output (its
+    # native libxml-2.0.pc would shadow the cross one; the gcalctool trap)
+    cross.buildPackages.gettext # msgfmt for po/
+    cross.buildPackages.python3 # wasm-dynsym-inject.py
+    fpcast.binaryen
+  ];
+  buildInputs = [
+    cross.gtk3
+    cross.glib
+    cross.librsvg
+    # librsvg-2.0.pc's Requires chain, listed explicitly (librsvg's leaf
+    # posture drops its nix-support propagation): pkg-config must resolve
+    # libcroco/cairo/pango/gdk-pixbuf/png from OUR inputs.
+    cross.libcroco
+    cross.cairo
+    cross.pango
+    cross.gdk-pixbuf
+    cross.libpng
+    cross.libxml2
+    cross.freetype
+    cross.fontconfig
+    cross.pixman
+    cross.zlib
+  ];
+
+  strictDeps = false;
+
+  # Native-xz shim before unpack (the gcalctool trap).
+  preUnpack = ''
+    mkdir -p "$TMPDIR/native-xz-bin"
+    ln -sf ${cross.buildPackages.xz}/bin/xz "$TMPDIR/native-xz-bin/xz"
+    export PATH="$TMPDIR/native-xz-bin:$PATH"
+  '';
+
+  # Native glib tools by absolute path (AC_PATH_PROG honors preset env vars) —
+  # native glib itself must stay out of the inputs or its glib-2.0.pc (which
+  # requires sysprof-capture-4, unlike our -Dsysprof=disabled cross glib)
+  # shadows the cross one on the loose PATH. Same fix as gcalctool.
+  GLIB_COMPILE_SCHEMAS = "${cross.buildPackages.glib.dev}/bin/glib-compile-schemas";
+  GLIB_COMPILE_RESOURCES = "${cross.buildPackages.glib.dev}/bin/glib-compile-resources";
+
+  enableParallelBuilding = true;
+
+  postInstall = ''
+    # Central gschemas.compiled lives in gtk-assets; a per-package copy would
+    # collide in the profile symlink merge.
+    rm -f "$out/share/glib-2.0/schemas/gschemas.compiled"
+  '';
+
+  postFixup = ''
+    ${fpcast.shellFn}
+    # dynsym-inject BEFORE fpcast, then the standard indirect-call cast fix —
+    # the uniform GTK-binary recipe (galculator/gcalctool). dynsym keeps any
+    # GModule-resolved symbol (Vala signal plumbing) dlsym-able.
+    python3 ${../scripts/wasm-dynsym-inject.py} \
+      "$out/bin/tali" "$out/bin/tali.dynsym"
+    mv "$out/bin/tali.dynsym" "$out/bin/tali"
+    fpcast_emu "$out/bin/tali" "$out/bin/tali.fpcast"
+    mv "$out/bin/tali.fpcast" "$out/bin/tali"
+    chmod +x "$out/bin/tali"
+    # Leaf app: drop the propagated -dev closure metadata (the #43 lesson).
+    rm -rf "$out/nix-support"
+  '';
+}

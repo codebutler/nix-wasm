@@ -114,6 +114,11 @@ let
                                 # share/gnome-mahjongg/{themes,maps} ride the closure.
           cross.five-or-more    # GNOME games: Color Lines. share/five-or-more/themes
                                 # + its GtkBuilder .ui files ride the closure.
+          cross.tali            # GNOME games: Yahtzee dice. share/tali SVG dice
+                                # ride the closure.
+          cross.gnome-mines     # GNOME games: Minesweeper (3.16 — pre
+                                # libgnome-games-support). share/gnome-mines css
+                                # + interface.ui ride the closure.
           cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
                             # end). Same reason as galculator: its buttons-*.ui panels
                             # load at runtime from the baked UI_DIR store path, and its
@@ -155,6 +160,8 @@ let
           "/share/gnome-mahjongg" # mahjongg tilesets + maps (profile symlink;
                                   # the binary reads its baked store path)
           "/share/five-or-more"   # five-or-more ball themes + .ui files
+          "/share/tali"           # tali dice SVGs
+          "/share/gnome-mines"    # mines css + interface.ui
           "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
                                 # binary reads its baked UI_DIR store path; the
                                 # profile symlink is for discoverability)

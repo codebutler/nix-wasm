@@ -1032,6 +1032,22 @@ in
       }
     else
       prev.five-or-more or null;
+  tali =
+    if isWasm then
+      import ./userspace/tali.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.tali or null;
+  gnome-mines =
+    if isWasm then
+      import ./userspace/gnome-mines.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.gnome-mines;
 
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
