@@ -23,7 +23,13 @@ try {
     throw e;
   }
   if (!reached) throw new Error("no prompt");
-  s.send('echo "7*6" | /bin/gcalccmd\n');
+  // PATH lookup, not /bin: gcalctool is deliberately NOT in the initramfs
+  // extraBins — its two ~14 MB binaries there grew the unevictable initramfs
+  // tmpfs enough that build-from-source-e2e's in-guest nix-build could no
+  // longer get a 128 MB contiguous NOMMU allocation. It ships via
+  // systemPackages instead, so it loads from the (evictable, file-backed)
+  // squashfs at /run/current-system/sw/bin.
+  s.send('echo "7*6" | gcalccmd\n');
   // gcalccmd echoes a "> " prompt then the result line; match a bare 42.
   pass = await s.waitForOutput(/(^|[^0-9])42([^0-9]|$)/m, 180000);
 } finally {
