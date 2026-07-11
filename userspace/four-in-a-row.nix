@@ -90,7 +90,10 @@ cross.stdenv.mkDerivation {
   # incompatible-function-pointer-types to a hard error. ABI-identical —
   # demote it back to a warning for the GENERATED code (hand-written-C games
   # stay strict and get real patches instead).
-  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types";
+  # -fcommon: its hand-written-C half (main.c/gfx.c/prefs.c/theme.c) uses
+  # pre-2020 tentative definitions in headers (player_active) — duplicate
+  # symbols under clang's default -fno-common.
+  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types -fcommon";
 
   enableParallelBuilding = true;
 
