@@ -96,5 +96,12 @@ cross.stdenv.mkDerivation {
     # against this package's .dev output in the BUILD graph, which does not
     # read nix-support from the installed store copy.
     rm -rf "$out/nix-support"
+    # Libtool archives embed dependency_libs with ABSOLUTE STORE PATHS — they
+    # dragged the entire build closure (glib-dev → native python3 62MB /
+    # gettext / bash-dev / glibc…) into the SERVED image: 36 → 112 store
+    # paths, base.squashfs 112MB → 306MB. Consumers link via pkg-config
+    # -L/-l; .la files are pure liability (distros strip them for the same
+    # reason). The -config script embeds dep -L paths the same way.
+    rm -f "$out/lib/"*.la "$out/bin/"*-config
   '';
 }
