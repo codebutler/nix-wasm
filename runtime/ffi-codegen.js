@@ -130,6 +130,75 @@ export function genTrampoline(sig, opts = {}) {
   ]);
 }
 
+/**
+ * The INVERSE of the canonical trampoline: a wasm-level canonical thunk that
+ * ADAPTS a raw-signature function to the fpcast canonical ABI so it can live
+ * in the indirect table of a canonical world. Signature (i64 × CANONICAL_
+ * PARAMS) -> i64; body converts the leading params down to the raw types
+ * (fromABI), direct-calls the imported raw function, and extends the result
+ * back to i64 (toABI; void returns i64 0) — mirroring what binaryen's
+ * FuncCastEmulation emits for a module's own elem entries at build time.
+ *
+ * Used by dylink's functionAddress: a dlsym'd export that was never
+ * address-taken has no build-time thunk, and installing the RAW function in
+ * the table traps ("function signature mismatch") the moment fpcast'd guest
+ * code call_indirects it with the canonical convention (the gtk3-demo/pango
+ * hb_* dlsym regression). Instantiate with { e: { f: rawFn } }; the adapted
+ * function is exported as "thunk".
+ *
+ * @param {{ params: string[], result: string | null }} sig the RAW signature
+ * @returns {Uint8Array}
+ */
+export function genCanonicalThunk(sig) {
+  // type 0 = the canonical thunk type; type 1 = the raw target signature.
+  const canonType = [
+    0x60,
+    ...vec(Array.from({ length: CANONICAL_PARAMS }, () => VT.i64)),
+    ...vec([VT.i64]),
+  ];
+  const rawType = [
+    0x60,
+    ...vec(sig.params.map((p) => VT[p])),
+    ...vec(sig.result ? [VT[sig.result]] : []),
+  ];
+  const typeSec = section(1, vec([canonType, rawType]));
+  // import the raw function (module func index 0)
+  const importSec = section(2, vec([[...str("e"), ...str("f"), 0x00, ...uleb(1)]]));
+  const funcSec = section(3, vec([[...uleb(0)]])); // local func (index 1): canonical type
+  const exportSec = section(7, vec([[...str("thunk"), 0x00, ...uleb(1)]]));
+
+  const body = [];
+  sig.params.forEach((p, i) => {
+    body.push(OP.local_get, ...uleb(i)); // canonical i64 param i
+    fromABI(body, p); // i64 -> raw param type
+  });
+  body.push(0x10, ...uleb(0)); // call the imported raw function
+  if (sig.result) {
+    toABI(body, sig.result); // raw result -> i64
+  } else {
+    body.push(OP.i64_const, ...sleb(0));
+  }
+  body.push(0x0b);
+  const code = [...uleb(0), ...body]; // 0 local decls
+  const codeSec = section(10, vec([[...uleb(code.length), ...code]]));
+
+  return new Uint8Array([
+    0x00,
+    0x61,
+    0x73,
+    0x6d,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    ...typeSec,
+    ...importSec,
+    ...funcSec,
+    ...exportSec,
+    ...codeSec,
+  ]);
+}
+
 /** Raw ABI: load each arg at its natural type, call the exact signature. */
 function genRawBody(sig) {
   const body = [];

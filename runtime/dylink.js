@@ -46,14 +46,22 @@
 // synchronous guest import call, and this code runs in a Worker where sync
 // compilation is unrestricted.
 
+import { genCanonicalThunk } from "./ffi-codegen.js";
+
 const textDecoder = new TextDecoder("utf-8");
 
 // Wasm section ids.
 const SEC_CUSTOM = 0;
 const SEC_TYPE = 1;
 const SEC_IMPORT = 2;
+const SEC_FUNC = 3;
 const SEC_EXPORT = 7;
 const SEC_ELEM = 9;
+
+// Value-type byte → ffi-codegen signature name (the four numeric types the
+// canonical fpcast ABI marshals). An export whose signature uses anything else
+// (ref types, v128) gets NO runtime thunk — see functionAddress.
+const VT_NAME = { 0x7f: "i32", 0x7e: "i64", 0x7d: "f32", 0x7c: "f64" };
 
 // The fpcast-emu canonical param count (must match runtime/ffi-codegen.js
 // CANONICAL_PARAMS + userspace/fpcast-emu.nix `-pa max-func-params@128`). A
@@ -154,6 +162,9 @@ function skipLimits(c) {
  *   elem: { offsetKind: "global" | "const", offsetConst: number, funcIndices: number[] } | null,
  *   dynsym: Map<string, number>,
  *   fpcast: boolean,
+ *   types: { params: number[], results: number[] }[],
+ *   funcImportTypes: number[],
+ *   funcTypes: number[],
  * }}
  */
 export function parseDylinkModule(bytes) {
@@ -177,6 +188,12 @@ export function parseDylinkModule(bytes) {
     elem: null,
     dynsym: new Map(),
     fpcast: false,
+    // Function signatures, for the fpcast dynSlot thunks (functionAddress):
+    // types[i] = { params: byte[], results: byte[] }, funcImportTypes /
+    // funcTypes = type indices for the imported / local function index space.
+    types: [],
+    funcImportTypes: [],
+    funcTypes: [],
   };
 
   while (c.i < bytes.length) {
@@ -184,20 +201,28 @@ export function parseDylinkModule(bytes) {
     const size = c.uleb();
     const end = c.i + size;
     if (id === SEC_TYPE) {
-      // Scan for the fpcast canonical signature (i64 × CANONICAL_PARAMS) -> i64.
+      // Record every functype (for export signatures) and scan for the fpcast
+      // canonical signature (i64 × CANONICAL_PARAMS) -> i64 along the way.
       const n = c.uleb();
       for (let k = 0; k < n; k++) {
         if (c.u8() !== 0x60) break; // functype tag; anything else = malformed
         const np = c.uleb();
+        const params = [];
         let allI64 = np === CANONICAL_PARAMS;
         for (let j = 0; j < np; j++) {
-          if (c.u8() !== VT_I64) allI64 = false;
+          const t = c.u8();
+          params.push(t);
+          if (t !== VT_I64) allI64 = false;
         }
         const nr = c.uleb();
+        const results = [];
         let i64Ret = nr === 1;
         for (let j = 0; j < nr; j++) {
-          if (c.u8() !== VT_I64) i64Ret = false;
+          const t = c.u8();
+          results.push(t);
+          if (t !== VT_I64) i64Ret = false;
         }
+        info.types.push({ params, results });
         if (allI64 && i64Ret) info.fpcast = true;
       }
     } else if (id === SEC_CUSTOM) {
@@ -241,7 +266,7 @@ export function parseDylinkModule(bytes) {
         const kind = c.u8();
         info.imports.push({ module, name, kind });
         if (kind === KIND_FUNC) {
-          c.uleb(); // type index
+          info.funcImportTypes.push(c.uleb());
           info.funcImportCount++;
         } else if (kind === KIND_TABLE) {
           c.u8(); // reftype
@@ -259,6 +284,9 @@ export function parseDylinkModule(bytes) {
           throw new Error(`unknown import kind ${kind}`);
         }
       }
+    } else if (id === SEC_FUNC) {
+      const n = c.uleb();
+      for (let k = 0; k < n; k++) info.funcTypes.push(c.uleb());
     } else if (id === SEC_EXPORT) {
       const n = c.uleb();
       for (let k = 0; k < n; k++) {
@@ -302,6 +330,41 @@ export function parseDylinkModule(bytes) {
     c.i = end;
   }
   return info;
+}
+
+/**
+ * A name → raw-signature lookup for a module's exported functions, from the
+ * parse info's type/import/function/export sections. Returns null for unknown
+ * names, non-func exports, multi-result or non-numeric-typed signatures (the
+ * canonical ABI marshals exactly i32/i64/f32/f64). Used by functionAddress to
+ * build canonical thunks for dlsym'd raw exports in an fpcast world.
+ *
+ * @param {ReturnType<typeof parseDylinkModule>} info
+ * @returns {(name: string) => ({ params: string[], result: string | null } | null)}
+ */
+function buildSigLookup(info) {
+  const byName = new Map();
+  for (const e of info.exports) if (e.kind === KIND_FUNC) byName.set(e.name, e.index);
+  const { types, funcImportTypes, funcTypes, funcImportCount } = info;
+  return (name) => {
+    const fi = byName.get(name);
+    if (fi === undefined) return null;
+    const ti = fi < funcImportCount ? funcImportTypes[fi] : funcTypes[fi - funcImportCount];
+    const t = types[ti];
+    if (!t || t.results.length > 1) return null;
+    const params = [];
+    for (const b of t.params) {
+      const n = VT_NAME[b];
+      if (!n) return null;
+      params.push(n);
+    }
+    let result = null;
+    if (t.results.length === 1) {
+      result = VT_NAME[t.results[0]];
+      if (!result) return null;
+    }
+    return { params, result };
+  };
 }
 
 /**
@@ -350,6 +413,7 @@ export const DL_ERRNO = { ENOENT: 2, ENOMEM: 12, EINVAL: 22, ENOEXEC: 8 };
  *   elemSlots: Map<string, number>,
  *   dynSlots: Map<string, number>,
  *   fpcast: boolean,
+ *   sigOf: (name: string) => ({ params: string[], result: string | null } | null),
  * }} DlModule
  */
 
@@ -387,6 +451,12 @@ export class DynamicLoader {
      */
     this.opLog = [];
     this.lastError = 0;
+    /** Table slots holding runtime-generated canonical thunks (dynSlots that
+     *  adapt a raw dlsym'd export to the fpcast ABI — see functionAddress).
+     *  @type {Set<number>} */
+    this.thunkedSlots = new Set();
+    /** Compiled thunk modules, keyed by raw signature. @type {Map<string, WebAssembly.Module>} */
+    this.thunkModules = new Map();
   }
 
   /** @param {number} v */
@@ -414,6 +484,7 @@ export class DynamicLoader {
       elemSlots: exportedElemSlots(info),
       dynSlots: new Map(),
       fpcast: info.fpcast,
+      sigOf: buildSigLookup(info),
     });
   }
 
@@ -475,19 +546,58 @@ export class DynamicLoader {
     if (slot !== undefined) return m.tableBase + slot;
     const cached = m.dynSlots.get(name);
     if (cached !== undefined) return cached;
+    // In an fpcast world (main module canonicalized), EVERY function pointer
+    // guest code holds must follow the canonical (i64×N)->i64 ABI — fpcast'd
+    // callers call_indirect with that convention directly (pango's hb_* shim
+    // does exactly this with dlsym results). An export that was never
+    // address-taken has no build-time thunk, so installing the RAW function
+    // traps with "function signature mismatch" the moment it's called. Adapt
+    // it with a runtime-generated canonical thunk instead (the runtime twin
+    // of the build-time FuncCastEmulation elem rewrite). Signature unknown
+    // (exotic types / no export record) → install raw and warn: a direct
+    // canonical call would trap anyway, but the libffi path can still use it.
+    let install = /** @type {any} */ (fn);
+    let thunked = false;
+    if (this.modules[0]?.fpcast) {
+      const sig = m.sigOf(name);
+      if (sig) {
+        install = this.#canonicalThunk(sig, fn);
+        thunked = true;
+      } else {
+        this.log(`[dylink] no signature for dlsym'd ${name}; installing raw (fpcast world)`);
+      }
+    }
     const idx = this.table.grow(1);
-    this.table.set(idx, /** @type {any} */ (fn));
+    this.table.set(idx, install);
     m.dynSlots.set(name, idx);
+    if (thunked) this.thunkedSlots.add(idx);
     if (logged) this.opLog.push({ op: "install", module: this.modules.indexOf(m), name });
     return idx;
+  }
+
+  /**
+   * A canonical-ABI adapter around a raw export (see functionAddress). Thunk
+   * MODULES are cached per raw signature; each target gets its own (cheap)
+   * instance binding the import.
+   * @param {{ params: string[], result: string | null }} sig
+   * @param {Function} fn
+   */
+  #canonicalThunk(sig, fn) {
+    const key = `${sig.params.join(",")}->${sig.result ?? ""}`;
+    let mod = this.thunkModules.get(key);
+    if (!mod) {
+      mod = new WebAssembly.Module(/** @type {BufferSource} */ (genCanonicalThunk(sig)));
+      this.thunkModules.set(key, mod);
+    }
+    return new WebAssembly.Instance(mod, { e: { f: fn } }).exports.thunk;
   }
 
   /**
    * Is table slot `index` a fpcast canonical thunk? Used by the runtime FFI
    * path (kernel-worker __wasm_ffi_call) to pick the trampoline ABI. A slot is
    * canonical iff it lands in a fpcast'd module's [tableBase, +tableCount)
-   * range and is NOT a dynamically-installed raw export (dynSlots are always
-   * raw, whatever module they belong to). Falls back to the main module's
+   * range, or is a dynSlot functionAddress wrapped in a runtime canonical
+   * thunk (fpcast world); un-thunked dynSlots are raw. Falls back to the main module's
    * fpcast status for slots outside any recorded range (e.g. a program that
    * never dlopen'd — its own function pointers follow its own build).
    *
@@ -497,7 +607,9 @@ export class DynamicLoader {
   isCanonicalSlot(index) {
     for (const m of this.modules) {
       for (const slot of m.dynSlots.values()) {
-        if (slot === index) return false; // raw install, any module
+        // A dynSlot is raw UNLESS functionAddress wrapped it in a runtime
+        // canonical thunk (fpcast world).
+        if (slot === index) return this.thunkedSlots.has(index);
       }
     }
     for (const m of this.modules) {
@@ -552,6 +664,7 @@ export class DynamicLoader {
       elemSlots: exportedElemSlots(info),
       dynSlots: new Map(),
       fpcast: info.fpcast,
+      sigOf: buildSigLookup(info),
     };
 
     // PHASE 1 — fallible resolution, with NO side effects on the table or the
