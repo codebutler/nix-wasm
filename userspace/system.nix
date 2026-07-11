@@ -119,6 +119,11 @@ let
           cross.gnome-mines     # GNOME games: Minesweeper (3.16 — pre
                                 # libgnome-games-support). share/gnome-mines css
                                 # + interface.ui ride the closure.
+          cross.four-in-a-row   # GNOME games: Connect Four (sound stubbed — no
+                                # audio stack). share/four-in-a-row ui + pixmaps
+                                # ride the closure.
+          cross.iagno           # GNOME games: Reversi (sound stubbed). Assets
+                                # gresource-embedded; schema rides the closure.
           cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
                             # end). Same reason as galculator: its buttons-*.ui panels
                             # load at runtime from the baked UI_DIR store path, and its
@@ -162,6 +167,7 @@ let
           "/share/five-or-more"   # five-or-more ball themes + .ui files
           "/share/tali"           # tali dice SVGs
           "/share/gnome-mines"    # mines css + interface.ui
+          "/share/four-in-a-row"  # four-in-a-row .ui + pixmaps
           "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
                                 # binary reads its baked UI_DIR store path; the
                                 # profile symlink is for discoverability)

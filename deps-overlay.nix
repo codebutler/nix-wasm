@@ -1048,6 +1048,22 @@ in
       }
     else
       prev.gnome-mines;
+  four-in-a-row =
+    if isWasm then
+      import ./userspace/four-in-a-row.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.four-in-a-row or null;
+  iagno =
+    if isWasm then
+      import ./userspace/iagno.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.iagno or null;
 
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
