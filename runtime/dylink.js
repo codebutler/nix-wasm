@@ -162,6 +162,9 @@ function skipLimits(c) {
  *   elem: { offsetKind: "global" | "const", offsetConst: number, funcIndices: number[] } | null,
  *   dynsym: Map<string, number>,
  *   fpcast: boolean,
+ *   types: { params: number[], results: number[] }[],
+ *   funcImportTypes: number[],
+ *   funcTypes: number[],
  * }}
  */
 export function parseDylinkModule(bytes) {
@@ -583,7 +586,7 @@ export class DynamicLoader {
     const key = `${sig.params.join(",")}->${sig.result ?? ""}`;
     let mod = this.thunkModules.get(key);
     if (!mod) {
-      mod = new WebAssembly.Module(genCanonicalThunk(sig));
+      mod = new WebAssembly.Module(/** @type {BufferSource} */ (genCanonicalThunk(sig)));
       this.thunkModules.set(key, mod);
     }
     return new WebAssembly.Instance(mod, { e: { f: fn } }).exports.thunk;

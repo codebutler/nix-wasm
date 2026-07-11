@@ -368,7 +368,9 @@ describe("canonical dynSlot thunks (fpcast world)", () => {
   };
 
   test("genCanonicalThunk adapts a raw (i32,i32)->i32 to the canonical ABI", () => {
-    const mod = new WebAssembly.Module(genCanonicalThunk({ params: ["i32", "i32"], result: "i32" }));
+    const mod = new WebAssembly.Module(
+      genCanonicalThunk({ params: ["i32", "i32"], result: "i32" }),
+    );
     const { thunk } = new WebAssembly.Instance(mod, { e: { f: (a, b) => a + b } }).exports;
     expect(thunk(...canonArgs(2, 40))).toBe(42n);
   });
@@ -402,7 +404,14 @@ describe("canonical dynSlot thunks (fpcast world)", () => {
     const sec = (id, pl) => [id, ...uleb(pl.length), ...pl];
     const type = [0x60, ...vec(params.map((q) => VTB[q])), ...vec(result ? [VTB[result]] : [])];
     const bytes = new Uint8Array([
-      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x00,
+      0x61,
+      0x73,
+      0x6d,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
       ...sec(1, vec([type])),
       ...sec(2, vec([[...str("e"), ...str("f"), 0x00, ...uleb(0)]])),
       ...sec(7, vec([[...str("f"), 0x00, ...uleb(0)]])),
@@ -457,7 +466,11 @@ describe("canonical dynSlot thunks (fpcast world)", () => {
     const dl = makeLoader();
     const m = fakeMain(false, () => ({ params: ["i32"], result: "i32" }));
     dl.modules.push(m);
-    const slot = dl.functionAddress(m, "id", asWasmFn(["i32"], "i32", (x) => x));
+    const slot = dl.functionAddress(
+      m,
+      "id",
+      asWasmFn(["i32"], "i32", (x) => x),
+    );
     expect(dl.table.get(slot)(5)).toBe(5);
     expect(dl.isCanonicalSlot(slot)).toBe(false);
   });
