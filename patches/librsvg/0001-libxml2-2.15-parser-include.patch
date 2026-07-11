@@ -1,8 +1,13 @@
-Build against modern libxml2 (2.13+): <libxml/SAX.h> is a deprecated stub
-that no longer transitively includes the parser headers, so xmlParserCtxtPtr
-is undeclared everywhere rsvg-private.h/rsvg-mask.h/rsvg-styles.h relied on
-it. Include <libxml/parser.h> (the header that actually declares the type)
-instead. The same fix distros carry for old librsvg on new libxml2.
+Build against modern libxml2 (2.13+). Three API drifts since 2012:
+1. <libxml/SAX.h> is a deprecated stub that no longer transitively includes
+   the parser headers, so xmlParserCtxtPtr is undeclared in
+   rsvg-private.h/rsvg-mask.h/rsvg-styles.h — include <libxml/parser.h>.
+2. xmlStructuredErrorFunc's error parameter became const xmlError*
+   (libxml2 2.12) — rsvg_xml_noerror's signature must match or the
+   handler.serror assignment is an incompatible-function-pointer error.
+3. xmlCtxtGetLastError returns const xmlError* (2.13) — rsvg_set_error's
+   local must be const.
+The same class of fixes distros carry for old librsvg on new libxml2.
 
 --- a/rsvg-private.h
 +++ b/rsvg-private.h
@@ -37,3 +42,25 @@ instead. The same fix distros carry for old librsvg on new libxml2.
  #include <pango/pango.h>
  
  G_BEGIN_DECLS 
+--- a/rsvg-css.c
++++ b/rsvg-css.c
+@@ -839,7 +839,7 @@
+ }
+ 
+ static void
+-rsvg_xml_noerror (void *data, xmlErrorPtr error)
++rsvg_xml_noerror (void *data, const xmlError *error) /* libxml2 2.12+: xmlStructuredErrorFunc takes const xmlError* */
+ {
+ }
+ 
+--- a/rsvg-base.c
++++ b/rsvg-base.c
+@@ -1197,7 +1197,7 @@
+ static void
+ rsvg_set_error (GError **error, xmlParserCtxtPtr ctxt)
+ {
+-    xmlErrorPtr xerr;
++    const xmlError *xerr; /* libxml2 2.13+: xmlCtxtGetLastError returns const */
+ 
+     xerr = xmlCtxtGetLastError (ctxt);
+     if (xerr) {
