@@ -1,7 +1,9 @@
 # gcalctool — browser visual acceptance: click 7 × 6 = 42
 
 **Status: VERIFIED 2026-07-11 — on the PR #142 preview artifacts (commit
-`ee8880c7`), before merge.**
+`2dd58db7`, the final artifact shape: gcalctool loads from the squashfs via
+PATH at `/run/current-system/sw/bin`, deliberately NOT in the initramfs
+extraBins — see the NOMMU contiguous-alloc note in the smoke), before merge.**
 
 ![gcalctool showing 42 after clicking 7 × 6](./gcalctool-42.png)
 
