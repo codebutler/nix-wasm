@@ -482,6 +482,11 @@ jobs:
           # headless gate with no source patch. Light (no GTK init) but kept
           # one-per-boot with its GTK siblings for isolation. Gating.
           run_smoke demo/node/gcalctool-smoke.mjs
+          # GNOME games tier: rsvg-convert renders mahjongg's real tileset SVG
+          # to PNG in-guest — proves libcroco → librsvg → pango/cairo →
+          # cairo-png headless, zero source patches. The game windows are
+          # browser checks on the rig. Gating.
+          run_smoke demo/node/rsvg-smoke.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because

@@ -26,12 +26,15 @@ pkgs.buildPackages.runCommand "gtk-assets" { nativeBuildInputs = [ pkgs.buildPac
     [ -d "$d" ] && cp "$d"/*.gschema.xml $out/share/glib-2.0/schemas/ 2>/dev/null || true
   done
 
-  # App schemas: gcalctool's org.gnome.gcalctool (g_settings_new aborts at
-  # startup if it's missing from the compiled dir). Probe both the canonical
-  # and the nixpkgs gsettings-schemas install layouts, same as gtk3 above.
-  for d in ${cross.gcalctool}/share/glib-2.0/schemas \
-           ${cross.gcalctool}/share/gsettings-schemas/*/glib-2.0/schemas; do
-    [ -d "$d" ] && cp "$d"/*.gschema.xml $out/share/glib-2.0/schemas/ 2>/dev/null || true
+  # App schemas (g_settings_new aborts at startup if an app's schema is
+  # missing from the compiled dir): gcalctool + the GNOME games. Probe both
+  # the canonical and the nixpkgs gsettings-schemas install layouts, same as
+  # gtk3 above. Add new schema-using apps to this list.
+  for pkg in ${cross.gcalctool} ${cross.gnome-mahjongg} ${cross.five-or-more}; do
+    for d in $pkg/share/glib-2.0/schemas \
+             $pkg/share/gsettings-schemas/*/glib-2.0/schemas; do
+      [ -d "$d" ] && cp "$d"/*.gschema.xml $out/share/glib-2.0/schemas/ 2>/dev/null || true
+    done
   done
 
   glib-compile-schemas $out/share/glib-2.0/schemas

@@ -107,6 +107,13 @@ let
                             # initramfs extraBins) so its store path — and thus its
                             # $out/share/galculator/ui/*.ui, loaded at runtime from the
                             # hardcoded PACKAGE_UI_DIR — enters the served /nix closure.
+          cross.librsvg     # GNOME-games tier: rsvg-convert on PATH (the tier's
+                            # headless gate renders a game tileset SVG in-guest);
+                            # the games link the .a statically at build.
+          cross.gnome-mahjongg  # GNOME games: tile solitaire. systemPackages so its
+                                # share/gnome-mahjongg/{themes,maps} ride the closure.
+          cross.five-or-more    # GNOME games: Color Lines. share/five-or-more/themes
+                                # + its GtkBuilder .ui files ride the closure.
           cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
                             # end). Same reason as galculator: its buttons-*.ui panels
                             # load at runtime from the baked UI_DIR store path, and its
@@ -145,6 +152,9 @@ let
           "/share/icons"
           "/share/galculator"   # M4: galculator .ui files (profile symlink; the
                                 # binary loads them from its own store path directly)
+          "/share/gnome-mahjongg" # mahjongg tilesets + maps (profile symlink;
+                                  # the binary reads its baked store path)
+          "/share/five-or-more"   # five-or-more ball themes + .ui files
           "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
                                 # binary reads its baked UI_DIR store path; the
                                 # profile symlink is for discoverability)

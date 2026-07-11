@@ -777,6 +777,16 @@
         # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
         gcalctool = cross.gcalctool;
 
+        # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
+        # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and
+        # five-or-more (pure C, GtkBuilder/GModule autoconnect) are the first
+        # two games. rsvg-convert is the tier's headless gate
+        # (runtime/demo/node/rsvg-smoke.mjs); the game windows are browser
+        # checks on the rig.
+        librsvg = cross.librsvg;
+        gnome-mahjongg = cross.gnome-mahjongg;
+        five-or-more = cross.five-or-more;
+
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.
         inherit sommelier;
