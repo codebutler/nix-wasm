@@ -1,11 +1,22 @@
 # M0 — wl_seat input probe: verification record
 
-**Status: PENDING — manual browser verification not yet run.**
+**Status: VERIFIED 2026-07-11 — pointer + keyboard events confirmed in a real browser.**
 
-The `wl-input-probe` binary has been built and baked into the initramfs, but the
-browser-side input verification (Step 5 of the brief) requires a person to move a
-mouse and press keys in a live browser session against the Greenfield compositor.
-That step cannot be automated and has not yet been performed.
+Verified on the headless-Chromium rig (`runtime/demo/web/` + `serve.mjs`,
+SwiftShader GL, runtime at master `2d1ed94`, the live channel image
+artifacts) — the "requires a person" assumption no longer holds: Playwright
+drives a real mouse over the probe surface. Observed output, matching the
+expected block below line for line:
+
+```
+PROBE seat.caps=0x3
+PROBE kb.enter
+PROBE pointer.enter x=69 y=69
+PROBE pointer.motion x=79 y=74
+… (smooth motion stream) …
+PROBE pointer.button button=272 state=1   ← the M0 goal (BTN_LEFT press)
+PROBE pointer.button button=272 state=0
+```
 
 ## What was built
 
