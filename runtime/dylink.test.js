@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.js";
+import { genCanonicalThunk, CANONICAL_PARAMS } from "./ffi-codegen.js";
 
 const FIX = new URL("./test-fixtures/dylink/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIX)));
@@ -351,5 +352,113 @@ describe("fork/clone replay (Track 0 §4)", () => {
 
     // The child's own snapshot is replayable again (grandchild forks).
     expect(childLoader.snapshot().opLog.length).toBe(snap.opLog.length);
+  });
+});
+
+// The gtk3-demo/pango regression (pc prod): an fpcast'd main dlsym's raw
+// exports (hb_*) that were never address-taken; installing them RAW in the
+// table traps ("function signature mismatch") when fpcast'd code
+// call_indirects them with the canonical (i64×N)->i64 convention.
+// functionAddress must install runtime canonical thunks instead.
+describe("canonical dynSlot thunks (fpcast world)", () => {
+  const canonArgs = (...real) => {
+    const a = Array.from({ length: CANONICAL_PARAMS }, () => 0n);
+    real.forEach((v, i) => (a[i] = BigInt(v)));
+    return a;
+  };
+
+  test("genCanonicalThunk adapts a raw (i32,i32)->i32 to the canonical ABI", () => {
+    const mod = new WebAssembly.Module(genCanonicalThunk({ params: ["i32", "i32"], result: "i32" }));
+    const { thunk } = new WebAssembly.Instance(mod, { e: { f: (a, b) => a + b } }).exports;
+    expect(thunk(...canonArgs(2, 40))).toBe(42n);
+  });
+
+  test("genCanonicalThunk handles void results", () => {
+    let called = 0;
+    const mod = new WebAssembly.Module(genCanonicalThunk({ params: ["i32"], result: null }));
+    const { thunk } = new WebAssembly.Instance(mod, { e: { f: () => void (called = 1) } }).exports;
+    expect(thunk(...canonArgs(7))).toBe(0n);
+    expect(called).toBe(1);
+  });
+
+  // A funcref table only accepts exported wasm functions (production's `fn`
+  // is always m.instance.exports[name]) — wrap a JS fn in a re-exporting
+  // wasm module so the raw-install paths are exercised realistically.
+  const asWasmFn = (params, result, jsFn) => {
+    const VTB = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+    const uleb = (n) => {
+      const o = [];
+      let v = n >>> 0;
+      do {
+        let b = v & 0x7f;
+        v >>>= 7;
+        if (v) b |= 0x80;
+        o.push(b);
+      } while (v);
+      return o;
+    };
+    const vec = (a) => [...uleb(a.length), ...a.flat()];
+    const str = (t) => vec([...t].map((c) => c.charCodeAt(0)));
+    const sec = (id, pl) => [id, ...uleb(pl.length), ...pl];
+    const type = [0x60, ...vec(params.map((q) => VTB[q])), ...vec(result ? [VTB[result]] : [])];
+    const bytes = new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      ...sec(1, vec([type])),
+      ...sec(2, vec([[...str("e"), ...str("f"), 0x00, ...uleb(0)]])),
+      ...sec(7, vec([[...str("f"), 0x00, ...uleb(0)]])),
+    ]);
+    return new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { f: jsFn } }).exports.f;
+  };
+
+  const makeLoader = () => {
+    const table = new WebAssembly.Table({ element: "anyfunc", initial: 0 });
+    return new DynamicLoader({ memory: null, table, baseEnv: {}, log: () => {} });
+  };
+  const fakeMain = (fpcast, sigOf) => ({
+    handle: 1,
+    name: "<main>",
+    bytes: null,
+    memoryBase: 0,
+    tableBase: 0,
+    tableCount: 0,
+    global: true,
+    instance: /** @type {any} */ (null),
+    elemSlots: new Map(),
+    dynSlots: new Map(),
+    fpcast,
+    sigOf,
+  });
+
+  test("functionAddress thunks raw exports in an fpcast world; isCanonicalSlot agrees", () => {
+    const dl = makeLoader();
+    const m = fakeMain(true, () => ({ params: ["i32", "i32"], result: "i32" }));
+    dl.modules.push(m);
+    const raw = asWasmFn(["i32", "i32"], "i32", (a, b) => a * b);
+    const slot = dl.functionAddress(m, "mul", raw);
+    // the installed table entry follows the CANONICAL convention, not raw
+    const fn = dl.table.get(slot);
+    expect(fn(...canonArgs(6, 7))).toBe(42n);
+    expect(dl.isCanonicalSlot(slot)).toBe(true);
+    // cached second lookup returns the same slot
+    expect(dl.functionAddress(m, "mul", raw)).toBe(slot);
+  });
+
+  test("unknown signature falls back to a raw install (isCanonicalSlot false)", () => {
+    const dl = makeLoader();
+    const m = fakeMain(true, () => null);
+    dl.modules.push(m);
+    const raw = asWasmFn(["i32"], "i32", (a) => a + 1);
+    const slot = dl.functionAddress(m, "mystery", raw);
+    expect(dl.table.get(slot)(41)).toBe(42);
+    expect(dl.isCanonicalSlot(slot)).toBe(false);
+  });
+
+  test("non-fpcast world installs raw (unchanged behavior)", () => {
+    const dl = makeLoader();
+    const m = fakeMain(false, () => ({ params: ["i32"], result: "i32" }));
+    dl.modules.push(m);
+    const slot = dl.functionAddress(m, "id", asWasmFn(["i32"], "i32", (x) => x));
+    expect(dl.table.get(slot)(5)).toBe(5);
+    expect(dl.isCanonicalSlot(slot)).toBe(false);
   });
 });
