@@ -29,15 +29,26 @@
 # HOW TO APPLY IT — two supported forms, ONE pass definition (`passCmd` below):
 #
 #   1. `hook` — a nixpkgs SETUP HOOK (the wrapGAppsHook / autoPatchelfHook
-#      idiom). Add `fpcast.hook` to a derivation's `nativeBuildInputs` and every
-#      wasm executable it installs under `$out/bin` (any output) is fpcast'd
-#      automatically in a `postFixupHooks` step — no per-package bash. This is
-#      the preferred form for the common "one or more installed binaries" case
-#      (l3afpad, librsvg, gcolor3, the games …). It replaces the copy-pasted
-#      `postFixup` wasm-opt blocks that used to live in every consumer.
+#      idiom): the ONE-LINE way to declare "this is a wasm GTK leaf app". Add
+#      `fpcast.hook` to a derivation's `nativeBuildInputs` and in a single
+#      `postFixupHooks` step it (a) fpcasts every wasm executable the derivation
+#      installs under any output's `bin/`, and (b) strips the leaf app's
+#      `$out/nix-support` served-closure dead weight (the #43 cleanup that was
+#      itself hand-copied into every GTK app). No per-package bash, no postFixup
+#      — this is the preferred form for the common installed-GTK-app case
+#      (l3afpad, librsvg, gcolor3, the games …), replacing BOTH the copy-pasted
+#      `postFixup` wasm-opt block AND the `rm -rf $out/nix-support` line.
 #
-#      • Escape hatch: set `dontFpcastEmu = true` to suppress the auto pass
-#        (e.g. a derivation that fpcasts a non-`bin` artifact itself).
+#      It is opt-IN, not propagated from gtk3/glib, on purpose — exactly like
+#      wrapGAppsHook. nixpkgs does not auto-propagate build-time hooks from
+#      libraries because propagated-native-build-input OFFSET rules are subtle;
+#      a mis-propagated hook silently no-ops → every GTK binary ships un-fpcast'd
+#      and boot-crashes with no build error. An explicit opt-in can't misfire.
+#
+#      • `dontFpcastEmu = true` suppresses only the fpcast pass (a derivation
+#        that fpcasts a non-`bin` artifact itself).
+#      • `dontWasmLeafClean = true` suppresses only the nix-support strip (a
+#        NON-leaf that installs a gobject tool but must keep its propagation).
 #      • ORDERING with dynsym-inject (dynsym.nix): the hook runs in
 #        `postFixupHooks`, which `runHook` fires AFTER the derivation's own
 #        `postFixup` env-var body (the same guarantee autoPatchelfHook relies
@@ -87,32 +98,48 @@ let
   '';
 
   # The setup-hook script: define fpcast_emu, then register a postFixup hook
-  # that fpcasts every wasm executable installed under each output's bin/.
-  hookScript = cross.buildPackages.writeText "fpcast-emu-setup-hook.sh" ''
+  # that (1) fpcasts every wasm executable installed under each output's bin/,
+  # and (2) strips the leaf app's $out/nix-support served-closure dead weight.
+  hookScript = cross.buildPackages.writeText "wasm-gtk-app-setup-hook.sh" ''
     ${fpcastEmuFn}
 
-    _fpcastEmuAllBins() {
-      # Escape hatch for derivations that run the pass themselves.
-      if [ -n "''${dontFpcastEmu:-}" ]; then return 0; fi
-      local outName outDir exe
-      for outName in $outputs; do
-        outDir="''${!outName}/bin"
-        [ -d "$outDir" ] || continue
-        for exe in "$outDir"/*; do
-          [ -f "$exe" ] || continue
-          # Only touch actual wasm modules (magic "\0asm" = 00 61 73 6d).
-          # Skips shell wrappers / config scripts a package may install in bin.
-          [ "$(dd if="$exe" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
-          fpcast_emu "$exe" "$exe.fpcast.tmp"
-          mv "$exe.fpcast.tmp" "$exe"
-          chmod +x "$exe"
+    _wasmGtkAppFinalize() {
+      # (1) fpcast every installed wasm executable. `dontFpcastEmu` opts out
+      #     (a derivation that runs the pass itself, at a non-bin path etc.).
+      if [ -z "''${dontFpcastEmu:-}" ]; then
+        local outName outDir exe
+        for outName in $outputs; do
+          outDir="''${!outName}/bin"
+          [ -d "$outDir" ] || continue
+          for exe in "$outDir"/*; do
+            [ -f "$exe" ] || continue
+            # Only touch actual wasm modules (magic "\0asm" = 00 61 73 6d).
+            # Skips shell wrappers / config scripts a package installs in bin.
+            [ "$(dd if="$exe" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
+            fpcast_emu "$exe" "$exe.fpcast.tmp"
+            mv "$exe.fpcast.tmp" "$exe"
+            chmod +x "$exe"
+          done
         done
-      done
+      fi
+
+      # (2) LEAF-app closure hygiene (the #43 lesson): $out/nix-support/
+      #     propagated-build-inputs records gtk+3-dev, which drags the whole
+      #     X11 / glibc-locale `-dev` tree into the SERVED store closure for an
+      #     app nothing ever links against. Strip it — every GTK *app* wants
+      #     this (it was hand-copied into l3afpad/gcalctool/gcolor3/the games).
+      #     Only $out is touched: a $dev output's nix-support is real link
+      #     metadata downstream builds need (librsvg), so it is left intact.
+      #     `dontWasmLeafClean` opts out for a NON-leaf that installs a bin
+      #     (a library shipping a gobject tool) and must keep its propagation.
+      if [ -z "''${dontWasmLeafClean:-}" ] && [ -e "''${out:-}/nix-support" ]; then
+        rm -rf "$out/nix-support"
+      fi
     }
 
     # runHook fires the derivation's own `postFixup` body BEFORE this array, so
     # a dynsym_inject step in postFixup lands before we fpcast (order preserved).
-    postFixupHooks+=(_fpcastEmuAllBins)
+    postFixupHooks+=(_wasmGtkAppFinalize)
   '';
 
   hook = cross.buildPackages.makeSetupHook
@@ -125,7 +152,9 @@ in
   # consumer using either form no longer needs this in nativeBuildInputs.
   inherit binaryen;
 
-  # Preferred form: add to nativeBuildInputs → auto-fpcast every wasm bin.
+  # Preferred form: add to nativeBuildInputs → auto-fpcast every wasm bin +
+  # strip the leaf app's $out/nix-support. The one-line "wasm GTK leaf app"
+  # declaration (opt out per-concern via dontFpcastEmu / dontWasmLeafClean).
   inherit hook;
 
   # Raw `fpcast_emu <in> <out>` function, for buildPhase / non-bin / hand-ordered

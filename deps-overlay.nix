@@ -1104,26 +1104,19 @@ in
   # binding, resolved at compile time via the generated class_init — NOT
   # gtk_builder_connect_signals(NULL)/GModule lookup), so it has the same
   # GModule-free posture as l3afpad/gtk3-demo: only the shared --fpcast-emu
-  # post-link pass (gobject class_init casts) is needed, no dynsym-inject —
-  # applied automatically by `fpcast.hook` (userspace/fpcast-emu.nix) over the
-  # installed $out/bin/gcolor3. UNVERIFIED (no Nix build access when this
-  # override was written — see nix-wasm#156): confirm `nix build .#gcolor3`
-  # succeeds before relying on this. A --selftest source patch (like
-  # galculator's/l3afpad's) is deliberately NOT added yet — inventing one
-  # against unread upstream source would be exactly the kind of unverified
-  # shortcut the PRIME DIRECTIVE forbids; add it once the real gcolor3 source
-  # (window.c/main.c) has been read against a working build.
+  # post-link pass (gobject class_init casts) is needed, no dynsym-inject. The
+  # ENTIRE wasm-specific override is the one `fpcast.hook` line: it fpcasts
+  # $out/bin/gcolor3 AND strips the leaf app's $out/nix-support (#43) in one
+  # step — so this override carries no postFixup and no bespoke bash at all.
+  # UNVERIFIED (no Nix build access when written — see nix-wasm#156): confirm
+  # `nix build .#gcolor3` succeeds before relying on it. A --selftest source
+  # patch (like galculator's/l3afpad's) is deliberately NOT added yet —
+  # inventing one against unread upstream source would be exactly the kind of
+  # unverified shortcut the PRIME DIRECTIVE forbids; add it once the real
+  # gcolor3 source (window.c/main.c) has been read against a working build.
   gcolor3 = whenWasm
     (p: p.overrideAttrs (o: {
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.hook ];
-      postFixup = (o.postFixup or "") + ''
-        # Same dead-weight propagation risk galculator hit (issue #43): a leaf
-        # GTK3 app's nix-support/propagated-build-inputs can drag a `gtk+3-dev`
-        # → X11/glibc-locale `-dev` tree into the served closure for no reason.
-        # Cheap and harmless to always drop for a leaf app; verify closure size
-        # once buildable (`nix path-info -S .#gcolor3`) rather than assuming.
-        rm -rf "$out/nix-support"
-      '';
     }))
     prev.gcolor3;
 

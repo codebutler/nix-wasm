@@ -94,15 +94,12 @@ cross.stdenv.mkDerivation {
   '';
 
   # fpcast.hook (nativeBuildInputs) applies the standard gobject/pango
-  # indirect-call cast fix to $out/bin/rsvg-convert automatically (the .a
-  # libraries need nothing — fpcast is a per-final-binary pass; the games run
-  # the same hook on their own linked outputs). This postFixup only does the
-  # served-closure cleanup below.
+  # indirect-call cast fix to $out/bin/rsvg-convert automatically AND strips
+  # $out/nix-support (the #43 served-closure cleanup — the games link this
+  # package's .dev output in the BUILD graph, whose nix-support the hook leaves
+  # intact; only $out is stripped). So this postFixup keeps ONLY the librsvg-
+  # specific libtool cleanup the hook can't know about:
   postFixup = ''
-    # Leaf posture for the served closure (the #43 lesson). The games build
-    # against this package's .dev output in the BUILD graph, which does not
-    # read nix-support from the installed store copy.
-    rm -rf "$out/nix-support"
     # Libtool archives embed dependency_libs with ABSOLUTE STORE PATHS — they
     # dragged the entire build closure (glib-dev → native python3 62MB /
     # gettext / bash-dev / glibc…) into the SERVED image: 36 → 112 store

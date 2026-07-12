@@ -89,15 +89,11 @@ cross.stdenv.mkDerivation {
     rm -f "$out/share/icons/hicolor/icon-theme.cache"
   '';
 
-  # fpcast.hook (nativeBuildInputs) applies the standard GTK-binary indirect-
-  # call cast fix to $out/bin/l3afpad automatically. No dynsym-inject: no
-  # GtkBuilder autoconnect, nothing resolved by name at runtime (gtk3-demo
-  # posture) — so the hook's plain fpcast is all that's needed.
-  postFixup = ''
-    # Leaf app: drop the propagated -dev closure metadata (the #43 lesson —
-    # it drags the whole X11/-dev tree into the served store).
-    rm -rf "$out/nix-support"
-  '';
+  # fpcast.hook (nativeBuildInputs) does everything wasm-specific: it fpcasts
+  # $out/bin/l3afpad (the standard GTK-binary indirect-call cast fix) AND strips
+  # the leaf app's $out/nix-support (#43). No dynsym-inject — no GtkBuilder
+  # autoconnect, nothing resolved by name at runtime (gtk3-demo posture) — so
+  # the hook's plain fpcast is all that's needed, and there is no postFixup.
 
   meta.description = "L3afpad — simple GTK3 text editor (leafpad fork) on wasm32; signals wired in C, no GModule";
 }
