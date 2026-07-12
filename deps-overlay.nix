@@ -891,10 +891,9 @@ in
       # derivation linking cross gtk3 sources it and fpcasts its installed wasm
       # bins with ZERO per-package lines — the correctness pass every gobject
       # binary needs can no longer be forgotten on a new GTK app. It is
-      # fpcast-ONLY by default (safe/no-op on gtk3 libraries too); a leaf app
-      # opts into the served-closure nix-support strip with `wasmLeafApp = true`,
-      # and a consumer that fpcasts its own binary sets `dontFpcastEmu = true`
-      # (see userspace/fpcast-emu.nix). NOTE: gtk3's OWN tool binaries are not
+      # fpcast-only (a correct/no-op on gtk3 libraries too); a consumer that
+      # fpcasts its own binary sets `dontFpcastEmu = true` (see
+      # userspace/fpcast-emu.nix). NOTE: gtk3's OWN tool binaries are not
       # touched — a package's setup hook applies to its CONSUMERS, not itself.
       propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
         fpcast.hook
@@ -1123,14 +1122,11 @@ in
   # gtk_widget_class_bind_template_callback — no GModule autoconnect), so it
   # needs no dynsym-inject either. So there is DELIBERATELY no `gcolor3 = …`
   # entry here: `cross.gcolor3` is stock nixpkgs + the shared fixes, installed
-  # on demand (`nix-env -iA nixpkgs.gcolor3`), not baked into the base squashfs
-  # — so the `wasmLeafApp` served-closure size optimization the base-image apps
-  # use (l3afpad/galculator/the games) is unnecessary; its `-dev` closure only
-  # inflates that one on-demand install, and correctness is unaffected. If
-  # `nix build .#gcolor3` reveals a cross gap, the fix belongs in the relevant
-  # SHARED dependency override, never a gcolor3-private recipe (corollary 1).
-  # (A display-free --selftest patch could be added later for a CI gate, but it
-  # is not needed for the app to build/install/run.)
+  # on demand (`nix-env -iA nixpkgs.gcolor3`). If `nix build .#gcolor3` reveals
+  # a cross gap, the fix belongs in the relevant SHARED dependency override,
+  # never a gcolor3-private recipe (corollary 1). (A display-free --selftest
+  # patch could be added later for a CI gate, but it is not needed for the app
+  # to build/install/run.)
 
   # --- GNOME games tier (issue: browser desktop games) ------------------------
   # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS

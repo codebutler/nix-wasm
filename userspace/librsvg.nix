@@ -20,9 +20,7 @@ cross.stdenv.mkDerivation {
   pname = "librsvg";
   version = "2.40.21";
   # librsvg does NOT link gtk3, so it doesn't receive gtk3's propagated
-  # auto-fpcast hook — it adds `fpcast.hook` explicitly (below). Opt into the
-  # leaf served-closure nix-support strip (#43), now that leaf-clean is opt-in:
-  wasmLeafApp = true;
+  # auto-fpcast hook — it adds `fpcast.hook` explicitly (below).
 
   src = pkgs.fetchurl {
     url = "https://download.gnome.org/sources/librsvg/2.40/librsvg-2.40.21.tar.xz";
@@ -97,13 +95,13 @@ cross.stdenv.mkDerivation {
     sed -i 's/^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$/Requires: glib-2.0 gio-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0/' "$pc"
   '';
 
-  # fpcast.hook (nativeBuildInputs) + wasmLeafApp (above) apply the standard
-  # gobject/pango indirect-call cast fix to $out/bin/rsvg-convert AND strip
-  # $out/nix-support (the #43 served-closure cleanup — the games link this
-  # package's .dev output in the BUILD graph, whose nix-support the hook leaves
-  # intact; only $out is stripped). So this postFixup keeps ONLY the librsvg-
-  # specific libtool cleanup the hook can't know about:
+  # fpcast.hook (nativeBuildInputs) applies the standard gobject/pango
+  # indirect-call cast fix to $out/bin/rsvg-convert automatically.
   postFixup = ''
+    # Leaf posture for the served closure (#43): drop $out's propagated -dev
+    # metadata. The games link this package's .dev output in the BUILD graph,
+    # whose nix-support is a separate output and left intact — only $out here.
+    rm -rf "$out/nix-support"
     # Libtool archives embed dependency_libs with ABSOLUTE STORE PATHS — they
     # dragged the entire build closure (glib-dev → native python3 62MB /
     # gettext / bash-dev / glibc…) into the SERVED image: 36 → 112 store

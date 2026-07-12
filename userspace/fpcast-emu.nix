@@ -26,55 +26,32 @@
 #   changing their ABI and table layout. It belongs only on the gobject/GTK
 #   binaries that actually need it, applied as the last link step.
 #
-# HOW TO APPLY IT — two supported forms, ONE pass definition (`passCmd` below):
+# TWO ways to apply it, ONE pass definition (`passCmd` below) so the exact
+# wasm-opt invocation lives in a single place:
 #
-#   1. `hook` — a nixpkgs SETUP HOOK (the libxml2-setupHook idiom), AUTO-APPLIED
-#      to every gtk3 consumer: the cross `gtk3` override (deps-overlay.nix) puts
-#      this hook in its `propagatedNativeBuildInputs`, so any derivation that
-#      links gtk3 sources it with ZERO per-package lines. In a single idempotent
-#      `postFixupHooks` step it:
-#        (a) fpcasts every wasm executable the derivation installs under any
-#            output's `bin/` — the correctness pass every gobject binary needs,
-#            now impossible to forget on a new GTK app; and
-#        (b) IF the derivation opts in with `wasmLeafApp = true`, strips its
-#            `$out/nix-support` served-closure dead weight (the #43 cleanup).
-#
-#      WHY fpcast is default-ON but leaf-clean is opt-IN: the hook reaches gtk3
-#      *libraries* too (anything linking gtk3), and fpcast is a correct/no-op on
-#      any gobject binary — safe to apply universally. But the nix-support strip
-#      would delete a LIBRARY's real propagated-build-inputs metadata that
-#      downstream builds need, so it must NEVER fire by default — only a leaf
-#      APP (nothing links it) sets `wasmLeafApp = true`.
-#
-#      Escape hatches:
-#      • `dontFpcastEmu = true` — a derivation that fpcasts its OWN binary (a
-#        mid-buildPhase temp object, a non-`bin` artifact, or a hand-ordered
-#        dynsym+fpcast sequence) sets this so the auto pass does not DOUBLE-apply
-#        on top of its manual one. Every currently-manual gtk3-linking consumer
-#        (gtk-hello/gtk-demo/widget-factory/gcalctool/galculator/the games) sets
-#        it and keeps its existing manual fpcast unchanged.
-#      • `wasmLeafApp = true` — opt IN to the leaf nix-support strip (l3afpad,
-#        librsvg, gcolor3, …).
+#   1. `hook` — a nixpkgs SETUP HOOK, auto-applied to every gtk3 consumer: the
+#      cross `gtk3` override (deps-overlay.nix) puts it in its
+#      `propagatedNativeBuildInputs`, so any derivation linking gtk3 fpcasts its
+#      installed $out/bin wasm executables with ZERO per-package lines — the
+#      correctness pass can't be forgotten on a new GTK app. It runs in an
+#      idempotent `postFixupHooks` step (propagation can register it twice).
+#      A consumer that fpcasts its OWN binary (a mid-buildPhase temp object, a
+#      non-`bin` artifact, or a hand-ordered dynsym+fpcast sequence) sets
+#      `dontFpcastEmu = true` so the auto pass does not double-apply. fpcast is
+#      a correct/no-op on any gobject binary, so it is safe to apply to gtk3
+#      libraries too. A non-gtk3 gobject binary (librsvg) adds `hook` to its own
+#      nativeBuildInputs explicitly.
 #
 #      ORDERING with dynsym-inject (dynsym.nix): the auto pass runs in
 #      `postFixupHooks`, which `runHook` fires AFTER the derivation's own
-#      `postFixup` env-var body (the guarantee autoPatchelfHook relies on). So a
-#      GModule app that does NOT set `dontFpcastEmu` can keep just its
-#      `dynsym_inject … $out/bin/x` in `postFixup` and the auto pass fpcasts the
-#      injected binary afterwards — dynsym-FIRST / fpcast-SECOND preserved. (The
-#      existing games/gcalctool instead set `dontFpcastEmu` and keep their whole
-#      manual dynsym+fpcast, unchanged, until each is boot-verified onto the
-#      auto path one at a time — PRIME DIRECTIVE: no blind glib/gtk3 flip.)
+#      `postFixup` body, so a GModule app that does NOT set `dontFpcastEmu` can
+#      keep just its `dynsym_inject … $out/bin/x` in `postFixup` and the pass
+#      fpcasts the injected binary afterwards (dynsym-first / fpcast-second).
 #
-#   2. `shellFn` — the raw `fpcast_emu <in.wasm> <out.wasm>` shell function, for
-#      derivations that must run the pass at a specific point a postFixup hook
-#      can't express: mid-`buildPhase` on a temp object before install
-#      (gtk-hello, pango-text, gtk-demo, the *-selftest binaries), or on a
-#      non-`bin` artifact / in a hand-ordered dynsym+fpcast sequence
-#      (dltest's side .so, widget-factory). Source it with `${fpcast.shellFn}`.
-#
-#   BOTH forms call the SAME `passCmd`, so the exact wasm-opt invocation (its
-#   feature set, the max-func-params width) lives in exactly one place here.
+#   2. `shellFn` — the raw `fpcast_emu <in.wasm> <out.wasm>` shell function for
+#      the manual callers above (gtk-hello, gtk-demo, widget-factory, gcalctool,
+#      galculator, the games, dltest, the *-selftests). Source it with
+#      `${fpcast.shellFn}`.
 #
 # NOTE: the --enable-* set matches what pure-C cross binaries (glib/pango/GTK)
 # contain. A future C++/`-fwasm-exceptions` GTK binary that needs this seam must
@@ -104,53 +81,35 @@ let
   '';
 
   # The setup-hook script: define fpcast_emu, then register an idempotent
-  # postFixup hook that (1) fpcasts every wasm executable installed under each
-  # output's bin/ unless `dontFpcastEmu`, and (2) strips $out/nix-support only
-  # when the derivation opts in with `wasmLeafApp`. Propagated from gtk3, so it
-  # can be registered more than once (transitive dep paths) — the run guard
-  # makes a second invocation a no-op.
-  hookScript = cross.buildPackages.writeText "wasm-gtk-app-setup-hook.sh" ''
+  # postFixup hook that fpcasts every installed wasm executable, unless the
+  # derivation fpcasts its own (`dontFpcastEmu`).
+  hookScript = cross.buildPackages.writeText "wasm-fpcast-setup-hook.sh" ''
     ${fpcastEmuFn}
 
-    _wasmGtkAppFinalize() {
+    _fpcastEmuAllBins() {
       # Idempotency: propagation can source/register this hook twice.
-      if [ -n "''${__wasmGtkAppFinalizeDone:-}" ]; then return 0; fi
-      __wasmGtkAppFinalizeDone=1
-
-      # (1) fpcast every installed wasm executable. `dontFpcastEmu` opts out
-      #     (a derivation that runs the pass itself — manual/dynsym consumers).
-      if [ -z "''${dontFpcastEmu:-}" ]; then
-        local outName outDir exe
-        for outName in $outputs; do
-          outDir="''${!outName}/bin"
-          [ -d "$outDir" ] || continue
-          for exe in "$outDir"/*; do
-            [ -f "$exe" ] || continue
-            # Only touch actual wasm modules (magic "\0asm" = 00 61 73 6d).
-            # Skips shell wrappers / config scripts a package installs in bin.
-            [ "$(dd if="$exe" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
-            fpcast_emu "$exe" "$exe.fpcast.tmp"
-            mv "$exe.fpcast.tmp" "$exe"
-            chmod +x "$exe"
-          done
+      if [ -n "''${__fpcastEmuDone:-}" ]; then return 0; fi
+      __fpcastEmuDone=1
+      if [ -n "''${dontFpcastEmu:-}" ]; then return 0; fi
+      local outName outDir exe
+      for outName in $outputs; do
+        outDir="''${!outName}/bin"
+        [ -d "$outDir" ] || continue
+        for exe in "$outDir"/*; do
+          [ -f "$exe" ] || continue
+          # Only touch actual wasm modules (magic "\0asm" = 00 61 73 6d).
+          # Skips shell wrappers / config scripts a package installs in bin.
+          [ "$(dd if="$exe" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "0061736d" ] || continue
+          fpcast_emu "$exe" "$exe.fpcast.tmp"
+          mv "$exe.fpcast.tmp" "$exe"
+          chmod +x "$exe"
         done
-      fi
-
-      # (2) LEAF-app closure hygiene (the #43 lesson): $out/nix-support/
-      #     propagated-build-inputs records gtk+3-dev, dragging the whole X11 /
-      #     glibc-locale `-dev` tree into the SERVED store closure for an app
-      #     nothing ever links against. OPT-IN via `wasmLeafApp` — a LIBRARY
-      #     that links gtk3 also sources this hook and MUST keep its propagation
-      #     metadata, so this never fires by default. Only $out is touched (a
-      #     $dev output's nix-support is real downstream link metadata).
-      if [ -n "''${wasmLeafApp:-}" ] && [ -e "''${out:-}/nix-support" ]; then
-        rm -rf "$out/nix-support"
-      fi
+      done
     }
 
     # runHook fires the derivation's own `postFixup` body BEFORE this array, so
     # a dynsym_inject step in postFixup lands before we fpcast (order preserved).
-    postFixupHooks+=(_wasmGtkAppFinalize)
+    postFixupHooks+=(_fpcastEmuAllBins)
   '';
 
   hook = cross.buildPackages.makeSetupHook
@@ -159,15 +118,13 @@ let
 in
 {
   # The native binaryen build input (provides `wasm-opt`). Kept exported for
-  # back-compat; `shellFn`/`hook` already call wasm-opt by absolute path, so a
-  # consumer using either form no longer needs this in nativeBuildInputs.
+  # back-compat; `shellFn`/`hook` already call wasm-opt by absolute path.
   inherit binaryen;
 
   # The auto hook. Lives in cross gtk3's propagatedNativeBuildInputs
   # (deps-overlay.nix), so every gtk3 consumer fpcasts its wasm bins with no
-  # per-package line. `dontFpcastEmu` opts a manual consumer out; `wasmLeafApp`
-  # opts a leaf app INTO the $out/nix-support strip. A non-gtk3 gobject binary
-  # (librsvg) still adds it explicitly to nativeBuildInputs.
+  # per-package line. `dontFpcastEmu` opts a manual consumer out. A non-gtk3
+  # gobject binary (librsvg) adds it explicitly to nativeBuildInputs.
   inherit hook;
 
   # Raw `fpcast_emu <in> <out>` function, for buildPhase / non-bin / hand-ordered

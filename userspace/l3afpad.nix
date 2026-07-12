@@ -36,10 +36,6 @@
 { cross, pkgs }:
 cross.stdenv.mkDerivation {
   pname = "l3afpad";
-  # l3afpad links gtk3, so gtk3's propagated hook (deps-overlay.nix) fpcasts
-  # $out/bin/l3afpad automatically — no fpcast line here. Opt into the leaf
-  # served-closure nix-support strip (#43):
-  wasmLeafApp = true;
   # The last rev nixpkgs shipped (24.05); upstream has been quiet since.
   version = "unstable-2022-02-14";
 
@@ -94,7 +90,12 @@ cross.stdenv.mkDerivation {
   # No dynsym-inject and no manual fpcast: l3afpad wires signals in C (no
   # GtkBuilder autoconnect, gtk3-demo posture), so the standard indirect-call
   # cast fix is all it needs — and that arrives automatically from gtk3's
-  # propagated hook. `wasmLeafApp = true` (above) is the whole wasm footprint.
+  # propagated hook (deps-overlay.nix).
+  postFixup = ''
+    # Leaf app in the served base image: drop the propagated -dev closure
+    # metadata (#43) so the served store doesn't carry the X11/-dev tree.
+    rm -rf "$out/nix-support"
+  '';
 
   meta.description = "L3afpad — simple GTK3 text editor (leafpad fork) on wasm32; signals wired in C, no GModule";
 }
