@@ -1,12 +1,11 @@
 # four-in-a-row 3.22.1 — GNOME Four-in-a-row (Connect Four), fifth of the
 # games tier. Vala upstream, autotools dist tarball ships the generated C
-# (the mahjongg story). Deps: gtk3 + librsvg — upstream also wants
-# libcanberra-gtk3, which we DON'T cross-build (canberra-gtk.c is X11-only
-# source and our GTK3 is wayland-only; a null-driver build would be silent
-# anyway since the guest has no audio device). The sound calls are stubbed
-# by patches/four-in-a-row/0001-disable-sound.patch (one call site in
-# hand-written main.c) and the configure requirement is sed'd out below.
-# Revisit when the guest grows an audio stack.
+# (the mahjongg story). Deps: gtk3 + librsvg + libcanberra-gtk3 — SOUND IS
+# REAL now (issue #145): the guest has a virtio-snd sound card and
+# libcanberra cross-builds with the builtin ALSA backend against our
+# wayland-only GTK3 (deps-overlay.nix + patches/libcanberra/0001), so the
+# upstream ca_gtk_play_for_widget call sites build unmodified (the old
+# 0001-disable-sound.patch + configure sed are retired).
 #
 # GSettings schema (org.gnome.four-in-a-row) compiles centrally in
 # gtk-assets.nix; its themes ride the closure via systemPackages.
@@ -21,20 +20,11 @@ cross.stdenv.mkDerivation {
   };
 
   patches = [
-    ../patches/four-in-a-row/0001-disable-sound.patch
     # player_active tentative definition in main.h — -fcommon is NOT an option
     # on wasm32 (no common symbols in the object format; clang ICEs), so the
     # header gets a real extern. See the patch header.
     ../patches/four-in-a-row/0002-extern-player-active.patch
   ];
-
-  # Drop the libcanberra-gtk3 requirement from the SHIPPED configure (we
-  # don't autoreconf). Asserted: the build fails loudly if the string moves.
-  postPatch = ''
-    grep -c "libcanberra-gtk3" configure >/dev/null || (echo "canberra sed anchor missing" >&2; exit 1)
-    sed -i 's/ *libcanberra-gtk3 >= [$\\]*CANBERRA_GTK_REQUIRED//g' configure
-    if grep -q "libcanberra-gtk3" configure; then echo "canberra sed incomplete" >&2; exit 1; fi
-  '';
 
   nativeBuildInputs = [
     cross.buildPackages.pkg-config
@@ -50,6 +40,12 @@ cross.stdenv.mkDerivation {
     cross.gtk3
     cross.glib
     cross.librsvg
+    # Event sounds (issue #145): libcanberra-gtk3 + its static link chain
+    # (libcanberra.pc pulls vorbisfile + alsa via Libs.private).
+    cross.libcanberra
+    cross.alsa-lib
+    cross.libvorbis
+    cross.libogg
     # librsvg-2.0.pc's Requires chain, listed explicitly (librsvg's leaf
     # posture drops its nix-support propagation): pkg-config must resolve
     # libcroco/cairo/pango/gdk-pixbuf/png from OUR inputs.

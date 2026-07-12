@@ -250,6 +250,13 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.m
 # in-guest reflects the new size. Also wired into nix-wasm.yml boot-smoke (gating).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/resize-smoke.mjs
 
+# #145 guest-audio smoke (busybox-only boot): virtio-snd (kernel patch 0027,
+# CONFIG_SND_VIRTIO) + cross alsa-lib. `alsa-tone` plays a deterministic 440Hz
+# sine through snd_pcm_open/set_params/writei/drain; PASS = the host device
+# model saw SET_PARAMS(48k/2ch)+START and received the full tone BIT-EXACT.
+# Also wired into nix-wasm.yml boot-smoke (gating).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/snd-smoke.mjs
+
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
@@ -845,7 +852,8 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   canonical layout changed — the console is now **8 single-port virtio-console
   devices** at an explicit `VW_DEV_CONSOLE_BASE = 8` (host idx 8..15, registered by a
   `for (i<8) virtio_wasm_register(VW_DEV_CONSOLE_BASE + i, …)` loop), with
-  `VW_DEV_VSOCK = 7` BEFORE them (index 6 unused). So the assertion now enforces the
+  `VW_DEV_VSOCK = 7` BEFORE them (index 6 = `VW_DEV_SND` since #145 — the
+  virtio-snd sound card, patch 0027; the postPatch assertion pins SND=6 too). So the assertion now enforces the
   OPPOSITE order from #87's "bug" framing above — `VW_DEV_VSOCK(7) < CONSOLE_BASE(8)`
   is CORRECT now — and checks the `VW_DEV_CONSOLE_BASE + i` loop (not a single
   `VW_DEV_CONSOLE` call) plus the pinned `=7`/`=8` values. Multiport was abandoned:
@@ -871,6 +879,36 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (`setConfigSize`/`getConfigSize`) — written before the irq is raised, race-free. Gated
   by `resize-smoke.mjs` (boot → `console.resize` → `stty size`). It's a GENERAL transport
   feature (any future config-change device can use it), console is just the first user.
+- **Guest audio = virtio-snd (patch 0027, `VW_DEV_SND=6`) + cross alsa-lib; the
+  device's completion model is LOAD-BEARING** (#145; `runtime/virtio/snd-device.js`,
+  `deps-overlay.nix` alsa-lib/libcanberra, `patches/alsa-lib/0001`,
+  `patches/libcanberra/0001`). Stock mainline driver (CONFIG_SND_VIRTIO) over the
+  wasm transport; the host serves ONE s16/48kHz playback stream and hands PCM to a
+  pluggable sink (`snd.onReady(device)` boot hook → `device.setSink(…)`; pc's
+  AudioWorklet in `js/linux/guest-audio.js`). THREE rules found by BOOTING, not
+  spec-reading — all three produced `-EIO` in alsa-lib with no kernel error:
+  (1) tx buffers queued BEFORE `R_PCM_START` must stay HELD in the vring (the
+  driver pre-queues its whole ALSA buffer and counts period-elapsed only on
+  completions while running — early completion starves the accounting, writei
+  hangs to its 10s timeout); (2) running completions must be PACED against a
+  real-time playback clock (a whole buffer completing in one burst wraps hw_ptr
+  exactly onto itself → "stalled" pointer → same -EIO; pacing is also what makes
+  writei block like real hardware); (3) the driver submits only FULL periods
+  (`virtio_pcm_msg.c` accumulates to period_bytes), so a playback app must
+  silence-pad its final period before `snd_pcm_drain` (aplay does; alsa-tone
+  does) or drain times out (~buffer_size*1.1/rate ms). alsa-lib cross needs
+  `--without-versioned` PLUS patches/alsa-lib/0001 (the no-versioning alias
+  fallback and link_warning are module-level `.symver`/`.weak`/`.set`/`.section`
+  inline asm — no wasm encoding; the patch swaps in C weak-alias attributes) and
+  compiles out the fork() holdouts per the process-model rule (dmix/dshare/
+  dsnoop + shm/aserver, ladspa, UCM). libcanberra builds `--with-builtin=alsa`
+  (the dso loader is ltdl dlopen; builtin compiles the ALSA driver INTO the lib —
+  the gio-modules posture) against our wayland-only gtk3 via patches/libcanberra/
+  0001 (guards the X11-metadata code behind GDK_WINDOWING_X11; nixpkgs' runtime-
+  check patch still needs gdkx.h) + an anchored configure sed dropping the ltdl
+  hard-require (builtin builds never use it). The cc-wrapper wasm-ld filter also
+  grew `--as-needed` (libcanberra's Makefile passes it; ELF-DSO-only). Gate:
+  `snd-smoke.mjs` (bit-exact PCM at the sink). ENGINE_ABI 11.
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),

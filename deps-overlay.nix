@@ -272,6 +272,75 @@ in
     }))
     prev.alsa-lib;
 
+  # --- libcanberra: XDG event sounds over the ALSA backend (issue #145) -------
+  # The GNOME games (iagno, four-in-a-row) play their event sounds through
+  # ca_gtk_play_for_widget (libcanberra-gtk3). Cross it with:
+  # - gtkSupport = "gtk3" against OUR wayland-only gtk3 (nixpkgs points the
+  #   flavor at gtk3-x11) + patches/libcanberra/0001: canberra-gtk.c and the
+  #   gtk module read X11-only window metadata (_NET_WM_DESKTOP/_XEMBED_INFO)
+  #   through unconditional gdkx.h includes — guard them behind
+  #   GDK_WINDOWING_X11 with faithful "not available" fallbacks (the metadata
+  #   only decorates the sound-event proplist).
+  # - `--with-builtin=alsa`: the default backend loader is ltdl dlopen-per-
+  #   driver; the builtin flavor compiles the ALSA driver INTO libcanberra
+  #   (the upstream-supported static path — same posture as gio modules /
+  #   gdk-pixbuf loaders on this guest). pulse/gstreamer/oss are off (no such
+  #   daemons on the guest); libtool(ltdl)/libcap/systemd drop out with it.
+  # - the sound files themselves decode through libvorbisfile (cross
+  #   libvorbis/libogg — stock nixpkgs recipes, no override needed).
+  libcanberra = whenWasm
+    (p: (p.override {
+      gtkSupport = "gtk3";
+      gtk3-x11 = final.gtk3;
+      libpulseaudio = null;
+      gst_all_1 = { gstreamer = null; gst-plugins-base = null; };
+      libcap = null;
+      withSystemd = false;
+      libtool = null;
+    }).overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/libcanberra/0001-wayland-only-gtk.patch ];
+      buildInputs = builtins.filter (d: d != null) (o.buildInputs or [ ]);
+      configureFlags = (o.configureFlags or [ ]) ++ [
+        "--with-builtin=alsa"
+        "--disable-pulse"
+        "--disable-gstreamer"
+        "--disable-lynx"
+      ];
+      # The SHIPPED configure hard-errors without libltdl even though a
+      # --with-builtin=<driver> build never uses it (ltdl only backs the dso
+      # loader) — an upstream bug for builtin builds. Drop the bail-out from
+      # the generated configure (we don't autoreconf), asserted like the
+      # games' canberra seds so a tarball change fails loudly.
+      postPatch = (o.postPatch or "") + ''
+        grep -c 'Unable to find libltdl' configure >/dev/null || (echo "ltdl sed anchor missing" >&2; exit 1)
+        sed -i 's|as_fn_error $? "Unable to find libltdl." "$LINENO" 5|: # builtin-driver build: ltdl unused (wasm)|' configure
+        if grep -q 'as_fn_error $? "Unable to find libltdl."' configure; then echo "ltdl sed incomplete" >&2; exit 1; fi
+      '';
+      # nixpkgs' postInstall rewrites -lltdl in the .la files; the builtin-alsa
+      # build never links ltdl (and libtool is nulled above). Instead: the
+      # static build produces no module .so, so the install-exec-hook's
+      # libcanberra-gtk-module.so → libcanberra-gtk3-module.so compat symlink
+      # dangles (noBrokenSymlinks fails the build) — and the GTK-modules dir is
+      # meaningless on this guest anyway (NOMMU/static: GTK can't load modules).
+      # Drop the whole modules dir.
+      postInstall = ''
+        rm -rf $out/lib/gtk-3.0
+
+        # Static-only consumers resolve the FULL link line from the .pc (there
+        # is no .so carrying DT_NEEDED), but upstream's libcanberra.pc omits
+        # the decoder/backend deps entirely (they're baked into the ELF .so
+        # normally) and libcanberra-gtk3.pc hardcodes -lX11 (wayland-only GTK
+        # here). Publish the real static chain via Requires and drop -lX11.
+        pc=''${!outputDev}/lib/pkgconfig/libcanberra.pc
+        grep -q '^Requires:$' "$pc" || (echo "libcanberra.pc Requires anchor missing" >&2; exit 1)
+        sed -i 's/^Requires:$/Requires: vorbisfile alsa/' "$pc"
+        pcg=''${!outputDev}/lib/pkgconfig/libcanberra-gtk3.pc
+        grep -q -- '-lX11' "$pcg" || (echo "libcanberra-gtk3.pc -lX11 anchor missing" >&2; exit 1)
+        sed -i 's/ -lX11//' "$pcg"
+      '';
+    }))
+    prev.libcanberra;
+
   # --- harfbuzz: glib-free for the M2 text stack ------------------------------
   # nixpkgs harfbuzz enables the glib integration (hb-glib) by default, which would
   # drag the entire glib cross-build into the M2 text layer. M2 only needs core

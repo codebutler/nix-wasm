@@ -883,6 +883,7 @@
         "busybox"
         "ncurses" # userspace targets (Nix-built guest), exposed for build/testing
         "alsa-lib" # guest ALSA userspace (issue #145 — virtio-snd sound card)
+        "libcanberra" # XDG event sounds over the ALSA backend (issue #145)
       ])
       # The Wayland stack (client + server libs), each cross-built to wasm.
       # Exposed as `wl-<name>` so `nix build -k .#wl-…` surfaces every cross
