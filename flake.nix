@@ -791,6 +791,13 @@
         # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
         gcalctool = cross.gcalctool;
 
+        # l3afpad — GTK3 leafpad fork (#122): the first real GTK3 productivity
+        # app (open/edit/save text, incl. /mnt/pc). Signals wired in C — no
+        # GModule, the gtk3-demo posture. --selftest is the headless gate
+        # (runtime/demo/node/l3afpad-smoke.mjs); the editor window + a /mnt/pc
+        # save round-trip are the MANUAL browser check.
+        l3afpad = cross.l3afpad;
+
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
         # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and
         # five-or-more (pure C, GtkBuilder/GModule autoconnect) are the first

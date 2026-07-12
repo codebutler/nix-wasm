@@ -128,6 +128,11 @@ let
                             # org.gnome.gcalctool schema must ride the closure for the
                             # gtk-assets compiled-schema dir (g_settings_new aborts if
                             # the schema is missing).
+          cross.l3afpad     # GTK3 text editor (leafpad fork, #122) — the first real
+                            # GTK3 productivity app. systemPackages (NOT initramfs
+                            # extraBins — the gcalctool tmpfs lesson) so the binary
+                            # loads from the evictable squashfs and its window icon
+                            # (baked ICONDIR = $out/share/pixmaps) rides the closure.
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";

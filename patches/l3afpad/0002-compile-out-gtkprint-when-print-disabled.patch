@@ -1,0 +1,28 @@
+diff --git a/src/gtkprint.c b/src/gtkprint.c
+index f01d08a..e74a0a9 100644
+--- a/src/gtkprint.c
++++ b/src/gtkprint.c
+@@ -17,6 +17,17 @@
+  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+  */
+ 
++/* nix-wasm #122: the cross GTK3 is wayland-only with no unix-print layer
++   (gtkprintoperation-unix.c / the print backends are not compiled into
++   libgtk — the same gap that dropped gtk3-demo's pagesetup demo), so the
++   GtkPrintOperation symbols this file references do not exist. Compile the
++   whole TU out under --disable-print: menu.c/callback.c/emacs.c already
++   guard every USE with #if ENABLE_PRINT, but the DEFINITIONS here were
++   unconditional and would still pull the missing libgtk members at link. */
++#include "l3afpad.h" /* config.h -> ENABLE_PRINT (defaults to 1) */
++
++#if ENABLE_PRINT
++
+ #include <gtk/gtk.h>
+ #include "gtkprint.h"
+ 
+@@ -217,3 +228,5 @@ void create_gtkprint_preview_session(GtkTextView *text_view, const gchar *title)
+ 
+ 	g_object_unref(op);
+ }
++
++#endif /* ENABLE_PRINT */

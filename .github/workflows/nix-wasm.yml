@@ -515,6 +515,12 @@ jobs:
           # headless gate with no source patch. Light (no GTK init) but kept
           # one-per-boot with its GTK siblings for isolation. Gating.
           run_smoke demo/node/gcalctool-smoke.mjs
+          # l3afpad (GTK3 leafpad fork, #122): the first real GTK3 productivity
+          # app — signals wired in C, no GModule (the gtk3-demo posture).
+          # --selftest class_inits the editor widgets through the fpcast seam +
+          # fires a GtkTextBuffer signal, display-free. One-per-boot like its
+          # GTK siblings. Gating.
+          run_smoke demo/node/l3afpad-smoke.mjs
           # GNOME games tier: rsvg-convert renders mahjongg's real tileset SVG
           # to PNG in-guest — proves libcroco → librsvg → pango/cairo →
           # cairo-png headless, zero source patches. The game windows are

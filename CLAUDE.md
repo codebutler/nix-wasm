@@ -217,6 +217,15 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 # full browser window is a MANUAL browser check).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-demo-smoke.mjs
 
+# l3afpad (GTK3 leafpad fork — the first real GTK3 PRODUCTIVITY app, #122: a
+# Notepad-class open/edit/save text editor. Signals wired in C like gtk3-demo
+# (GtkActionEntry/G_CALLBACK + g_signal_connect, never
+# gtk_builder_connect_signals) → NO GModule dependency. --selftest class_inits
+# the editor widget classes + fires a GtkTextBuffer "changed" signal into an
+# address-taken C handler through the fpcast seam, display-free; the editor
+# window + an open/edit/save round-trip to /mnt/pc are a MANUAL browser check).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/l3afpad-smoke.mjs
+
 # #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
 #   sigalrm-smoke   — self-armed SIGALRM/itimer/alarm (kernel mechanism, #55).
 #   kill-wake-smoke — cross-process kill() async-signal wake (a reduced C
@@ -770,6 +779,39 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   runtime on this guest — the `builder` demo would hit the GModule wall if its
   own `.ui` autoconnect path is exercised, and `glarea` needs GL (libepoxy is
   built no-GL) — but the browser itself and the bulk of the demos do.
+- **l3afpad — the first real productivity app** (`userspace/l3afpad.nix`,
+  `patches/l3afpad/`, `deps-overlay.nix` `l3afpad`; issue #122). The GTK3 fork
+  of leafpad — a Notepad-class open/edit/save text editor, the follow-through
+  on the gtk3-demo lesson: it wires every signal in C (menu.c's
+  `GtkActionEntry` tables with `G_CALLBACK` fn pointers + `g_signal_connect`
+  in window.c) and never calls `gtk_builder_connect_signals`, so NO GModule
+  wall and NO dynsym inject — just the shared `--fpcast-emu` post-link pass.
+  nixpkgs dropped l3afpad before our pin, so it is a from-scratch derivation
+  like gcalctool (in the overlay as `cross.l3afpad`), pinned to the same
+  rev+hash nixpkgs last shipped (24.05). The source is a git checkout (no
+  pre-generated ./configure, no po/Makefile.in.in), so the build runs
+  `autoreconfHook` **plus `intltoolize` in `preAutoreconf`** (the step
+  upstream's autogen.sh and Debian's dh_autoreconf run — autoreconf alone does
+  not invoke intltoolize). Its 2013-era `AM_CONFIG_HEADER` / two-arg
+  `AM_INIT_AUTOMAKE` are fine: automake 1.17 still accepts both
+  (obsolete-warning only — verified in automake's m4/obsolete.m4 + init.m4).
+  `--disable-print` + **patch 0002 compile out gtkprint.c entirely**: upstream
+  guards every print *use* with `#if ENABLE_PRINT` but left the definitions
+  unconditional, and the wayland-only/no-cups cross gtk3 has no unix-print
+  layer (the gtk3-demo pagesetup.c gap) — the unconditional TU would pull
+  missing libgtk members at link. `strictDeps=false` for glib's
+  `AM_GLIB_DEFINE_LOCALEDIR` m4 (same as galculator's `AM_GLIB_GNU_GETTEXT`).
+  Ships via `environment.systemPackages` ONLY (NOT initramfs `extraBins` — the
+  gcalctool tmpfs lesson: the binary loads from the evictable squashfs, and
+  its `share/pixmaps/l3afpad.png` window icon — loaded at runtime from the
+  baked ICONDIR store path — rides the served closure). `--selftest` is the
+  display-free gate: widget `class_init`s (menubar/textview/scrolled-window)
+  through the fpcast seam, a real `GtkTextBuffer` "changed" signal fired into
+  an address-taken C handler (buffers, unlike widgets, are instantiable
+  without a display), `gtk_get_major_version()==3`. Gate:
+  `node demo/node/l3afpad-smoke.mjs` matches `/L3AFPAD-SELFTEST: .* OK/` (in
+  the `nix-boot-smoke` CI job, one-per-boot like its GTK siblings). The
+  open/edit/save-a-file-to-/mnt/pc flow is a MANUAL browser check.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
