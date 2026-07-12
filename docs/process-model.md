@@ -11,17 +11,20 @@ This document is the authoritative description of the **spawn contract**. Its
 purpose: the busybox/ash/glib spawn patches are **one documented platform port**,
 not a pile of ad-hoc per-package hacks.
 
-## Spawn contract — `posix_spawn` only
+## Spawn contract — `posix_spawn` by default, fork() as a per-binary opt-in
 
-wasm cannot implement `fork()`/`vfork()`. "Return twice" requires re-entering a
-call frame mid-execution — a **multi-shot continuation**. No shipped wasm engine
-provides one: WasmFX and JSPI are **one-shot** (verified empirically in
-`spikes/stackswitch/` — a 2nd `resume` traps with "resuming an invalid
-continuation"), and per-binary **asyncify** (serialize the stack to copyable
-memory) is the only multi-shot option, which we reject as a whole-userspace tax.
-A new task on wasm is therefore always a **fresh instance running a function** —
-which is precisely `clone(CLONE_VM, fn)` / `posix_spawn`, the one spawn primitive
-that needs no return-twice.
+wasm cannot implement `fork()`/`vfork()` **on the plain toolchain**. "Return
+twice" requires re-entering a call frame mid-execution — a **multi-shot
+continuation**. No shipped wasm engine provides one natively: WasmFX and JSPI
+are **one-shot** (verified empirically in `spikes/stackswitch/` — a 2nd
+`resume` traps with "resuming an invalid continuation"). The one multi-shot
+mechanism is per-binary **asyncify** (serialize the stack to copyable linear
+memory) — rejected as the *whole-userspace default* (size/speed tax on every
+binary), but it **works and already ships as an opt-in seam**: see "Real
+`fork()` — the asyncify seam" below. On the default toolchain a new task is
+therefore always a **fresh instance running a function** — which is precisely
+`clone(CLONE_VM, fn)` / `posix_spawn`, the one spawn primitive that needs no
+return-twice.
 
 So the platform is **`posix_spawn`-only**, defined once at three layers:
 
@@ -41,6 +44,26 @@ So the platform is **`posix_spawn`-only**, defined once at three layers:
 The link-behavior is pinned by a probe: `spikes/nofork/` (flake attr
 `.#nofork-linkcheck`) compiles a `fork()` user and a `posix_spawn()` user through
 the cross cc-wrapper and records `fork=ABSENT` / `spawn=LINKED` in its output.
+
+## Real `fork()` — the asyncify seam (per-binary opt-in)
+
+Real fork-without-exec **exists and passes acceptance** (PR #20): the
+`forkSeam` musl variant (`toolchain/musl.nix`), the `cc-fork` driver
+(`toolchain/guest-cc-fork.nix`), and `userspace/asyncify-cc.nix` build a
+binary whose live stack asyncify can serialize into copyable linear memory —
+so the child genuinely returns twice, gets private memory, and is reaped
+correctly (8 `fork-*` acceptance programs). It was shelved (#32/#25/#29) when
+every fork paid an eager whole-RSS copy; **Track A's software-MMU COW removed
+that cliff**, and **#129 (Track B)** is generalizing the seam into a
+cross-stdenv flag so opting a package into real `fork()` is a build option,
+not a bespoke derivation. The plan confines the asyncify tax to fork-using
+binaries (shells, `make`, daemons) — everything else stays `posix_spawn` and
+pays nothing — and then retires the forkshell `ash` and the
+`posix_spawn`-only accommodations below.
+
+Until #129 lands, the **default** toolchain remains `posix_spawn`-only and the
+holdout rules below apply. Do not describe `fork()` as impossible on this
+platform — it is an opt-in with a per-binary cost.
 
 ## Handling a fork/vfork holdout — the decision rule
 
@@ -93,6 +116,11 @@ one of these — in order of preference — and **never** add a stub that links:
      are disabled on the guest. (This replaced an earlier runtime-abort stub; the
      symmetric `__wasm__` guard covers both the NOMMU busybox build, `BB_MMU=0`,
      and the allnoconfig ash build, `BB_MMU=1`.)
+
+4. **The fork is load-bearing (real fork-without-exec in a program we need)
+   → opt the binary into the asyncify fork seam** (see "Real `fork()`" above;
+   #129 is making this a flag). The binary pays the asyncify size/speed tax;
+   nothing else does. Prefer rules 1–3 when the fork is incidental.
 
 ### The busybox/ash spawn port (the labeled platform port)
 
