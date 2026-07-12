@@ -23,6 +23,14 @@ let
   # Apply f only in the wasm cross set; leave native packages untouched (cached).
   whenWasm = f: p: if isWasm then f p else p;
 
+  # The shared gobject/GTK fpcast-emu seam (userspace/fpcast-emu.nix). Its `hook`
+  # auto-applies the --fpcast-emu post-link pass to a derivation's installed
+  # $out/bin wasm executables when added to nativeBuildInputs — used by the
+  # GTK-app overrides below (gcolor3 …) so the raw wasm-opt invocation lives in
+  # exactly one place, not copy-pasted per override. `cross = final` so it reaches
+  # the native binaryen via final.buildPackages (same access galculator uses).
+  fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
+
   # Patch compiler-rt (and compiler-rt-no-libc — busybox's clangNoLibcxx stdenv
   # uses targetLlvmPackages.compiler-rt-no-libc via overrideScope's `self`, so
   # both attrs must be fixed) inside any llvmPackages scope: replace the rejected
@@ -1096,30 +1104,19 @@ in
   # binding, resolved at compile time via the generated class_init — NOT
   # gtk_builder_connect_signals(NULL)/GModule lookup), so it has the same
   # GModule-free posture as l3afpad/gtk3-demo: only the shared --fpcast-emu
-  # post-link pass (gobject class_init casts) is needed, no dynsym-inject.
-  # UNVERIFIED (no Nix build access when this override was written — see
-  # nix-wasm#156): confirm `nix build .#gcolor3` actually succeeds and the
-  # postFixup binary name/path match before relying on this. A --selftest
-  # source patch (like galculator's/l3afpad's) is deliberately NOT added here
-  # yet — inventing one against unread upstream source would be exactly the
-  # kind of unverified shortcut the PRIME DIRECTIVE forbids; add it once the
-  # real gcolor3 source (window.c/main.c) has been read against a working build.
+  # post-link pass (gobject class_init casts) is needed, no dynsym-inject —
+  # applied automatically by `fpcast.hook` (userspace/fpcast-emu.nix) over the
+  # installed $out/bin/gcolor3. UNVERIFIED (no Nix build access when this
+  # override was written — see nix-wasm#156): confirm `nix build .#gcolor3`
+  # succeeds before relying on this. A --selftest source patch (like
+  # galculator's/l3afpad's) is deliberately NOT added yet — inventing one
+  # against unread upstream source would be exactly the kind of unverified
+  # shortcut the PRIME DIRECTIVE forbids; add it once the real gcolor3 source
+  # (window.c/main.c) has been read against a working build.
   gcolor3 = whenWasm
     (p: p.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [
-        final.buildPackages.binaryen
-      ];
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.hook ];
       postFixup = (o.postFixup or "") + ''
-        if [ -f "$out/bin/gcolor3" ]; then
-          wasm-opt \
-            --enable-threads --enable-bulk-memory --enable-mutable-globals \
-            --enable-nontrapping-float-to-int --enable-sign-ext \
-            --enable-reference-types --enable-multivalue \
-            -pa max-func-params@128 --fpcast-emu \
-            "$out/bin/gcolor3" -o "$out/bin/gcolor3.fpcast"
-          mv "$out/bin/gcolor3.fpcast" "$out/bin/gcolor3"
-          chmod +x "$out/bin/gcolor3"
-        fi
         # Same dead-weight propagation risk galculator hit (issue #43): a leaf
         # GTK3 app's nix-support/propagated-build-inputs can drag a `gtk+3-dev`
         # → X11/glibc-locale `-dev` tree into the served closure for no reason.

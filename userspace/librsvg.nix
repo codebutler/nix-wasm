@@ -31,7 +31,8 @@ cross.stdenv.mkDerivation {
 
   nativeBuildInputs = [
     cross.buildPackages.pkg-config
-    fpcast.binaryen
+    # Auto-fpcasts $out/bin/rsvg-convert in postFixup (userspace/fpcast-emu.nix).
+    fpcast.hook
   ];
   buildInputs = [
     # gdk-pixbuf-BASE, not the svg-loader variant: the svg gdk-pixbuf compiles
@@ -92,17 +93,12 @@ cross.stdenv.mkDerivation {
     sed -i 's/^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$/Requires: glib-2.0 gio-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0/' "$pc"
   '';
 
+  # fpcast.hook (nativeBuildInputs) applies the standard gobject/pango
+  # indirect-call cast fix to $out/bin/rsvg-convert automatically (the .a
+  # libraries need nothing — fpcast is a per-final-binary pass; the games run
+  # the same hook on their own linked outputs). This postFixup only does the
+  # served-closure cleanup below.
   postFixup = ''
-    ${fpcast.shellFn}
-    # rsvg-convert is a gobject/pango binary → the standard indirect-call
-    # cast fix (same seam as every GTK-stack binary). The .a libraries need
-    # nothing — fpcast is a per-final-binary pass; the games run it on their
-    # own linked outputs.
-    if [ -f "$out/bin/rsvg-convert" ]; then
-      fpcast_emu "$out/bin/rsvg-convert" "$out/bin/rsvg-convert.fpcast"
-      mv "$out/bin/rsvg-convert.fpcast" "$out/bin/rsvg-convert"
-      chmod +x "$out/bin/rsvg-convert"
-    fi
     # Leaf posture for the served closure (the #43 lesson). The games build
     # against this package's .dev output in the BUILD graph, which does not
     # read nix-support from the installed store copy.

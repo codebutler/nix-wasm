@@ -56,7 +56,8 @@ cross.stdenv.mkDerivation {
     cross.buildPackages.autoreconfHook # git checkout — no shipped ./configure
     cross.buildPackages.intltool # AC_PROG_INTLTOOL + intltoolize + .desktop merge
     cross.buildPackages.gettext # msgfmt for po/
-    fpcast.binaryen
+    # Auto-fpcasts $out/bin/l3afpad in postFixup (userspace/fpcast-emu.nix).
+    fpcast.hook
   ];
   # strictDeps=false (below) also puts these dev outputs' share/aclocal on the
   # aclocal search path — AM_GLIB_DEFINE_LOCALEDIR/AM_GLIB_GNU_GETTEXT come from
@@ -88,14 +89,11 @@ cross.stdenv.mkDerivation {
     rm -f "$out/share/icons/hicolor/icon-theme.cache"
   '';
 
+  # fpcast.hook (nativeBuildInputs) applies the standard GTK-binary indirect-
+  # call cast fix to $out/bin/l3afpad automatically. No dynsym-inject: no
+  # GtkBuilder autoconnect, nothing resolved by name at runtime (gtk3-demo
+  # posture) — so the hook's plain fpcast is all that's needed.
   postFixup = ''
-    ${fpcast.shellFn}
-    # The standard GTK-binary indirect-call cast fix (gobject class_init /
-    # signal marshaller casts). No dynsym-inject: no GtkBuilder autoconnect,
-    # nothing is resolved by name at runtime (the gtk3-demo posture).
-    fpcast_emu "$out/bin/l3afpad" "$out/bin/l3afpad.fpcast"
-    mv "$out/bin/l3afpad.fpcast" "$out/bin/l3afpad"
-    chmod +x "$out/bin/l3afpad"
     # Leaf app: drop the propagated -dev closure metadata (the #43 lesson —
     # it drags the whole X11/-dev tree into the served store).
     rm -rf "$out/nix-support"
