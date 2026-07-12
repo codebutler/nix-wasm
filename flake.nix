@@ -798,6 +798,21 @@
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
 
+        # gcolor3 — small GTK3 color chooser (successor to the GTK2-only
+        # gcolor2). Unlike l3afpad (dropped from nixpkgs, needed a from-scratch
+        # pin) or galculator (needed patches), gcolor3 is CURRENTLY packaged in
+        # nixpkgs unmodified. Its window.c wires signals with explicit
+        # g_signal_connect + gtk_widget_class_bind_template_callback (a
+        # GtkWidgetClass template, not gtk_builder_connect_signals autoconnect)
+        # — same GModule-free posture as l3afpad/gtk3-demo. Exposed here
+        # UNMODIFIED (no deps-overlay override) to find out how far stock
+        # nixpkgs gets before any wasm-specific fix (most likely the shared
+        # --fpcast-emu post-link pass every gobject-casting GTK3 app needs) is
+        # actually required. Per PRIME DIRECTIVE corollary 1: stay on
+        # nixpkgs-via-crossSystem, don't fork a private recipe until stock is
+        # proven insufficient.
+        gcolor3 = cross.gcolor3;
+
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
         # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and
         # five-or-more (pure C, GtkBuilder/GModule autoconnect) are the first
