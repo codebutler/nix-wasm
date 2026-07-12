@@ -1,12 +1,12 @@
-// rsvg-smoke.mjs — boots (nix:true) and renders a REAL game tileset SVG to
-// PNG in-guest with rsvg-convert. The GNOME-games tier's headless gate, with
-// zero source patches: exercises libcroco (CSS) → librsvg (SVG DOM +
-// rendering) → pango/cairo (text/paths) → cairo-png (the newly-enabled cairo
-// PNG backend) end-to-end, display-free. The tileset is gnome-mahjongg's
-// actual postmodern theme riding the served closure, so this also proves the
-// games' assets are where the binaries will look. The game WINDOWS are
-// browser checks on the rig (docs/superpowers/notes/gnome-games-visual.md).
-// Exit 0 pass / 1 fail / 2 inconclusive (boot panic; re-run).
+// rsvg-smoke.mjs — boots (nix:true) and renders a self-contained SVG to PNG
+// in-guest with rsvg-convert. The GNOME-games tier's headless gate, zero
+// source patches and zero game-asset-path dependency: it writes a tiny SVG
+// and converts it, exercising libcroco (CSS) → librsvg (SVG DOM + render) →
+// pango/cairo → cairo-png (the newly-enabled cairo PNG backend) end-to-end,
+// display-free. A valid PNG (magic 89 50 4e 47) proves the whole chain the
+// games link against. The game WINDOWS are browser checks on the rig
+// (docs/superpowers/notes/gnome-games-visual.md). Exit 0 pass / 1 fail /
+// 2 inconclusive (boot panic; re-run).
 import { bootNode } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
@@ -24,11 +24,13 @@ try {
     throw e;
   }
   if (!reached) throw new Error("no prompt");
-  // Render the mahjongg tileset, then print the PNG magic bytes: a valid
-  // render starts 89 50 4e 47 ("\x89PNG").
+  // Write a minimal SVG and convert it; print the PNG magic bytes. A valid
+  // render starts 89 50 4e 47 ("\x89PNG"). Self-contained — no dependency on
+  // a game's installed theme path (which drift and made the first cut flaky).
   s.send(
-    'svg=$(find /run/current-system/sw/share/gnome-mahjongg/themes -name "*.svg" | head -1); ' +
-      'rsvg-convert "$svg" -o /tmp/tile.png && od -An -tx1 -N4 /tmp/tile.png | tr -s " "\n',
+    'printf \'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">' +
+      '<rect width="8" height="8" fill="red"/></svg>\' > /tmp/t.svg && ' +
+      'rsvg-convert /tmp/t.svg -o /tmp/t.png && od -An -tx1 -N4 /tmp/t.png | tr -s " "\n',
   );
   pass = await s.waitForOutput(/89 50 4e 47/, 180000);
 } finally {

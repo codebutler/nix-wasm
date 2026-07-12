@@ -1032,14 +1032,6 @@ in
       }
     else
       prev.five-or-more or null;
-  tali =
-    if isWasm then
-      import ./userspace/tali.nix {
-        cross = final;
-        pkgs = final.buildPackages;
-      }
-    else
-      prev.tali or null;
   gnome-mines =
     if isWasm then
       import ./userspace/gnome-mines.nix {
@@ -1048,14 +1040,6 @@ in
       }
     else
       prev.gnome-mines;
-  four-in-a-row =
-    if isWasm then
-      import ./userspace/four-in-a-row.nix {
-        cross = final;
-        pkgs = final.buildPackages;
-      }
-    else
-      prev.four-in-a-row or null;
   iagno =
     if isWasm then
       import ./userspace/iagno.nix {
