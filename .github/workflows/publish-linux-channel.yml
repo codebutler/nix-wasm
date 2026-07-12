@@ -26,8 +26,8 @@ concurrency:
 jobs:
   publish:
     # Namespace small runner (x86_64) — substitutes the closure from Cachix and
-    # uploads to R2, so the default profile suffices (matches publish-wasm-artifacts).
-    runs-on: namespace-profile-default
+    # uploads to R2, so the `sm` profile suffices (matches publish-wasm-artifacts).
+    runs-on: namespace-profile-sm
     steps:
       - uses: actions/checkout@v4
 

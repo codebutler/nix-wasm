@@ -33,7 +33,7 @@ env:
 jobs:
   teardown:
     if: github.event.action == 'closed'
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-sm
     steps:
       - name: Check provisioning
         id: cfg
@@ -64,7 +64,7 @@ jobs:
     if: >-
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-md
     timeout-minutes: 180
     steps:
       - name: Check provisioning

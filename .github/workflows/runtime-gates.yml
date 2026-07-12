@@ -28,7 +28,7 @@ jobs:
   gates:
     name: engine tests + typecheck + lint + format
     # Namespace small runner — keeps this off GitHub-hosted minutes (private repo).
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-sm
     timeout-minutes: 15
     defaults:
       run:

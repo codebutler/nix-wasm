@@ -67,7 +67,7 @@ jobs:
   # `nix`) gates the boot smokes, which substitute the unchanged kernel/artifacts
   # from Cachix instead of waiting on a rebuild.
   changes:
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-xs
     outputs:
       nix: ${{ steps.filter.outputs.nix }}
       runtime: ${{ steps.filter.outputs.runtime }}
@@ -92,12 +92,14 @@ jobs:
     name: build .#${{ matrix.attr }}
     needs: changes
     if: ${{ needs.changes.outputs.nix == 'true' }}
-    # Namespace large runner (x86_64). The from-source LLVM poles (guest-clang, the
-    # kernel's patched LLVM) are RAM/core-bound — they time out on a stock 4-core/
-    # 16 GB ubuntu-latest (kernel hit the 6h cap). The nix-heavy profile gives the
+    # Namespace `lg` runner (16 vCPU / 32 GB, x86_64). The from-source LLVM poles
+    # (guest-clang, the kernel's patched LLVM) are RAM/core-bound — they time out
+    # on a stock 4-core/16 GB ubuntu-latest (kernel hit the 6h cap). `lg` gives the
     # cores/RAM/disk to land each in ~1-2h. cache.nixos.org still has the full
-    # nixos-26.05 x86_64 cache for the native deps.
-    runs-on: namespace-profile-nix-heavy
+    # nixos-26.05 x86_64 cache for the native deps. (This is the sole heavy build;
+    # everything else runs on the smaller xs/sm/md t-shirt pools — see the other
+    # jobs.)
+    runs-on: namespace-profile-lg
     timeout-minutes: 350 # headroom under the 6h job limit; warm reruns substitute from Cachix
     strategy:
       fail-fast: false
@@ -135,7 +137,7 @@ jobs:
     # C++ + squashfs/initramfs/image), so the default profile suffices. (Use
     # nix-heavy for the FIRST cold run that has to compile the whole cross closure
     # from source.) Stays off GitHub-hosted minutes (private repo).
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-md
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -249,7 +251,7 @@ jobs:
     # from Cachix). `!failure() && !cancelled()` lets it run even when `toolchain`
     # was SKIPPED (runtime-only change) instead of being blocked by the needs edge.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-md
     timeout-minutes: 60
     # Two independent smoke groups on different artifacts (busybox-only signal
     # boots vs the software-MMU kernels) — run them on parallel runners instead of
@@ -471,7 +473,7 @@ jobs:
     # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
     # the unchanged nix:true artifacts from Cachix rather than blocking on a build.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-md
     timeout-minutes: 90
     # ~13 full-nix guest boots ran serially in one job. Split into two parallel
     # shards on the same substituted artifacts: `core` (9P transport + nix install
@@ -623,7 +625,7 @@ jobs:
     # World OR engine change; substitutes unchanged artifacts from Cachix when the
     # build jobs were skipped (runtime-only change) — see boot-smoke's note.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-md
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
