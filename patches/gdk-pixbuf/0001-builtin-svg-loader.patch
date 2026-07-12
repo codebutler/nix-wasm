@@ -5,18 +5,82 @@ loadable modules — so the only way to add SVG support is to compile the
 loader in alongside png/jpeg. librsvg ships the loader (io-svg.c); we
 vendor it (patches/gdk-pixbuf/io-svg.c) and register it:
   - top meson.build: a librsvg-2.0 dep appended to loaders_deps (supplies
-    io-svg.c's <rsvg.h> and links librsvg-2.a so gdk-pixbuf's tools resolve
-    rsvg_*). librsvg is built against the BASE gdk-pixbuf to break the
-    librsvg<->gdk-pixbuf cycle (see deps-overlay.nix).
+    io-svg.c's <librsvg/rsvg.h> and links librsvg-2.a so gdk-pixbuf's tools
+    resolve rsvg_*). librsvg is built against the BASE gdk-pixbuf to break the
+    librsvg<->gdk-pixbuf cycle (see deps-overlay.nix). REQUIRED, not optional:
+    a librsvg-2.0 that pkg-config can't resolve would silently disable the
+    loader and still build green.
   - gdk-pixbuf/meson.build: an 'svg' loaders entry (enabled when librsvg is
     found), with -Dfill_vtable/-Dfill_info renaming io-svg.c's module entry
     points to the built-in convention (_gdk_pixbuf__svg_fill_*).
-  - gdk-pixbuf-io.c: load_one_builtin_module(svg), guarded by INCLUDE_svg.
+  - gdk-pixbuf-io.c: register svg in ALL THREE places the builtin-loader
+    machinery requires — the load_one_builtin_module(svg) call in
+    gdk_pixbuf_io_init_builtin, the module(svg) extern declaration of
+    _gdk_pixbuf__svg_fill_info/_fill_vtable, AND the try_module(svg,svg) entry
+    in gdk_pixbuf_load_module_unlocked that maps module_name "svg" to those
+    functions. All three are guarded by INCLUDE_svg. Missing the last two, the
+    call finds no fill_vtable, load_module_unlocked returns FALSE, the module
+    is dropped, and gdk_pixbuf_new_from_file(".svg") fails at runtime even
+    though the loader compiled in (the exact "Unable to load image … .svg"
+    the browser rig caught).
 Built with -Dbuiltin_loaders=all so the svg entry is compiled in.
-
+diff --git a/gdk-pixbuf/gdk-pixbuf-io.c b/gdk-pixbuf/gdk-pixbuf-io.c
+index ba6747e..e421baf 100644
+--- a/gdk-pixbuf/gdk-pixbuf-io.c
++++ b/gdk-pixbuf/gdk-pixbuf-io.c
+@@ -612,6 +612,9 @@ gdk_pixbuf_io_init_builtin (void)
+ #ifdef INCLUDE_png
+         load_one_builtin_module (png);
+ #endif
++#ifdef INCLUDE_svg
++        load_one_builtin_module (svg); /* nix-wasm: librsvg built-in SVG loader */
++#endif
+ #ifdef INCLUDE_bmp
+         load_one_builtin_module (bmp);
+ #endif
+@@ -717,6 +720,7 @@ gdk_pixbuf_io_init (void)
+   extern void _gdk_pixbuf__##type##_fill_vtable (GdkPixbufModule *module)
+ 
+ module (png);
++module (svg); /* nix-wasm: librsvg built-in SVG loader */
+ module (jpeg);
+ module (gif);
+ module (ico);
+@@ -835,6 +839,9 @@ gdk_pixbuf_load_module_unlocked (GdkPixbufModule *image_module,
+ #ifdef INCLUDE_png
+         try_module (png,png);
+ #endif
++#ifdef INCLUDE_svg
++        try_module (svg,svg); /* nix-wasm: librsvg built-in SVG loader */
++#endif
+ #ifdef INCLUDE_bmp
+         try_module (bmp,bmp);
+ #endif
+diff --git a/gdk-pixbuf/meson.build b/gdk-pixbuf/meson.build
+index 16d97e7..9723d0d 100644
+--- a/gdk-pixbuf/meson.build
++++ b/gdk-pixbuf/meson.build
+@@ -10,6 +10,15 @@ loaders = {
+     'sources': [ 'io-png.c' ],
+     'enabled': enabled_loaders.contains('png'),
+   },
++  # nix-wasm: librsvg's SVG loader, built in. io-svg.c is vendored from the
++  # librsvg 2.40 source (patches/gdk-pixbuf/io-svg.c, copied in postPatch). Its
++  # module entry points are renamed to the built-in convention via -D so
++  # gdk-pixbuf-io.c's load_one_builtin_module(svg) resolves them.
++  'svg': {
++    'sources': [ 'io-svg.c' ],
++    'enabled': librsvg_dep.found(),
++    'c_args': [ '-Dfill_vtable=_gdk_pixbuf__svg_fill_vtable', '-Dfill_info=_gdk_pixbuf__svg_fill_info' ],
++  },
+   'bmp': {
+     'sources': [ 'io-bmp.c' ],
+     'enabled': enabled_loaders.contains('bmp') and not native_windows_loaders,
+diff --git a/meson.build b/meson.build
+index b88ef70..99546e7 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -313,6 +313,21 @@
+@@ -313,6 +313,21 @@ if glycin_dep.found()
    loaders_deps += [ glycin_dep ]
  endif
  
@@ -38,33 +102,3 @@ Built with -Dbuiltin_loaders=all so the svg entry is compiled in.
  gif_opt = get_option('gif').disable_auto_if(glycin_dep.found() or enabled_loaders.contains('android'))
  if not gif_opt.disabled()
    enabled_loaders += 'gif'
---- a/gdk-pixbuf/meson.build
-+++ b/gdk-pixbuf/meson.build
-@@ -10,6 +10,15 @@
-     'sources': [ 'io-png.c' ],
-     'enabled': enabled_loaders.contains('png'),
-   },
-+  # nix-wasm: librsvg's SVG loader, built in. io-svg.c is vendored from the
-+  # librsvg 2.40 source (patches/gdk-pixbuf/io-svg.c, copied in postPatch). Its
-+  # module entry points are renamed to the built-in convention via -D so
-+  # gdk-pixbuf-io.c's load_one_builtin_module(svg) resolves them.
-+  'svg': {
-+    'sources': [ 'io-svg.c' ],
-+    'enabled': librsvg_dep.found(),
-+    'c_args': [ '-Dfill_vtable=_gdk_pixbuf__svg_fill_vtable', '-Dfill_info=_gdk_pixbuf__svg_fill_info' ],
-+  },
-   'bmp': {
-     'sources': [ 'io-bmp.c' ],
-     'enabled': enabled_loaders.contains('bmp') and not native_windows_loaders,
---- a/gdk-pixbuf/gdk-pixbuf-io.c
-+++ b/gdk-pixbuf/gdk-pixbuf-io.c
-@@ -612,6 +612,9 @@
- #ifdef INCLUDE_png
-         load_one_builtin_module (png);
- #endif
-+#ifdef INCLUDE_svg
-+        load_one_builtin_module (svg); /* nix-wasm: librsvg built-in SVG loader */
-+#endif
- #ifdef INCLUDE_bmp
-         load_one_builtin_module (bmp);
- #endif
