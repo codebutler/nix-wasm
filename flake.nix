@@ -316,6 +316,16 @@
         inherit cross;
       };
 
+      # Guest-side read-only 9P2000.L rootfs server for pc's /Linux mount
+      # (pc#472): connects OUT to VMADDR_CID_HOST:1025 (the same reverse-
+      # connection trick as pcctl) and serves the live guest filesystem; pc
+      # mounts it at /Linux and the tray launcher reads .desktop entries off
+      # it. Never serves /mnt/pc (host↔guest mount recursion guard). Baked
+      # into the initramfs as /bin/ninepd; started from inittab (init.nix).
+      ninepdDaemon = import ./userspace/ninepd.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -507,7 +517,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -730,6 +740,10 @@
         # Guest /Ctl desktop-control agent over AF_VSOCK (issue #60 Phase 2) →
         # $out/bin/pcctl.
         pcctl = pcctlAgent;
+
+        # Read-only 9P rootfs server for pc's /Linux mount (pc#472) →
+        # $out/bin/ninepd.
+        ninepd = ninepdDaemon;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;
