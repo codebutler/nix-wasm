@@ -24,11 +24,11 @@ let
   whenWasm = f: p: if isWasm then f p else p;
 
   # The shared gobject/GTK fpcast-emu seam (userspace/fpcast-emu.nix). Its `hook`
-  # auto-applies the --fpcast-emu post-link pass to a derivation's installed
-  # $out/bin wasm executables when added to nativeBuildInputs — used by the
-  # GTK-app overrides below (gcolor3 …) so the raw wasm-opt invocation lives in
-  # exactly one place, not copy-pasted per override. `cross = final` so it reaches
-  # the native binaryen via final.buildPackages (same access galculator uses).
+  # rides the gtk3 override's propagatedNativeBuildInputs (below), so every gtk3
+  # consumer auto-fpcasts its installed $out/bin wasm executables with no
+  # per-package line — the raw wasm-opt invocation lives in exactly one place.
+  # `cross = final` so it reaches the native binaryen via final.buildPackages
+  # (same access galculator uses).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
 
   # Patch compiler-rt (and compiler-rt-no-libc — busybox's clangNoLibcxx stdenv
@@ -1114,30 +1114,23 @@ in
     else
       prev.gcalctool or null;
 
-  # --- gcolor3: small GTK3 color chooser (successor to the GTK2-only ---------
-  # gcolor2). Unlike l3afpad/gcalctool it is CURRENTLY packaged in nixpkgs, so
-  # this is a plain override (corollary 1: reuse nixpkgs' own recipe), not a
-  # from-scratch pin. Its window.c wires signals with explicit g_signal_connect
-  # + gtk_widget_class_bind_template_callback (a GtkWidgetClass template
-  # binding, resolved at compile time via the generated class_init — NOT
-  # gtk_builder_connect_signals(NULL)/GModule lookup), so it has the same
-  # GModule-free posture as l3afpad/gtk3-demo: only the shared --fpcast-emu
-  # post-link pass (gobject class_init casts) is needed, no dynsym-inject — and
-  # that is now AUTOMATIC via gtk3's propagated hook (above). So the ENTIRE
-  # wasm-specific override is one attribute: `wasmLeafApp = true`, opting into
-  # the $out/nix-support served-closure strip (#43). No fpcast line, no
-  # nativeBuildInputs, no postFixup. UNVERIFIED (no Nix build access when
-  # written — see nix-wasm#156): confirm `nix build .#gcolor3` succeeds before
-  # relying on it. A --selftest source patch (like galculator's/l3afpad's) is
-  # deliberately NOT added yet — inventing one against unread upstream source
-  # would be exactly the kind of unverified shortcut the PRIME DIRECTIVE forbids;
-  # add it once the real gcolor3 source (window.c/main.c) has been read against
-  # a working build.
-  gcolor3 = whenWasm
-    (p: p.overrideAttrs (_: {
-      wasmLeafApp = true;
-    }))
-    prev.gcolor3;
+  # --- gcolor3: NO override needed — the zero-per-package target -------------
+  # gcolor3 (small GTK3 color chooser) is packaged in nixpkgs and is the proof
+  # that a GTK app now needs ZERO wasm-specific nix. It cross-compiles via the
+  # shared crossSystem + this overlay's dependency-category fixes (the GTK
+  # stack), and its gobject binary is fpcast'd automatically by gtk3's
+  # propagated hook (above). It wires signals in C (g_signal_connect +
+  # gtk_widget_class_bind_template_callback — no GModule autoconnect), so it
+  # needs no dynsym-inject either. So there is DELIBERATELY no `gcolor3 = …`
+  # entry here: `cross.gcolor3` is stock nixpkgs + the shared fixes, installed
+  # on demand (`nix-env -iA nixpkgs.gcolor3`), not baked into the base squashfs
+  # — so the `wasmLeafApp` served-closure size optimization the base-image apps
+  # use (l3afpad/galculator/the games) is unnecessary; its `-dev` closure only
+  # inflates that one on-demand install, and correctness is unaffected. If
+  # `nix build .#gcolor3` reveals a cross gap, the fix belongs in the relevant
+  # SHARED dependency override, never a gcolor3-private recipe (corollary 1).
+  # (A display-free --selftest patch could be added later for a CI gate, but it
+  # is not needed for the app to build/install/run.)
 
   # --- GNOME games tier (issue: browser desktop games) ------------------------
   # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS
