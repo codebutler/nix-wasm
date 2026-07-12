@@ -1,0 +1,141 @@
+diff --git a/sommelier-xdg-shell.cc b/sommelier-xdg-shell.cc
+index 94c7ea8..c4267bf 100644
+--- a/sommelier-xdg-shell.cc
++++ b/sommelier-xdg-shell.cc
+@@ -9,6 +9,7 @@
+ #include <stdlib.h>
+ 
+ #include "sommelier.h"                  // NOLINT(build/include_directory)
++#include "sommelier-logging.h"          // NOLINT(build/include_directory) #143 diag
+ #include "sommelier-transform.h"        // NOLINT(build/include_directory)
+ #include "xdg-shell-client-protocol.h"  // NOLINT(build/include_directory)
+ #include "xdg-shell-server-protocol.h"  // NOLINT(build/include_directory)
+@@ -194,12 +195,49 @@ static void sl_xdg_toplevel_set_app_id(struct wl_client* client,
+   xdg_toplevel_shim()->set_app_id(host->proxy, application_id_str);
+ }
+ 
++// #143 DIAGNOSTIC (temporary): trace the fixed-size CSD window sizing sequence.
++// These wrap the requests that ForwardRequestToShim would otherwise pass through
++// 1:1 (identical behavior — just a LOG before the same shim call), so the guest
++// window sizing is unchanged. They reveal, per-toplevel, the title (to identify
++// gcalctool/galculator), the min/max size GTK locks for non-resizable windows,
++// the geometry GTK commits, and every configure the host sends back. Remove once
++// codebutler/nix-wasm#143 is root-caused.
++static void sl_xdg_toplevel_set_title(struct wl_client* client,
++                                      struct wl_resource* resource,
++                                      const char* title) {
++  struct sl_host_xdg_toplevel* host =
++      static_cast<sl_host_xdg_toplevel*>(wl_resource_get_user_data(resource));
++  LOG(INFO) << "#143 set_title tl=" << host << " \"" << (title ? title : "")
++            << "\"";
++  xdg_toplevel_shim()->set_title(host->proxy, title);
++}
++
++static void sl_xdg_toplevel_set_max_size(struct wl_client* client,
++                                         struct wl_resource* resource,
++                                         int32_t width,
++                                         int32_t height) {
++  struct sl_host_xdg_toplevel* host =
++      static_cast<sl_host_xdg_toplevel*>(wl_resource_get_user_data(resource));
++  LOG(INFO) << "#143 set_max_size tl=" << host << " " << width << "x" << height;
++  xdg_toplevel_shim()->set_max_size(host->proxy, width, height);
++}
++
++static void sl_xdg_toplevel_set_min_size(struct wl_client* client,
++                                         struct wl_resource* resource,
++                                         int32_t width,
++                                         int32_t height) {
++  struct sl_host_xdg_toplevel* host =
++      static_cast<sl_host_xdg_toplevel*>(wl_resource_get_user_data(resource));
++  LOG(INFO) << "#143 set_min_size tl=" << host << " " << width << "x" << height;
++  xdg_toplevel_shim()->set_min_size(host->proxy, width, height);
++}
++
+ static const struct xdg_toplevel_interface sl_xdg_toplevel_implementation = {
+     sl_xdg_toplevel_destroy,
+     ForwardRequestToShim<xdg_toplevel_shim,
+                          &XdgToplevelShim::set_parent,
+                          AllowNullResource::kYes>,
+-    ForwardRequestToShim<xdg_toplevel_shim, &XdgToplevelShim::set_title>,
++    sl_xdg_toplevel_set_title,  // #143 diag (was ForwardRequestToShim set_title)
+     sl_xdg_toplevel_set_app_id,
+     sl_xdg_toplevel_show_window_menu,
+     ForwardRequestToShim<xdg_toplevel_shim,
+@@ -208,8 +246,8 @@ static const struct xdg_toplevel_interface sl_xdg_toplevel_implementation = {
+     ForwardRequestToShim<xdg_toplevel_shim,
+                          &XdgToplevelShim::resize,
+                          AllowNullResource::kYes>,
+-    ForwardRequestToShim<xdg_toplevel_shim, &XdgToplevelShim::set_max_size>,
+-    ForwardRequestToShim<xdg_toplevel_shim, &XdgToplevelShim::set_min_size>,
++    sl_xdg_toplevel_set_max_size,  // #143 diag (was ForwardRequestToShim)
++    sl_xdg_toplevel_set_min_size,  // #143 diag (was ForwardRequestToShim)
+     ForwardRequestToShim<xdg_toplevel_shim, &XdgToplevelShim::set_maximized>,
+     ForwardRequestToShim<xdg_toplevel_shim, &XdgToplevelShim::unset_maximized>,
+     ForwardRequestToShim<xdg_toplevel_shim,
+@@ -233,6 +271,40 @@ static void sl_xdg_toplevel_configure(void* data,
+   sl_transform_host_to_guest(host->ctx, get_host_surface(host->originator),
+                              &iwidth, &iheight);
+ 
++  // #143 DIAGNOSTIC (temporary): trace every toplevel configure host->guest,
++  // decoding the states array so we can see whether the initial configure
++  // carries `activated` and whether a size is ever pushed. See #143.
++  {
++    bool activated = false, maximized = false, fullscreen = false,
++         resizing = false;
++    uint32_t* state;
++    for (state = static_cast<uint32_t*>(states->data);
++         reinterpret_cast<char*>(state) <
++         static_cast<char*>(states->data) + states->size;
++         state++) {
++      switch (*state) {
++        case XDG_TOPLEVEL_STATE_MAXIMIZED:
++          maximized = true;
++          break;
++        case XDG_TOPLEVEL_STATE_FULLSCREEN:
++          fullscreen = true;
++          break;
++        case XDG_TOPLEVEL_STATE_RESIZING:
++          resizing = true;
++          break;
++        case XDG_TOPLEVEL_STATE_ACTIVATED:
++          activated = true;
++          break;
++        default:
++          break;
++      }
++    }
++    LOG(INFO) << "#143 toplevel.configure tl=" << host << " host=" << width
++              << "x" << height << " guest=" << iwidth << "x" << iheight
++              << " activated=" << activated << " maximized=" << maximized
++              << " fullscreen=" << fullscreen << " resizing=" << resizing;
++  }
++
+   xdg_toplevel_shim()->send_configure(host->resource, iwidth, iheight, states);
+ }
+ 
+@@ -328,6 +400,14 @@ static void sl_xdg_surface_set_window_geometry(struct wl_client* client,
+   sl_transform_guest_to_host(host->ctx, host->originator, &x1, &y1);
+   sl_transform_guest_to_host(host->ctx, host->originator, &x2, &y2);
+ 
++  // #143 DIAGNOSTIC (temporary): the geometry GTK commits is the shadow-excluded
++  // logical window rect (titlebar + content). If this is already one headerbar
++  // short, the loss is guest/GTK-side; if it is full-height but the buffer comes
++  // out short, it is elsewhere. See #143.
++  LOG(INFO) << "#143 set_window_geometry surf=" << host << " guest=" << x << ","
++            << y << " " << width << "x" << height << " host=" << x1 << "," << y1
++            << " " << (x2 - x1) << "x" << (y2 - y1);
++
+   xdg_surface_shim()->set_window_geometry(host->proxy, x1, y1, x2 - x1,
+                                           y2 - y1);
+ }
+@@ -343,6 +423,10 @@ static void sl_xdg_surface_configure(void* data,
+   struct sl_host_xdg_surface* host = static_cast<sl_host_xdg_surface*>(
+       xdg_surface_shim()->get_user_data(xdg_surface));
+ 
++  // #143 DIAGNOSTIC (temporary): marks each configure round (paired serial). See
++  // #143.
++  LOG(INFO) << "#143 surface.configure surf=" << host << " serial=" << serial;
++
+   xdg_surface_shim()->send_configure(host->resource, serial);
+ }
+ 
