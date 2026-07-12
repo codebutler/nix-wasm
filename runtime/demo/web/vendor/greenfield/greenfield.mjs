@@ -23703,7 +23703,9 @@ var Renderer = class _Renderer {
             dy: a.y - b.y
           };
         }
-        this.session.userShell.events.surfaceContentUpdated({ id: view.surface.resource.id, client: { id: view.surface.resource.client.id } }, { bitmap: bufferContents.pixelContent, width, height, parent });
+        const g = view.surface.geometry;
+        const geometry = { x: g.position.x, y: g.position.y, width: g.size.width, height: g.size.height };
+        this.session.userShell.events.surfaceContentUpdated({ id: view.surface.resource.id, client: { id: view.surface.resource.client.id } }, { bitmap: bufferContents.pixelContent, width, height, parent, geometry });
       }
     } else if (buffer !== void 0 && bufferContents === void 0) {
       if (view.mapped && buffer && view.surface.damaged) {
