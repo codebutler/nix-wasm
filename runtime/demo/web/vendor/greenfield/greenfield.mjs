@@ -20869,6 +20869,7 @@ var XdgToplevel = class _XdgToplevel {
     this.current.state = { ...this.next.state };
     this.current.minSize = this.next.minSize;
     this.current.maxSize = this.next.maxSize;
+    this.enforceMinSize();
     this.desktopSurface.commit();
     surface.session.renderer.render();
   }
@@ -20929,6 +20930,22 @@ var XdgToplevel = class _XdgToplevel {
   // grows on a later relayout — never corrects. Mirrors greenfield source commit
   // 307f48e (packages/compositor/src/XdgToplevel.ts); regenerate via the proper
   // greenfield esbuild bundle when re-vendoring.
+  // codebutler/nix-wasm#143: a compositor must never leave a toplevel smaller than
+  // its declared minimum. GTK3 self-sizing from the 0x0 configure draws a window one
+  // CSD titlebar short; a min-only window (galculator: min 331x380, drawn 331x328)
+  // isn't caught by the min==max pre-empt below, so enforce min on commit. Mirrors
+  // greenfield source d65b084's successor. The pending guard settles in one round.
+  enforceMinSize() {
+    const min = this.current.minSize;
+    if (!(min.width > 0 && min.height > 0)) return;
+    const geo = this.xdgSurface.surface.geometry.size;
+    if (geo.width >= min.width && geo.height >= min.height) return;
+    const width = geo.width < min.width ? min.width : geo.width;
+    const height = geo.height < min.height ? min.height : geo.height;
+    if (this.pending.size.width !== width || this.pending.size.height !== height) {
+      this.configureSize({ width, height });
+    }
+  }
   maybeConfigureFixedSize() {
     const min = this.next.minSize;
     const max = this.next.maxSize;
