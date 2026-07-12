@@ -1,0 +1,66 @@
+Build against modern libxml2 (2.13+). Three API drifts since 2012:
+1. <libxml/SAX.h> is a deprecated stub that no longer transitively includes
+   the parser headers, so xmlParserCtxtPtr is undeclared in
+   rsvg-private.h/rsvg-mask.h/rsvg-styles.h — include <libxml/parser.h>.
+2. xmlStructuredErrorFunc's error parameter became const xmlError*
+   (libxml2 2.12) — rsvg_xml_noerror's signature must match or the
+   handler.serror assignment is an incompatible-function-pointer error.
+3. xmlCtxtGetLastError returns const xmlError* (2.13) — rsvg_set_error's
+   local must be const.
+The same class of fixes distros carry for old librsvg on new libxml2.
+
+--- a/rsvg-private.h
++++ b/rsvg-private.h
+@@ -31,7 +31,7 @@
+ 
+ #include "rsvg.h"
+ 
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ #include <libxml/xmlmemory.h>
+ #include <pango/pango.h>
+ #include <glib.h>
+--- a/rsvg-mask.h
++++ b/rsvg-mask.h
+@@ -31,7 +31,7 @@
+ #include "rsvg-css.h"
+ #include "rsvg-styles.h"
+ #include "rsvg-shapes.h"
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ 
+ G_BEGIN_DECLS 
+ 
+--- a/rsvg-styles.h
++++ b/rsvg-styles.h
+@@ -31,7 +31,7 @@
+ #include "rsvg.h"
+ #include "rsvg-paint-server.h"
+ 
+-#include <libxml/SAX.h>
++#include <libxml/parser.h> /* modern libxml2: SAX.h is a deprecated stub that no longer pulls in the parser types (xmlParserCtxtPtr) */
+ #include <pango/pango.h>
+ 
+ G_BEGIN_DECLS 
+--- a/rsvg-css.c
++++ b/rsvg-css.c
+@@ -839,7 +839,7 @@
+ }
+ 
+ static void
+-rsvg_xml_noerror (void *data, xmlErrorPtr error)
++rsvg_xml_noerror (void *data, const xmlError *error) /* libxml2 2.12+: xmlStructuredErrorFunc takes const xmlError* */
+ {
+ }
+ 
+--- a/rsvg-base.c
++++ b/rsvg-base.c
+@@ -1197,7 +1197,7 @@
+ static void
+ rsvg_set_error (GError **error, xmlParserCtxtPtr ctxt)
+ {
+-    xmlErrorPtr xerr;
++    const xmlError *xerr; /* libxml2 2.13+: xmlCtxtGetLastError returns const */
+ 
+     xerr = xmlCtxtGetLastError (ctxt);
+     if (xerr) {

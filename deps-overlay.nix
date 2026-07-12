@@ -540,8 +540,11 @@ in
   #   - x11Support: drags libxext/libxrender/libxcb (X11 surfaces). Off.
   #   - gtk_doc=true is set UNCONDITIONALLY in nixpkgs (needs gtk-doc/docbook,
   #     a native doc toolchain that's pointless here) → force -Dgtk_doc=false.
-  #   - libpng: the PNG image-surface helper. Not needed; disable.
   #   - lzo: cairo-script surface compression; not needed. Off.
+  # ON (GNOME-games update): png — librsvg 2.40 (the games' SVG renderer)
+  # hard-requires cairo-png.pc (its configure checks `cairo-png`), and
+  # rsvg-convert writes PNG through it. Cross libpng rides on zlib; strictly
+  # additive to everything downstream.
   # Result: libcairo.a + libcairo-gobject.a with CAIRO_HAS_IMAGE_SURFACE +
   # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 +
   # fontconfig; cairo-gobject.pc present for GTK3.
@@ -552,7 +555,6 @@ in
       # Null the optional inputs so meson's auto-detection can't pick them up
       # from the sysroot even with the feature flags off.
       # freetype + fontconfig + glib (gobjectSupport) are real cross deps.
-      libpng = null;
       libxext = null;
       libxrender = null;
       libxcb = null;
@@ -568,7 +570,7 @@ in
         "-Dtests=disabled"
         "-Dfreetype=enabled"
         "-Dfontconfig=enabled"
-        "-Dpng=disabled"
+        "-Dpng=enabled"
         "-Dzlib=enabled"
         # lzo backs the cairo-script surface's compression; not needed here,
         # and we nulled the input above.
@@ -990,6 +992,54 @@ in
       }
     else
       prev.gcalctool or null;
+
+  # --- GNOME games tier (issue: browser desktop games) ------------------------
+  # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS
+  # engine; dropped from nixpkgs in 2021) are from-scratch pins — the shared
+  # SVG-rendering enabler every GNOME game draws its pieces with. The games
+  # themselves are autotools-era picks whose dist tarballs ship Vala-generated
+  # C (mahjongg) or are hand-written C (five-or-more). All isWasm-guarded; no
+  # native fallback exists for the pins (null, never evaluated).
+  libcroco =
+    if isWasm then
+      import ./userspace/libcroco.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.libcroco or null;
+  librsvg =
+    if isWasm then
+      import ./userspace/librsvg.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.librsvg;
+  gnome-mahjongg =
+    if isWasm then
+      import ./userspace/gnome-mahjongg.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.gnome-mahjongg;
+  five-or-more =
+    if isWasm then
+      import ./userspace/five-or-more.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.five-or-more or null;
+  iagno =
+    if isWasm then
+      import ./userspace/iagno.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.iagno or null;
 
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
