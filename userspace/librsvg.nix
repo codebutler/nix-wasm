@@ -19,6 +19,7 @@
 cross.stdenv.mkDerivation {
   pname = "librsvg";
   version = "2.40.21";
+  # Not a gtk3 consumer, so no propagated hook — adds fpcast.hook explicitly.
 
   src = pkgs.fetchurl {
     url = "https://download.gnome.org/sources/librsvg/2.40/librsvg-2.40.21.tar.xz";
@@ -31,7 +32,7 @@ cross.stdenv.mkDerivation {
 
   nativeBuildInputs = [
     cross.buildPackages.pkg-config
-    fpcast.binaryen
+    fpcast.hook # fpcasts $out/bin/rsvg-convert
   ];
   buildInputs = [
     # gdk-pixbuf-BASE, not the svg-loader variant: the svg gdk-pixbuf compiles
@@ -93,26 +94,9 @@ cross.stdenv.mkDerivation {
   '';
 
   postFixup = ''
-    ${fpcast.shellFn}
-    # rsvg-convert is a gobject/pango binary → the standard indirect-call
-    # cast fix (same seam as every GTK-stack binary). The .a libraries need
-    # nothing — fpcast is a per-final-binary pass; the games run it on their
-    # own linked outputs.
-    if [ -f "$out/bin/rsvg-convert" ]; then
-      fpcast_emu "$out/bin/rsvg-convert" "$out/bin/rsvg-convert.fpcast"
-      mv "$out/bin/rsvg-convert.fpcast" "$out/bin/rsvg-convert"
-      chmod +x "$out/bin/rsvg-convert"
-    fi
-    # Leaf posture for the served closure (the #43 lesson). The games build
-    # against this package's .dev output in the BUILD graph, which does not
-    # read nix-support from the installed store copy.
-    rm -rf "$out/nix-support"
-    # Libtool archives embed dependency_libs with ABSOLUTE STORE PATHS — they
-    # dragged the entire build closure (glib-dev → native python3 62MB /
-    # gettext / bash-dev / glibc…) into the SERVED image: 36 → 112 store
-    # paths, base.squashfs 112MB → 306MB. Consumers link via pkg-config
-    # -L/-l; .la files are pure liability (distros strip them for the same
-    # reason). The -config script embeds dep -L paths the same way.
+    rm -rf "$out/nix-support"                  # drop -dev propagation (#43); $dev untouched
+    # .la/-config embed absolute build-closure paths → dragged glib-dev/python3
+    # into the served image (112MB→306MB). Consumers link via pkg-config.
     rm -f "$out/lib/"*.la "$out/bin/"*-config
   '';
 }

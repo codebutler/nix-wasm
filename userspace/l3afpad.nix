@@ -33,7 +33,7 @@
 # The window icon loads at runtime from the baked ICONDIR store path
 # ($out/share/pixmaps/l3afpad.png), so the package must ride the served /nix
 # closure via environment.systemPackages — the galculator/gcalctool pattern.
-{ cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
+{ cross, pkgs }:
 cross.stdenv.mkDerivation {
   pname = "l3afpad";
   # The last rev nixpkgs shipped (24.05); upstream has been quiet since.
@@ -56,7 +56,6 @@ cross.stdenv.mkDerivation {
     cross.buildPackages.autoreconfHook # git checkout — no shipped ./configure
     cross.buildPackages.intltool # AC_PROG_INTLTOOL + intltoolize + .desktop merge
     cross.buildPackages.gettext # msgfmt for po/
-    fpcast.binaryen
   ];
   # strictDeps=false (below) also puts these dev outputs' share/aclocal on the
   # aclocal search path — AM_GLIB_DEFINE_LOCALEDIR/AM_GLIB_GNU_GETTEXT come from
@@ -88,18 +87,9 @@ cross.stdenv.mkDerivation {
     rm -f "$out/share/icons/hicolor/icon-theme.cache"
   '';
 
-  postFixup = ''
-    ${fpcast.shellFn}
-    # The standard GTK-binary indirect-call cast fix (gobject class_init /
-    # signal marshaller casts). No dynsym-inject: no GtkBuilder autoconnect,
-    # nothing is resolved by name at runtime (the gtk3-demo posture).
-    fpcast_emu "$out/bin/l3afpad" "$out/bin/l3afpad.fpcast"
-    mv "$out/bin/l3afpad.fpcast" "$out/bin/l3afpad"
-    chmod +x "$out/bin/l3afpad"
-    # Leaf app: drop the propagated -dev closure metadata (the #43 lesson —
-    # it drags the whole X11/-dev tree into the served store).
-    rm -rf "$out/nix-support"
-  '';
+  # Signals wired in C (no GModule), so gtk3's propagated hook is all it needs.
+  # Drop the -dev propagation from the served-image closure (#43).
+  postFixup = ''rm -rf "$out/nix-support"'';
 
   meta.description = "L3afpad — simple GTK3 text editor (leafpad fork) on wasm32; signals wired in C, no GModule";
 }

@@ -13,6 +13,7 @@
 { cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gnome-mines";
+  dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup below
   version = "3.16.1";
 
   src = pkgs.fetchurl {

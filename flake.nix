@@ -816,6 +816,11 @@
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
 
+        # gcolor3 — stock nixpkgs GTK3 color chooser; no override needed (shared
+        # cross fixes + auto-fpcast via gtk3). A build target for verification;
+        # add to wasmPublishedPkgs once `nix build .#gcolor3` is green.
+        gcolor3 = cross.gcolor3;
+
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
         # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and
         # five-or-more (pure C, GtkBuilder/GModule autoconnect) are the first

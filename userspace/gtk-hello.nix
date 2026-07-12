@@ -6,6 +6,7 @@
 , fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gtk-hello";
+  dontFpcastEmu = true; # fpcasts its own binary in buildPhase below
   version = "0.1.0";
   dontUnpack = true;
   nativeBuildInputs = [ cross.buildPackages.pkg-config fpcast.binaryen ];

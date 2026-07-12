@@ -35,6 +35,7 @@
 { cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gcalctool";
+  dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup below
   version = "6.6.2";
 
   src = pkgs.fetchurl {

@@ -11,6 +11,7 @@
 { cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "iagno";
+  dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup below
   version = "3.22.0";
 
   src = pkgs.fetchurl {

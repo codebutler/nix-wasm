@@ -23,6 +23,9 @@ let
   # Apply f only in the wasm cross set; leave native packages untouched (cached).
   whenWasm = f: p: if isWasm then f p else p;
 
+  # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
+  fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
+
   # Patch compiler-rt (and compiler-rt-no-libc — busybox's clangNoLibcxx stdenv
   # uses targetLlvmPackages.compiler-rt-no-libc via overrideScope's `self`, so
   # both attrs must be fixed) inside any llvmPackages scope: replace the rejected
@@ -989,6 +992,11 @@ in
       libice = null;
       tinysparql = null;
     }).overrideAttrs (o: {
+      # Auto-fpcast every gtk3 consumer: the hook rides propagation, so a GTK
+      # app needs no fpcast line. Opt out with `dontFpcastEmu` (fpcast-emu.nix).
+      propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
+        fpcast.hook
+      ];
       # Match libepoxy's EGL platform-type choice (see the libepoxy override):
       # GTK re-parses eglplatform.h via `#include <epoxy/egl.h>` in the wayland
       # backend, so it needs the same `void *` EGLNative*Type typedefs.
@@ -1113,6 +1121,7 @@ in
   # native galculator is untouched.
   galculator = whenWasm
     (p: p.overrideAttrs (o: {
+      dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup (below)
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [
         final.buildPackages.binaryen
         final.buildPackages.python3 # dynsym-inject (below)
@@ -1198,6 +1207,9 @@ in
       }
     else
       prev.gcalctool or null;
+
+  # gcolor3 needs no override: stock nixpkgs, cross-compiled by the shared fixes
+  # and auto-fpcast'd via gtk3. Deliberately absent here.
 
   # --- GNOME games tier (issue: browser desktop games) ------------------------
   # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS
