@@ -787,6 +787,9 @@
         gnome-mahjongg = cross.gnome-mahjongg;
         five-or-more = cross.five-or-more;
         iagno = cross.iagno;
+        gnome-mines = cross.gnome-mines;
+        four-in-a-row = cross.four-in-a-row;
+        tali = cross.tali;
 
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)
         # → $out/bin/sommelier.

@@ -404,6 +404,34 @@ in
     }))
     prev.llhttp;
 
+  # --- gdk-pixbuf: build librsvg's SVG loader in as a BUILT-IN loader ----------
+  # This guest's gdk-pixbuf is all-builtin — no loaders.cache, no runtime
+  # loadable modules (verified: the static .a carries _gdk_pixbuf__png_fill_vtable
+  # etc. and there is no loaders dir) — so the ONLY way to teach it SVG is to
+  # compile librsvg's io-svg.c in alongside png/jpeg. Without it, apps that load
+  # .svg through gdk-pixbuf (gnome-mines' HUD icons, four-in-a-row's tileset,
+  # tali's dice) get a blank / "Unable to load image" (nix-wasm#146).
+  #
+  # `gdk-pixbuf-base` is the plain upstream cross build. librsvg builds against
+  # it (userspace/librsvg.nix), which BREAKS the cycle: the svg gdk-pixbuf below
+  # compiles io-svg.c and links librsvg, so it depends on librsvg, which must NOT
+  # depend back on the svg gdk-pixbuf. base ≠ svg, no cycle.
+  gdk-pixbuf-base = prev.gdk-pixbuf;
+
+  # The svg-loader gdk-pixbuf — what gtk3 and every app actually use. base +
+  # the vendored io-svg.c (patches/gdk-pixbuf/) + a librsvg dep. Built with
+  # -Dbuiltin_loaders=all so the patch's `svg` loaders entry is compiled in.
+  gdk-pixbuf = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/gdk-pixbuf/0001-builtin-svg-loader.patch ];
+      postPatch = (o.postPatch or "") + ''
+        cp ${./patches/gdk-pixbuf/io-svg.c} gdk-pixbuf/io-svg.c
+      '';
+      buildInputs = (o.buildInputs or [ ]) ++ [ final.librsvg ];
+      mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dbuiltin_loaders=all" ];
+    }))
+    prev.gdk-pixbuf;
+
   # --- libjpeg-turbo: no SIMD (and skip the broken simdcoverage target) -------
   # gdk-pixbuf's built-in JPEG loader (and libtiff/libwebp downstream) need
   # libjpeg. wasm32 has no SIMD asm backend, so libjpeg-turbo's simd/CMakeLists
@@ -1040,6 +1068,30 @@ in
       }
     else
       prev.iagno or null;
+  four-in-a-row =
+    if isWasm then
+      import ./userspace/four-in-a-row.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.four-in-a-row or null;
+  tali =
+    if isWasm then
+      import ./userspace/tali.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.tali or null;
+  gnome-mines =
+    if isWasm then
+      import ./userspace/gnome-mines.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.gnome-mines or null;
 
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when

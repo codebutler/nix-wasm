@@ -116,6 +116,12 @@ let
                                 # + its GtkBuilder .ui files ride the closure.
           cross.iagno           # GNOME games: Reversi (sound stubbed). Assets
                                 # gresource-embedded; schema rides the closure.
+          cross.gnome-mines     # GNOME games: Minesweeper (3.16 — pre
+                                # libgnome-games-support). SVG HUD icons now load
+                                # via the built-in gdk-pixbuf SVG loader (#146).
+          cross.four-in-a-row   # GNOME games: Connect Four (sound stubbed). Its
+                                # SVG tileset loads via the gdk-pixbuf SVG loader.
+          cross.tali            # GNOME games: Yahtzee dice (SVG via gdk-pixbuf).
           cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
                             # end). Same reason as galculator: its buttons-*.ui panels
                             # load at runtime from the baked UI_DIR store path, and its
@@ -157,6 +163,9 @@ let
           "/share/gnome-mahjongg" # mahjongg tilesets + maps (profile symlink;
                                   # the binary reads its baked store path)
           "/share/five-or-more"   # five-or-more ball themes + .ui files
+          "/share/gnome-mines"    # mines css + interface.ui
+          "/share/four-in-a-row"  # four-in-a-row .ui + pixmaps
+          "/share/tali"           # tali dice SVGs
           "/share/applications"   # every GUI app's .desktop entry (GNOME
                                   # games, gcalctool, galculator all install
                                   # one) merged at /run/current-system/sw/
