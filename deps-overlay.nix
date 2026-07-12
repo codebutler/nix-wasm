@@ -404,6 +404,101 @@ in
     }))
     prev.llhttp;
 
+  # --- gdk-pixbuf: build librsvg's SVG loader in as a BUILT-IN loader ----------
+  # This guest's gdk-pixbuf is all-builtin — no loaders.cache, no runtime
+  # loadable modules (verified: the static .a carries _gdk_pixbuf__png_fill_vtable
+  # etc. and there is no loaders dir) — so the ONLY way to teach it SVG is to
+  # compile librsvg's io-svg.c in alongside png/jpeg. Without it, apps that load
+  # .svg through gdk-pixbuf (gnome-mines' HUD icons, four-in-a-row's tileset,
+  # tali's dice) get a blank / "Unable to load image" (nix-wasm#146).
+  #
+  # `gdk-pixbuf-base` is the plain upstream cross build. librsvg builds against
+  # it (userspace/librsvg.nix), which BREAKS the cycle: the svg gdk-pixbuf below
+  # compiles io-svg.c and links librsvg, so it depends on librsvg, which must NOT
+  # depend back on the svg gdk-pixbuf. base ≠ svg, no cycle.
+  gdk-pixbuf-base = prev.gdk-pixbuf;
+
+  # The svg-loader gdk-pixbuf — what gtk3 and every app actually use. base +
+  # the vendored io-svg.c (patches/gdk-pixbuf/) + a librsvg dep. Built with
+  # -Dbuiltin_loaders=all so the patch's `svg` loaders entry is compiled in.
+  gdk-pixbuf = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/gdk-pixbuf/0001-builtin-svg-loader.patch ];
+      postPatch = (o.postPatch or "") + ''
+        cp ${./patches/gdk-pixbuf/io-svg.c} gdk-pixbuf/io-svg.c
+      '';
+      # The patch gates the built-in svg loader on
+      #   librsvg_dep = dependency('librsvg-2.0', required: false)
+      # so librsvg-2.0.pc must not merely be on the path but fully RESOLVABLE by
+      # pkg-config at configure time — else librsvg_dep.found() is false, the svg
+      # loader is silently skipped (no -DINCLUDE_svg, no static lib), and the
+      # build still succeeds with NO svg support. librsvg-2.0.pc's Requires were
+      # promoted for static linking (userspace/librsvg.nix) to
+      #   glib-2.0 gio-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0
+      # none of which are gdk-pixbuf-base inputs, so `pkg-config --exists
+      # librsvg-2.0` fails unless we put every provider on the path too. Mirror
+      # librsvg's own buildInputs (minus gdk-pixbuf-base) so the whole Requires
+      # chain resolves. Verified on the browser rig: without these, four-in-a-row
+      # throws "Unable to load image … tileset.svg" and tali's dice are blank.
+      buildInputs = (o.buildInputs or [ ]) ++ [
+        final.librsvg
+        final.cairo
+        final.pango
+        final.libcroco
+        final.libxml2
+        final.freetype
+        final.fontconfig
+        final.pixman
+        final.libpng
+        final.zlib
+      ];
+      mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dbuiltin_loaders=all" ];
+      # Now that io-svg.c.o is in libgdk_pixbuf-2.0.a, gdk-pixbuf HARD-depends on
+      # librsvg's whole static chain at link time — and the .pc has to thread a
+      # very fine needle to express that:
+      #
+      #  * NOT as a Requires. meson auto-added librsvg-2.0 to Requires.private,
+      #    which poisons every consumer's pkg-config RESOLUTION: to merely FIND
+      #    gdk-pixbuf-2.0 they'd have to resolve librsvg-2.0's chain (libcroco/
+      #    cairo/pango/libxml2), and gtk3/galculator don't carry libcroco — so
+      #    `dependency('gdk-pixbuf-2.0')` reports "found: NO", gtk3 falls back to
+      #    a disabled subproject wrap, and the build dies. So strip it.
+      #  * BUT the link flags must stay, or every consumer that statically links
+      #    libgdk_pixbuf-2.0.a (gtk3's own tools, galculator, gcalctool, the
+      #    games) underlinks io-svg.c.o's rsvg_* (wasm-ld: undefined symbol
+      #    rsvg_handle_new …). The games list librsvg in their buildInputs so
+      #    THEY resolve, but gtk3's internal tools don't — hence the gtk3 build
+      #    failing here.
+      #
+      # Thread it: strip librsvg-2.0 from Requires (fixes resolution), then fold
+      # librsvg's FULL static link closure into Libs as raw flags (fixes linking,
+      # no pkg-config lookup for consumers). Computed with pkg-config HERE, where
+      # librsvg-2.0 IS resolvable (it + its chain are our buildInputs).
+      postInstall = (o.postInstall or "") + ''
+        pc="$out/lib/pkgconfig/gdk-pixbuf-2.0.pc"
+        grep -q 'librsvg-2.0' "$pc" || (echo "gdk-pixbuf-2.0.pc no longer names librsvg-2.0 — did the loader stop linking it? re-check the strip" >&2; exit 1)
+        # 1) Capture librsvg's full static link flags BEFORE stripping the .pc,
+        #    using pkg-config (librsvg-2.0 resolves here). --static pulls the whole
+        #    Requires chain's libs (-lrsvg-2 -lcroco-0.6 -lxml2 …) so no consumer
+        #    underlinks. $PKG_CONFIG is set by the pkg-config setup hook (cross
+        #    wrapper); fall back to the plain name.
+        rsvg_libs=$(''${PKG_CONFIG:-pkg-config} --static --libs librsvg-2.0)
+        test -n "$rsvg_libs" || (echo "pkg-config produced no librsvg-2.0 libs — cannot fold into gdk-pixbuf-2.0.pc" >&2; exit 1)
+        echo "$rsvg_libs" | grep -q -- '-lrsvg-2' || (echo "librsvg static libs missing -lrsvg-2: $rsvg_libs" >&2; exit 1)
+        # 2) Drop the librsvg-2.0 token (+ optional version) from any Requires
+        #    line, then tidy the comma artifacts (doubled/leading/trailing).
+        sed -i -E 's/librsvg-2\.0[[:space:]]*(>=[[:space:]]*[0-9.]+)?//g' "$pc"
+        sed -i -E '/^Requires(\.private)?:/ { s/,[[:space:]]*,/, /g; s/:[[:space:]]*,[[:space:]]*/: /; s/[[:space:]]*,[[:space:]]*$//; }' "$pc"
+        if grep -q 'librsvg-2.0' "$pc"; then echo "failed to strip librsvg-2.0 from gdk-pixbuf-2.0.pc" >&2; exit 1; fi
+        # 3) Fold librsvg's static libs onto the Libs line (after -lgdk_pixbuf-2.0
+        #    so static-link order stays correct). Public Libs, not Libs.private:
+        #    the gtk3-tool link that failed did not pull Libs.private.
+        sed -i -E "/^Libs:/ s#\$# $rsvg_libs#" "$pc"
+        grep -q -- '-lrsvg-2' "$pc" || (echo "failed to fold librsvg libs into gdk-pixbuf-2.0.pc Libs" >&2; exit 1)
+      '';
+    }))
+    prev.gdk-pixbuf;
+
   # --- libjpeg-turbo: no SIMD (and skip the broken simdcoverage target) -------
   # gdk-pixbuf's built-in JPEG loader (and libtiff/libwebp downstream) need
   # libjpeg. wasm32 has no SIMD asm backend, so libjpeg-turbo's simd/CMakeLists
@@ -1040,6 +1135,30 @@ in
       }
     else
       prev.iagno or null;
+  four-in-a-row =
+    if isWasm then
+      import ./userspace/four-in-a-row.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.four-in-a-row or null;
+  tali =
+    if isWasm then
+      import ./userspace/tali.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.tali or null;
+  gnome-mines =
+    if isWasm then
+      import ./userspace/gnome-mines.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.gnome-mines or null;
 
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when

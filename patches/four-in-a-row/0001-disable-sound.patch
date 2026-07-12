@@ -1,0 +1,29 @@
+Disable libcanberra sound: the wasm guest has no audio device and no
+libcanberra cross build (its canberra-gtk half is X11-only source, and a
+null-driver build would be silent anyway). One include + one call site in
+hand-written main.c. Revisit if the guest grows an audio stack.
+
+--- a/src/main.c
++++ b/src/main.c
+@@ -27,7 +27,7 @@
+ 
+ #include <glib/gi18n.h>
+ #include <gtk/gtk.h>
+-#include <canberra-gtk.h>
++/* sound disabled on the wasm guest: no audio device, no libcanberra */
+ 
+ #include "ai.h"
+ #include "main.h"
+@@ -437,10 +437,8 @@
+     path = g_build_filename (SOUND_DIRECTORY, filename, NULL);
+     g_free (filename);
+ 
+-    ca_gtk_play_for_widget (drawarea,
+-                            0,
+-                            CA_PROP_MEDIA_NAME, name,
+-                            CA_PROP_MEDIA_FILENAME, path, NULL);
++    /* ca_gtk_play_for_widget call removed: the wasm guest has no audio
++     * device and no libcanberra; revisit if the guest grows a sound stack. */
+     g_free (path);
+   }
+ }

@@ -34,7 +34,11 @@ cross.stdenv.mkDerivation {
     fpcast.binaryen
   ];
   buildInputs = [
-    cross.gdk-pixbuf
+    # gdk-pixbuf-BASE, not the svg-loader variant: the svg gdk-pixbuf compiles
+    # in librsvg's io-svg.c and thus depends on THIS librsvg — building librsvg
+    # against base breaks that derivation cycle (base has no svg loader; it's
+    # only used here). See the gdk-pixbuf override in deps-overlay.nix.
+    cross.gdk-pixbuf-base
     cross.pango
     cross.cairo
     cross.glib
@@ -78,7 +82,14 @@ cross.stdenv.mkDerivation {
     pc="$out/lib/pkgconfig/librsvg-2.0.pc"
     grep -q '^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$' "$pc" \
       || (echo "librsvg .pc Requires line moved — update the sed" >&2; exit 1)
-    sed -i 's/^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$/Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0/' "$pc"
+    # Promote librsvg's real static-link deps into Requires (upstream assumes
+    # shared linking) — but DROP gdk-pixbuf-2.0. librsvg builds against
+    # gdk-pixbuf-BASE, while every downstream consumer (the games, via gtk3)
+    # links the svg-loader gdk-pixbuf. Leaving gdk-pixbuf in Requires here would
+    # put the BASE gdk-pixbuf's .pc on their pkg-config path too, and whichever
+    # gdk-pixbuf-2.0.pc pkg-config resolved first would win — nondeterministically
+    # dropping the svg loader. Consumers get gdk-pixbuf from gtk3 (svg) instead.
+    sed -i 's/^Requires: glib-2.0 gio-2.0 gdk-pixbuf-2.0 cairo$/Requires: glib-2.0 gio-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0/' "$pc"
   '';
 
   postFixup = ''
