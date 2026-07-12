@@ -453,27 +453,48 @@ in
         final.zlib
       ];
       mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dbuiltin_loaders=all" ];
-      # The built-in svg loader links librsvg, so meson threads librsvg-2.0 into
-      # gdk-pixbuf-2.0.pc's Requires.private. That poisons EVERY gdk-pixbuf
-      # consumer's pkg-config resolution: to merely FIND gdk-pixbuf-2.0 they now
-      # have to resolve librsvg-2.0's whole chain (libcroco/cairo/pango/libxml2),
-      # and gtk3 doesn't carry libcroco — so `dependency('gdk-pixbuf-2.0')` in
-      # gtk3 reports "found: NO", falls back to a disabled subproject wrap, and
-      # the gtk3 build dies. Strip the librsvg-2.0 requirement back out: it's an
-      # INTERNAL implementation detail of the built-in loader, not something
-      # every consumer should have to resolve. The consumers that actually need
-      # rsvg_* at the final static link (the games) already list librsvg + its
-      # chain in their own buildInputs, so the symbols still resolve; Libs.private
-      # keeps -lrsvg-2 (harmless — a lib, not a .pc lookup). Same fix shape as
-      # librsvg.nix dropping gdk-pixbuf-2.0 from ITS .pc Requires.
+      # Now that io-svg.c.o is in libgdk_pixbuf-2.0.a, gdk-pixbuf HARD-depends on
+      # librsvg's whole static chain at link time — and the .pc has to thread a
+      # very fine needle to express that:
+      #
+      #  * NOT as a Requires. meson auto-added librsvg-2.0 to Requires.private,
+      #    which poisons every consumer's pkg-config RESOLUTION: to merely FIND
+      #    gdk-pixbuf-2.0 they'd have to resolve librsvg-2.0's chain (libcroco/
+      #    cairo/pango/libxml2), and gtk3/galculator don't carry libcroco — so
+      #    `dependency('gdk-pixbuf-2.0')` reports "found: NO", gtk3 falls back to
+      #    a disabled subproject wrap, and the build dies. So strip it.
+      #  * BUT the link flags must stay, or every consumer that statically links
+      #    libgdk_pixbuf-2.0.a (gtk3's own tools, galculator, gcalctool, the
+      #    games) underlinks io-svg.c.o's rsvg_* (wasm-ld: undefined symbol
+      #    rsvg_handle_new …). The games list librsvg in their buildInputs so
+      #    THEY resolve, but gtk3's internal tools don't — hence the gtk3 build
+      #    failing here.
+      #
+      # Thread it: strip librsvg-2.0 from Requires (fixes resolution), then fold
+      # librsvg's FULL static link closure into Libs as raw flags (fixes linking,
+      # no pkg-config lookup for consumers). Computed with pkg-config HERE, where
+      # librsvg-2.0 IS resolvable (it + its chain are our buildInputs).
       postInstall = (o.postInstall or "") + ''
         pc="$out/lib/pkgconfig/gdk-pixbuf-2.0.pc"
         grep -q 'librsvg-2.0' "$pc" || (echo "gdk-pixbuf-2.0.pc no longer names librsvg-2.0 — did the loader stop linking it? re-check the strip" >&2; exit 1)
-        # Drop the librsvg-2.0 token (+ optional version) from any Requires line,
-        # then tidy the comma artifacts (doubled/leading/trailing) it leaves.
+        # 1) Capture librsvg's full static link flags BEFORE stripping the .pc,
+        #    using pkg-config (librsvg-2.0 resolves here). --static pulls the whole
+        #    Requires chain's libs (-lrsvg-2 -lcroco-0.6 -lxml2 …) so no consumer
+        #    underlinks. $PKG_CONFIG is set by the pkg-config setup hook (cross
+        #    wrapper); fall back to the plain name.
+        rsvg_libs=$(''${PKG_CONFIG:-pkg-config} --static --libs librsvg-2.0)
+        test -n "$rsvg_libs" || (echo "pkg-config produced no librsvg-2.0 libs — cannot fold into gdk-pixbuf-2.0.pc" >&2; exit 1)
+        echo "$rsvg_libs" | grep -q -- '-lrsvg-2' || (echo "librsvg static libs missing -lrsvg-2: $rsvg_libs" >&2; exit 1)
+        # 2) Drop the librsvg-2.0 token (+ optional version) from any Requires
+        #    line, then tidy the comma artifacts (doubled/leading/trailing).
         sed -i -E 's/librsvg-2\.0[[:space:]]*(>=[[:space:]]*[0-9.]+)?//g' "$pc"
         sed -i -E '/^Requires(\.private)?:/ { s/,[[:space:]]*,/, /g; s/:[[:space:]]*,[[:space:]]*/: /; s/[[:space:]]*,[[:space:]]*$//; }' "$pc"
         if grep -q 'librsvg-2.0' "$pc"; then echo "failed to strip librsvg-2.0 from gdk-pixbuf-2.0.pc" >&2; exit 1; fi
+        # 3) Fold librsvg's static libs onto the Libs line (after -lgdk_pixbuf-2.0
+        #    so static-link order stays correct). Public Libs, not Libs.private:
+        #    the gtk3-tool link that failed did not pull Libs.private.
+        sed -i -E "/^Libs:/ s#\$# $rsvg_libs#" "$pc"
+        grep -q -- '-lrsvg-2' "$pc" || (echo "failed to fold librsvg libs into gdk-pixbuf-2.0.pc Libs" >&2; exit 1)
       '';
     }))
     prev.gdk-pixbuf;
