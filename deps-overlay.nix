@@ -1160,6 +1160,21 @@ in
     else
       prev.gnome-mines or null;
 
+  # --- l3afpad: GTK3 leafpad fork — the first real GTK3 productivity app ------
+  # (#122). Pure C, every signal wired with g_signal_connect / GtkActionEntry
+  # tables (no GtkBuilder autoconnect → no GModule, the gtk3-demo posture).
+  # nixpkgs dropped it before our pin (no by-name/l3 shard at 9ae611a), so a
+  # from-scratch derivation (userspace/l3afpad.nix), isWasm-guarded like
+  # gcalctool — no native fallback exists (null, never evaluated).
+  l3afpad =
+    if isWasm then
+      import ./userspace/l3afpad.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.l3afpad or null;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):

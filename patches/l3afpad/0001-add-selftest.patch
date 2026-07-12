@@ -1,0 +1,74 @@
+diff --git a/src/main.c b/src/main.c
+index c6ffc4d..0516deb 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -191,11 +191,69 @@ static void parse_args(gint argc, gchar **argv, FileInfo *fi)
+ 		fi->filename = parse_file_uri(argv[1]);
+ }
+ 
++/* nix-wasm #122 headless gate. The full l3afpad window needs a Wayland
++   display (no compositor in the node test harness), so the real editor is a
++   MANUAL browser check. This --selftest instead proves, display-free, the
++   parts that exercise the wasm-specific seams:
++     - the editor chrome's widget classes (menubar / textview / scrolled
++       window) class_init cleanly through the --fpcast-emu seam
++       (g_type_class_ref, no GdkDisplay required);
++     - the app's signal-wiring style — g_signal_connect of an address-taken C
++       handler (l3afpad never calls gtk_builder_connect_signals, so like
++       gtk3-demo it has NO GModule dependency) — fires through fpcast on a
++       GtkTextBuffer, the same non-widget GObject the real document model is
++       built on;
++     - gtk_get_major_version() == 3. */
++static int selftest_handler_ran = 0;
++static void selftest_on_buf_changed(GtkTextBuffer *buffer, gpointer data)
++{
++	(void)buffer;
++	(void)data;
++	selftest_handler_ran = 1;
++}
++
++static int run_selftest(void)
++{
++	GtkTextBuffer *buf;
++	int have_types, have_buf, chars, ok;
++
++	/* The editor chrome's widget classes through the fpcast seam —
++	   class_init needs no display (the gtk-hello/gtk3-demo pattern). */
++	g_type_class_ref(GTK_TYPE_MENU_BAR);
++	g_type_class_ref(GTK_TYPE_TEXT_VIEW);
++	g_type_class_ref(GTK_TYPE_SCROLLED_WINDOW);
++	have_types = g_type_from_name("GtkMenuBar") != 0
++		&& g_type_from_name("GtkTextView") != 0
++		&& g_type_from_name("GtkScrolledWindow") != 0;
++
++	/* The document model + the app's C signal wiring: "changed" must fire
++	   the address-taken handler through the fpcast canonical thunk. */
++	buf = gtk_text_buffer_new(NULL);
++	have_buf = GTK_IS_TEXT_BUFFER(buf);
++	g_signal_connect(buf, "changed",
++		G_CALLBACK(selftest_on_buf_changed), NULL);
++	gtk_text_buffer_set_text(buf, "hello", -1); /* emits "changed" */
++	chars = gtk_text_buffer_get_char_count(buf);
++
++	ok = have_types && have_buf && selftest_handler_ran && chars == 5
++		&& gtk_get_major_version() == 3;
++	printf("L3AFPAD-SELFTEST: types=%d buf=%d handler_ran=%d chars=%d major=%u %s\n",
++		have_types, have_buf, selftest_handler_ran, chars,
++		gtk_get_major_version(), ok ? "OK" : "FAIL");
++	fflush(stdout);
++	g_object_unref(buf);
++	return ok ? 0 : 1;
++}
++
+ gint main(gint argc, gchar **argv)
+ {
+ 	Conf *conf;
+ 	gchar *stdin_data = NULL;
+ 
++	/* nix-wasm #122: headless mechanism gate (no display). See run_selftest(). */
++	if (argc > 1 && g_strcmp0(argv[1], "--selftest") == 0)
++		return run_selftest();
++
+ 	bindtextdomain(PACKAGE, LOCALEDIR);
+ 	bind_textdomain_codeset(PACKAGE, "UTF-8");
+ 	textdomain(PACKAGE);
