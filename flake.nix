@@ -800,17 +800,18 @@
 
         # gcolor3 — small GTK3 color chooser (successor to the GTK2-only
         # gcolor2). Unlike l3afpad (dropped from nixpkgs, needed a from-scratch
-        # pin) or galculator (needed patches), gcolor3 is CURRENTLY packaged in
-        # nixpkgs unmodified. Its window.c wires signals with explicit
-        # g_signal_connect + gtk_widget_class_bind_template_callback (a
-        # GtkWidgetClass template, not gtk_builder_connect_signals autoconnect)
-        # — same GModule-free posture as l3afpad/gtk3-demo. Exposed here
-        # UNMODIFIED (no deps-overlay override) to find out how far stock
-        # nixpkgs gets before any wasm-specific fix (most likely the shared
-        # --fpcast-emu post-link pass every gobject-casting GTK3 app needs) is
-        # actually required. Per PRIME DIRECTIVE corollary 1: stay on
-        # nixpkgs-via-crossSystem, don't fork a private recipe until stock is
-        # proven insufficient.
+        # pin), gcolor3 is CURRENTLY packaged in nixpkgs, so deps-overlay.nix's
+        # override just applies the shared --fpcast-emu post-link pass (same
+        # GModule-free posture as l3afpad/gtk3-demo: window.c wires signals
+        # with g_signal_connect + gtk_widget_class_bind_template_callback, not
+        # gtk_builder_connect_signals autoconnect) plus the galculator-style
+        # nix-support strip. UNVERIFIED — no Nix build access when this was
+        # written (nix-wasm#156); `nix build .#gcolor3` must actually succeed
+        # before trusting the override. Deliberately NOT yet added to
+        # `wasmPublishedPkgs` (below): that list feeds `wasm-binary-cache`,
+        # which is on the DEFAULT CI build path — coupling an unconfirmed
+        # package in would break CI for everyone if the build fails. Move it
+        # there only after `nix build .#gcolor3` is confirmed green.
         gcolor3 = cross.gcolor3;
 
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
