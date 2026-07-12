@@ -61,14 +61,6 @@ cross.stdenv.mkDerivation {
     # to, and stock sommelier doesn't implement the protocol, so the host
     # (Greenfield -> pc) sees a silent client and CSD-defaults it to frameless.
     ../patches/sommelier/0003-xdg-decoration-passthrough.patch
-    # DIAGNOSTIC (temporary, codebutler/nix-wasm#143): trace the fixed-size CSD
-    # window sizing sequence (set_title/set_min_size/set_max_size/geometry +
-    # every host->guest configure) to /var/log/sommelier.log. Behavior is
-    # unchanged — each wrapped request still forwards to the host exactly as the
-    # stock ForwardRequestToShim did; it only adds `#143`-prefixed LOG lines. To
-    # read the trace in a booted guest: run `gcalctool &` then
-    # `grep '#143' /var/log/sommelier.log`. Revert once #143 is root-caused.
-    ../patches/sommelier/0004-configure-geometry-diag-logging.patch
   ];
 
   nativeBuildInputs = [
