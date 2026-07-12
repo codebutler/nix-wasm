@@ -1,7 +1,7 @@
 # GNOME games tier — browser visual acceptance
 
-**Status: VERIFIED 2026-07-12 — four games render on the browser rig (PR #144
-preview artifacts, commit `7223568`).**
+**Status: VERIFIED 2026-07-12 — three games render on the browser rig (PR #144
+preview artifacts).**
 
 Verified on the headless-Chromium rig (`runtime/demo/web/` + SwiftShader,
 per-game fresh boot). The tier's SVG-rendering chain (libcroco → librsvg 2.40 →
@@ -15,17 +15,15 @@ no `Unable to load image` for any of these four.
 ## five-or-more — board + placed balls + the "Next:" SVG preview trio
 ![five-or-more](./games-shots/five-or-more.png)
 
-## gnome-mines — playable grid, revealed cells (one cosmetic missing SVG icon)
-![gnome-mines](./games-shots/gnome-mines.png)
-
 ## iagno — green Reversi board with the four starting discs
 ![iagno](./games-shots/iagno.png)
 
-## Why these four (and not four-in-a-row / tali)
+## Why these three (and not gnome-mines / four-in-a-row / tali)
 
 These render their pieces through **librsvg's API** (`rsvg_handle_*` →
-cairo), which works. four-in-a-row and tali load their tileset / dice as
-`.svg` files **through gdk-pixbuf**, which has no SVG loader on this guest
-(no `libpixbufloader-svg`, no `loaders.cache` — verified in-guest). They're
-deferred to **nix-wasm#146** (gdk-pixbuf SVG loader), which also clears
-gnome-mines' cosmetic icon warning.
+cairo), which works. The deferred three load SVG **through gdk-pixbuf**,
+which has no SVG loader on this guest (no `libpixbufloader-svg`, no
+`loaders.cache` — verified in-guest): four-in-a-row throws "Unable to load
+image" (tileset, unplayable), tali shows blank dice, and gnome-mines' HUD
+icons (mine-counter flag, clock) are blank. All three are deferred to
+**nix-wasm#146** (gdk-pixbuf SVG loader).

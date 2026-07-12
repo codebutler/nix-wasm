@@ -1032,14 +1032,6 @@ in
       }
     else
       prev.five-or-more or null;
-  gnome-mines =
-    if isWasm then
-      import ./userspace/gnome-mines.nix {
-        cross = final;
-        pkgs = final.buildPackages;
-      }
-    else
-      prev.gnome-mines;
   iagno =
     if isWasm then
       import ./userspace/iagno.nix {

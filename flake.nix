@@ -786,7 +786,6 @@
         librsvg = cross.librsvg;
         gnome-mahjongg = cross.gnome-mahjongg;
         five-or-more = cross.five-or-more;
-        gnome-mines = cross.gnome-mines;
         iagno = cross.iagno;
 
         # Task 8: Sommelier — the guest Wayland compositor shim (virtwl/wl_shm path)

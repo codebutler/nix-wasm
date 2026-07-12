@@ -114,9 +114,6 @@ let
                                 # share/gnome-mahjongg/{themes,maps} ride the closure.
           cross.five-or-more    # GNOME games: Color Lines. share/five-or-more/themes
                                 # + its GtkBuilder .ui files ride the closure.
-          cross.gnome-mines     # GNOME games: Minesweeper (3.16 — pre
-                                # libgnome-games-support). share/gnome-mines css
-                                # + interface.ui ride the closure.
           cross.iagno           # GNOME games: Reversi (sound stubbed). Assets
                                 # gresource-embedded; schema rides the closure.
           cross.gcalctool   # the classic GNOME calculator (+ gcalccmd console front-
@@ -160,7 +157,6 @@ let
           "/share/gnome-mahjongg" # mahjongg tilesets + maps (profile symlink;
                                   # the binary reads its baked store path)
           "/share/five-or-more"   # five-or-more ball themes + .ui files
-          "/share/gnome-mines"    # mines css + interface.ui
           "/share/applications"   # every GUI app's .desktop entry (GNOME
                                   # games, gcalctool, galculator all install
                                   # one) merged at /run/current-system/sw/
