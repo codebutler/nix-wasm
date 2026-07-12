@@ -27,6 +27,9 @@
 , dynsym ? import ./dynsym.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gtk3-widget-factory";
+  # Does its own dynsym-inject+fpcast in buildPhase → opt out of gtk3's
+  # propagated auto-fpcast (deps-overlay.nix) so the pass isn't applied twice.
+  dontFpcastEmu = true;
   version = "3.24.52";
 
   # Reuse the cross gtk3's own source tarball — widget-factory ships in its demos/.

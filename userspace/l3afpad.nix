@@ -33,9 +33,13 @@
 # The window icon loads at runtime from the baked ICONDIR store path
 # ($out/share/pixmaps/l3afpad.png), so the package must ride the served /nix
 # closure via environment.systemPackages — the galculator/gcalctool pattern.
-{ cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
+{ cross, pkgs }:
 cross.stdenv.mkDerivation {
   pname = "l3afpad";
+  # l3afpad links gtk3, so gtk3's propagated hook (deps-overlay.nix) fpcasts
+  # $out/bin/l3afpad automatically — no fpcast line here. Opt into the leaf
+  # served-closure nix-support strip (#43):
+  wasmLeafApp = true;
   # The last rev nixpkgs shipped (24.05); upstream has been quiet since.
   version = "unstable-2022-02-14";
 
@@ -56,8 +60,6 @@ cross.stdenv.mkDerivation {
     cross.buildPackages.autoreconfHook # git checkout — no shipped ./configure
     cross.buildPackages.intltool # AC_PROG_INTLTOOL + intltoolize + .desktop merge
     cross.buildPackages.gettext # msgfmt for po/
-    # Auto-fpcasts $out/bin/l3afpad in postFixup (userspace/fpcast-emu.nix).
-    fpcast.hook
   ];
   # strictDeps=false (below) also puts these dev outputs' share/aclocal on the
   # aclocal search path — AM_GLIB_DEFINE_LOCALEDIR/AM_GLIB_GNU_GETTEXT come from
@@ -89,11 +91,10 @@ cross.stdenv.mkDerivation {
     rm -f "$out/share/icons/hicolor/icon-theme.cache"
   '';
 
-  # fpcast.hook (nativeBuildInputs) does everything wasm-specific: it fpcasts
-  # $out/bin/l3afpad (the standard GTK-binary indirect-call cast fix) AND strips
-  # the leaf app's $out/nix-support (#43). No dynsym-inject — no GtkBuilder
-  # autoconnect, nothing resolved by name at runtime (gtk3-demo posture) — so
-  # the hook's plain fpcast is all that's needed, and there is no postFixup.
+  # No dynsym-inject and no manual fpcast: l3afpad wires signals in C (no
+  # GtkBuilder autoconnect, gtk3-demo posture), so the standard indirect-call
+  # cast fix is all it needs — and that arrives automatically from gtk3's
+  # propagated hook. `wasmLeafApp = true` (above) is the whole wasm footprint.
 
   meta.description = "L3afpad — simple GTK3 text editor (leafpad fork) on wasm32; signals wired in C, no GModule";
 }

@@ -886,6 +886,19 @@ in
       libice = null;
       tinysparql = null;
     }).overrideAttrs (o: {
+      # AUTO-fpcast every gtk3 consumer (the libxml2-setupHook idiom): the
+      # shared fpcast-emu hook rides gtk3's propagatedNativeBuildInputs, so any
+      # derivation linking cross gtk3 sources it and fpcasts its installed wasm
+      # bins with ZERO per-package lines — the correctness pass every gobject
+      # binary needs can no longer be forgotten on a new GTK app. It is
+      # fpcast-ONLY by default (safe/no-op on gtk3 libraries too); a leaf app
+      # opts into the served-closure nix-support strip with `wasmLeafApp = true`,
+      # and a consumer that fpcasts its own binary sets `dontFpcastEmu = true`
+      # (see userspace/fpcast-emu.nix). NOTE: gtk3's OWN tool binaries are not
+      # touched — a package's setup hook applies to its CONSUMERS, not itself.
+      propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
+        fpcast.hook
+      ];
       # Match libepoxy's EGL platform-type choice (see the libepoxy override):
       # GTK re-parses eglplatform.h via `#include <epoxy/egl.h>` in the wayland
       # backend, so it needs the same `void *` EGLNative*Type typedefs.
@@ -1010,6 +1023,11 @@ in
   # native galculator is untouched.
   galculator = whenWasm
     (p: p.overrideAttrs (o: {
+      # galculator does its OWN dynsym-inject+fpcast in postFixup (below), so
+      # opt OUT of gtk3's propagated auto-fpcast to avoid double-applying the
+      # pass. (Left unchanged/manual on purpose — a boot-verified migration onto
+      # the auto path is a separate step; PRIME DIRECTIVE: no blind gtk3 flip.)
+      dontFpcastEmu = true;
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [
         final.buildPackages.binaryen
         final.buildPackages.python3 # dynsym-inject (below)
@@ -1104,19 +1122,20 @@ in
   # binding, resolved at compile time via the generated class_init — NOT
   # gtk_builder_connect_signals(NULL)/GModule lookup), so it has the same
   # GModule-free posture as l3afpad/gtk3-demo: only the shared --fpcast-emu
-  # post-link pass (gobject class_init casts) is needed, no dynsym-inject. The
-  # ENTIRE wasm-specific override is the one `fpcast.hook` line: it fpcasts
-  # $out/bin/gcolor3 AND strips the leaf app's $out/nix-support (#43) in one
-  # step — so this override carries no postFixup and no bespoke bash at all.
-  # UNVERIFIED (no Nix build access when written — see nix-wasm#156): confirm
-  # `nix build .#gcolor3` succeeds before relying on it. A --selftest source
-  # patch (like galculator's/l3afpad's) is deliberately NOT added yet —
-  # inventing one against unread upstream source would be exactly the kind of
-  # unverified shortcut the PRIME DIRECTIVE forbids; add it once the real
-  # gcolor3 source (window.c/main.c) has been read against a working build.
+  # post-link pass (gobject class_init casts) is needed, no dynsym-inject — and
+  # that is now AUTOMATIC via gtk3's propagated hook (above). So the ENTIRE
+  # wasm-specific override is one attribute: `wasmLeafApp = true`, opting into
+  # the $out/nix-support served-closure strip (#43). No fpcast line, no
+  # nativeBuildInputs, no postFixup. UNVERIFIED (no Nix build access when
+  # written — see nix-wasm#156): confirm `nix build .#gcolor3` succeeds before
+  # relying on it. A --selftest source patch (like galculator's/l3afpad's) is
+  # deliberately NOT added yet — inventing one against unread upstream source
+  # would be exactly the kind of unverified shortcut the PRIME DIRECTIVE forbids;
+  # add it once the real gcolor3 source (window.c/main.c) has been read against
+  # a working build.
   gcolor3 = whenWasm
-    (p: p.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.hook ];
+    (p: p.overrideAttrs (_: {
+      wasmLeafApp = true;
     }))
     prev.gcolor3;
 
