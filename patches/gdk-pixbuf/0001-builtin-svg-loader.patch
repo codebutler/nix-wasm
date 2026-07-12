@@ -16,7 +16,7 @@ Built with -Dbuiltin_loaders=all so the svg entry is compiled in.
 
 --- a/meson.build
 +++ b/meson.build
-@@ -313,6 +313,16 @@
+@@ -313,6 +313,21 @@
    loaders_deps += [ glycin_dep ]
  endif
  
@@ -25,10 +25,15 @@ Built with -Dbuiltin_loaders=all so the svg entry is compiled in.
 +# built against the base gdk-pixbuf; the dep here supplies io-svg.c's rsvg.h +
 +# links librsvg-2.a so gdk-pixbuf's own tools resolve rsvg_*. See
 +# patches/gdk-pixbuf/ + the gdk-pixbuf override in deps-overlay.nix.
-+librsvg_dep = dependency('librsvg-2.0', required: false)
-+if librsvg_dep.found()
-+  loaders_deps += librsvg_dep
-+endif
++#
++# REQUIRED, not optional: the SVG loader is the entire reason this variant
++# exists. With required:false a librsvg-2.0.pc that pkg-config can't fully
++# resolve (its Requires chain must be on the path — see deps-overlay.nix) would
++# leave found()=false, silently skip the loader, and ship a gdk-pixbuf with NO
++# svg support that still builds green. required:true turns that into a loud
++# configure failure instead.
++librsvg_dep = dependency('librsvg-2.0', required: true)
++loaders_deps += librsvg_dep
 +
  gif_opt = get_option('gif').disable_auto_if(glycin_dep.found() or enabled_loaders.contains('android'))
  if not gif_opt.disabled()

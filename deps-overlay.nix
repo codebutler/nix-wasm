@@ -427,7 +427,31 @@ in
       postPatch = (o.postPatch or "") + ''
         cp ${./patches/gdk-pixbuf/io-svg.c} gdk-pixbuf/io-svg.c
       '';
-      buildInputs = (o.buildInputs or [ ]) ++ [ final.librsvg ];
+      # The patch gates the built-in svg loader on
+      #   librsvg_dep = dependency('librsvg-2.0', required: false)
+      # so librsvg-2.0.pc must not merely be on the path but fully RESOLVABLE by
+      # pkg-config at configure time — else librsvg_dep.found() is false, the svg
+      # loader is silently skipped (no -DINCLUDE_svg, no static lib), and the
+      # build still succeeds with NO svg support. librsvg-2.0.pc's Requires were
+      # promoted for static linking (userspace/librsvg.nix) to
+      #   glib-2.0 gio-2.0 cairo pangocairo pangoft2 libcroco-0.6 libxml-2.0
+      # none of which are gdk-pixbuf-base inputs, so `pkg-config --exists
+      # librsvg-2.0` fails unless we put every provider on the path too. Mirror
+      # librsvg's own buildInputs (minus gdk-pixbuf-base) so the whole Requires
+      # chain resolves. Verified on the browser rig: without these, four-in-a-row
+      # throws "Unable to load image … tileset.svg" and tali's dice are blank.
+      buildInputs = (o.buildInputs or [ ]) ++ [
+        final.librsvg
+        final.cairo
+        final.pango
+        final.libcroco
+        final.libxml2
+        final.freetype
+        final.fontconfig
+        final.pixman
+        final.libpng
+        final.zlib
+      ];
       mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dbuiltin_loaders=all" ];
     }))
     prev.gdk-pixbuf;
