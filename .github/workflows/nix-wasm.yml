@@ -45,7 +45,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: nix-wasm-${{ github.ref }}
+  # Key on the HEAD BRANCH NAME, not github.ref: github.ref is refs/heads/<branch>
+  # for push but refs/pull/<N>/merge for pull_request, so the push-event (claude/**)
+  # and pull_request-event runs of the SAME commit used to land in different groups
+  # and BOTH ran — double-building the whole wasm world per PR push. The branch-name
+  # key shares one group so the duplicate self-cancels (same fix as ci.yml in pc).
+  group: nix-wasm-${{ github.event.pull_request.head.ref || github.ref_name }}
   # Supersede an in-flight run on a newer push. Safe for a cache-populating build:
   # cachix-action pushes each derivation as it finishes (post-build-hook), so a
   # cancelled run's completed paths are already in Cachix and the new run just
@@ -53,9 +58,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # --- decouple runtime-only changes from the world rebuild ---------------------
+  # This workflow triggers on both *.nix/patches (the wasm world) AND runtime/**
+  # (the JS engine, because the boot smokes run it). But the toolchain/artifacts
+  # BUILD jobs don't depend on runtime/ at all — a pure engine-JS change used to
+  # still spin up the nix-heavy LLVM runners and re-run the whole build path. This
+  # filter splits the two: `nix` gates the from-source build jobs; `runtime` (or
+  # `nix`) gates the boot smokes, which substitute the unchanged kernel/artifacts
+  # from Cachix instead of waiting on a rebuild.
+  changes:
+    runs-on: namespace-profile-default
+    outputs:
+      nix: ${{ steps.filter.outputs.nix }}
+      runtime: ${{ steps.filter.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3.0.2
+        id: filter
+        with:
+          filters: |
+            nix:
+              - 'flake.nix'
+              - 'flake.lock'
+              - '**/*.nix'
+              - 'patches/**'
+              - '.rebuild-request'
+              - '.github/workflows/nix-wasm.yml'
+            runtime:
+              - 'runtime/**'
+
   # --- the heavy from-source LLVM builds, one runner each, pushed to Cachix ----
   toolchain:
     name: build .#${{ matrix.attr }}
+    needs: changes
+    if: ${{ needs.changes.outputs.nix == 'true' }}
     # Namespace large runner (x86_64). The from-source LLVM poles (guest-clang, the
     # kernel's patched LLVM) are RAM/core-bound — they time out on a stock 4-core/
     # 16 GB ubuntu-latest (kernel hit the 6h cap). The nix-heavy profile gives the
@@ -92,7 +128,8 @@ jobs:
   # --- the substitutable artifact set: reuses the cached toolchain via Cachix ---
   artifacts:
     name: build wasm artifacts
-    needs: toolchain
+    needs: [changes, toolchain]
+    if: ${{ needs.changes.outputs.nix == 'true' }}
     # Namespace small runner: with the toolchain + cross closure cached in Cachix,
     # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
     # C++ + squashfs/initramfs/image), so the default profile suffices. (Use
@@ -179,7 +216,10 @@ jobs:
 
       # Acceptance #2 (determinism): a forced rebuild of nix.wasm must reproduce
       # the same output. --rebuild rebuilds just the top derivation and compares.
+      # This recompiles nix.wasm's C++ a SECOND time, so it's off the PR critical
+      # path — run it on master/dispatch only, not on every PR push.
       - name: Determinism check (.#nix-wasm --rebuild)
+        if: github.event_name != 'pull_request'
         run: nix build -L --rebuild '.#nix-wasm' --no-link
 
   # --- boot-smoke: actually BOOT the guest and run the in-repo node smokes -----
@@ -203,10 +243,21 @@ jobs:
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
   boot-smoke:
-    name: boot guest + run signal smokes
-    needs: toolchain
+    name: boot guest + ${{ matrix.shard }} smokes
+    needs: [changes, toolchain]
+    # Runs when the world changed OR just the engine did (substitutes the kernel
+    # from Cachix). `!failure() && !cancelled()` lets it run even when `toolchain`
+    # was SKIPPED (runtime-only change) instead of being blocked by the needs edge.
+    if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
     runs-on: namespace-profile-default
     timeout-minutes: 60
+    # Two independent smoke groups on different artifacts (busybox-only signal
+    # boots vs the software-MMU kernels) — run them on parallel runners instead of
+    # ~9 boots serially in one job, halving this job's wall-clock.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [signals, mmu]
     steps:
       - uses: actions/checkout@v4
 
@@ -231,7 +282,10 @@ jobs:
           node-version: 22
 
       # Substitute the two artifacts a busybox-only (nix:false) boot needs.
+      # Only the `signals` shard boots busybox; the `mmu` shard builds its own
+      # kernels below.
       - name: Build kernel + initramfs (substitute from Cachix)
+        if: matrix.shard == 'signals'
         run: |
           mkdir -p .artifacts
           ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
@@ -253,6 +307,7 @@ jobs:
       # prompt. Multi-tty (hvc1+) needs the full-nix inittab (8 getty lines live in
       # base.squashfs, not the initramfs) and is validated on the PR preview boot.
       - name: Boot smokes (sigalrm + kill-wake + timeout + ping-pace #75 + vsock)
+        if: matrix.shard == 'signals'
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts/
@@ -325,6 +380,7 @@ jobs:
       # (.#kernel-mmu / .#kernel-mmu-a2) + inits (.#mmu-init / .#mmu-init-a2)
       # from Cachix; the smokes instrument the init at runtime and boot nix:false.
       - name: MMU smokes (#128 software MMU — A1 checksum + A2 demand paging)
+        if: matrix.shard == 'mmu'
         working-directory: runtime
         run: |
           run_smoke() {
@@ -409,10 +465,22 @@ jobs:
   # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
   # pushed to Cachix first and this job substitutes them.
   nix-boot-smoke:
-    name: boot full nix system + 9P transport smoke
-    needs: [toolchain, artifacts]
+    name: nix system smoke (${{ matrix.shard }})
+    needs: [changes, toolchain, artifacts]
+    # Run on a world OR engine change. `!failure() && !cancelled()` lets it run
+    # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
+    # the unchanged nix:true artifacts from Cachix rather than blocking on a build.
+    if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
     runs-on: namespace-profile-default
     timeout-minutes: 90
+    # ~13 full-nix guest boots ran serially in one job. Split into two parallel
+    # shards on the same substituted artifacts: `core` (9P transport + nix install
+    # + compiler + from-source + graphics selftests) and `gtk` (the heavy
+    # one-per-boot GTK apps). Halves the wall-clock of the longest job.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, gtk]
     steps:
       - uses: actions/checkout@v4
 
@@ -480,60 +548,63 @@ jobs:
             echo "$script still inconclusive after 3 attempts"
             return 2
           }
-          # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/pc over
-          # pcroot 9P, installs make-wasm32 over nixcache 9P).
-          run_smoke demo/node/smoke.mjs
-          # The new CLI: `nix profile install` of a REAL-derivation catalog entry
-          # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware
-          # cache), then compiles + runs a C program. Gating.
-          run_smoke demo/node/profile-install-e2e.mjs
-          # `nix-env -iA` of the FULL toolchain (guest-clang-wasm32 + guest-cc +
-          # guest-cxx) then COMPILES AND RUNS bare clang/clang++/cc/c++ → exit
-          # 42/7. Gates two things the other smokes don't: (1) `nix-env -iA`
-          # substituting a trivial (`allowSubstitutes = false`) derivation — needs
-          # always-allow-substitutes in the guest nix.conf, else nix-env tries to
-          # BUILD it and dies "platform mismatch" (#1 follow-up); (2) EXECUTING a
-          # freshly-compiled wasm binary in the headless harness (issue #96). Gating.
-          run_smoke demo/node/wrapperless-cc-e2e.mjs
-          # BUILD derivations FROM SOURCE on the guest (issue #92), not just
-          # substitute: a trivial sh-builder, a multi-util sh-builder (PATH=/bin),
-          # and a derivation that compiles inline C with the in-guest toolchain →
-          # then RUNS the from-source-built binary (exit 42). Proves nix's
-          # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
-          # posix_spawn. Gating.
-          run_smoke demo/node/build-from-source-e2e.mjs
-          # M2/M3a graphics + FFI selftests (issue #88), batched into ONE boot
-          # (display-free --selftest binaries baked into the image): glib (gobject +
-          # libffi double marshaller), libffi (raw wasm backend), pango (cairo-ft
-          # layout), wl-text (freetype/fontconfig/harfbuzz/cairo). Gating.
-          run_smoke demo/node/selftests-batch.mjs
-          # The HEAVY GTK selftests (issue #88) run one-per-fresh-boot — batching
-          # several ~14 MB GTK inits in one boot fragments the NOMMU heap and wedges
-          # a later one (they pass fine isolated). gtk-hello (GTK3 type tree via the
-          # fpcast seam, M3b), galculator (GTK3 .ui parse + widget class_init, M4),
-          # gtk3-widget-factory (GtkBuilder add_callback_symbol autoconnect, #33),
-          # gtk3-demo (full GtkApplication, signals wired in C — no GModule).
-          # Gating; the retry wrapper covers boot-panic flakes (exit 2).
-          run_smoke demo/node/gtk-smoke.mjs
-          run_smoke demo/node/galculator-smoke.mjs
-          run_smoke demo/node/widget-factory-smoke.mjs
-          run_smoke demo/node/gtk-demo-smoke.mjs
-          # gcalctool (classic GNOME calculator): computes 7*6=42 with gcalccmd,
-          # the console front-end sharing the GUI's equation engine — a real
-          # headless gate with no source patch. Light (no GTK init) but kept
-          # one-per-boot with its GTK siblings for isolation. Gating.
-          run_smoke demo/node/gcalctool-smoke.mjs
-          # l3afpad (GTK3 leafpad fork, #122): the first real GTK3 productivity
-          # app — signals wired in C, no GModule (the gtk3-demo posture).
-          # --selftest class_inits the editor widgets through the fpcast seam +
-          # fires a GtkTextBuffer signal, display-free. One-per-boot like its
-          # GTK siblings. Gating.
-          run_smoke demo/node/l3afpad-smoke.mjs
-          # GNOME games tier: rsvg-convert renders mahjongg's real tileset SVG
-          # to PNG in-guest — proves libcroco → librsvg → pango/cairo →
-          # cairo-png headless, zero source patches. The game windows are
-          # browser checks on the rig. Gating.
-          run_smoke demo/node/rsvg-smoke.mjs
+          if [ "${{ matrix.shard }}" = "core" ]; then
+            # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/pc over
+            # pcroot 9P, installs make-wasm32 over nixcache 9P).
+            run_smoke demo/node/smoke.mjs
+            # The new CLI: `nix profile install` of a REAL-derivation catalog entry
+            # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware
+            # cache), then compiles + runs a C program. Gating.
+            run_smoke demo/node/profile-install-e2e.mjs
+            # `nix-env -iA` of the FULL toolchain (guest-clang-wasm32 + guest-cc +
+            # guest-cxx) then COMPILES AND RUNS bare clang/clang++/cc/c++ → exit
+            # 42/7. Gates two things the other smokes don't: (1) `nix-env -iA`
+            # substituting a trivial (`allowSubstitutes = false`) derivation — needs
+            # always-allow-substitutes in the guest nix.conf, else nix-env tries to
+            # BUILD it and dies "platform mismatch" (#1 follow-up); (2) EXECUTING a
+            # freshly-compiled wasm binary in the headless harness (issue #96). Gating.
+            run_smoke demo/node/wrapperless-cc-e2e.mjs
+            # BUILD derivations FROM SOURCE on the guest (issue #92), not just
+            # substitute: a trivial sh-builder, a multi-util sh-builder (PATH=/bin),
+            # and a derivation that compiles inline C with the in-guest toolchain →
+            # then RUNS the from-source-built binary (exit 42). Proves nix's
+            # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
+            # posix_spawn. Gating.
+            run_smoke demo/node/build-from-source-e2e.mjs
+            # M2/M3a graphics + FFI selftests (issue #88), batched into ONE boot
+            # (display-free --selftest binaries baked into the image): glib (gobject +
+            # libffi double marshaller), libffi (raw wasm backend), pango (cairo-ft
+            # layout), wl-text (freetype/fontconfig/harfbuzz/cairo). Gating.
+            run_smoke demo/node/selftests-batch.mjs
+            # GNOME games tier: rsvg-convert renders mahjongg's real tileset SVG
+            # to PNG in-guest — proves libcroco → librsvg → pango/cairo →
+            # cairo-png headless, zero source patches. The game windows are
+            # browser checks on the rig. Gating.
+            run_smoke demo/node/rsvg-smoke.mjs
+          else
+            # The HEAVY GTK selftests (issue #88) run one-per-fresh-boot — batching
+            # several ~14 MB GTK inits in one boot fragments the NOMMU heap and wedges
+            # a later one (they pass fine isolated). gtk-hello (GTK3 type tree via the
+            # fpcast seam, M3b), galculator (GTK3 .ui parse + widget class_init, M4),
+            # gtk3-widget-factory (GtkBuilder add_callback_symbol autoconnect, #33),
+            # gtk3-demo (full GtkApplication, signals wired in C — no GModule).
+            # Gating; the retry wrapper covers boot-panic flakes (exit 2).
+            run_smoke demo/node/gtk-smoke.mjs
+            run_smoke demo/node/galculator-smoke.mjs
+            run_smoke demo/node/widget-factory-smoke.mjs
+            run_smoke demo/node/gtk-demo-smoke.mjs
+            # gcalctool (classic GNOME calculator): computes 7*6=42 with gcalccmd,
+            # the console front-end sharing the GUI's equation engine — a real
+            # headless gate with no source patch. Light (no GTK init) but kept
+            # one-per-boot with its GTK siblings for isolation. Gating.
+            run_smoke demo/node/gcalctool-smoke.mjs
+            # l3afpad (GTK3 leafpad fork, #122): the first real GTK3 productivity
+            # app — signals wired in C, no GModule (the gtk3-demo posture).
+            # --selftest class_inits the editor widgets through the fpcast seam +
+            # fires a GtkTextBuffer signal, display-free. One-per-boot like its
+            # GTK siblings. Gating.
+            run_smoke demo/node/l3afpad-smoke.mjs
+          fi
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because
@@ -548,7 +619,10 @@ jobs:
   # pass on the fixed one.
   browser-smoke:
     name: boot in Chromium + dlopen smoke
-    needs: [toolchain, artifacts]
+    needs: [changes, toolchain, artifacts]
+    # World OR engine change; substitutes unchanged artifacts from Cachix when the
+    # build jobs were skipped (runtime-only change) — see boot-smoke's note.
+    if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
     runs-on: namespace-profile-default
     timeout-minutes: 60
     steps:
