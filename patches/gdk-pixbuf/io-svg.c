@@ -25,7 +25,12 @@
 
 #include <stdlib.h>
 
-#include <rsvg.h>
+/* nix-wasm: upstream compiles this in-tree where <rsvg.h> resolves against the
+ * librsvg source root. Vendored into gdk-pixbuf it builds against librsvg's
+ * INSTALLED headers, whose .pc adds -I<prefix>/include/librsvg-2.0 and installs
+ * rsvg.h under librsvg-2.0/librsvg/ — so use the external <librsvg/rsvg.h> path
+ * (the same include the games' own librsvg-API code uses). */
+#include <librsvg/rsvg.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
 #define N_(string) (string)
