@@ -72,10 +72,14 @@ cross.stdenv.mkDerivation {
     "GLIB_MKENUMS=${cross.buildPackages.glib.dev}/bin/glib-mkenums"
   ];
 
-  # -fcommon: same-era hand-written C with tentative definitions in shared
-  # headers (the four-in-a-row player_active class of duplicate-symbol break
-  # under clang's default -fno-common).
-  NIX_CFLAGS_COMPILE = "-fcommon";
+  # NO -fcommon: it ICEs clang on wasm32 (the object format has no common
+  # symbols). Tali's headers already declare every global with `extern`
+  # (yahtzee.h/gyahtzee.h) and no symbol is defined at file scope in two TUs,
+  # so -fno-common (clang's default) links cleanly with no extern patch needed
+  # — unlike four-in-a-row, whose main.h carried a real tentative definition.
+  # Keep the incompatible-function-pointer-types demotion that this GTK-era C
+  # needs for its g_signal_connect callback casts (same as gnome-mines).
+  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types";
 
   enableParallelBuilding = true;
 

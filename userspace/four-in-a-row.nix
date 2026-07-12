@@ -20,7 +20,13 @@ cross.stdenv.mkDerivation {
     hash = "sha256-PM9lqdoI2OiI+pCnv1UZK8NEmBzsOx9W+g2nD0IxN9Q=";
   };
 
-  patches = [ ../patches/four-in-a-row/0001-disable-sound.patch ];
+  patches = [
+    ../patches/four-in-a-row/0001-disable-sound.patch
+    # player_active tentative definition in main.h — -fcommon is NOT an option
+    # on wasm32 (no common symbols in the object format; clang ICEs), so the
+    # header gets a real extern. See the patch header.
+    ../patches/four-in-a-row/0002-extern-player-active.patch
+  ];
 
   # Drop the libcanberra-gtk3 requirement from the SHIPPED configure (we
   # don't autoreconf). Asserted: the build fails loudly if the string moves.
@@ -89,11 +95,11 @@ cross.stdenv.mkDerivation {
   # qualification drift (gchar** vs const gchar**); clang >=16 promotes
   # incompatible-function-pointer-types to a hard error. ABI-identical —
   # demote it back to a warning for the GENERATED code (hand-written-C games
-  # stay strict and get real patches instead).
-  # -fcommon: its hand-written-C half (main.c/gfx.c/prefs.c/theme.c) uses
-  # pre-2020 tentative definitions in headers (player_active) — duplicate
-  # symbols under clang's default -fno-common.
-  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types -fcommon";
+  # stay strict and get real patches instead). NO -fcommon: it ICEs clang on
+  # wasm32 (no common symbols in the object format), so the hand-written-C
+  # half's lone tentative definition (player_active) gets a real extern via
+  # 0002-extern-player-active.patch instead.
+  NIX_CFLAGS_COMPILE = "-Wno-error=incompatible-function-pointer-types";
 
   enableParallelBuilding = true;
 
