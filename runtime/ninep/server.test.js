@@ -549,3 +549,48 @@ describe("multi-connection (multi-mount, Phase E/N1)", () => {
     expect(dec(r.data)).toBe("real backend");
   });
 });
+
+describe("opt-in RPC trace (#151 software-MMU 9P localizer)", () => {
+  test("trace captures the Twrite the guest issues + the host's Rwrite reply", async () => {
+    const lines = [];
+    const tvfs = MemVfs.from({ Home: { "notes.txt": "hello world" } });
+    const tsrv = createNinePServer({ vfs: tvfs, trace: (l) => lines.push(l) });
+    const tc = client(tsrv);
+    const root = await mount(tc);
+    const { fid } = await walk(tc, root, ["Home", "notes.txt"]);
+    await tc.rpc({ type: P9.Tlopen, fid, flags: 0 });
+    const data = new TextEncoder().encode("hello-from-linux\n");
+    const w = await tc.rpc({ type: P9.Twrite, fid, offset: 0, data });
+    expect(w.type).toBe(P9.Rwrite);
+
+    // The whole point of the #151 localizer: prove a host-side Twrite for the
+    // right file, with the host's reply — so a real MMU boot shows whether the
+    // guest issues the write at all.
+    const line = lines.find((l) => l.includes("Twrite("));
+    expect(line).toBeDefined();
+    expect(line).toContain("path=/Home/notes.txt");
+    expect(line).toContain(`count=${data.length}`);
+    expect(line).toContain(`-> Rwrite count=${data.length}`);
+  });
+
+  test("trace records an Rlerror with its errno when an RPC fails", async () => {
+    const lines = [];
+    const tsrv = createNinePServer({ vfs: MemVfs.from({ Home: {} }), trace: (l) => lines.push(l) });
+    const tc = client(tsrv);
+    const root = await mount(tc);
+    // First walk component missing → the server throws ENOENT → Rlerror.
+    await tc.rpc({ type: P9.Twalk, fid: root, newfid: tc.fid(), wnames: ["ghost"] });
+    const err = lines.find((l) => l.includes("-> Rlerror"));
+    expect(err).toBeDefined();
+    expect(err).toContain(`errno=${E.NOENT}`);
+  });
+
+  test("no trace option → no tracing, behavior unchanged", async () => {
+    // A server built without `trace` must not throw and must still serve.
+    const tsrv = createNinePServer({ vfs: MemVfs.from({ Home: { "a.txt": "x" } }) });
+    const tc = client(tsrv);
+    const root = await mount(tc);
+    const r = await walk(tc, root, ["Home", "a.txt"]);
+    expect(r.qids.length).toBe(2);
+  });
+});

@@ -597,6 +597,10 @@ jobs:
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
+          # #151 localizer: trace host-side 9P RPCs (`[9p] …`) so this boot shows
+          # whether the guest issues Twrite/Tread under the software MMU (see
+          # runtime/ninep/server.js traceRpc). MMU boot only; NOMMU stays quiet.
+          NINEP_TRACE: "1"
         run: |
           run_smoke() {
             local script="$1" attempt rc
