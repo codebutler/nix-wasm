@@ -6,9 +6,7 @@
 , fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gtk-hello";
-  # Fpcasts its own binary in buildPhase → opt out of gtk3's propagated
-  # auto-fpcast (deps-overlay.nix gtk3 override) so the pass isn't applied twice.
-  dontFpcastEmu = true;
+  dontFpcastEmu = true; # fpcasts its own binary in buildPhase below
   version = "0.1.0";
   dontUnpack = true;
   nativeBuildInputs = [ cross.buildPackages.pkg-config fpcast.binaryen ];

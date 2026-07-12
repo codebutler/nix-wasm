@@ -798,18 +798,9 @@
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
 
-        # gcolor3 — small GTK3 color chooser, and the ZERO-per-package proof:
-        # `cross.gcolor3` is STOCK nixpkgs (there is deliberately no gcolor3
-        # entry in deps-overlay.nix). It cross-compiles via the shared
-        # crossSystem + dependency-category overlay fixes, and its gobject
-        # binary is fpcast'd automatically by gtk3's propagated hook — so a GTK
-        # app needs no wasm-specific nix at all. Exposed as a build target here.
-        # UNVERIFIED — no Nix build access when written (nix-wasm#156); if
-        # `nix build .#gcolor3` reveals a cross gap, the fix goes in the relevant
-        # SHARED dependency override, never a gcolor3-private recipe. Not yet in
-        # `wasmPublishedPkgs` (below): that list feeds `wasm-binary-cache` on the
-        # DEFAULT CI path, so an unconfirmed package would break CI for everyone
-        # — add it once `nix build .#gcolor3` is confirmed green.
+        # gcolor3 — stock nixpkgs GTK3 color chooser; no override needed (shared
+        # cross fixes + auto-fpcast via gtk3). A build target for verification;
+        # add to wasmPublishedPkgs once `nix build .#gcolor3` is green.
         gcolor3 = cross.gcolor3;
 
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are

@@ -35,9 +35,7 @@
 { cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gcalctool";
-  # Does its own dynsym-inject+fpcast in postFixup → opt out of gtk3's
-  # propagated auto-fpcast (deps-overlay.nix) so the pass isn't applied twice.
-  dontFpcastEmu = true;
+  dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup below
   version = "6.6.2";
 
   src = pkgs.fetchurl {

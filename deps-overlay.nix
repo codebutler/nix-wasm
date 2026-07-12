@@ -23,12 +23,7 @@ let
   # Apply f only in the wasm cross set; leave native packages untouched (cached).
   whenWasm = f: p: if isWasm then f p else p;
 
-  # The shared gobject/GTK fpcast-emu seam (userspace/fpcast-emu.nix). Its `hook`
-  # rides the gtk3 override's propagatedNativeBuildInputs (below), so every gtk3
-  # consumer auto-fpcasts its installed $out/bin wasm executables with no
-  # per-package line — the raw wasm-opt invocation lives in exactly one place.
-  # `cross = final` so it reaches the native binaryen via final.buildPackages
-  # (same access galculator uses).
+  # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
 
   # Patch compiler-rt (and compiler-rt-no-libc — busybox's clangNoLibcxx stdenv
@@ -886,15 +881,8 @@ in
       libice = null;
       tinysparql = null;
     }).overrideAttrs (o: {
-      # AUTO-fpcast every gtk3 consumer (the libxml2-setupHook idiom): the
-      # shared fpcast-emu hook rides gtk3's propagatedNativeBuildInputs, so any
-      # derivation linking cross gtk3 sources it and fpcasts its installed wasm
-      # bins with ZERO per-package lines — the correctness pass every gobject
-      # binary needs can no longer be forgotten on a new GTK app. It is
-      # fpcast-only (a correct/no-op on gtk3 libraries too); a consumer that
-      # fpcasts its own binary sets `dontFpcastEmu = true` (see
-      # userspace/fpcast-emu.nix). NOTE: gtk3's OWN tool binaries are not
-      # touched — a package's setup hook applies to its CONSUMERS, not itself.
+      # Auto-fpcast every gtk3 consumer: the hook rides propagation, so a GTK
+      # app needs no fpcast line. Opt out with `dontFpcastEmu` (fpcast-emu.nix).
       propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
         fpcast.hook
       ];
@@ -1022,11 +1010,7 @@ in
   # native galculator is untouched.
   galculator = whenWasm
     (p: p.overrideAttrs (o: {
-      # galculator does its OWN dynsym-inject+fpcast in postFixup (below), so
-      # opt OUT of gtk3's propagated auto-fpcast to avoid double-applying the
-      # pass. (Left unchanged/manual on purpose — a boot-verified migration onto
-      # the auto path is a separate step; PRIME DIRECTIVE: no blind gtk3 flip.)
-      dontFpcastEmu = true;
+      dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup (below)
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [
         final.buildPackages.binaryen
         final.buildPackages.python3 # dynsym-inject (below)
@@ -1113,20 +1097,8 @@ in
     else
       prev.gcalctool or null;
 
-  # --- gcolor3: NO override needed — the zero-per-package target -------------
-  # gcolor3 (small GTK3 color chooser) is packaged in nixpkgs and is the proof
-  # that a GTK app now needs ZERO wasm-specific nix. It cross-compiles via the
-  # shared crossSystem + this overlay's dependency-category fixes (the GTK
-  # stack), and its gobject binary is fpcast'd automatically by gtk3's
-  # propagated hook (above). It wires signals in C (g_signal_connect +
-  # gtk_widget_class_bind_template_callback — no GModule autoconnect), so it
-  # needs no dynsym-inject either. So there is DELIBERATELY no `gcolor3 = …`
-  # entry here: `cross.gcolor3` is stock nixpkgs + the shared fixes, installed
-  # on demand (`nix-env -iA nixpkgs.gcolor3`). If `nix build .#gcolor3` reveals
-  # a cross gap, the fix belongs in the relevant SHARED dependency override,
-  # never a gcolor3-private recipe (corollary 1). (A display-free --selftest
-  # patch could be added later for a CI gate, but it is not needed for the app
-  # to build/install/run.)
+  # gcolor3 needs no override: stock nixpkgs, cross-compiled by the shared fixes
+  # and auto-fpcast'd via gtk3. Deliberately absent here.
 
   # --- GNOME games tier (issue: browser desktop games) ------------------------
   # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS
