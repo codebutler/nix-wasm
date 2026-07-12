@@ -20915,9 +20915,34 @@ var XdgToplevel = class _XdgToplevel {
   }
   setMaxSize(resource, width, height) {
     this.next.maxSize = { width, height };
+    this.maybeConfigureFixedSize();
   }
   setMinSize(resource, width, height) {
     this.next.minSize = { width, height };
+    this.maybeConfigureFixedSize();
+  }
+  // codebutler/nix-wasm#143: a non-resizable toplevel (min==max, non-zero) is
+  // told its exact size instead of the default 0x0 ("client picks"). GTK3's
+  // wayland backend sizes a 0x0-configured window from a fallback captured before
+  // its CSD titlebar is folded into the size request, so a fixed-size window
+  // renders one titlebar-height too short and — unlike a resizable window that
+  // grows on a later relayout — never corrects. Mirrors greenfield source commit
+  // 307f48e (packages/compositor/src/XdgToplevel.ts); regenerate via the proper
+  // greenfield esbuild bundle when re-vendoring.
+  maybeConfigureFixedSize() {
+    const min = this.next.minSize;
+    const max = this.next.maxSize;
+    if (
+      min.width > 0 &&
+      min.height > 0 &&
+      min.width === max.width &&
+      min.height === max.height &&
+      this.pending.state.maximized === void 0 &&
+      this.pending.state.fullscreen === void 0 &&
+      (this.pending.size.width !== min.width || this.pending.size.height !== min.height)
+    ) {
+      this.configureSize({ width: min.width, height: min.height });
+    }
   }
   setMaximized(resource) {
     this.ensureAdded();
