@@ -453,6 +453,28 @@ in
         final.zlib
       ];
       mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dbuiltin_loaders=all" ];
+      # The built-in svg loader links librsvg, so meson threads librsvg-2.0 into
+      # gdk-pixbuf-2.0.pc's Requires.private. That poisons EVERY gdk-pixbuf
+      # consumer's pkg-config resolution: to merely FIND gdk-pixbuf-2.0 they now
+      # have to resolve librsvg-2.0's whole chain (libcroco/cairo/pango/libxml2),
+      # and gtk3 doesn't carry libcroco — so `dependency('gdk-pixbuf-2.0')` in
+      # gtk3 reports "found: NO", falls back to a disabled subproject wrap, and
+      # the gtk3 build dies. Strip the librsvg-2.0 requirement back out: it's an
+      # INTERNAL implementation detail of the built-in loader, not something
+      # every consumer should have to resolve. The consumers that actually need
+      # rsvg_* at the final static link (the games) already list librsvg + its
+      # chain in their own buildInputs, so the symbols still resolve; Libs.private
+      # keeps -lrsvg-2 (harmless — a lib, not a .pc lookup). Same fix shape as
+      # librsvg.nix dropping gdk-pixbuf-2.0 from ITS .pc Requires.
+      postInstall = (o.postInstall or "") + ''
+        pc="$out/lib/pkgconfig/gdk-pixbuf-2.0.pc"
+        grep -q 'librsvg-2.0' "$pc" || (echo "gdk-pixbuf-2.0.pc no longer names librsvg-2.0 — did the loader stop linking it? re-check the strip" >&2; exit 1)
+        # Drop the librsvg-2.0 token (+ optional version) from any Requires line,
+        # then tidy the comma artifacts (doubled/leading/trailing) it leaves.
+        sed -i -E 's/librsvg-2\.0[[:space:]]*(>=[[:space:]]*[0-9.]+)?//g' "$pc"
+        sed -i -E '/^Requires(\.private)?:/ { s/,[[:space:]]*,/, /g; s/:[[:space:]]*,[[:space:]]*/: /; s/[[:space:]]*,[[:space:]]*$//; }' "$pc"
+        if grep -q 'librsvg-2.0' "$pc"; then echo "failed to strip librsvg-2.0 from gdk-pixbuf-2.0.pc" >&2; exit 1; fi
+      '';
     }))
     prev.gdk-pixbuf;
 
