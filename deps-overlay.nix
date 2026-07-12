@@ -230,6 +230,48 @@ in
     }))
     prev.libffi;
 
+  # --- alsa-lib: the guest ALSA userspace (issue #145 guest audio) ------------
+  # Cross-builds against the virtio-snd sound card (kernel patch 0027 +
+  # runtime/virtio/snd-device.js). Static like everything else (platform flag);
+  # three wasm-specific adjustments:
+  # - `--without-versioned`: symbol versioning is implemented with `.symver`
+  #   asm directives, which the wasm backend has no encoding for (same
+  #   wasm-can't-do-native-asm class as libffi/fpcast/__unmapself). A static
+  #   build doesn't need versioned symbols anyway.
+  # - drop the ucm/topology postInstall symlinks: pure data for hardware use
+  #   cases (Use Case Manager profiles, DSP topologies) that don't exist on the
+  #   virtio-snd guest — they'd only inflate the served closure.
+  # - the static build resolves its built-in plugins (hw, plug, …) through
+  #   alsa-lib's own no-PIC snd_dlsym list (upstream-supported static linking),
+  #   NOT dlopen — nothing to do, just why no dlopen accommodation is needed.
+  # The runtime config (share/alsa/alsa.conf) rides $out and is referenced by
+  # the compiled-in datadir store path, so on a nix:true boot ALSA config
+  # resolves with no env vars, like a real NixOS; the busybox-only boot smoke
+  # copies it into the initramfs (initramfs.nix extraShare) and points
+  # ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it.
+  # - the no-versioning alias fallback still emits `.weak`/`.set` module asm —
+  #   patches/alsa-lib/0001 expresses the alias as a C weak-alias attribute on
+  #   wasm instead (clang lowers it to a proper weak wasm symbol).
+  # - the fork() holdouts are compiled out per the process-model rule (fork is
+  #   removed from musl, so they fail to LINK — loud, exactly as designed):
+  #   the direct plugin family (dmix/dshare/dsnoop, pcm_direct.c forks its
+  #   mixing server) + the shm/share plugins (drop them and aserver — the shm
+  #   server binary — is not built either), ladspa (runtime dlopen of external
+  #   plugin .so's), and UCM (ucm_exec.c forks — hardware use-case profiles
+  #   that don't exist on virtio-snd). Everything an app actually uses on this
+  #   guest (hw + the plug conversion layer, softvol, ioplug/extplug, …) stays.
+  alsa-lib = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/alsa-lib/0001-wasm-c-alias-instead-of-asm-symver.patch ];
+      configureFlags = (o.configureFlags or [ ]) ++ [
+        "--without-versioned"
+        "--disable-ucm"
+        "--with-pcm-plugins=copy,linear,route,mulaw,alaw,adpcm,rate,plug,multi,file,null,empty,meter,hooks,lfloat,asym,iec958,softvol,extplug,ioplug,mmap_emul"
+      ];
+      postInstall = "";
+    }))
+    prev.alsa-lib;
+
   # --- harfbuzz: glib-free for the M2 text stack ------------------------------
   # nixpkgs harfbuzz enables the glib integration (hb-glib) by default, which would
   # drag the entire glib cross-build into the M2 text layer. M2 only needs core

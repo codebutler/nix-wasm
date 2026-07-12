@@ -70,6 +70,7 @@ const enc = new TextEncoder();
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
+ *   snd?: { onReady: (device: import("./virtio/snd-device.js").SndVirtioDevice) => void },  // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
  * }} opts
  * @returns {Promise<{
  *   consoleCount: number,
@@ -176,6 +177,10 @@ export async function bootLinux(opts) {
     // through). The host VsockVirtioDevice runs the vsock protocol; `vsock.onReady`
     // hands it to the caller so it can listen()/connect() over AF_VSOCK.
     vsock: opts.vsock,
+    // Issue #145: the virtio-snd PCM sink hook (passed straight through). The
+    // host SndVirtioDevice parses the control/tx traffic; `snd.onReady` hands it
+    // to the caller so it can setSink() an AudioWorklet / recorder.
+    snd: opts.snd,
     on_module_cached: opts.onModuleCached, // fires when a streamed binary finishes compiling+caching
   });
 

@@ -1,0 +1,47 @@
+The wasm backend has no encoding for alsa-lib's two module-level inline-asm
+idioms (same wasm-can't-do-native-asm class as libffi/fpcast/__unmapself in
+CLAUDE.md); both fire even with --without-versioned:
+
+1. include/alsa-symbols.h: the no-versioned-symbols fallback of
+   use_default_symbol_version aliases the public symbol name to the internal
+   __-prefixed definition with ".weak name" + ".set name,real" asm — every TU
+   using the macro (control.c, pcm.c, timer*.c, ump.c, dlmisc.c) fails with
+   "<inline asm>: unknown directive". Express the exact same alias at the C
+   level instead: a weak alias attribute, which clang lowers to a proper weak
+   wasm symbol.
+
+2. include/local.h: link_warning() (deprecation warnings via the ELF
+   .gnu.warning.SYMBOL section) is gated on HAVE_GNU_LD/HAVE_ELF, which the
+   header HARDCODES — its ".section …\n\t.previous" asm has no wasm encoding
+   either. Route wasm to the header's own no-op fallback ("We will never be
+   heard; they will all die horribly.") — losing only a link-time deprecation
+   warning, no functional change.
+
+Wasm-only (#if defined(__wasm__)); every other platform keeps the asm paths
+bit-for-bit.
+
+--- a/include/alsa-symbols.h
++++ b/include/alsa-symbols.h
+@@ -54,7 +54,10 @@
+ 		default_symbol_version(real, name, version)
+ #else
+ #define use_symbol_version(real, name, version) /* nothing */
+-#if defined(__alpha__) || defined(__mips__)
++#if defined(__wasm__)
++#define use_default_symbol_version(real, name, version) \
++	extern __typeof(real) name __attribute__((weak, alias(#real)))
++#elif defined(__alpha__) || defined(__mips__)
+ #define use_default_symbol_version(real, name, version) \
+ 	__asm__ (".weak " ASM_NAME(#name)); \
+ 	__asm__ (ASM_NAME(#name) " = " ASM_NAME(#real))
+--- a/include/local.h
++++ b/include/local.h
+@@ -291,7 +291,7 @@
+ 
+ #define ASM_NAME(name) __SYMBOL_PREFIX name
+ 
+-#ifdef HAVE_GNU_LD
++#if defined(HAVE_GNU_LD) && !defined(__wasm__)
+ # ifdef HAVE_ELF
+ 
+ /* We want the .gnu.warning.SYMBOL section to be unallocated.  */

@@ -309,6 +309,14 @@ jobs:
           # `stty size`. Gating — a regression (resize not propagating) fails.
           run_smoke demo/node/resize-smoke.mjs
 
+          # Issue #145: the guest SOUND CARD. virtio-snd (kernel patch 0027,
+          # CONFIG_SND_VIRTIO) + cross alsa-lib: alsa-tone plays a deterministic
+          # 440Hz sine through snd_pcm_open/set_params/writei/drain; the host
+          # device model (runtime/virtio/snd-device.js) must see SET_PARAMS
+          # (48k/2ch) + START, receive the full tone on the tx vq, and the PCM
+          # prefix must be BIT-EXACT. Gating.
+          run_smoke demo/node/snd-smoke.mjs
+
       # #128 Track A software MMU: boot a softmmu-instrumented init under the
       # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
       # present check, pages populated at exec) checksums bit-exact; A2 (checked
