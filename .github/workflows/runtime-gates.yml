@@ -17,6 +17,13 @@ on:
       - '.github/workflows/runtime-gates.yml'
   workflow_dispatch:
 
+# Without this, the push (claude/**) and pull_request runs of the same commit
+# both ran. Key on the head branch name so they share one group and the duplicate
+# self-cancels (same pattern as nix-wasm.yml / pc's ci.yml).
+concurrency:
+  group: runtime-gates-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   gates:
     name: engine tests + typecheck + lint + format
