@@ -25,7 +25,15 @@
 # nixpkgsChannel — the wasm-nixpkgs channel store path (baked into the squashfs
 # via base-squashfs.nix). The guest's `nixpkgs` nix-env channel is `import
 # <this path> {}`; null → no nixpkgs channel (busybox-only / toolchain-only boots).
-{ pkgs, nixpkgsChannel ? null }:
+#
+# forkMode (#131 prove-then-flip) — this init runs on the software-MMU real-fork
+# guest (.#kernel-mmu-a2 + busybox-fork). Its only effect is to SKIP the
+# forkshell-ash promotion below: that ash is the NOMMU serialize+re-exec shell,
+# whose spawn dance is both unnecessary under real fork() and exactly the kind of
+# NOMMU-ism the MMU boot is proving we can drop, so we keep busybox-fork's hush as
+# /bin/sh. (autoconf-heavy #!/bin/sh scripts — build-from-source — will want a
+# real-fork ash; that is a later layer, out of scope for the first boot smoke.)
+{ pkgs, nixpkgsChannel ? null, forkMode ? false }:
 pkgs.writeText "init" ''
   #!/bin/sh
   # busybox is on /bin (baked); call applets via PATH.
@@ -123,7 +131,8 @@ pkgs.writeText "init" ''
     # services invoke the profile-absolute busybox sh directly, so only
     # `#!/bin/sh` scripts and the interactive login shell pick up ash.
     # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
-    [ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh
+    # forkMode: keep busybox-fork's hush as /bin/sh (see the header comment).
+    ${pkgs.lib.optionalString (!forkMode) ''[ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh''}
 
     # nix-env channels (resolve `nix-env -iA <channel>.<name>`), real-NixOS-style.
     # Two channels in ~/.nix-defexpr (nix-env addresses each top-level dir as a
