@@ -1,0 +1,79 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Sat, 12 Jul 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: register a virtio-snd device (VIRTIO_ID_SOUND)
+
+Register a virtio-snd device on the wasm virtio transport so the stock
+mainline virtio-snd driver (sound/virtio/, CONFIG_SND_VIRTIO) gives the
+guest a sound card (issue #145): /dev/snd/* appears, ALSA userspace
+(alsa-lib, libcanberra event sounds) works unmodified, and the host
+receives the PCM stream through runtime/virtio/snd-device.js — the same
+"everything is a virtio device" pattern as console/blk/9p/vsock (#10).
+
+Device index: pinned to host index 6 with an explicit `= 6` — the
+previously-unused slot between the 9P channels (4,5) and vsock (7). The
+explicit value keeps the index stable regardless of which CONFIG-guarded
+earlier slots are built; the host side (runtime/kernel-worker.js /
+runtime/kernel-host.js VW_DEV_SND = 6) and the kernel must agree on the
+index that selects the device in every host-call. Guarded by
+IS_ENABLED(CONFIG_SND_VIRTIO) so the enum slot and the init call are a
+no-op when the driver is not built.
+
+Mainline virtio_snd.c binds four virtqueues — controlq (q0), eventq
+(q1), txq (q2), rxq (q3) — within the transport's VIRTIO_WASM_MAX_VQS=8,
+and reads the jack/stream/chmap counts from config space (struct
+virtio_snd_config). The host serves { jacks=0, streams=1, chmaps=0 } and
+answers the PCM control requests + consumes tx periods per the virtio
+spec §5.14 in runtime/virtio/snd-device.js: one s16 48kHz playback
+stream, capture out of scope. The kernel side here is just the device
+registration — no custom sound code, the stock driver does the rest.
+
+The default 64-entry virtqueue is left unchanged: an ALSA period is one
+3-descriptor chain ([virtio_snd_pcm_xfer][data][virtio_snd_pcm_status])
+and the driver posts at most buffer_bytes/period_bytes messages at once
+(a handful), far under 64.
+
+Part of issue #145 (guest audio: virtio-snd device + alsa-lib).
+---
+ drivers/virtio/virtio_wasm.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -434,6 +434,15 @@
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
+ #endif
++#if IS_ENABLED(CONFIG_SND_VIRTIO)
++	/*
++	 * virtio-snd: the guest's sound card (issue #145). Pinned to host index
++	 * 6 with an explicit value (the previously-unused slot between the 9P
++	 * channels and vsock); the host (VW_DEV_SND = 6 in kernel-worker.js /
++	 * kernel-host.js) must agree on this index.
++	 */
++	VW_DEV_SND = 6,
++#endif
+ #if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)
+ 	/*
+ 	 * virtio-vsock: AF_VSOCK socket channel for the /Ctl bridge (issue #10
+@@ -530,6 +539,18 @@
+ 		pr_warn("virtio_wasm: vsock register failed: %ld\n", PTR_ERR(vw));
+ #endif
+ 
++#if IS_ENABLED(CONFIG_SND_VIRTIO)
++	/*
++	 * virtio-snd sound card (stock sound/virtio driver, issue #145). The
++	 * host serves the jack/stream/chmap counts in config space and drives
++	 * the control/event/tx/rx vqs (runtime/virtio/snd-device.js): one s16
++	 * 48kHz playback stream, no capture.
++	 */
++	vw = virtio_wasm_register(VW_DEV_SND, VIRTIO_ID_SOUND);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: snd register failed: %ld\n", PTR_ERR(vw));
++#endif
++
+ 	return 0;
+ }
+ 
+--
+2.53.0

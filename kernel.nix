@@ -116,6 +116,15 @@ pkgs.stdenv.mkDerivation {
     # inode set up for shared mmap, re-allocate a larger contiguous block and copy
     # the data across (only marked inodes; ordinary ramfs growth is unaffected).
     ./patches/kernel/0022-wasm-nommu-ramfs-regrow-shared-mmap.patch
+    # Issue #145 (guest audio): register a virtio-snd device (VIRTIO_ID_SOUND =
+    # 25) on the wasm virtio transport so the stock mainline virtio-snd driver
+    # (sound/virtio/, CONFIG_SND_VIRTIO) gives the guest a sound card —
+    # /dev/snd/* appears and ALSA userspace (alsa-lib, libcanberra) works
+    # unmodified. VW_DEV_SND is pinned to host index 6 (the previously-unused
+    # slot between the 9P channels and vsock); the host serves the stream
+    # counts + drives the control/event/tx/rx vqs (runtime/virtio/snd-device.js:
+    # one s16 48kHz playback stream, capture out of scope).
+    ./patches/kernel/0027-wasm-virtio-snd-device.patch
   ] ++ pkgs.lib.optionals mmu [
     # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
     ./patches/kernel/0023-wasm-software-mmu.patch
@@ -154,10 +163,10 @@ pkgs.stdenv.mkDerivation {
     grep -nE 'virtio_wasm_register(_cfg)?\(VW_DEV_' "$vw" || true
 
     # 1) Every non-console device the host serves MUST keep its registration call.
-    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_VSOCK; do
+    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_SND VW_DEV_VSOCK; do
       grep -q "virtio_wasm_register($d," "$vw" || {
         echo "ERROR: $vw is missing virtio_wasm_register($d, …) — a kernel patch" \
-             "(0017-0020) applied with fuzz and dropped a device registration." >&2
+             "(0017-0020, 0027) applied with fuzz and dropped a device registration." >&2
         exit 1
       }
     done
@@ -193,12 +202,16 @@ pkgs.stdenv.mkDerivation {
            "(fuzzy patch apply). VSOCK must be index 7, CONSOLE_BASE index 8." >&2
       exit 1
     fi
-    # 3) The explicit pinned indices must be exactly VSOCK=7, CONSOLE_BASE=8.
+    # 3) The explicit pinned indices must be exactly SND=6, VSOCK=7, CONSOLE_BASE=8.
+    grep -qE 'VW_DEV_SND[[:space:]]*=[[:space:]]*6,' "$vw" || {
+      echo "ERROR: VW_DEV_SND is not pinned to 6 in $vw (must match VW_DEV_SND in" \
+           "runtime/kernel-worker.js / kernel-host.js — patch 0027 applied with fuzz?)" >&2
+      exit 1; }
     grep -qE 'VW_DEV_VSOCK[[:space:]]*=[[:space:]]*7,' "$vw" || {
       echo "ERROR: VW_DEV_VSOCK is not pinned to 7 in $vw" >&2; exit 1; }
     grep -qE 'VW_DEV_CONSOLE_BASE[[:space:]]*=[[:space:]]*8,' "$vw" || {
       echo "ERROR: VW_DEV_CONSOLE_BASE is not pinned to 8 in $vw" >&2; exit 1; }
-    echo "virtio_wasm.c device enum + registrations OK (9P/vsock/8-console present, order correct)"
+    echo "virtio_wasm.c device enum + registrations OK (9P/snd/vsock/8-console present, order correct)"
   '';
 
   nativeBuildInputs = [
@@ -348,7 +361,19 @@ pkgs.stdenv.mkDerivation {
       `# silently drops the driver.` \
       --enable CONFIG_VSOCKETS \
       --enable CONFIG_VIRTIO_VSOCKETS \
-      --enable CONFIG_VIRTIO_VSOCKETS_COMMON
+      --enable CONFIG_VIRTIO_VSOCKETS_COMMON \
+      `# Issue #145: guest audio — ALSA core + the stock virtio-snd driver` \
+      `# (sound/virtio/, patch 0027, VW_DEV_SND=6, VIRTIO_ID_SOUND=25).` \
+      `# CONFIG_SOUND is the gate (depends on HAS_IOMEM — default y on wasm);` \
+      `# CONFIG_SND is the ALSA core; CONFIG_SND_VIRTIO selects SND_PCM +` \
+      `# SND_JACK (+ SND_TIMER via SND_PCM) automatically. OSS emulation stays` \
+      `# off (defaults). CONFIG_SND_VIRTIO depends on SOUND+SND+VIRTIO, so all` \
+      `# three must be enabled or olddefconfig silently drops the driver —` \
+      `# asserted below like CONFIG_MMU.` \
+      --enable CONFIG_SOUND \
+      --enable CONFIG_SND \
+      --enable CONFIG_SND_PCM \
+      --enable CONFIG_SND_VIRTIO
 
     ${pkgs.lib.optionalString mmu ''
       # #128: enable the software MMU + disable binfmt_elf (the guest execs wasm).
@@ -358,6 +383,12 @@ pkgs.stdenv.mkDerivation {
     ''}
 
     make $makeFlags olddefconfig
+
+    # Issue #145: a silently-dropped CONFIG_SND_VIRTIO would ship a kernel with
+    # no sound card and nothing would fail until the snd smoke — fail here.
+    grep -qE "^CONFIG_SND_VIRTIO=y" build/.config \
+      || { echo "ERROR: CONFIG_SND_VIRTIO did not stick (olddefconfig dropped it" \
+                "— check the CONFIG_SOUND/CONFIG_SND gates)" >&2; exit 1; }
 
     ${pkgs.lib.optionalString mmu ''
       grep -qE "^CONFIG_MMU=y" build/.config \

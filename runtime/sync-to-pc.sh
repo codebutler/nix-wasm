@@ -32,7 +32,9 @@ cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # replaced the bespoke hvc_wasm backend.
 # vsock-device.js is the virtio-vsock host device (#10 option 3) — the AF_VSOCK
 # socket channel substrate for the guest→host /Ctl bridge.
-cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js,ninep-device.js,console-device.js,vsock-device.js} "$DEST/virtio/"
+# snd-device.js is the virtio-snd host device (#145) — the guest's sound card;
+# pc attaches its AudioWorklet sink via the snd.onReady boot hook.
+cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js,ninep-device.js,console-device.js,vsock-device.js,snd-device.js} "$DEST/virtio/"
 
 # Completeness check: every relative import in the synced tree must resolve to
 # a synced file. The copy lists above are hardcoded, so a new engine module
