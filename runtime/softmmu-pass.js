@@ -244,11 +244,24 @@ function resolveCheckedImports(importSec, typeSec, exportSec) {
   const { funcs, globals } = parseImportsDetailed(importSec.body);
   const syscallFuncIdx = funcs.findIndex((f) => f.name === "__wasm_syscall_2");
   if (syscallFuncIdx === -1) {
+    // #152 diagnostic: report which env.* imports (esp. the __wasm_syscall_N
+    // family) this binary DOES have, so a boot failure localizes the cause:
+    //  - imports other __wasm_syscall_* but NOT _2 → it links libc yet the
+    //    keep-alive (toolchain/musl.nix) did not land in THIS binary;
+    //  - imports NO __wasm_syscall_* → a non-libc / custom-entry binary that
+    //    never routes through __libc_start_main at all.
+    const syscalls = funcs.map((f) => f.name).filter((n) => /^__wasm_syscall_\d$/.test(n));
+    const envImports = funcs
+      .map((f) => f.name)
+      .filter((n) => n.startsWith("__") || n.startsWith("logAPIs") || n.includes("wasm"))
+      .slice(0, 24);
     throw new Error(
       'softmmu: checked mode requires the module to import "__wasm_syscall_2" ' +
         "(musl's syscall2 host trap, used here to route NR_MMU_FAULT to the " +
         "kernel's fault handler) — every real guest binary that links libc " +
-        "imports it; this module does not",
+        "imports it; this module does not. " +
+        `[#152 diag] func-imports=${funcs.length}; __wasm_syscall_* present=[${syscalls.join(",") || "none"}]; ` +
+        `sample env imports=[${envImports.join(",")}]`,
     );
   }
   const types = parseTypeEntries(typeSec ? typeSec.body : null);
