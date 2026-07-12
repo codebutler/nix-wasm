@@ -17,6 +17,13 @@ surface** (the security model — there is no global pointer like X11's). So the
 track the cursor when it is over the window, and freeze at the last position when it
 leaves. There is no standard Wayland protocol to read the global pointer position.
 
+wl-eyes draws no window frame of its own, so it requests **server-side
+decorations** via `zxdg_decoration_manager_v1` (xdg-decoration): the compositor
+draws the titlebar/frame. Compositors treat a client that stays silent as
+client-side-decorated (the GTK model), which would leave this window frameless.
+The global is optional — on a compositor without xdg-decoration the window is
+simply undecorated.
+
 ## Build
 
 Prereqs (development packages):

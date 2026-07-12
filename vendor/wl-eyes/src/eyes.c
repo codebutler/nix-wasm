@@ -18,6 +18,7 @@
 
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 
 #define WIDTH 360
 #define HEIGHT 220
@@ -44,10 +45,12 @@ struct app {
 	struct xdg_wm_base *wm_base;
 	struct wl_seat *seat;
 	struct wl_pointer *pointer;
+	struct zxdg_decoration_manager_v1 *decoration_manager;
 
 	struct wl_surface *surface;
 	struct xdg_surface *xdg_surface;
 	struct xdg_toplevel *xdg_toplevel;
+	struct zxdg_toplevel_decoration_v1 *decoration;
 
 	struct buffer buffers[NBUF];
 	double mouse_x, mouse_y;
@@ -227,6 +230,22 @@ static const struct xdg_toplevel_listener toplevel_listener = {
 	.close = toplevel_close,
 };
 
+/* ---- xdg-decoration ----
+ *
+ * wl-eyes draws no window frame of its own, so ask the compositor for
+ * server-side decorations (a shell-drawn titlebar/frame). Compositors default
+ * to client-side for clients that stay silent — which would leave this window
+ * frameless — so the request must be explicit. The manager global is optional;
+ * on a compositor without xdg-decoration the window is simply undecorated.
+ */
+static void decoration_configure(void *data, struct zxdg_toplevel_decoration_v1 *deco, uint32_t mode)
+{
+	/* We draw nothing either way; the compositor's choice needs no action. */
+}
+static const struct zxdg_toplevel_decoration_v1_listener decoration_listener = {
+	.configure = decoration_configure,
+};
+
 /* ---- pointer ---- */
 static void pointer_enter(void *data, struct wl_pointer *p, uint32_t serial, struct wl_surface *s,
 		wl_fixed_t sx, wl_fixed_t sy)
@@ -288,6 +307,8 @@ static void registry_global(void *data, struct wl_registry *r, uint32_t name, co
 	} else if (strcmp(iface, wl_seat_interface.name) == 0) {
 		app->seat = wl_registry_bind(r, name, &wl_seat_interface, 1);
 		wl_seat_add_listener(app->seat, &seat_listener, app);
+	} else if (strcmp(iface, zxdg_decoration_manager_v1_interface.name) == 0) {
+		app->decoration_manager = wl_registry_bind(r, name, &zxdg_decoration_manager_v1_interface, 1);
 	}
 }
 static void registry_global_remove(void *data, struct wl_registry *r, uint32_t name) {}
@@ -329,6 +350,15 @@ int main(void)
 	xdg_toplevel_add_listener(app.xdg_toplevel, &toplevel_listener, &app);
 	xdg_toplevel_set_title(app.xdg_toplevel, "eyes");
 	xdg_toplevel_set_app_id(app.xdg_toplevel, "be.udev.eyes");
+	/* Request shell-drawn decorations before the first commit so the mode is
+	 * negotiated before the surface maps (see the xdg-decoration note above). */
+	if (app.decoration_manager) {
+		app.decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(
+				app.decoration_manager, app.xdg_toplevel);
+		zxdg_toplevel_decoration_v1_add_listener(app.decoration, &decoration_listener, &app);
+		zxdg_toplevel_decoration_v1_set_mode(app.decoration,
+				ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	}
 	wl_surface_commit(app.surface);
 
 	printf("wl-eyes: running\n");
@@ -337,6 +367,10 @@ int main(void)
 
 	for (int i = 0; i < NBUF; i++)
 		free_buffer(&app.buffers[i]);
+	if (app.decoration)
+		zxdg_toplevel_decoration_v1_destroy(app.decoration);
+	if (app.decoration_manager)
+		zxdg_decoration_manager_v1_destroy(app.decoration_manager);
 	if (app.xdg_toplevel)
 		xdg_toplevel_destroy(app.xdg_toplevel);
 	if (app.xdg_surface)

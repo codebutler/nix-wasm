@@ -1,0 +1,450 @@
+diff --git a/meson.build b/meson.build
+index 1dd4408..3c4fc89 100644
+--- a/meson.build
++++ b/meson.build
+@@ -54,6 +54,7 @@ wl_protocols = [
+   'protocol/text-input-extension-unstable-v1.xml',
+   'protocol/text-input-x11-unstable-v1.xml',
+   'protocol/viewporter.xml',
++  'protocol/xdg-decoration-unstable-v1.xml',
+   'protocol/xdg-output-unstable-v1.xml',
+   'protocol/xdg-shell.xml',
+ ]
+@@ -226,6 +227,7 @@ libsommelier = static_library(
+     'sommelier-transform.cc',
+     'sommelier-util.cc',
+     'sommelier-viewporter.cc',
++    'sommelier-xdg-decoration.cc',
+     'sommelier-xdg-shell.cc',
+     'sommelier-xshape.cc',
+     'sommelier.cc',
+diff --git a/protocol/xdg-decoration-unstable-v1.xml b/protocol/xdg-decoration-unstable-v1.xml
+new file mode 100644
+index 0000000..82ca247
+--- /dev/null
++++ b/protocol/xdg-decoration-unstable-v1.xml
+@@ -0,0 +1,160 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<protocol name="xdg_decoration_unstable_v1">
++  <copyright>
++    Copyright © 2018 Simon Ser
++
++    Permission is hereby granted, free of charge, to any person obtaining a
++    copy of this software and associated documentation files (the "Software"),
++    to deal in the Software without restriction, including without limitation
++    the rights to use, copy, modify, merge, publish, distribute, sublicense,
++    and/or sell copies of the Software, and to permit persons to whom the
++    Software is furnished to do so, subject to the following conditions:
++
++    The above copyright notice and this permission notice (including the next
++    paragraph) shall be included in all copies or substantial portions of the
++    Software.
++
++    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++    DEALINGS IN THE SOFTWARE.
++  </copyright>
++
++  <interface name="zxdg_decoration_manager_v1" version="1">
++    <description summary="window decoration manager">
++      This interface allows a compositor to announce support for server-side
++      decorations.
++
++      A window decoration is a set of window controls as deemed appropriate by
++      the party managing them, such as user interface components used to move,
++      resize and change a window's state.
++
++      A client can use this protocol to request being decorated by a supporting
++      compositor.
++
++      If compositor and client do not negotiate the use of a server-side
++      decoration using this protocol, clients continue to self-decorate as they
++      see fit.
++
++      Warning! The protocol described in this file is experimental and
++      backward incompatible changes may be made. Backward compatible changes
++      may be added together with the corresponding interface version bump.
++      Backward incompatible changes are done by bumping the version number in
++      the protocol and interface names and resetting the interface version.
++      Once the protocol is to be declared stable, the 'z' prefix and the
++      version number in the protocol and interface names are removed and the
++      interface version number is reset.
++    </description>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the decoration manager object">
++        Destroy the decoration manager. This doesn't destroy objects created
++        with the manager.
++      </description>
++    </request>
++
++    <request name="get_toplevel_decoration">
++      <description summary="create a new toplevel decoration object">
++        Create a new decoration object associated with the given toplevel.
++
++        Creating an xdg_toplevel_decoration from an xdg_toplevel which has a
++        buffer attached or committed is a client error, and any attempts by a
++        client to attach or manipulate a buffer prior to the first
++        xdg_toplevel_decoration.configure event must also be treated as
++        errors.
++      </description>
++      <arg name="id" type="new_id" interface="zxdg_toplevel_decoration_v1"/>
++      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
++    </request>
++  </interface>
++
++  <interface name="zxdg_toplevel_decoration_v1" version="1">
++    <description summary="decoration object for a toplevel surface">
++      The decoration object allows the compositor to toggle server-side window
++      decorations for a toplevel surface. The client can request to switch to
++      another mode.
++
++      The xdg_toplevel_decoration object must be destroyed before its
++      xdg_toplevel.
++    </description>
++
++    <enum name="error">
++      <entry name="unconfigured_buffer" value="0"
++        summary="xdg_toplevel has a buffer attached before configure"/>
++      <entry name="already_constructed" value="1"
++        summary="xdg_toplevel already has a decoration object"/>
++      <entry name="orphaned" value="2"
++        summary="xdg_toplevel destroyed before the decoration object"/>
++      <entry name="invalid_mode" value="3" summary="invalid mode"/>
++    </enum>
++
++    <request name="destroy" type="destructor">
++      <description summary="destroy the decoration object">
++        Switch back to a mode without any server-side decorations at the next
++        commit.
++      </description>
++    </request>
++
++    <enum name="mode">
++      <description summary="window decoration modes">
++        These values describe window decoration modes.
++      </description>
++      <entry name="client_side" value="1"
++        summary="no server-side window decoration"/>
++      <entry name="server_side" value="2"
++        summary="server-side window decoration"/>
++    </enum>
++
++    <request name="set_mode">
++      <description summary="set the decoration mode">
++        Set the toplevel surface decoration mode. This informs the compositor
++        that the client prefers the provided decoration mode.
++
++        After requesting a decoration mode, the compositor will respond by
++        emitting an xdg_surface.configure event. The client should then update
++        its content, drawing it without decorations if the received mode is
++        server-side decorations. The client must also acknowledge the configure
++        when committing the new content (see xdg_surface.ack_configure).
++
++        The compositor can decide not to use the client's mode and enforce a
++        different mode instead.
++
++        Clients whose decoration mode depend on the xdg_toplevel state may send
++        a set_mode request in response to an xdg_surface.configure event and wait
++        for the next xdg_surface.configure event to prevent unwanted state.
++        Such clients are responsible for preventing configure loops and must
++        make sure not to send multiple successive set_mode requests with the
++        same decoration mode.
++
++        If an invalid mode is supplied by the client, the invalid_mode protocol
++        error is raised by the compositor.
++      </description>
++      <arg name="mode" type="uint" enum="mode" summary="the decoration mode"/>
++    </request>
++
++    <request name="unset_mode">
++      <description summary="unset the decoration mode">
++        Unset the toplevel surface decoration mode. This informs the compositor
++        that the client doesn't prefer a particular decoration mode.
++
++        This request has the same semantics as set_mode.
++      </description>
++    </request>
++
++    <event name="configure">
++      <description summary="notify a decoration mode change">
++        The configure event configures the effective decoration mode. The
++        configured state should not be applied immediately. Clients must send an
++        ack_configure in response to this event. See xdg_surface.configure and
++        xdg_surface.ack_configure for details.
++
++        A configure event can be sent at any time. The specified mode must be
++        obeyed by the client.
++      </description>
++      <arg name="mode" type="uint" enum="mode" summary="the decoration mode"/>
++    </event>
++  </interface>
++</protocol>
+diff --git a/sommelier-ctx.cc b/sommelier-ctx.cc
+index 9f654d0..207379a 100644
+--- a/sommelier-ctx.cc
++++ b/sommelier-ctx.cc
+@@ -124,6 +124,7 @@ void sl_context_init_default(struct sl_context* ctx) {
+   ctx->shell = nullptr;
+   ctx->data_device_manager = nullptr;
+   ctx->xdg_shell = nullptr;
++  ctx->xdg_decoration_manager = nullptr;
+   ctx->aura_shell = nullptr;
+   ctx->viewporter = nullptr;
+   ctx->linux_dmabuf = nullptr;
+diff --git a/sommelier-ctx.h b/sommelier-ctx.h
+index 79eef25..98fbf4f 100644
+--- a/sommelier-ctx.h
++++ b/sommelier-ctx.h
+@@ -92,6 +92,7 @@ struct sl_context {
+   struct sl_shell* shell;
+   struct sl_data_device_manager* data_device_manager;
+   struct sl_xdg_shell* xdg_shell;
++  struct sl_xdg_decoration_manager* xdg_decoration_manager;
+   struct sl_aura_shell* aura_shell;
+   struct sl_viewporter* viewporter;
+   struct sl_linux_dmabuf* linux_dmabuf;
+diff --git a/sommelier-xdg-decoration.cc b/sommelier-xdg-decoration.cc
+new file mode 100644
+index 0000000..a96a841
+--- /dev/null
++++ b/sommelier-xdg-decoration.cc
+@@ -0,0 +1,167 @@
++// Copyright 2026 The ChromiumOS Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// zxdg_decoration_manager_v1 passthrough (xdg-decoration-unstable-v1).
++//
++// Sommelier's clients are compositor-decorated or self-decorated at the HOST
++// compositor's discretion; a client that wants server-side decorations (e.g. a
++// bare wl_shm app that draws no frame of its own, like wl-eyes) must be able to
++// negotiate that with the host. This module forwards the protocol 1:1: the
++// manager global is advertised to clients only when the host compositor offers
++// it (see the registry handler in sommelier.cc), get_toplevel_decoration is
++// re-issued against the host xdg_toplevel proxy, set_mode/unset_mode forward,
++// and the host's configure(mode) event is relayed back. No transform is needed
++// — the protocol carries only mode enums, no coordinates.
++//
++// Follows the sommelier-viewporter.cc passthrough pattern (direct proxy calls,
++// no codegen shim indirection).
++
++#include <assert.h>
++#include <stdlib.h>
++
++#include "sommelier.h"           // NOLINT(build/include_directory)
++#include "sommelier-xdg-shell.h"  // NOLINT(build/include_directory)
++
++#include "xdg-decoration-unstable-v1-client-protocol.h"  // NOLINT(build/include_directory)
++#include "xdg-decoration-unstable-v1-server-protocol.h"  // NOLINT(build/include_directory)
++
++struct sl_host_xdg_decoration_manager {
++  struct sl_context* ctx;
++  struct wl_resource* resource;
++  struct zxdg_decoration_manager_v1* proxy;
++};
++
++struct sl_host_xdg_toplevel_decoration {
++  struct sl_context* ctx;
++  struct wl_resource* resource;
++  struct zxdg_toplevel_decoration_v1* proxy;
++};
++
++static void sl_xdg_toplevel_decoration_destroy(struct wl_client* client,
++                                               struct wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++static void sl_xdg_toplevel_decoration_set_mode(struct wl_client* client,
++                                                struct wl_resource* resource,
++                                                uint32_t mode) {
++  struct sl_host_xdg_toplevel_decoration* host =
++      static_cast<sl_host_xdg_toplevel_decoration*>(
++          wl_resource_get_user_data(resource));
++
++  zxdg_toplevel_decoration_v1_set_mode(host->proxy, mode);
++}
++
++static void sl_xdg_toplevel_decoration_unset_mode(struct wl_client* client,
++                                                  struct wl_resource* resource) {
++  struct sl_host_xdg_toplevel_decoration* host =
++      static_cast<sl_host_xdg_toplevel_decoration*>(
++          wl_resource_get_user_data(resource));
++
++  zxdg_toplevel_decoration_v1_unset_mode(host->proxy);
++}
++
++static const struct zxdg_toplevel_decoration_v1_interface
++    sl_xdg_toplevel_decoration_implementation = {
++        sl_xdg_toplevel_decoration_destroy,
++        sl_xdg_toplevel_decoration_set_mode,
++        sl_xdg_toplevel_decoration_unset_mode,
++};
++
++static void sl_xdg_toplevel_decoration_configure(
++    void* data, struct zxdg_toplevel_decoration_v1* decoration, uint32_t mode) {
++  struct sl_host_xdg_toplevel_decoration* host =
++      static_cast<sl_host_xdg_toplevel_decoration*>(data);
++
++  zxdg_toplevel_decoration_v1_send_configure(host->resource, mode);
++}
++
++static const struct zxdg_toplevel_decoration_v1_listener
++    sl_xdg_toplevel_decoration_listener = {
++        sl_xdg_toplevel_decoration_configure,
++};
++
++static void sl_destroy_host_xdg_toplevel_decoration(
++    struct wl_resource* resource) {
++  struct sl_host_xdg_toplevel_decoration* host =
++      static_cast<sl_host_xdg_toplevel_decoration*>(
++          wl_resource_get_user_data(resource));
++
++  zxdg_toplevel_decoration_v1_destroy(host->proxy);
++  wl_resource_set_user_data(resource, nullptr);
++  delete host;
++}
++
++static void sl_xdg_decoration_manager_destroy(struct wl_client* client,
++                                              struct wl_resource* resource) {
++  wl_resource_destroy(resource);
++}
++
++static void sl_xdg_decoration_manager_get_toplevel_decoration(
++    struct wl_client* client,
++    struct wl_resource* resource,
++    uint32_t id,
++    struct wl_resource* toplevel_resource) {
++  struct sl_host_xdg_decoration_manager* host =
++      static_cast<sl_host_xdg_decoration_manager*>(
++          wl_resource_get_user_data(resource));
++  struct sl_host_xdg_toplevel* host_toplevel =
++      static_cast<sl_host_xdg_toplevel*>(
++          wl_resource_get_user_data(toplevel_resource));
++
++  struct sl_host_xdg_toplevel_decoration* decoration =
++      new sl_host_xdg_toplevel_decoration();
++  decoration->ctx = host->ctx;
++  decoration->resource = wl_resource_create(
++      client, &zxdg_toplevel_decoration_v1_interface, 1, id);
++  wl_resource_set_implementation(decoration->resource,
++                                 &sl_xdg_toplevel_decoration_implementation,
++                                 decoration,
++                                 sl_destroy_host_xdg_toplevel_decoration);
++  decoration->proxy = zxdg_decoration_manager_v1_get_toplevel_decoration(
++      host->proxy, host_toplevel->proxy);
++  zxdg_toplevel_decoration_v1_add_listener(
++      decoration->proxy, &sl_xdg_toplevel_decoration_listener, decoration);
++}
++
++static const struct zxdg_decoration_manager_v1_interface
++    sl_xdg_decoration_manager_implementation = {
++        sl_xdg_decoration_manager_destroy,
++        sl_xdg_decoration_manager_get_toplevel_decoration,
++};
++
++static void sl_destroy_host_xdg_decoration_manager(
++    struct wl_resource* resource) {
++  struct sl_host_xdg_decoration_manager* host =
++      static_cast<sl_host_xdg_decoration_manager*>(
++          wl_resource_get_user_data(resource));
++
++  zxdg_decoration_manager_v1_destroy(host->proxy);
++  wl_resource_set_user_data(resource, nullptr);
++  delete host;
++}
++
++static void sl_bind_host_xdg_decoration_manager(struct wl_client* client,
++                                                void* data,
++                                                uint32_t version,
++                                                uint32_t id) {
++  struct sl_context* ctx = (struct sl_context*)data;
++  struct sl_host_xdg_decoration_manager* host =
++      new sl_host_xdg_decoration_manager();
++  host->ctx = ctx;
++  host->resource =
++      wl_resource_create(client, &zxdg_decoration_manager_v1_interface, 1, id);
++  wl_resource_set_implementation(host->resource,
++                                 &sl_xdg_decoration_manager_implementation,
++                                 host, sl_destroy_host_xdg_decoration_manager);
++  host->proxy = static_cast<zxdg_decoration_manager_v1*>(wl_registry_bind(
++      wl_display_get_registry(ctx->display), ctx->xdg_decoration_manager->id,
++      &zxdg_decoration_manager_v1_interface, 1));
++}
++
++struct sl_global* sl_xdg_decoration_manager_global_create(
++    struct sl_context* ctx) {
++  return sl_global_create(ctx, &zxdg_decoration_manager_v1_interface, 1, ctx,
++                          sl_bind_host_xdg_decoration_manager);
++}
+diff --git a/sommelier.cc b/sommelier.cc
+index 1b2815d..ba7d600 100644
+--- a/sommelier.cc
++++ b/sommelier.cc
+@@ -655,6 +655,20 @@ void sl_registry_handler(void* data,
+     viewporter->host_viewporter_global = sl_viewporter_global_create(ctx);
+     // Allow non-integer scale.
+     ctx->scale = MIN(MAX_SCALE, MAX(MIN_SCALE, ctx->desired_scale));
++  } else if (strcmp(interface, "zxdg_decoration_manager_v1") == 0) {
++    // xdg-decoration passthrough (sommelier-xdg-decoration.cc): advertise the
++    // manager to our clients only when the host compositor offers it.
++    struct sl_xdg_decoration_manager* xdg_decoration_manager =
++        static_cast<sl_xdg_decoration_manager*>(
++            malloc(sizeof(struct sl_xdg_decoration_manager)));
++    assert(xdg_decoration_manager);
++    xdg_decoration_manager->ctx = ctx;
++    xdg_decoration_manager->id = id;
++    xdg_decoration_manager->host_global = nullptr;
++    assert(!ctx->xdg_decoration_manager);
++    ctx->xdg_decoration_manager = xdg_decoration_manager;
++    xdg_decoration_manager->host_global =
++        sl_xdg_decoration_manager_global_create(ctx);
+   } else if (strcmp(interface, "zwp_linux_dmabuf_v1") == 0) {
+     struct sl_linux_dmabuf* linux_dmabuf =
+         static_cast<sl_linux_dmabuf*>(malloc(sizeof(struct sl_linux_dmabuf)));
+@@ -858,6 +872,14 @@ void sl_registry_remover(void* data,
+     ctx->xdg_shell = nullptr;
+     return;
+   }
++  if (ctx->xdg_decoration_manager && ctx->xdg_decoration_manager->id == id) {
++    if (ctx->xdg_decoration_manager->host_global) {
++      sl_global_destroy(ctx->xdg_decoration_manager->host_global);
++    }
++    free(ctx->xdg_decoration_manager);
++    ctx->xdg_decoration_manager = nullptr;
++    return;
++  }
+   if (ctx->aura_shell && ctx->aura_shell->id == id) {
+     if (ctx->aura_shell->host_gtk_shell_global) {
+       sl_global_destroy(ctx->aura_shell->host_gtk_shell_global);
+diff --git a/sommelier.h b/sommelier.h
+index 57f8e72..ce7ab73 100644
+--- a/sommelier.h
++++ b/sommelier.h
+@@ -414,6 +414,12 @@ struct sl_xdg_shell {
+   struct xdg_wm_base* internal;
+ };
+ 
++struct sl_xdg_decoration_manager {
++  struct sl_context* ctx;
++  uint32_t id;
++  struct sl_global* host_global;
++};
++
+ struct sl_aura_shell {
+   struct sl_context* ctx;
+   uint32_t id;
+@@ -582,6 +588,9 @@ struct sl_global* sl_viewporter_global_create(struct sl_context* ctx);
+ struct sl_global* sl_xdg_shell_global_create(struct sl_context* ctx,
+                                              uint32_t version);
+ 
++struct sl_global* sl_xdg_decoration_manager_global_create(
++    struct sl_context* ctx);
++
+ struct sl_global* sl_gtk_shell_global_create(struct sl_context* ctx);
+ 
+ struct sl_global* sl_drm_global_create(struct sl_context* ctx,
