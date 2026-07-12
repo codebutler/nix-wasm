@@ -510,6 +510,12 @@ jobs:
           run_smoke demo/node/galculator-smoke.mjs
           run_smoke demo/node/widget-factory-smoke.mjs
           run_smoke demo/node/gtk-demo-smoke.mjs
+          # l3afpad (GTK3 leafpad fork, #122): the first real productivity app —
+          # signals wired in C like gtk3-demo (no GModule). Display-free
+          # --selftest (widget class_init + a GtkTextBuffer round-trip through
+          # the fpcast seam); the open/edit/save-to-/mnt/pc flow is a manual
+          # browser check. One-per-boot like its GTK siblings. Gating.
+          run_smoke demo/node/l3afpad-smoke.mjs
           # gcalctool (classic GNOME calculator): computes 7*6=42 with gcalccmd,
           # the console front-end sharing the GUI's equation engine — a real
           # headless gate with no source patch. Light (no GTK init) but kept

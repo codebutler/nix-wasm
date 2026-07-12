@@ -1,0 +1,84 @@
+--- a/src/main.c	2026-07-12 04:05:31.675253799 +0000
++++ b/src/main.c	2026-07-12 04:05:31.719158234 +0000
+@@ -191,6 +191,70 @@
+ 		fi->filename = parse_file_uri(argv[1]);
+ }
+ 
++/* nix-wasm headless gate (codebutler/nix-wasm#122). The real l3afpad window
++   needs a Wayland display (the node test harness has no compositor), so the
++   open/edit/save flow is a MANUAL browser check. This --selftest instead
++   proves, display-free, the parts that ride the wasm-specific seams:
++     - the GTK widget classes the editor is built from (menubar, text view,
++       scrolled window) class_init cleanly through the --fpcast-emu seam
++       (g_type_class_ref, no GdkDisplay needed);
++     - a real GtkTextBuffer instance round-trips text (the editor core is a
++       GtkTextBuffer; set/get runs gobject property/signal machinery through
++       the fpcast seam) -- instantiable display-free, unlike widgets;
++     - the menu callbacks (menu.c wires every signal in C via GtkActionEntry /
++       G_CALLBACK -- no GtkBuilder, no gtk_builder_connect_signals, so no
++       GModule dependency, the same reason gtk3-demo works on the static
++       guest) are real, address-taken function pointers (fpcast canonical
++       thunks);
++     - gtk_get_major_version() == 3.
++   Runs BEFORE parse_args/gtk_init: parse_args rejects unknown options and
++   gtk_init aborts without a display. */
++static gint run_selftest(void)
++{
++	GtkTextBuffer *buffer;
++	GtkTextIter start, end;
++	gchar *str;
++	int have_types, buffer_ok, have_callbacks, ok;
++	guint i;
++	/* Address-taken menu callbacks (menu.c's GtkActionEntry table takes the
++	   same addresses) -- each is an fpcast-emu canonical thunk. */
++	void (*cbs[])(void) = {
++		(void (*)(void)) on_file_new,
++		(void (*)(void)) on_file_open,
++		(void (*)(void)) on_file_save,
++		(void (*)(void)) on_edit_undo,
++	};
++
++	g_type_class_ref(GTK_TYPE_MENU_BAR);
++	g_type_class_ref(GTK_TYPE_TEXT_VIEW);
++	g_type_class_ref(GTK_TYPE_SCROLLED_WINDOW);
++	have_types = g_type_from_name("GtkMenuBar") != 0
++		&& g_type_from_name("GtkTextView") != 0
++		&& g_type_from_name("GtkScrolledWindow") != 0;
++
++	buffer = gtk_text_buffer_new(NULL);
++	gtk_text_buffer_set_text(buffer, "L3afpad on wasm", -1);
++	gtk_text_buffer_get_bounds(buffer, &start, &end);
++	str = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
++	buffer_ok = str != NULL && strcmp(str, "L3afpad on wasm") == 0
++		&& gtk_text_buffer_get_char_count(buffer) == 15;
++	g_free(str);
++	g_object_unref(buffer);
++
++	have_callbacks = 1;
++	for (i = 0; i < G_N_ELEMENTS(cbs); i++)
++		if (cbs[i] == NULL)
++			have_callbacks = 0;
++
++	ok = have_types && buffer_ok && have_callbacks
++		&& gtk_get_major_version() == 3;
++	printf("L3AFPAD-SELFTEST: types=%d buffer=%d callbacks=%d major=%u %s\n",
++		have_types, buffer_ok, have_callbacks, gtk_get_major_version(),
++		ok ? "OK" : "FAIL");
++	fflush(stdout);
++	return ok ? 0 : 1;
++}
++
+ gint main(gint argc, gchar **argv)
+ {
+ 	Conf *conf;
+@@ -200,6 +264,10 @@
+ 	bind_textdomain_codeset(PACKAGE, "UTF-8");
+ 	textdomain(PACKAGE);
+ 
++	/* nix-wasm: headless mechanism gate (no display). See run_selftest(). */
++	if (argc > 1 && g_strcmp0(argv[1], "--selftest") == 0)
++		return run_selftest();
++
+ 	pub = g_malloc(sizeof(PublicData));
+ 	pub->fi = g_malloc(sizeof(FileInfo));
+ 	pub->fi->filename     = NULL;

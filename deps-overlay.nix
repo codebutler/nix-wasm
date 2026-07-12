@@ -1088,6 +1088,23 @@ in
     else
       prev.gcalctool or null;
 
+  # --- l3afpad: the first real productivity app (#122) ------------------------
+  # The GTK3 fork of leafpad — a Notepad-class open/edit/save text editor.
+  # Pure C, every signal wired in C (GtkActionEntry/G_CALLBACK + g_signal_connect,
+  # never gtk_builder_connect_signals) → no GModule wall, no dynsym (the gtk3-demo
+  # lesson). nixpkgs never packaged l3afpad, so like gcalctool it is a from-scratch
+  # derivation (userspace/l3afpad.nix) living in the overlay so system.nix /
+  # flake.nix reach it as cross.l3afpad. isWasm-guarded; no native fallback exists
+  # (null, never evaluated).
+  l3afpad =
+    if isWasm then
+      import ./userspace/l3afpad.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.l3afpad or null;
+
   # --- GNOME games tier (issue: browser desktop games) ------------------------
   # librsvg 2.40 (last all-C release; nixpkgs' is Rust) + libcroco (its CSS
   # engine; dropped from nixpkgs in 2021) are from-scratch pins — the shared

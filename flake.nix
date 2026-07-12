@@ -517,7 +517,7 @@
       };
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator cross.l3afpad pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -790,6 +790,13 @@
         # installs /bin/gcalccmd, the console engine front-end that the headless
         # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
         gcalctool = cross.gcalctool;
+
+        # l3afpad — the GTK3 leafpad fork, the first real productivity app on
+        # the guest (#122): a Notepad-class open/edit/save text editor. Signals
+        # wired in C (no GModule, no dynsym — the gtk3-demo lesson). --selftest
+        # is the headless gate (runtime/demo/node/l3afpad-smoke.mjs); the
+        # open/edit/save-to-/mnt/pc flow is a manual browser check.
+        l3afpad = cross.l3afpad;
 
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
         # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and

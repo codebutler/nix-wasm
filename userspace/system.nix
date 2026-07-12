@@ -128,6 +128,11 @@ let
                             # org.gnome.gcalctool schema must ride the closure for the
                             # gtk-assets compiled-schema dir (g_settings_new aborts if
                             # the schema is missing).
+          cross.l3afpad     # l3afpad text editor (#122, the first real productivity
+                            # app). systemPackages (not just the initramfs extraBins)
+                            # so its share/pixmaps/l3afpad.png — loaded at runtime from
+                            # the baked ICONDIR store path — and its .desktop entry /
+                            # hicolor icons ride the served /nix closure.
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -176,6 +181,9 @@ let
           "/share/gcalctool"    # gcalctool buttons-*.ui files (same pattern: the
                                 # binary reads its baked UI_DIR store path; the
                                 # profile symlink is for discoverability)
+          "/share/pixmaps"      # l3afpad window icon (same pattern: the binary
+                                # reads its baked ICONDIR store path; the profile
+                                # symlink is for discoverability/launchers)
         ];
         environment.variables.TERMINFO_DIRS = "/run/current-system/sw/share/terminfo";
         # fontconfig: point at the baked-in conf + cache so FcInit resolves
