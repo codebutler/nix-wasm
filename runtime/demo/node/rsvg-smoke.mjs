@@ -24,15 +24,18 @@ try {
     throw e;
   }
   if (!reached) throw new Error("no prompt");
-  // Write a minimal SVG and convert it; print the PNG magic bytes. A valid
-  // render starts 89 50 4e 47 ("\x89PNG"). Self-contained — no dependency on
-  // a game's installed theme path (which drift and made the first cut flaky).
+  // Write a minimal SVG and convert it, then confirm the output is a PNG. The
+  // PNG magic is \x89 P N G …, so "PNG" is printable at bytes 1-3 — grep -a
+  // (binary-safe) on the header proves it. BusyBox `od` lacks GNU's
+  // -A/-t/-N flags (the first cut used them and always errored), so avoid od.
+  // Self-contained — no dependency on a game's installed theme path.
   s.send(
     'printf \'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">' +
       '<rect width="8" height="8" fill="red"/></svg>\' > /tmp/t.svg && ' +
-      'rsvg-convert /tmp/t.svg -o /tmp/t.png && od -An -tx1 -N4 /tmp/t.png | tr -s " "\n',
+      "rsvg-convert /tmp/t.svg -o /tmp/t.png && " +
+      "head -c 8 /tmp/t.png | grep -qa PNG && echo RSVG_PNG_OK\n",
   );
-  pass = await s.waitForOutput(/89 50 4e 47/, 180000);
+  pass = await s.waitForOutput(/RSVG_PNG_OK/, 180000);
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-2000));
   s.kill();
