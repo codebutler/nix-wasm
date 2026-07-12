@@ -60,7 +60,7 @@ definitions then cross-compile.
   (`patches/kernel/0008-0012`) — there is **no fake-llvm wrapper** (deleted).
 - **Guest userspace** = `userspace/*.nix`: a curated `lib.evalModules` NixOS
   closure (no systemd/perl/python) + a patched busybox (`userspace/busybox.nix`:
-  clone-with-fn spawn — NOMMU wasm can't fork/vfork) built via the `cross`
+  clone-with-fn spawn — the default toolchain is `posix_spawn`-only) built via the `cross`
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
   mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
   lowerdir and hands off to busybox-init.
@@ -69,9 +69,17 @@ definitions then cross-compile.
   so callers fail to **link** (loud build error) rather than SIGILL/abort at runtime.
   Holdouts are handled by one documented rule (don't-build an unused CLI / port a
   real library to `posix_spawn` / compile out an unused return-twice symbol) — never
-  a stub. See **`docs/process-model.md`**. Per-process Memory and real `fork()` are
-  *measured* dead-ends (`spikes/elastic-mem/` ~124-Memory/tab cap;
-  `spikes/stackswitch/` WasmFX/JSPI one-shot).
+  a stub. See **`docs/process-model.md`**. Per-process Memory is a *measured*
+  dead-end (`spikes/elastic-mem/` ~124-Memory/tab cap), and WasmFX/JSPI are
+  one-shot (`spikes/stackswitch/`) — but real `fork()` is **NOT** a dead-end:
+  the **asyncify fork seam** (PR #20: `toolchain/musl.nix` `forkSeam` +
+  `guest-cc-fork.nix` + `userspace/asyncify-cc.nix`) delivers real
+  fork-without-exec as a **per-binary opt-in** (returns twice, private memory,
+  reaps — 8 `fork-*` acceptance programs), and Track A COW made the copy cheap,
+  so **#129 (Track B)** is generalizing it into a flag and will eventually
+  retire the forkshell/`posix_spawn`-only accommodations. Until then the
+  DEFAULT contract stays `posix_spawn`-only — don't describe fork as
+  impossible, describe it as opt-in.
 
 LLVM target triple is `wasm32-unknown-unknown` (clang rejects
 `wasm32-unknown-linux-musl`); `-D__linux__ -matomics -mbulk-memory
