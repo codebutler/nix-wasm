@@ -145,13 +145,14 @@ const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 // pass limited to APPENDING (types/funcs/globals/exports), which is the
 // invariant the rest of `instrument()` already relies on.
 //
-// The "every binary imports it already" precondition is GUARANTEED, not merely
-// observed: a binary that makes no 2-arg syscall would otherwise let wasm-ld
-// drop the `env.__wasm_syscall_2` import (#152 — a nix-closure exec that panicked
-// the kernel here). `toolchain/musl.nix` force-retains it in every executable via
-// a never-taken keep-alive reference from `__libc_start_main` (reachable from
-// every `_start`, so it survives `--gc-sections`). Do NOT remove that keep-alive:
-// it is what makes this REQUIRE contract safe for arbitrary guest binaries.
+// The "every binary imports it already" precondition holds because every
+// musl-linked guest binary makes 2-arg syscalls, so `__wasm_syscall_2` is a
+// live import. #152 looked like a violation — sommelier read as `func-imports=1`,
+// only `__wasm_ffi_call` — but that was a DECODER bug, not a missing import: the
+// import walkers (`parseImportsDetailed`/`countImports`) desynced on the
+// `__cpp_exception` TAG import (kind 0x04) that `-fwasm-exceptions` C++ binaries
+// carry AHEAD of the syscall imports, so the syscalls went unseen. Handling tag
+// imports (below) restored the invariant; NO musl keep-alive is needed.
 export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unistd.h)
 
 /** Fault `kind` for an atomic op: RMW/cmpxchg/store need write permission. */
@@ -197,6 +198,17 @@ function parseImportsDetailed(body) {
       const vt = body[i++];
       const mut = body[i++];
       globals.push({ module: mod, name, valtype: vt, mutable: mut });
+    } else if (ek === 0x04) {
+      // tag (exception) import: attribute byte + type index. Every guest C++
+      // binary (built `-fwasm-exceptions`) imports the `__cpp_exception` tag,
+      // and wasm-ld can emit it BEFORE the `__wasm_syscall_*` function imports.
+      // Skipping it MUST advance past both descriptor bytes — dropping this
+      // case desyncs the walk and makes every later import (incl. the syscalls
+      // `resolveCheckedImports` needs) invisible (#152: sommelier read as
+      // `func-imports=1`, only `__wasm_ffi_call`). Encoding mirrors the
+      // canonical tag walker in kernel-worker.js.
+      i++; // attribute (0x00 = exception)
+      [, i] = readU(body, i); // type index
     }
   }
   return { funcs, globals };
@@ -429,6 +441,27 @@ function splitSections(bytes) {
 
 // ---- instruction walker: know every immediate so we can find mem ops --------
 
+/**
+ * Skip a blocktype immediate (empty 0x40, a single valtype, or an s33 type
+ * index) — used by block/loop/if AND the exception-handling `try`/`try_table`.
+ */
+function skipBlockType(b, i) {
+  if (
+    b[i] === 0x40 ||
+    b[i] === 0x7f ||
+    b[i] === 0x7e ||
+    b[i] === 0x7d ||
+    b[i] === 0x7c ||
+    b[i] === 0x7b ||
+    b[i] === 0x70 ||
+    b[i] === 0x6f
+  ) {
+    return i + 1;
+  }
+  [, i] = readS(b, i);
+  return i;
+}
+
 /** Index just past the instruction at `i` (opcode + immediates), non-recursing. */
 function skipInstr(b, i) {
   const op = b[i++];
@@ -436,20 +469,37 @@ function skipInstr(b, i) {
     case 0x02: // block
     case 0x03: // loop
     case 0x04: // if
-      if (
-        b[i] === 0x40 ||
-        b[i] === 0x7f ||
-        b[i] === 0x7e ||
-        b[i] === 0x7d ||
-        b[i] === 0x7c ||
-        b[i] === 0x7b ||
-        b[i] === 0x70 ||
-        b[i] === 0x6f
-      ) {
-        i++;
-      } else {
-        [, i] = readS(b, i);
+      return skipBlockType(b, i);
+    // ---- wasm exception handling (guest C++ is built -fwasm-exceptions) -----
+    // Both the legacy (try/catch/…) and standard (try_table/throw_ref) EH
+    // opcode sets appear in a guest binary depending on the LLVM lowering, so
+    // handle all of them. `skipInstr` is a LINEAR (non-recursing) walker, so a
+    // scope opener only needs its immediates skipped — the nested body and the
+    // matching `end`/`catch`/`delegate` are visited as their own instructions.
+    // Without these, instrument() throws "unknown opcode" on the first EH
+    // instruction in sommelier / nix.wasm / any GTK app's code (#152).
+    case 0x06: // try (legacy) — blocktype
+      return skipBlockType(b, i);
+    case 0x1f: {
+      // try_table (standard) — blocktype + vec(catch clause)
+      i = skipBlockType(b, i);
+      let n;
+      [n, i] = readU(b, i);
+      for (let k = 0; k < n; k++) {
+        const ck = b[i++]; // 0 catch, 1 catch_ref, 2 catch_all, 3 catch_all_ref
+        if (ck === 0x00 || ck === 0x01) [, i] = readU(b, i); // tag index
+        [, i] = readU(b, i); // label
       }
+      return i;
+    }
+    case 0x07: // catch (legacy) — tag index
+    case 0x08: // throw — tag index
+    case 0x09: // rethrow (legacy) — relative depth
+    case 0x18: // delegate (legacy) — relative depth
+      [, i] = readU(b, i);
+      return i;
+    case 0x19: // catch_all (legacy) — no immediate
+    case 0x0a: // throw_ref (standard) — no immediate
       return i;
     case 0x0c: // br
     case 0x0d: // br_if
@@ -897,6 +947,14 @@ function countImports(importBody, kind) {
       [, i] = readU(importBody, i);
       if (fl & 1) [, i] = readU(importBody, i);
     } else if (ek === 0x03) i += 2;
+    else if (ek === 0x04) {
+      // tag (exception) import: attribute byte + type index. Must advance past
+      // both or the imported-function count (this feeds the defined-function
+      // index base for renumbering) desyncs on any `-fwasm-exceptions` C++
+      // binary (#152). Same encoding as parseImportsDetailed / kernel-worker.js.
+      i++;
+      [, i] = readU(importBody, i);
+    }
   }
   return count;
 }

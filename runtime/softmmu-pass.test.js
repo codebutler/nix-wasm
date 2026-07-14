@@ -384,9 +384,16 @@ describe("checked (A2 present-check) translate", () => {
   const I32 = 0x7f;
 
   /**
-   * @param {{omitTlsExport?: boolean}} [opts] `omitTlsExport` builds the
-   *   function but does NOT export it — used to test resolveCheckedImports'
-   *   dedicated "requires __get_tls_base export" error path.
+   * @param {{omitTlsExport?: boolean, leadingTag?: boolean}} [opts]
+   *   `omitTlsExport` builds the function but does NOT export it — used to test
+   *   resolveCheckedImports' dedicated "requires __get_tls_base export" error
+   *   path. `leadingTag` prepends an `env.__cpp_exception` TAG import (kind
+   *   0x04) BEFORE the `__wasm_syscall_2` function import — reproducing the
+   *   real guest layout (#152: every `-fwasm-exceptions` C++ binary imports
+   *   this tag). A tag import does NOT occupy the function-index space, so the
+   *   defined-function indices below are unchanged; the point is that the
+   *   import DECODER must skip the tag or every later import (incl. the
+   *   syscall) goes unseen (sommelier was read as `func-imports=1`).
    */
   function buildCheckedFixture(opts = {}) {
     const types = [
@@ -394,10 +401,16 @@ describe("checked (A2 present-check) translate", () => {
       funcType([I32, I32], []), // 1: store_u8(va, v)
       funcType([I32, I32, I32, I32, I32], [I32]), // 2: __wasm_syscall_2
       funcType([], [I32]), // 3: __get_tls_base() -> i32
+      funcType([I32], []), // 4: __cpp_exception tag type ((i32)->())
     ];
     const typeSec = sectb(1, vecb(types));
 
     const imports = [
+      // TAG import first (kind 0x04, attribute 0x00, type index 4) — only when
+      // leadingTag, mirroring wasm-ld's real ordering for a guest C++ binary.
+      ...(opts.leadingTag
+        ? [[...strb("env"), ...strb("__cpp_exception"), 0x04, 0x00, ...leb_u(4)]]
+        : []),
       [...strb("env"), ...strb("__wasm_syscall_2"), 0x00, ...leb_u(2)],
       [...strb("env"), ...strb("__stack_pointer"), 0x03, I32, 0x01],
     ];
@@ -486,7 +499,13 @@ describe("checked (A2 present-check) translate", () => {
     // exported __get_tls_base(), which this fixture returns as a fixed
     // sentinel (0x1234); see buildCheckedFixture/buildCheckedBulkFixture.
     inst = new WebAssembly.Instance(mod, {
-      env: { __wasm_syscall_2: fault, __stack_pointer: spGlobal },
+      env: {
+        __wasm_syscall_2: fault,
+        __stack_pointer: spGlobal,
+        // Provided unconditionally; ignored by fixtures that don't import it,
+        // supplied to the leadingTag fixture that DOES (guest C++ EH tag).
+        __cpp_exception: new WebAssembly.Tag({ parameters: ["i32"] }),
+      },
     });
     const mem = inst.exports.memory;
     const needPages = 64; // 4 MiB, same as the other fixtures' boot()
@@ -556,6 +575,145 @@ describe("checked (A2 present-check) translate", () => {
     // __get_tls_base returns the fixed sentinel 0x1234.
     expect(b.rawCalls.length).toBe(1);
     expect(b.rawCalls[0].tp).toBe(0x1234);
+  });
+
+  test("a leading __cpp_exception TAG import does not hide the syscall import (#152)", () => {
+    // The #152 sommelier panic: a guest C++ binary imports the
+    // `__cpp_exception` tag (import kind 0x04) BEFORE its `__wasm_syscall_*`
+    // function imports. The pass's import decoders (parseImportsDetailed /
+    // countImports) had no case for kind 0x04, so the walk desynced on the tag
+    // and every later import vanished — resolveCheckedImports then wrongly threw
+    // "requires __wasm_syscall_2" (sommelier reported as func-imports=1). With
+    // the tag case, the syscall is found AND the imported-function count is
+    // correct, so instrument({checked}) succeeds and the module still faults
+    // correctly (a wrong func-count base would misnumber the fault call).
+    const V = HEAP + 0x58000;
+    const bytes = instrument(buildCheckedFixture({ leadingTag: true }), { checked: true });
+    const b = bootChecked(bytes, V);
+    new Uint8Array(b.mem.buffer)[V] = 0x5c;
+
+    const val = b.inst.exports.load_u8(V);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 0 });
+    expect(val).toBe(0x5c);
+  });
+
+  test("skipInstr walks all wasm exception-handling opcodes (#152)", () => {
+    // Once the tag import no longer hides the syscall, instrument() proceeds to
+    // WALK the code — and a `-fwasm-exceptions` C++ body contains EH opcodes.
+    // Build a fixture whose store_u8 body is a well-nested EH region covering
+    // BOTH the legacy (try/catch/rethrow/catch_all + throw) and the standard
+    // (try_table/throw_ref) opcode sets, then assert instrument() does NOT throw
+    // "unknown opcode" on any of them. Not instantiated — this exercises the
+    // static walker (skipInstr) independent of the host's EH-feature support.
+    // Hand-crafted EH body (a minimal module carrying only the checked-required
+    // imports/exports + one EH function). Body locals: none. Sequence (each
+    // op's immediates are what skipInstr must
+    // consume correctly):
+    //   try (void)                 06 40
+    //     local.get 0              20 00
+    //     i32.load8_u [a0 o0]      2d 00 00   (a real mem op inside the try)
+    //     drop                     1a
+    //   catch 0                    07 00      (tag index)
+    //     rethrow 0                09 00      (relative depth)
+    //   catch_all                  19
+    //   delegate 0                 18 00      (relative depth; ends the try)
+    //   try_table (void) [0]       1f 40 00   (blocktype void, 0 catch clauses)
+    //   end                        0b         (closes try_table)
+    //   throw_ref                  0a
+    //   i32.const 0 / throw 0      41 00 08 00  (throw a tag)
+    //   end                        0b         (function end)
+    const ehBody = [
+      ...leb_u(0), // 0 local groups
+      0x06,
+      0x40,
+      0x20,
+      0x00,
+      0x2d,
+      0x00,
+      0x00,
+      0x1a,
+      0x07,
+      0x00,
+      0x09,
+      0x00,
+      0x19,
+      0x18,
+      0x00,
+      0x1f,
+      0x40,
+      0x00,
+      0x0b,
+      0x0a,
+      0x41,
+      0x00,
+      0x08,
+      0x00,
+      0x0b,
+    ];
+    // Splice ehBody in place of store_u8's body by rebuilding the code section
+    // through the public builder is awkward; instead assert on a minimal module
+    // that carries ONLY the EH function plus the checked-required imports/exports.
+    const types = [
+      funcType([I32, I32], []), // 0: store-shaped (unused signature is fine)
+      funcType([I32, I32, I32, I32, I32], [I32]), // 1: __wasm_syscall_2
+      funcType([], [I32]), // 2: __get_tls_base
+      funcType([I32], []), // 3: tag type
+      funcType([], []), // 4: eh() -> void
+    ];
+    const typeSec = sectb(1, vecb(types));
+    const imports = [
+      [...strb("env"), ...strb("__cpp_exception"), 0x04, 0x00, ...leb_u(3)],
+      [...strb("env"), ...strb("__wasm_syscall_2"), 0x00, ...leb_u(1)],
+      [...strb("env"), ...strb("__stack_pointer"), 0x03, I32, 0x01],
+    ];
+    const importSec = sectb(2, vecb(imports));
+    // defined funcs: idx 1 = __get_tls_base (type 2), idx 2 = eh (type 4)
+    const funcSec = sectb(3, vecb([leb_u(2), leb_u(4)]));
+    const memSec = sectb(5, vecb([[0x00, ...leb_u(32)]]));
+    const exportSec = sectb(
+      7,
+      vecb([
+        [...strb("memory"), 0x02, ...leb_u(0)],
+        [...strb("__get_tls_base"), 0x00, ...leb_u(1)],
+        [...strb("eh"), 0x00, ...leb_u(2)],
+      ]),
+    );
+    const tlsBody = [...leb_u(0), 0x41, ...leb_s(0x1234), 0x0b];
+    const codeSec = sectb(
+      10,
+      [
+        ...leb_u(2),
+        ...leb_u(tlsBody.length),
+        ...tlsBody,
+        ...leb_u(ehBody.length),
+        ...ehBody,
+      ].flat(),
+    );
+    const mod = new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      ...typeSec,
+      ...importSec,
+      ...funcSec,
+      ...memSec,
+      ...exportSec,
+      ...codeSec,
+    ]);
+    // The pass must walk every EH opcode without a "unknown opcode" throw. Run
+    // both the unchecked (A1) and checked (A2) instrument paths.
+    expect(() => instrument(mod)).not.toThrow();
+    expect(() => instrument(mod, { checked: true })).not.toThrow();
+    // The mem op inside the try was found + translated: the instrumented module
+    // grows (the inline translate is bytes longer than the raw load).
+    expect(instrument(mod).length).toBeGreaterThan(mod.length);
   });
 
   test("a present page never faults", () => {
