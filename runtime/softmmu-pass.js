@@ -1360,6 +1360,28 @@ export function isInstrumented(bytes) {
   return false;
 }
 
+/** #152 diagnostic: the wasm "name" custom-section module name, or null. */
+function moduleName(bytes) {
+  try {
+    for (const s of splitSections(bytes)) {
+      if (s.id !== 0) continue; // custom section
+      let i, nm;
+      [nm, i] = readName(s.body, 0);
+      if (nm !== "name") continue;
+      while (i < s.body.length) {
+        const sub = s.body[i++];
+        let sz;
+        [sz, i] = readU(s.body, i);
+        if (sub === 0) return readName(s.body, i)[0]; // module-name subsection
+        i += sz;
+      }
+    }
+  } catch {
+    /* best-effort diagnostic only */
+  }
+  return null;
+}
+
 /**
  * Instrument a wasm module with the inlined software-MMU translate.
  *
@@ -1384,7 +1406,21 @@ export function instrument(bytes, opts = {}) {
 
   // A2 present-check context (null -> every rewritten function stays on the
   // A1 unchecked fast path, byte-identical to before A2 existed).
-  const checkedCtx = opts.checked ? resolveCheckedImports(importSec, typeSec, byId(7)) : null;
+  // #152 diagnostic: augment a checked-import failure with the module's byte
+  // size + name-section module name, so a boot failure says WHETHER the
+  // offending binary is a tiny generated module (FFI trampoline / dlopen side
+  // module — a few hundred bytes) or a real program (KiB+). That discriminates
+  // "a non-libc generated module reached the exec/instrument path" from "a real
+  // program lost its keep-alive import".
+  let checkedCtx;
+  try {
+    checkedCtx = opts.checked ? resolveCheckedImports(importSec, typeSec, byId(7)) : null;
+  } catch (e) {
+    if (e instanceof Error) {
+      e.message += ` [binary: ${bytes.length} bytes, module="${moduleName(bytes) ?? "?"}"]`;
+    }
+    throw e;
+  }
 
   // The wasm START function (__wasm_init_memory under --shared-memory) runs
   // DURING instantiation — before the embedder can set __mmu_pt_base — so its
