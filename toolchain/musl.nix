@@ -101,6 +101,50 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace src/env/__libc_start_main.c \
       --replace-fail 'exit(main(argc, argv, envp));' \
                      'do { extern long __wasm_syscall_2(long,long,long,long,long); volatile int __softmmu_keep = 0; if (__softmmu_keep) __wasm_syscall_2(0,0,244,0,0); } while (0); exit(((int(*)(int,char**))(void*)main)(argc, argv));'
+    # MMU flip (#166): seed a VALID main-thread pointer BEFORE global ctors run.
+    # The host runtime (runtime/kernel-worker.js, user_executable_run) calls
+    # __wasm_call_ctors — the C++/init_array static initializers — BEFORE
+    # _start -> __libc_start_main -> __init_libc -> __init_tp installs the real
+    # thread pointer (same ordering patch 0006 documents for page_size). So any
+    # ctor that touches TLS executes with __musl_tp == 0: libc++'s iostream init
+    # (std::ios_base::Init) calls __uselocale, which reads __pthread_self()->locale
+    # and dereferences a null struct pthread — faulting at offsetof(struct pthread,
+    # locale) == 0x60 (C ctors reading ->self fault at 0x0). On NOMMU page 0 is
+    # readable linear memory so the garbage read was silently tolerated; under
+    # CONFIG_MMU page 0 is unmapped and EVERY exec'd binary (busybox getty/init,
+    # sommelier, udhcpc, nix.wasm, ...) SIGSEGVs in startup — the single root
+    # cause behind the whole MMU-flip crash storm (localized by the engine-side
+    # wasm-frame fault probe). Fix: the host calls __wasm_early_tp_init (when the
+    # export is present) right before __wasm_call_ctors; __init_tp later installs
+    # the real main pthread, abandoning this static stand-in (harmless, static
+    # BSS). Lives in __set_thread_area.c (always linked — every binary uses
+    # __musl_tp/__set_thread_area — so --export-all/--export-if-defined exports
+    # it) and touches ONLY data (&libc.global_locale, a static pthread; both
+    # patched by __wasm_apply_data_relocs before the host calls it) — never a
+    # function address, so it dodges the GOT.func-resolves-to-0 hazard that is
+    # exactly why __wasm_call_ctors itself stays host-called, not musl-called.
+    cat >> src/thread/wasm/__set_thread_area.c <<'EOF'
+
+#ifdef __wasm__
+static struct pthread __wasm_early_main_td;
+void __wasm_early_tp_init(void)
+{
+	/* Mirror __init_tp()'s field setup (src/env/__init_tls.c) as closely as
+	 * possible WITHOUT a syscall, so any ctor that touches the thread struct
+	 * (not just locale) sees a coherent main-thread pointer. tid is the one
+	 * field that needs a syscall (SYS_set_tid_address); leave it 0 — ctors
+	 * run single-threaded before threading is up and never need a real tid,
+	 * and __init_tp sets it properly on the real pthread moments later. */
+	struct pthread *td = &__wasm_early_main_td;
+	td->self = td;
+	td->detach_state = DT_JOINABLE;
+	td->locale = &libc.global_locale;
+	td->robust_list.head = &td->robust_list.head;
+	td->next = td->prev = td;
+	__musl_tp = (uintptr_t)td;
+}
+#endif
+EOF
     # Clean-NOMMU spawn contract: wasm has no fork()/vfork() (return-twice needs a
     # multi-shot continuation, which no shipped engine provides — see
     # docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md). Remove the

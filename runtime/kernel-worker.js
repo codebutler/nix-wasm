@@ -1457,6 +1457,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // Ideally libc would do this instead of the usual __init_array stuff (e.g. override __libc_start_init in
             // musl). However, a reference to __wasm_call_ctors becomes a GOT import in -fPIC code, perhaps rightfully
             // so with the current implementation and use case on LLVM. Anyway, we do it here, slightly early on...
+            //
+            // pc (#166, MMU flip): the ctors run BEFORE _start -> __libc_start_main -> __init_tp installs the real
+            // thread pointer, so __musl_tp is still 0 here. Any TLS-touching ctor (libc++ iostream init ->
+            // __uselocale -> __pthread_self()->locale) then dereferences a null struct pthread — masked on NOMMU
+            // (page 0 is readable linear memory), a SIGSEGV under CONFIG_MMU that took down every exec'd binary in
+            // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
+            // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
+            // export just keeps the pre-fix behaviour (fine on NOMMU).
+            if (instance.exports.__wasm_early_tp_init) {
+              instance.exports.__wasm_early_tp_init();
+            }
             if (instance.exports.__wasm_call_ctors) {
               instance.exports.__wasm_call_ctors();
             }
