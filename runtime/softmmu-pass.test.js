@@ -264,6 +264,104 @@ describe("atomic ops (0xfe) — the musl-pthread path", () => {
   });
 });
 
+describe("helper-call translate under stress (#164 segfault triage)", () => {
+  // The nix.wasm runtime segfault (prove-then-flip run 29352263382) appeared in
+  // the FIRST binary big enough to take the #164 helper-call fallback. Rule the
+  // helper path in/out as the cause by running the REAL compiled fixtures —
+  // every scalar width, data-dependent loads, page-table redirection, and the
+  // full atomics battery — with inlineLimit:1 (every function via helper) and
+  // asserting bit-identical behavior with the original / the inline path.
+  const atomics = new Uint8Array(readFileSync(new URL("atomics.wasm", FIX)));
+  const viaHelper = (bytes) => instrument(bytes, { exportControls: true, inlineLimit: 1 });
+
+  test("prog.wasm via helper == original (all scalar widths + f64)", () => {
+    const orig = boot(prog, {});
+    const insn = boot(viaHelper(prog), { instrumented: true });
+    const N = 1000;
+    const buf = 0x100000;
+    orig.inst.exports.fill(buf, N, 7);
+    insn.inst.exports.fill(buf, N, 7);
+    expect(insn.inst.exports.sum_scan(buf, N)).toBe(orig.inst.exports.sum_scan(buf, N));
+    const bytes = 0x180000;
+    const o8 = new Uint8Array(orig.mem.buffer);
+    const i8 = new Uint8Array(insn.mem.buffer);
+    for (let k = 0; k < 500; k++) {
+      o8[bytes + k] = (k * 31) & 0xff;
+      i8[bytes + k] = (k * 31) & 0xff;
+    }
+    expect(insn.inst.exports.widen(bytes, 500)).toBe(orig.inst.exports.widen(bytes, 500));
+    const dbuf = 0x1c0000;
+    const od = new Float64Array(orig.mem.buffer);
+    const idf = new Float64Array(insn.mem.buffer);
+    for (let k = 0; k < 300; k++) {
+      od[dbuf / 8 + k] = k * 0.5 - 1.25;
+      idf[dbuf / 8 + k] = k * 0.5 - 1.25;
+    }
+    expect(insn.inst.exports.dsum(dbuf, 300)).toBe(orig.inst.exports.dsum(dbuf, 300));
+  });
+
+  test("prog.wasm via helper: pointer-chase + page-table redirection", () => {
+    const orig = boot(prog, {});
+    const insn = boot(viaHelper(prog), { instrumented: true });
+    const N = 256;
+    const next = 0x100000;
+    const setNext = (m) => {
+      const t = new Uint32Array(m.buffer);
+      for (let k = 0; k < N; k++) t[next / 4 + k] = (k * 7 + 1) % N;
+    };
+    setNext(orig.mem);
+    setNext(insn.mem);
+    expect(insn.inst.exports.chase(next, 0, 1000)).toBe(orig.inst.exports.chase(next, 0, 1000));
+    // remap: a store to V lands in P2 through the helper's walk too
+    const V = 0x200000;
+    const P2 = 0x210000;
+    const b = boot(viaHelper(prog), { instrumented: true, remap: (setPte) => setPte(V, P2) });
+    b.inst.exports.fill(V, 4, 100);
+    const u = b.u32();
+    expect(u[P2 / 4]).toBe(100);
+    expect(u[P2 / 4 + 3]).toBe(103);
+    expect(u[V / 4]).toBe(0);
+  });
+
+  test("atomics via helper == original (load/add/store/xchg/cas/add64) + remap", () => {
+    // nix.wasm is the first heavily-THREADED binary through the fallback — its
+    // musl pthread path is atomics-dense, so atomics×helper is the prime
+    // suspect surface. Mirror the full inline atomics battery through the
+    // helper, then the remap redirection.
+    const orig = boot(atomics, {});
+    const insn = boot(viaHelper(atomics), { instrumented: true });
+    const P = 0x100000;
+    const Q = 0x100008;
+    for (const h of [orig, insn]) {
+      const dv = new DataView(h.mem.buffer);
+      dv.setUint32(P, 7, true);
+      expect(h.inst.exports.a_load(P)).toBe(7);
+      expect(h.inst.exports.a_add(P, 5) >>> 0).toBe(7);
+      expect(dv.getUint32(P, true)).toBe(12);
+      h.inst.exports.a_store(P, 100);
+      expect(dv.getUint32(P, true)).toBe(100);
+      expect(h.inst.exports.a_xchg(P, 200) >>> 0).toBe(100);
+      expect(dv.getUint32(P, true)).toBe(200);
+      expect(h.inst.exports.a_cas(P, 200, 300) >>> 0).toBe(200);
+      expect(dv.getUint32(P, true)).toBe(300);
+      expect(h.inst.exports.a_cas(P, 999, 42) >>> 0).toBe(300);
+      expect(dv.getUint32(P, true)).toBe(300);
+      dv.setBigUint64(Q, 0n, true);
+      expect(h.inst.exports.a_add64(Q, 1000000000000n)).toBe(0n);
+      expect(dv.getBigUint64(Q, true)).toBe(1000000000000n);
+    }
+    const V = 0x200000;
+    const P2 = 0x220000;
+    const b = boot(viaHelper(atomics), { instrumented: true, remap: (setPte) => setPte(V, P2) });
+    const dv = new DataView(b.mem.buffer);
+    b.inst.exports.a_store(V, 0xabcd);
+    expect(dv.getUint32(P2, true)).toBe(0xabcd);
+    expect(dv.getUint32(V, true)).toBe(0);
+    expect(b.inst.exports.a_add(V, 1) >>> 0).toBe(0xabcd);
+    expect(dv.getUint32(P2, true)).toBe(0xabce);
+  });
+});
+
 describe("bulk-memory ops (0xfc) — memory.copy/fill/init through the page table", () => {
   const bulk = new Uint8Array(readFileSync(new URL("bulk.wasm", FIX)));
 
@@ -714,6 +812,67 @@ describe("checked (A2 present-check) translate", () => {
     // The mem op inside the try was found + translated: the instrumented module
     // grows (the inline translate is bytes longer than the raw load).
     expect(instrument(mod).length).toBeGreaterThan(mod.length);
+  });
+
+  test("helper-call fallback (over inlineLimit) still faults + translates correctly (#164)", () => {
+    // #164: a function whose inline instrumentation would exceed V8's max
+    // function size is re-emitted with a CALL to __mmu_translate_ck instead of
+    // the inline walk. Force that path for EVERY function with inlineLimit:1,
+    // then prove the checked semantics are byte-for-byte preserved: a not-
+    // present page faults exactly once (right kind), then the access succeeds.
+    const V = HEAP + 0x64000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    const b = bootChecked(bytes, V);
+    new Uint8Array(b.mem.buffer)[V] = 0x42;
+
+    // load: kind=0 fault, then reads the byte (translated through the helper)
+    expect(b.inst.exports.load_u8(V)).toBe(0x42);
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 0 });
+    // tp still sourced by calling __get_tls_base (fixture sentinel), unchanged
+    expect(b.rawCalls[0].tp).toBe(0x1234);
+
+    // store to a DIFFERENT not-present page: kind=1 fault, then writes
+    const W = HEAP + 0x66000;
+    // re-map W absent (bootChecked only made V absent); reuse the running inst
+    const t = new Uint32Array(b.mem.buffer);
+    const wpte = t[PT / 4 + (W >>> 22)] & ~0xfff;
+    t[wpte / 4 + ((W >>> 12) & 0x3ff)] = 0;
+    b.inst.exports.store_u8(W, 0x99);
+    expect(new Uint8Array(b.mem.buffer)[W]).toBe(0x99);
+    expect(b.calls.some((c) => c.ea === W && c.kind === 1)).toBe(true);
+  });
+
+  test("helper-call fallback yields a smaller module than the inline path (#164)", () => {
+    // The point of the fallback: the helper-call body is materially smaller than
+    // the inline walk, which is what keeps an over-limit function under V8's
+    // ceiling. A tiny inlineLimit forces the fallback; the inline build (huge
+    // limit) is the baseline. Same fixture, so any size delta is the emit mode.
+    const inline = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1e9 });
+    const viaHelper = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    expect(viaHelper.length).toBeLessThan(inline.length);
+  });
+
+  test("helper-call fallback: store fault (kind=1) + COW RO-page semantics (#164)", () => {
+    // The checked helper (__mmu_translate_ck) must preserve the permission-aware
+    // fault semantics the inline path has: a store to a not-present page faults
+    // kind=1; a store to a PRESENT-but-read-only page (COW) ALSO faults kind=1
+    // instead of writing through; a load from the RO page never faults.
+    const bytes = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    // not-present store
+    const V1 = HEAP + 0x70000;
+    const b1 = bootChecked(bytes, V1);
+    b1.inst.exports.store_u8(V1, 0x99);
+    expect(b1.calls).toEqual([{ nr: NR_MMU_FAULT, ea: V1, kind: 1 }]);
+    expect(new Uint8Array(b1.mem.buffer)[V1]).toBe(0x99);
+    // present-but-RO: store faults (COW), load does not
+    const V2 = HEAP + 0x78000;
+    const b2 = bootChecked(bytes, undefined, V2);
+    expect(b2.inst.exports.load_u8(V2)).toBe(0);
+    expect(b2.calls.length).toBe(0);
+    b2.inst.exports.store_u8(V2, 0xab);
+    expect(b2.calls).toEqual([{ nr: NR_MMU_FAULT, ea: V2, kind: 1 }]);
+    expect(new Uint8Array(b2.mem.buffer)[V2]).toBe(0xab);
   });
 
   test("a present page never faults", () => {
