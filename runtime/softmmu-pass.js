@@ -144,14 +144,6 @@ const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 // binary imports these three already) and keeps the module surgery in this
 // pass limited to APPENDING (types/funcs/globals/exports), which is the
 // invariant the rest of `instrument()` already relies on.
-//
-// The "every binary imports it already" precondition is GUARANTEED, not merely
-// observed: a binary that makes no 2-arg syscall would otherwise let wasm-ld
-// drop the `env.__wasm_syscall_2` import (#152 — a nix-closure exec that panicked
-// the kernel here). `toolchain/musl.nix` force-retains it in every executable via
-// a never-taken keep-alive reference from `__libc_start_main` (reachable from
-// every `_start`, so it survives `--gc-sections`). Do NOT remove that keep-alive:
-// it is what makes this REQUIRE contract safe for arbitrary guest binaries.
 export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unistd.h)
 
 /** Fault `kind` for an atomic op: RMW/cmpxchg/store need write permission. */

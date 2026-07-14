@@ -82,25 +82,9 @@ pkgs.stdenv.mkDerivation {
                      '__attribute__((__weak__)) int main(int argc, char *argv[])' \
       --replace-fail '	(void)envp;
 ' ""
-    # softmmu keep-alive (#152): under CONFIG_MMU the engine software-instruments
-    # EVERY exec'd binary at load, and checked-mode fault routing
-    # (runtime/softmmu-pass.js) emits `__wasm_syscall_2(NR_MMU_FAULT=244, ea, kind)`
-    # for every load/store — so the pass REQUIRES the module to import
-    # env.__wasm_syscall_2 and THROWS (→ kernel panic on execve) if it doesn't.
-    # The old assumption "every libc binary imports it" is false: a binary that
-    # happens to make no 2-arg syscall never references the symbol, so wasm-ld
-    # drops the import. Force-retain it in EVERY executable by referencing it from
-    # __libc_start_main (always linked, reachable from every _start) behind a
-    # `volatile` guard that never fires. Reachable-from-a-link-root is what
-    # actually survives --gc-sections here — a bare `used`/`retain` attribute or
-    # `--undefined=` does NOT (verified against wasm-ld 18). Harmless on the NOMMU
-    # guest: one unused, already allow-listed (toolchain/wasm-host-imports.nix)
-    # import per binary. The extern + guard are block-scoped so nothing else in
-    # the TU sees them; `long` == i32 on wasm32 → the exact (i32×5)->i32 signature
-    # the pass checks (musl's real __wasm_syscall_2 ABI: sp,tp,nr,a,b -> result).
     substituteInPlace src/env/__libc_start_main.c \
       --replace-fail 'exit(main(argc, argv, envp));' \
-                     'do { extern long __wasm_syscall_2(long,long,long,long,long); volatile int __softmmu_keep = 0; if (__softmmu_keep) __wasm_syscall_2(0,0,244,0,0); } while (0); exit(((int(*)(int,char**))(void*)main)(argc, argv));'
+                     'exit(((int(*)(int,char**))(void*)main)(argc, argv));'
     # Clean-NOMMU spawn contract: wasm has no fork()/vfork() (return-twice needs a
     # multi-shot continuation, which no shipped engine provides — see
     # docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md). Remove the
