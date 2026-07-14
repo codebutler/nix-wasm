@@ -53,6 +53,14 @@ cross.stdenv.mkDerivation {
     # own null-guarded xkb state) instead of asserting — else keyboard-using GTK
     # apps abort the per-client worker on wl_keyboard.keymap.
     ../patches/sommelier/0002-keymap-mmap-graceful.patch
+    # xdg-decoration passthrough: advertise zxdg_decoration_manager_v1 to guest
+    # clients when the HOST compositor offers it and forward the negotiation 1:1
+    # (new sommelier-xdg-decoration.cc, viewporter-passthrough pattern). Without
+    # this a guest client that wants server-side decorations (wl-eyes -- it draws
+    # no frame of its own) can never ask: sommelier is the compositor it talks
+    # to, and stock sommelier doesn't implement the protocol, so the host
+    # (Greenfield -> pc) sees a silent client and CSD-defaults it to frameless.
+    ../patches/sommelier/0003-xdg-decoration-passthrough.patch
   ];
 
   nativeBuildInputs = [

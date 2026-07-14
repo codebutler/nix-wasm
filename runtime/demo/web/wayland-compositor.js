@@ -747,4 +747,42 @@ function paintSurface(record, content) {
   }
   ctx.clearRect(0, 0, w, h);
   ctx.drawImage(bitmap, 0, 0);
+  applyWindowGeometry(record, content.geometry);
+}
+
+// Crop a client's shadow/CSD margins out of its window: a CSD toplevel's buffer
+// includes transparent shadow margins around the visible window, and the window
+// geometry (xdg_surface.set_window_geometry, sent by greenfield) is the visible
+// rect within that buffer. We size the .wl-win to the geometry, clip it, and
+// offset the (full-buffer) canvas by -(x,y) so only the window shows — no extra
+// space, and the shell's border/shadow (and pc's resize grips) hug the real
+// window edges instead of the buffer edges. Pointer mapping is unaffected: it
+// reads the canvas's own bounding rect, which still spans the whole buffer.
+function applyWindowGeometry(record, geometry) {
+  const { win, canvas } = record;
+  if (!win || !canvas || record.isPopup) return;
+  const bw = canvas.width;
+  const bh = canvas.height;
+  const inset =
+    geometry &&
+    geometry.width > 0 &&
+    geometry.height > 0 &&
+    (geometry.x > 0 || geometry.y > 0 || geometry.width < bw || geometry.height < bh);
+  if (inset) {
+    win.style.overflow = "hidden";
+    win.style.width = geometry.width + "px";
+    win.style.height = geometry.height + "px";
+    canvas.style.position = "absolute";
+    canvas.style.flex = "none";
+    canvas.style.left = -geometry.x + "px";
+    canvas.style.top = -geometry.y + "px";
+    canvas.style.width = bw + "px";
+    canvas.style.height = bh + "px";
+    record._geomInset = true;
+  } else if (record._geomInset) {
+    // Geometry grew back to the full buffer (or was cleared) — undo the crop.
+    for (const p of ["overflow", "width", "height"]) win.style[p] = "";
+    for (const p of ["position", "flex", "left", "top", "width", "height"]) canvas.style[p] = "";
+    record._geomInset = false;
+  }
 }

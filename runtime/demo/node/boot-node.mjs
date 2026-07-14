@@ -23,6 +23,10 @@ export async function bootNode(opts = {}) {
     // through so a smoke can register a host listener (device.listen(port, …))
     // via vsock.onReady(device). Absent for boots that don't exercise vsock.
     vsock: opts.vsock,
+    // Issue #145: the virtio-snd PCM sink hook. Passed straight through so a
+    // smoke can attach a recorder (device.setSink({ onPcm, … })) via
+    // snd.onReady(device). Absent for boots that don't exercise audio.
+    snd: opts.snd,
   });
 
   const transcripts = new Map();

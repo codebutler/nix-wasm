@@ -316,6 +316,26 @@
         inherit cross;
       };
 
+      # In-guest ALSA playback test for the virtio-snd sound card (issue #145):
+      # plays a deterministic 440Hz sine through the real alsa-lib path
+      # (snd_pcm_open/set_params/writei/drain); the host smoke
+      # (runtime/demo/node/snd-smoke.mjs) asserts the device model received the
+      # exact samples. Baked into the initramfs as /bin/alsa-tone, with
+      # alsa-lib's share/alsa config tree at /usr/share/alsa (extraShare).
+      alsaTone = import ./userspace/alsa-tone.nix {
+        inherit cross;
+      };
+
+      # Guest-side read-only 9P2000.L rootfs server for pc's /Linux mount
+      # (pc#472): connects OUT to VMADDR_CID_HOST:1025 (the same reverse-
+      # connection trick as pcctl) and serves the live guest filesystem; pc
+      # mounts it at /Linux and the tray launcher reads .desktop entries off
+      # it. Never serves /mnt/pc (host↔guest mount recursion guard). Baked
+      # into the initramfs as /bin/ninepd; started from inittab (init.nix).
+      ninepdDaemon = import ./userspace/ninepd.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -515,6 +535,7 @@
       initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
+<<<<<<< HEAD
         extraBins = initramfsExtraBins;
       };
       # #131 prove-then-flip: the same initramfs with the REAL-FORK busybox +
@@ -524,6 +545,13 @@
       wasmInitramfsFork = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusyboxFork; init = wasmBootstrapFork;
         extraBins = initramfsExtraBins;
+=======
+        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
+        # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
+        # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
+        # nix:true boot resolves the compiled-in /nix/store datadir instead).
+        extraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
+>>>>>>> origin/master
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -747,6 +775,14 @@
         # $out/bin/pcctl.
         pcctl = pcctlAgent;
 
+        # Issue #145: the in-guest ALSA test tone for the virtio-snd sound card
+        # → $out/bin/alsa-tone.
+        alsa-tone = alsaTone;
+
+        # Read-only 9P rootfs server for pc's /Linux mount (pc#472) →
+        # $out/bin/ninepd.
+        ninepd = ninepdDaemon;
+
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;
 
@@ -792,6 +828,18 @@
         # installs /bin/gcalccmd, the console engine front-end that the headless
         # gate computes 7*6=42 with (runtime/demo/node/gcalctool-smoke.mjs).
         gcalctool = cross.gcalctool;
+
+        # l3afpad — GTK3 leafpad fork (#122): the first real GTK3 productivity
+        # app (open/edit/save text, incl. /mnt/pc). Signals wired in C — no
+        # GModule, the gtk3-demo posture. --selftest is the headless gate
+        # (runtime/demo/node/l3afpad-smoke.mjs); the editor window + a /mnt/pc
+        # save round-trip are the MANUAL browser check.
+        l3afpad = cross.l3afpad;
+
+        # gcolor3 — stock nixpkgs GTK3 color chooser; no override needed (shared
+        # cross fixes + auto-fpcast via gtk3). A build target for verification;
+        # add to wasmPublishedPkgs once `nix build .#gcolor3` is green.
+        gcolor3 = cross.gcolor3;
 
         # GNOME games tier: librsvg 2.40 (last C release) + libcroco pins are
         # the shared SVG enabler; mahjongg (Vala-era autotools, shipped C) and
@@ -886,6 +934,8 @@
         "libblake3"
         "busybox"
         "ncurses" # userspace targets (Nix-built guest), exposed for build/testing
+        "alsa-lib" # guest ALSA userspace (issue #145 — virtio-snd sound card)
+        "libcanberra" # XDG event sounds over the ALSA backend (issue #145)
       ])
       # The Wayland stack (client + server libs), each cross-built to wasm.
       # Exposed as `wl-<name>` so `nix build -k .#wl-…` surfaces every cross

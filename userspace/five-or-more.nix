@@ -9,6 +9,7 @@
 { cross, pkgs, fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "five-or-more";
+  dontFpcastEmu = true; # does its own dynsym+fpcast in postFixup below
   version = "3.22.2";
 
   src = pkgs.fetchurl {

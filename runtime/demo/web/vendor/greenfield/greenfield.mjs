@@ -20869,6 +20869,7 @@ var XdgToplevel = class _XdgToplevel {
     this.current.state = { ...this.next.state };
     this.current.minSize = this.next.minSize;
     this.current.maxSize = this.next.maxSize;
+    this.enforceMinSize();
     this.desktopSurface.commit();
     surface.session.renderer.render();
   }
@@ -20915,9 +20916,50 @@ var XdgToplevel = class _XdgToplevel {
   }
   setMaxSize(resource, width, height) {
     this.next.maxSize = { width, height };
+    this.maybeConfigureFixedSize();
   }
   setMinSize(resource, width, height) {
     this.next.minSize = { width, height };
+    this.maybeConfigureFixedSize();
+  }
+  // codebutler/nix-wasm#143: a non-resizable toplevel (min==max, non-zero) is
+  // told its exact size instead of the default 0x0 ("client picks"). GTK3's
+  // wayland backend sizes a 0x0-configured window from a fallback captured before
+  // its CSD titlebar is folded into the size request, so a fixed-size window
+  // renders one titlebar-height too short and — unlike a resizable window that
+  // grows on a later relayout — never corrects. Mirrors greenfield source commit
+  // 307f48e (packages/compositor/src/XdgToplevel.ts); regenerate via the proper
+  // greenfield esbuild bundle when re-vendoring.
+  // codebutler/nix-wasm#143: a compositor must never leave a toplevel smaller than
+  // its declared minimum. GTK3 self-sizing from the 0x0 configure draws a window one
+  // CSD titlebar short; a min-only window (galculator: min 331x380, drawn 331x328)
+  // isn't caught by the min==max pre-empt below, so enforce min on commit. Mirrors
+  // greenfield source d65b084's successor. The pending guard settles in one round.
+  enforceMinSize() {
+    const min = this.current.minSize;
+    if (!(min.width > 0 && min.height > 0)) return;
+    const geo = this.xdgSurface.surface.geometry.size;
+    if (geo.width >= min.width && geo.height >= min.height) return;
+    const width = geo.width < min.width ? min.width : geo.width;
+    const height = geo.height < min.height ? min.height : geo.height;
+    if (this.pending.size.width !== width || this.pending.size.height !== height) {
+      this.configureSize({ width, height });
+    }
+  }
+  maybeConfigureFixedSize() {
+    const min = this.next.minSize;
+    const max = this.next.maxSize;
+    if (
+      min.width > 0 &&
+      min.height > 0 &&
+      min.width === max.width &&
+      min.height === max.height &&
+      this.pending.state.maximized === void 0 &&
+      this.pending.state.fullscreen === void 0 &&
+      (this.pending.size.width !== min.width || this.pending.size.height !== min.height)
+    ) {
+      this.configureSize({ width: min.width, height: min.height });
+    }
   }
   setMaximized(resource) {
     this.ensureAdded();
@@ -23678,7 +23720,9 @@ var Renderer = class _Renderer {
             dy: a.y - b.y
           };
         }
-        this.session.userShell.events.surfaceContentUpdated({ id: view.surface.resource.id, client: { id: view.surface.resource.client.id } }, { bitmap: bufferContents.pixelContent, width, height, parent });
+        const g = view.surface.geometry;
+        const geometry = { x: g.position.x, y: g.position.y, width: g.size.width, height: g.size.height };
+        this.session.userShell.events.surfaceContentUpdated({ id: view.surface.resource.id, client: { id: view.surface.resource.client.id } }, { bitmap: bufferContents.pixelContent, width, height, parent, geometry });
       }
     } else if (buffer !== void 0 && bufferContents === void 0) {
       if (view.mapped && buffer && view.surface.damaged) {

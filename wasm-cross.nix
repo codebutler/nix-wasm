@@ -67,6 +67,9 @@ let
             --start-group|--end-group) continue;;
             # GNU ld-only diagnostic flags that wasm-ld rejects.
             --warn-common) continue;;
+            # GNU ld ELF-DSO dependency pruning: meaningless for a static wasm
+            # link and rejected by wasm-ld (libcanberra's Makefile passes it).
+            --as-needed|--no-as-needed) continue;;
           esac
           args+=("$a")
         done

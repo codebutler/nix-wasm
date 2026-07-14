@@ -19,6 +19,7 @@ import { BlkDevice } from "./virtio/blk-device.js";
 import { NinePVirtioDevice } from "./virtio/ninep-device.js";
 import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
+import { SndVirtioDevice } from "./virtio/snd-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
 
 (function (console) {
@@ -359,6 +360,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // main-thread, so the worker instance only answers the synchronous transport
   // probes (features/config/setup) and forwards the kick.
   const VW_DEV_VSOCK = 7;
+  // Issue #145: virtio-snd — the guest's sound card (stock mainline
+  // sound/virtio driver, CONFIG_SND_VIRTIO). Pinned to host index 6 (the
+  // previously-unused slot between the 9P channels and vsock; must match kernel
+  // patch 0027's `VW_DEV_SND = 6` and kernel-host.js). The PCM sink
+  // (AudioWorklet / smoke assertions) is main-thread, so the worker instance
+  // only answers the synchronous transport probes and forwards the kick.
+  const VW_DEV_SND = 6;
   // Issue #10: virtio-9p channels — one virtio device per 9P mount/connection.
   // Device index, mount tag, and connection id (cid, for per-connection state
   // isolation in the shared 9P server) MUST match kernel patch 0018's enum and
@@ -517,6 +525,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         d = new VsockVirtioDevice({
           ...common,
           forwardNotify: (dev, q) => port.postMessage({ method: "virtiovsock_notify", dev, q }),
+        });
+        publish_raised_irqs_addr();
+      } else if (id === VW_DEV_SND) {
+        // Issue #145: virtio-snd. The PCM sink (AudioWorklet in pc, the smoke
+        // test's recorder in node) is main-thread-bound, but this kick lands on
+        // a task worker — so the worker-side device only answers the synchronous
+        // transport probes (getFeatures/configRead serving the stream counts,
+        // via the base ctor) and FORWARDS the notify to the main thread, where
+        // the host instance parses the control/tx traffic, feeds the sink, and
+        // raises the completion IRQ via the raised_irqs self-wake.
+        d = new SndVirtioDevice({
+          ...common,
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtiosnd_notify", dev, q }),
         });
         publish_raised_irqs_addr();
       } else {

@@ -65,4 +65,13 @@
 // shared arena with per-process pt_base. A fork-enabled guest on an old engine
 // would fail to instantiate (missing capture_stack) or _start() fork children
 // from scratch: bump.
-export const ENGINE_ABI = 10;
+//
+// 11 (#145: guest audio): the virtio device set grew virtio-snd — a new device
+// at host index 6 (VW_DEV_SND, the previously-unused slot between the 9P
+// channels and vsock), served by runtime/virtio/snd-device.js (controlq/eventq/
+// txq/rxq, one s16/48kHz playback stream) and drained on the main thread via
+// the virtiosnd_notify worker→main forward. A kernel with CONFIG_SND_VIRTIO
+// probes device 6 at boot; an old engine answers "unknown device index 6" (no
+// features/config/queue service), the driver's control requests time out, and
+// probe fails — /dev/snd never appears and ALSA userspace breaks: bump.
+export const ENGINE_ABI = 11;

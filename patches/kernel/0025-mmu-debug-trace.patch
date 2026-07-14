@@ -23,12 +23,16 @@
  retry:
  	vma = lock_mm_and_find_vma(mm, addr, current_pt_regs());
  	if (!vma)
-@@ -85,11 +89,30 @@
+@@ -85,11 +89,34 @@
  		goto bad_area_nosemaphore;
  	}
  
-+	if (dbg <= 20) {
-+		/* RAW-walk mm->pgd exactly as the softmmu pass does. */
++	if (dbg < 20) {
++		/* RAW-walk mm->pgd exactly as the softmmu pass does. NOTE: must be a
++		 * STRICT bound — dbg stops incrementing at 20 (the entry trace's
++		 * cap), so `<= 20` stays true forever and floods the console with a
++		 * walk line on EVERY successful fault (drowned the first MMUSEGV
++		 * capture on #166's diagnostic boot). */
 +		u32 *pgd = (u32 *)mm->pgd;
 +		u32 pgd_e = pgd[addr >> 22];
 +		u32 *ptp = (u32 *)(unsigned long)(pgd_e & ~0xfffU);

@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: namespace-profile-default
+    runs-on: namespace-profile-sm
     steps:
       - uses: actions/checkout@v4
       # wrangler needs Node >= 22; the Namespace runner ships v20 by default.

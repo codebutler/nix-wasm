@@ -38,9 +38,17 @@ let
   # Guard on /dev/wl0 so a kernel without virtwl doesn't hot-respawn; the trailing
   # `sleep 5` backs off if Sommelier ever exits (same pattern as syslogd above).
   waylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier --parent >>/var/log/sommelier.log 2>&1; sleep 5'";
+  # ninepd: the read-only 9P rootfs server behind pc's /Linux mount (pc#472).
+  # Dials OUT to the host on vsock 1025 and serves the LIVE guest filesystem —
+  # Filer browsing + the tray launcher's .desktop reads. INITRAMFS-absolute
+  # path (/bin/ninepd via extraBins), same posture as sommelier above. The
+  # daemon retries the dial and reconnects internally (pc may not be listening
+  # yet at init, and it replaces the mount on a fresh dial-in), so ::respawn +
+  # `sleep 5` is only the crash safety net.
+  ninepdLine = "::respawn:/bin/sh -c '/bin/ninepd >>/var/log/ninepd.log 2>&1; sleep 5'";
   # Build the inittab by explicit newline-join — do NOT use a `''` block: it strips
   # only the COMMON leading indent, so a single misaligned line keeps its leading
   # space and busybox then reads the tty id as whitespace ("can't open /dev/  ").
 in
 pkgs.writeText "inittab"
-  (lib.concatStringsSep "\n" ([ syslogLine waylandLine ] ++ consoleLines) + "\n")
+  (lib.concatStringsSep "\n" ([ syslogLine waylandLine ninepdLine ] ++ consoleLines) + "\n")

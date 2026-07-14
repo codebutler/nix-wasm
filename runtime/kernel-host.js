@@ -32,6 +32,7 @@ import {
   CONSOLE_CONFIG_IRQ_BASE,
 } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
+import { SndVirtioDevice } from "./virtio/snd-device.js";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -63,6 +64,13 @@ export const linux = async ({
   // Absent → the vsock device still exists (config/features answered) but no
   // host listener is registered, so guest connect attempts are RST'd.
   vsock,
+  // Issue #145: optional host hook for the virtio-snd PCM sink. `onReady(device)`
+  // is called once with the main-thread SndVirtioDevice so a caller (pc's
+  // AudioWorklet sink, the node smoke's recorder) can `device.setSink({ onPcm,
+  // onParams, onStart, onStop, bufferedBytes })`. Absent → the snd device still
+  // exists (the guest probes a working sound card) but the PCM frames are
+  // dropped on the floor.
+  snd,
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB).
   virtio_queues,
   // #43: read-only base-system squashfs image (ArrayBuffer) served as /dev/vdX
@@ -299,6 +307,40 @@ export const linux = async ({
     return hostVsockDevice;
   };
 
+  // Issue #145: virtio-snd — a MAIN-thread device that parses the control/tx
+  // traffic and feeds the host PCM sink (pc's AudioWorklet; the node smoke's
+  // recorder). The guest's vq kick lands on a task worker (which forwards it
+  // here as virtiosnd_notify); the worker can't run the sink. The completion
+  // IRQ uses the SAME raised_irqs self-wake wl/net/9p/vsock use. dev MUST match
+  // kernel-worker's VW_DEV_SND + kernel patch 0027: index 6.
+  const VW_DEV_SND = 6;
+  let hostSndDevice = null;
+  let sndReadyFired = false;
+  const hostSnd = () => {
+    if (wlRaisedIrqsAddr == null) return null;
+    if (!hostSndDevice) {
+      hostSndDevice = new SndVirtioDevice({
+        dev: VW_DEV_SND,
+        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_SND,
+        memory,
+        raiseInterrupt: raiseHostWlIrq, // same idle-wake OR/notify path as wl/net/9p
+        onlineCpus: [0], // maxcpus=1
+        sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
+        log,
+      });
+      // Hand the device to the caller (the pc audio sink) so it can setSink().
+      if (!sndReadyFired && snd && typeof snd.onReady === "function") {
+        sndReadyFired = true;
+        try {
+          snd.onReady(hostSndDevice);
+        } catch (e) {
+          log("[snd] onReady threw: " + (e && e.stack ? e.stack : e));
+        }
+      }
+    }
+    return hostSndDevice;
+  };
+
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -450,6 +492,15 @@ export const linux = async ({
     // refill / event) and raises the IRQ via the raised_irqs self-wake.
     virtiovsock_notify: (message) => {
       hostVsock()?.onNotify(message.q >>> 0);
+    },
+
+    // Issue #145: a guest virtio-snd kick the task worker forwarded. The PCM
+    // sink (AudioWorklet / smoke recorder) is main-thread-bound, so the worker
+    // can't service it — the host parses the kicked vq (control requests / tx
+    // PCM periods), feeds the sink, and raises the IRQ via the raised_irqs
+    // self-wake.
+    virtiosnd_notify: (message) => {
+      hostSnd()?.onNotify(message.q >>> 0);
     },
 
     // virtio-net: a frame the guest transmitted (worker owns TX). Enqueue it on

@@ -33,6 +33,7 @@
 , fpcast ? import ./fpcast-emu.nix { inherit cross; } }:
 cross.stdenv.mkDerivation {
   pname = "gtk3-demo";
+  dontFpcastEmu = true; # fpcasts its own binary in buildPhase below
   version = "3.24.52";
 
   # Reuse the cross gtk3's own source tarball — gtk-demo ships in its demos/.

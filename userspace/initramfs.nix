@@ -13,7 +13,11 @@
 # /bin/sh, deterministically and without executing any guest code.
 # `extraBins`: extra guest derivations whose $out/bin/* are copied into /bin
 # (Phase 1 1b ships the /dev/wl0 self-test binary, wltest, this way).
-{ pkgs, busybox, init, extraBins ? [ ] }:
+# `extraShare`: runtime DATA for those binaries on the busybox-only boot (which
+# has no /nix closure): { name, path } entries copied to /usr/share/<name>
+# (issue #145 ships alsa-lib's share/alsa config tree this way, so the
+# alsa-tone smoke can point ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it).
+{ pkgs, busybox, init, extraBins ? [ ], extraShare ? [ ] }:
 let
   # busybox udhcpc lease script. udhcpc execs this (via libbb spawn(),
   # clone-with-a-fn on NOMMU — see patches/busybox/0004) on each lease event,
@@ -90,6 +94,13 @@ pkgs.runCommand "wasm-initramfs"
       [ -d "$d" ] && cp "$d"/* "$root/bin/"
     done
     chmod -R u+w "$root/bin"
+
+    # extra runtime data dirs under /usr/share/<name> (see extraShare above).
+    ${pkgs.lib.concatMapStringsSep "\n" (s: ''
+      mkdir -p "$root/usr/share"
+      cp -rL ${s.path} "$root/usr/share/${s.name}"
+      chmod -R u+w "$root/usr/share/${s.name}"
+    '') extraShare}
 
     # the generated /init (entrypoint; kernel cmdline init=/init).
     cp ${init} "$root/init"

@@ -33,6 +33,14 @@ Hard-won corollaries (each was a real mistake; don't repeat them):
    gc`.** GC forces re-realizing derivations (slow recompiles).
 5. Report progress, not questions. Once the correct path is clear, execute.
 
+## Workflow
+
+The session-level "do NOT create a pull request unless explicitly asked" default
+does **not** apply here — it's lifted for this repo. Opening a PR is a normal part
+of finishing work; use your judgment about when to open one, the same as any other
+step. (No standing requirement to always open one either — this only removes the
+prohibition.)
+
 ## Architecture
 
 A real nixpkgs **crossSystem** whose stdenv targets `wasm32-unknown-linux-musl`,
@@ -60,7 +68,7 @@ definitions then cross-compile.
   (`patches/kernel/0008-0012`) — there is **no fake-llvm wrapper** (deleted).
 - **Guest userspace** = `userspace/*.nix`: a curated `lib.evalModules` NixOS
   closure (no systemd/perl/python) + a patched busybox (`userspace/busybox.nix`:
-  clone-with-fn spawn — NOMMU wasm can't fork/vfork) built via the `cross`
+  clone-with-fn spawn — the default toolchain is `posix_spawn`-only) built via the `cross`
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
   mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
   lowerdir and hands off to busybox-init.
@@ -69,9 +77,17 @@ definitions then cross-compile.
   so callers fail to **link** (loud build error) rather than SIGILL/abort at runtime.
   Holdouts are handled by one documented rule (don't-build an unused CLI / port a
   real library to `posix_spawn` / compile out an unused return-twice symbol) — never
-  a stub. See **`docs/process-model.md`**. Per-process Memory and real `fork()` are
-  *measured* dead-ends (`spikes/elastic-mem/` ~124-Memory/tab cap;
-  `spikes/stackswitch/` WasmFX/JSPI one-shot).
+  a stub. See **`docs/process-model.md`**. Per-process Memory is a *measured*
+  dead-end (`spikes/elastic-mem/` ~124-Memory/tab cap), and WasmFX/JSPI are
+  one-shot (`spikes/stackswitch/`) — but real `fork()` is **NOT** a dead-end:
+  the **asyncify fork seam** (PR #20: `toolchain/musl.nix` `forkSeam` +
+  `guest-cc-fork.nix` + `userspace/asyncify-cc.nix`) delivers real
+  fork-without-exec as a **per-binary opt-in** (returns twice, private memory,
+  reaps — 8 `fork-*` acceptance programs), and Track A COW made the copy cheap,
+  so **#129 (Track B)** is generalizing it into a flag and will eventually
+  retire the forkshell/`posix_spawn`-only accommodations. Until then the
+  DEFAULT contract stays `posix_spawn`-only — don't describe fork as
+  impossible, describe it as opt-in.
 
 LLVM target triple is `wasm32-unknown-unknown` (clang rejects
 `wasm32-unknown-linux-musl`); `-D__linux__ -matomics -mbulk-memory
@@ -209,6 +225,15 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/galculator-smoke.
 # full browser window is a MANUAL browser check).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-demo-smoke.mjs
 
+# l3afpad (GTK3 leafpad fork — the first real GTK3 PRODUCTIVITY app, #122: a
+# Notepad-class open/edit/save text editor. Signals wired in C like gtk3-demo
+# (GtkActionEntry/G_CALLBACK + g_signal_connect, never
+# gtk_builder_connect_signals) → NO GModule dependency. --selftest class_inits
+# the editor widget classes + fires a GtkTextBuffer "changed" signal into an
+# address-taken C handler through the fpcast seam, display-free; the editor
+# window + an open/edit/save round-trip to /mnt/pc are a MANUAL browser check).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/l3afpad-smoke.mjs
+
 # #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
 #   sigalrm-smoke   — self-armed SIGALRM/itimer/alarm (kernel mechanism, #55).
 #   kill-wake-smoke — cross-process kill() async-signal wake (a reduced C
@@ -249,6 +274,13 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.m
 # config-change irq; the stock driver hvc_resize()s the tty. PASS = `stty size`
 # in-guest reflects the new size. Also wired into nix-wasm.yml boot-smoke (gating).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/resize-smoke.mjs
+
+# #145 guest-audio smoke (busybox-only boot): virtio-snd (kernel patch 0027,
+# CONFIG_SND_VIRTIO) + cross alsa-lib. `alsa-tone` plays a deterministic 440Hz
+# sine through snd_pcm_open/set_params/writei/drain; PASS = the host device
+# model saw SET_PARAMS(48k/2ch)+START and received the full tone BIT-EXACT.
+# Also wired into nix-wasm.yml boot-smoke (gating).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/snd-smoke.mjs
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
@@ -762,6 +794,39 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   runtime on this guest — the `builder` demo would hit the GModule wall if its
   own `.ui` autoconnect path is exercised, and `glarea` needs GL (libepoxy is
   built no-GL) — but the browser itself and the bulk of the demos do.
+- **l3afpad — the first real productivity app** (`userspace/l3afpad.nix`,
+  `patches/l3afpad/`, `deps-overlay.nix` `l3afpad`; issue #122). The GTK3 fork
+  of leafpad — a Notepad-class open/edit/save text editor, the follow-through
+  on the gtk3-demo lesson: it wires every signal in C (menu.c's
+  `GtkActionEntry` tables with `G_CALLBACK` fn pointers + `g_signal_connect`
+  in window.c) and never calls `gtk_builder_connect_signals`, so NO GModule
+  wall and NO dynsym inject — just the shared `--fpcast-emu` post-link pass.
+  nixpkgs dropped l3afpad before our pin, so it is a from-scratch derivation
+  like gcalctool (in the overlay as `cross.l3afpad`), pinned to the same
+  rev+hash nixpkgs last shipped (24.05). The source is a git checkout (no
+  pre-generated ./configure, no po/Makefile.in.in), so the build runs
+  `autoreconfHook` **plus `intltoolize` in `preAutoreconf`** (the step
+  upstream's autogen.sh and Debian's dh_autoreconf run — autoreconf alone does
+  not invoke intltoolize). Its 2013-era `AM_CONFIG_HEADER` / two-arg
+  `AM_INIT_AUTOMAKE` are fine: automake 1.17 still accepts both
+  (obsolete-warning only — verified in automake's m4/obsolete.m4 + init.m4).
+  `--disable-print` + **patch 0002 compile out gtkprint.c entirely**: upstream
+  guards every print *use* with `#if ENABLE_PRINT` but left the definitions
+  unconditional, and the wayland-only/no-cups cross gtk3 has no unix-print
+  layer (the gtk3-demo pagesetup.c gap) — the unconditional TU would pull
+  missing libgtk members at link. `strictDeps=false` for glib's
+  `AM_GLIB_DEFINE_LOCALEDIR` m4 (same as galculator's `AM_GLIB_GNU_GETTEXT`).
+  Ships via `environment.systemPackages` ONLY (NOT initramfs `extraBins` — the
+  gcalctool tmpfs lesson: the binary loads from the evictable squashfs, and
+  its `share/pixmaps/l3afpad.png` window icon — loaded at runtime from the
+  baked ICONDIR store path — rides the served closure). `--selftest` is the
+  display-free gate: widget `class_init`s (menubar/textview/scrolled-window)
+  through the fpcast seam, a real `GtkTextBuffer` "changed" signal fired into
+  an address-taken C handler (buffers, unlike widgets, are instantiable
+  without a display), `gtk_get_major_version()==3`. Gate:
+  `node demo/node/l3afpad-smoke.mjs` matches `/L3AFPAD-SELFTEST: .* OK/` (in
+  the `nix-boot-smoke` CI job, one-per-boot like its GTK siblings). The
+  open/edit/save-a-file-to-/mnt/pc flow is a MANUAL browser check.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
@@ -845,7 +910,8 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   canonical layout changed — the console is now **8 single-port virtio-console
   devices** at an explicit `VW_DEV_CONSOLE_BASE = 8` (host idx 8..15, registered by a
   `for (i<8) virtio_wasm_register(VW_DEV_CONSOLE_BASE + i, …)` loop), with
-  `VW_DEV_VSOCK = 7` BEFORE them (index 6 unused). So the assertion now enforces the
+  `VW_DEV_VSOCK = 7` BEFORE them (index 6 = `VW_DEV_SND` since #145 — the
+  virtio-snd sound card, patch 0027; the postPatch assertion pins SND=6 too). So the assertion now enforces the
   OPPOSITE order from #87's "bug" framing above — `VW_DEV_VSOCK(7) < CONSOLE_BASE(8)`
   is CORRECT now — and checks the `VW_DEV_CONSOLE_BASE + i` loop (not a single
   `VW_DEV_CONSOLE` call) plus the pinned `=7`/`=8` values. Multiport was abandoned:
@@ -871,6 +937,36 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (`setConfigSize`/`getConfigSize`) — written before the irq is raised, race-free. Gated
   by `resize-smoke.mjs` (boot → `console.resize` → `stty size`). It's a GENERAL transport
   feature (any future config-change device can use it), console is just the first user.
+- **Guest audio = virtio-snd (patch 0027, `VW_DEV_SND=6`) + cross alsa-lib; the
+  device's completion model is LOAD-BEARING** (#145; `runtime/virtio/snd-device.js`,
+  `deps-overlay.nix` alsa-lib/libcanberra, `patches/alsa-lib/0001`,
+  `patches/libcanberra/0001`). Stock mainline driver (CONFIG_SND_VIRTIO) over the
+  wasm transport; the host serves ONE s16/48kHz playback stream and hands PCM to a
+  pluggable sink (`snd.onReady(device)` boot hook → `device.setSink(…)`; pc's
+  AudioWorklet in `js/linux/guest-audio.js`). THREE rules found by BOOTING, not
+  spec-reading — all three produced `-EIO` in alsa-lib with no kernel error:
+  (1) tx buffers queued BEFORE `R_PCM_START` must stay HELD in the vring (the
+  driver pre-queues its whole ALSA buffer and counts period-elapsed only on
+  completions while running — early completion starves the accounting, writei
+  hangs to its 10s timeout); (2) running completions must be PACED against a
+  real-time playback clock (a whole buffer completing in one burst wraps hw_ptr
+  exactly onto itself → "stalled" pointer → same -EIO; pacing is also what makes
+  writei block like real hardware); (3) the driver submits only FULL periods
+  (`virtio_pcm_msg.c` accumulates to period_bytes), so a playback app must
+  silence-pad its final period before `snd_pcm_drain` (aplay does; alsa-tone
+  does) or drain times out (~buffer_size*1.1/rate ms). alsa-lib cross needs
+  `--without-versioned` PLUS patches/alsa-lib/0001 (the no-versioning alias
+  fallback and link_warning are module-level `.symver`/`.weak`/`.set`/`.section`
+  inline asm — no wasm encoding; the patch swaps in C weak-alias attributes) and
+  compiles out the fork() holdouts per the process-model rule (dmix/dshare/
+  dsnoop + shm/aserver, ladspa, UCM). libcanberra builds `--with-builtin=alsa`
+  (the dso loader is ltdl dlopen; builtin compiles the ALSA driver INTO the lib —
+  the gio-modules posture) against our wayland-only gtk3 via patches/libcanberra/
+  0001 (guards the X11-metadata code behind GDK_WINDOWING_X11; nixpkgs' runtime-
+  check patch still needs gdkx.h) + an anchored configure sed dropping the ltdl
+  hard-require (builtin builds never use it). The cc-wrapper wasm-ld filter also
+  grew `--as-needed` (libcanberra's Makefile passes it; ELF-DSO-only). Gate:
+  `snd-smoke.mjs` (bit-exact PCM at the sink). ENGINE_ABI 11.
 - **busybox `timeout` — `-pPID` must precede the operands (musl getopt ≠ glibc)**
   (`patches/busybox/0008`; #35). `timeout PROG` spawns a watcher that re-execs
   itself with a hidden `-pPID` (the grandparent pid to SIGTERM after the timeout),
