@@ -716,6 +716,45 @@ describe("checked (A2 present-check) translate", () => {
     expect(instrument(mod).length).toBeGreaterThan(mod.length);
   });
 
+  test("helper-call fallback (over inlineLimit) still faults + translates correctly (#164)", () => {
+    // #164: a function whose inline instrumentation would exceed V8's max
+    // function size is re-emitted with a CALL to __mmu_translate_ck instead of
+    // the inline walk. Force that path for EVERY function with inlineLimit:1,
+    // then prove the checked semantics are byte-for-byte preserved: a not-
+    // present page faults exactly once (right kind), then the access succeeds.
+    const V = HEAP + 0x64000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    const b = bootChecked(bytes, V);
+    new Uint8Array(b.mem.buffer)[V] = 0x42;
+
+    // load: kind=0 fault, then reads the byte (translated through the helper)
+    expect(b.inst.exports.load_u8(V)).toBe(0x42);
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 0 });
+    // tp still sourced by calling __get_tls_base (fixture sentinel), unchanged
+    expect(b.rawCalls[0].tp).toBe(0x1234);
+
+    // store to a DIFFERENT not-present page: kind=1 fault, then writes
+    const W = HEAP + 0x66000;
+    // re-map W absent (bootChecked only made V absent); reuse the running inst
+    const t = new Uint32Array(b.mem.buffer);
+    const wpte = t[PT / 4 + (W >>> 22)] & ~0xfff;
+    t[wpte / 4 + ((W >>> 12) & 0x3ff)] = 0;
+    b.inst.exports.store_u8(W, 0x99);
+    expect(new Uint8Array(b.mem.buffer)[W]).toBe(0x99);
+    expect(b.calls.some((c) => c.ea === W && c.kind === 1)).toBe(true);
+  });
+
+  test("helper-call fallback yields a smaller module than the inline path (#164)", () => {
+    // The point of the fallback: the helper-call body is materially smaller than
+    // the inline walk, which is what keeps an over-limit function under V8's
+    // ceiling. A tiny inlineLimit forces the fallback; the inline build (huge
+    // limit) is the baseline. Same fixture, so any size delta is the emit mode.
+    const inline = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1e9 });
+    const viaHelper = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    expect(viaHelper.length).toBeLessThan(inline.length);
+  });
+
   test("a present page never faults", () => {
     const V = HEAP + 0x50000;
     const bytes = instrument(buildCheckedFixture(), { checked: true });

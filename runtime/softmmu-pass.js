@@ -646,9 +646,24 @@ function skipAtomic(b, i) {
  * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
  *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
  *   default A1 unchecked fast path (byte-identical to before A2 existed).
+ * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
+ *   #164: when set, emit each access's translate as a CALL to the appended
+ *   translate helper (`__mmu_translate` / `__mmu_translate_ck`) instead of
+ *   inlining the walk. Semantically identical — the helper IS the same walk as
+ *   a function — but ~4-5× smaller per access. `instrument()` uses this ONLY for
+ *   a function whose inline body would exceed V8's per-function size limit
+ *   (`kV8MaxWasmFunctionSize`); every other function keeps the measured-fast
+ *   inline path. Null (default) = inline, byte-identical to before #164.
  * @returns {number[]}
  */
-export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns, checked = null) {
+export function rewriteFuncBody(
+  code,
+  numParams,
+  ptBaseGlobal,
+  bulkFns,
+  checked = null,
+  helper = null,
+) {
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -736,6 +751,20 @@ export function rewriteFuncBody(code, numParams, ptBaseGlobal, bulkFns, checked 
   // present-bit test can consume a copy while the raw value survives for the
   // next level / the final address computation.
   const emitTranslate = (kind) => {
+    if (helper) {
+      // #164: helper-call translate — call the appended walk function instead
+      // of inlining it, keeping this (over-limit) function under V8's max
+      // function size. `$EA` already holds the effective address (the load/
+      // store/atomic emit set it), exactly as the inline path expects.
+      out.push(0x20, ...u(EA)); // local.get ea
+      if (checked) {
+        out.push(0x41, ...s(kind)); // i32.const kind (fault access-kind)
+        out.push(0x10, ...u(helper.checkedTranslateFunc)); // call __mmu_translate_ck -> phys
+      } else {
+        out.push(0x10, ...u(helper.translateFunc)); // call __mmu_translate -> phys
+      }
+      return;
+    }
     if (!checked) {
       out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
       out.push(0x20, ...u(EA)); // local.get ea
@@ -1444,7 +1473,11 @@ function moduleName(bytes) {
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
- * @param {{ exportControls?: boolean, checked?: boolean }} [opts]
+ * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number }} [opts]
+ *   `inlineLimit` (#164): the byte size above which a function's inline
+ *   instrumentation is replaced by the helper-call translate (default 6 MiB,
+ *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
+ *   fallback on small functions.
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -1520,6 +1553,16 @@ export function instrument(bytes, opts = {}) {
   const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
 
   // --- rewrite each defined function body inline -----------------------------
+  // #164: the inline translate expands each access ~4-10× — a large, memory-op-
+  // dense function (seen in nix.wasm: one function inflated to 23 MB) can exceed
+  // V8's per-function limit (kV8MaxWasmFunctionSize = 7,654,321 B) and refuse to
+  // compile(). For any function whose inline body crosses `inlineLimit`, re-emit
+  // it with the HELPER-CALL translate (`__mmu_translate`/`_ck`) — same walk, a
+  // call instead of an inline block, so the body shrinks well under the ceiling.
+  // Every other function keeps the measured-fast inline path. `opts.inlineLimit`
+  // (default 6 MiB, safely below V8's ceiling) is overridable for unit tests.
+  const inlineLimit = opts.inlineLimit ?? 6_000_000;
+  const helperFns = { translateFunc, checkedTranslateFunc };
   const cb = codeSec.body;
   let ci = 0;
   let nCode;
@@ -1531,7 +1574,25 @@ export function instrument(bytes, opts = {}) {
     const body = cb.subarray(ci, ci + size);
     ci += size;
     const numParams = paramCounts[defTypes[f]] ?? 0;
-    const rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx);
+    let rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx);
+    if (rewritten.length > inlineLimit) {
+      const viaHelper = rewriteFuncBody(
+        body,
+        numParams,
+        ptBaseGlobal,
+        bulkFns,
+        checkedCtx,
+        helperFns,
+      );
+      // Not a silent cap (per #128's boot-debuggability ethos): announce the
+      // fallback + both sizes so a boot log shows exactly which function and why.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `softmmu: function #${f} inline body ${rewritten.length}B exceeds ${inlineLimit}B ` +
+          `— using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
+      );
+      rewritten = viaHelper;
+    }
     newCodeEntries.push([...u(rewritten.length), ...rewritten]);
   }
   // append the translate helper body (RAW loads — it IS the translate):
