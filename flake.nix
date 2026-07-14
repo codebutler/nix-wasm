@@ -532,26 +532,25 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
+      # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
+      # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
+      # nix:true boot resolves the compiled-in /nix/store datadir instead).
+      initramfsExtraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-<<<<<<< HEAD
         extraBins = initramfsExtraBins;
+        extraShare = initramfsExtraShare;
       };
       # #131 prove-then-flip: the same initramfs with the REAL-FORK busybox +
       # bootstrap, for booting the FULL nix system on .#kernel-mmu-a2 (the
       # prerequisite gate before any accommodation can be deleted). The graphics
-      # extraBins are unchanged — the engine software-MMU-instruments each at load.
+      # extraBins/extraShare are unchanged — the engine software-MMU-instruments
+      # each binary at load.
       wasmInitramfsFork = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusyboxFork; init = wasmBootstrapFork;
         extraBins = initramfsExtraBins;
-=======
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
-        # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
-        # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
-        # nix:true boot resolves the compiled-in /nix/store datadir instead).
-        extraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
->>>>>>> origin/master
+        extraShare = initramfsExtraShare;
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
