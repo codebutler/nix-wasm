@@ -153,6 +153,52 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         console.error(
           `[mmu-nullderef ${runner_name}] ea=0x${ea.toString(16)} ("${chars}") kind=${args[4]}\n${new Error().stack}`,
         );
+        // #128 GROUND-TRUTH peek (revert with the probe): translation is proven
+        // correct (all VA ranges, both paths, 128 MiB scale), so the pointer
+        // field genuinely HOLDS 0x616e6962 — a real corruption or a nix latent
+        // UB, not a mistranslation. Walk THIS task's page table (own_pt_base,
+        // nix-env's root since the faulting user code called this syscall in its
+        // own worker) over the shared physical arena and hex+ASCII-dump the live
+        // stack frame of Config::set (`_settings.find(name)`), so we can SEE
+        // whether the offending std::string is an intact-but-misread object
+        // (SSO/layout: content "binary…" intact, data-pointer field wrong) or
+        // wholesale garbage. Best-effort + guarded; ONE shot (fatal ea only).
+        if (ea === 0x616e6962) {
+          try {
+            const u32 = new Uint32Array(memory.buffer);
+            const u8 = new Uint8Array(memory.buffer);
+            const pt = own_pt_base >>> 0;
+            const xlate = (va) => {
+              va >>>= 0;
+              const pgd_e = u32[(pt + ((va >>> 22) << 2)) >>> 2] >>> 0;
+              if (!pgd_e) return -1;
+              const pte = u32[((pgd_e & ~0xfff) + (((va >>> 12) & 0x3ff) << 2)) >>> 2] >>> 0;
+              if (!(pte & 1)) return -1;
+              return ((pte & ~0xfff) + (va & 0xfff)) >>> 0;
+            };
+            const sp = user_executable_imports.env.__stack_pointer.value >>> 0;
+            console.error(`[mmu-peek] own_pt_base=0x${pt.toString(16)} sp=0x${sp.toString(16)}`);
+            // dump [sp, sp+0x400): the active Config::set frame grows up from sp.
+            for (let off = 0; off < 0x400; off += 16) {
+              const va = (sp + off) >>> 0;
+              const p = xlate(va);
+              if (p < 0) {
+                console.error(`[mmu-peek] 0x${va.toString(16)}: <unmapped>`);
+                continue;
+              }
+              let hex = "";
+              let asc = "";
+              for (let k = 0; k < 16; k++) {
+                const b = u8[p + k];
+                hex += b.toString(16).padStart(2, "0") + (k === 7 ? "  " : " ");
+                asc += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : ".";
+              }
+              console.error(`[mmu-peek] 0x${va.toString(16)}: ${hex} |${asc}|`);
+            }
+          } catch (e) {
+            console.error(`[mmu-peek] failed: ${e && e.message}`);
+          }
+        }
       }
       return fn(...args);
     };
