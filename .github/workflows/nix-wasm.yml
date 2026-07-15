@@ -663,11 +663,7 @@ jobs:
       - name: Assemble MMU nix:true artifacts (substitute from Cachix)
         run: |
           mkdir -p .artifacts-nix-mmu
-          # DIAGNOSTIC (#166, revert before merge): boot the debugTrace kernel so
-          # the nix.wasm runtime SIGSEGV logs `MMUSEGV comm= pid= addr= kind=`
-          # (patch 0025's bad_area log) — the faulting address localizes the bug.
-          # debugTrace only adds patch 0025; the production kernel is untouched.
-          ln -sfn "$(nix build -L '.#kernel-mmu-a2-dbg' --no-link --print-out-paths)/vmlinux.wasm" \
+          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
             .artifacts-nix-mmu/vmlinux.wasm
           ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz

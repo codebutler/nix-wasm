@@ -207,13 +207,7 @@ cross.stdenv.mkDerivation {
     # busybox (which provides `sh` + coreutils) in the shared system profile.
     # External commands ash runs resolve to that busybox on PATH.
     mkdir -p "$out/bin"
-    # pc (#166 diag, TEMPORARY — revert with the engine #166 probe): install the
-    # UNSTRIPPED binary so it keeps its wasm "name" custom section. ash's remaining
-    # MMU-flip ctor fault (ea=0) came back as raw wasm-function[N] indices because
-    # the stripped `busybox` has no name section (sommelier kept its → the probe
-    # named __uselocale directly). The unstripped binary lets the [mmu-null-fault]
-    # probe print the faulting ash function by name. Runs identically; just larger.
-    cp build/busybox_unstripped "$out/bin/busybox"
+    cp build/busybox "$out/bin/busybox"
     ln -sf busybox "$out/bin/ash"
     runHook postInstall
   '';

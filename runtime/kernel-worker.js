@@ -106,41 +106,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     syscall_trace_budget = 120;
   };
 
-  /// pc (#166 diag, DIAGNOSTIC — revert before merging the MMU flip): capture
-  /// the guest wasm frames on a NULL-ish software-MMU fault. softmmu-pass.js
-  /// emits the fault call `__wasm_syscall_2(sp, tp, NR_MMU_FAULT=244, ea, kind)`
-  /// INLINE at every instrumented load/store site, so on a `*(T*)NULL` deref
-  /// (ea < one page) V8's Error().stack — which includes wasm frames — names the
-  /// exact faulting function in getty/sommelier that the CONFIG_MMU flip unmasks
-  /// (page 0 is unmapped under MMU, was readable linear memory on NOMMU).
-  /// Budgeted so the respawn storm can't flood the log. Composed AROUND the real
-  /// syscall_2 handler (runs on syscall_logged's fast path too), so it fires with
-  /// tracing off. A legit demand-page fault has ea >= a page and is ignored.
-  let mmu_null_fault_budget = 64; // pc (#166 diag): capture the whole 0x0 storm, not just the first
-  const mmu_fault_probe =
-    (fn) =>
-    (...args) => {
-      // wrapper ABI: (sp, tp, nr, a0=ea, a1=kind)
-      if (args[2] == 244 && args[3] >= 0 && args[3] < 0x1000 && mmu_null_fault_budget > 0) {
-        mmu_null_fault_budget--;
-        const frames = String(new Error().stack || "")
-          .split("\n")
-          .filter((l) => /wasm-function|wasm:\/\//.test(l))
-          .slice(0, 12)
-          .map((l) => l.trim())
-          .join(" <- ");
-        const earlytp = !!(
-          user_executable_instance &&
-          user_executable_instance.exports &&
-          user_executable_instance.exports.__wasm_early_tp_init
-        );
-        console.error(
-          `[mmu-null-fault ${runner_name}] ea=${args[3]} kind=${args[4]} earlytp_export=${earlytp} ${frames}`,
-        );
-      }
-      return fn(...args);
-    };
-
   /// A string denoting the runner name (same as Worker name), useful for debugging.
   let runner_name = "[Unknown]";
 
@@ -1184,7 +1149,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // signal being handled in its return path would need to save (and restore) them on its signal stack.
             __wasm_syscall_0: syscall_logged(vmlinux_instance.exports.wasm_syscall_0),
             __wasm_syscall_1: syscall_logged(vmlinux_instance.exports.wasm_syscall_1),
-            __wasm_syscall_2: syscall_logged(mmu_fault_probe(vmlinux_instance.exports.wasm_syscall_2)),
+            __wasm_syscall_2: syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
             __wasm_syscall_3: syscall_logged(vmlinux_instance.exports.wasm_syscall_3),
             // pc: futex_time64 (nr=422) split-arity shim — see patch 0015.
             // glib's g_futex_simple calls __NR_futex_time64 with 4 args
@@ -1527,11 +1492,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
             // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
             // export just keeps the pre-fix behaviour (fine on NOMMU).
-            // pc (#166): seed a valid main-thread pointer before ctors (see the musl
-            // __wasm_early_tp_init note). Diagnostic confirmed every exec'd binary
-            // exports+runs this (early_tp_export=true), and it fixed the locale (0x60)
-            // fault class — the per-exec log is removed so it can't drown the
-            // [mmu-null-fault] frames that localize the remaining 0x0 deref.
+            // pc (#166): seed a valid main-thread pointer before ctors (see musl
+            // __set_thread_area.c __wasm_early_tp_init). Ctors run before _start ->
+            // __init_tp, so a TLS-touching ctor (libc++ iostream -> __uselocale)
+            // would otherwise deref a null struct pthread — NOMMU-masked, SIGSEGV
+            // under the software MMU. Guarded so an older guest libc without the
+            // export keeps the pre-fix behaviour.
             if (instance.exports.__wasm_early_tp_init) {
               instance.exports.__wasm_early_tp_init();
             }

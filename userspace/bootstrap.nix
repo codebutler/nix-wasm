@@ -106,19 +106,9 @@ pkgs.writeText "init" ''
   # host DHCP server may not be up yet at boot), -A 2 (short inter-round wait).
   # No -q: udhcpc stays resident so it re-runs the lease script on renew. Guarded
   # on the NIC existing so a no-net kernel still boots.
-  # pc (#166 diag, TEMPORARY): step markers to localize the post-crash-fix MMU
-  # boot hang. With all four null-deref classes fixed nothing crashes anymore,
-  # but the boot goes silent between the overlayfs mount and the "pc: booting"
-  # echo — every step below is a suspect (the udhcpc launch used to CRASH
-  # instantly and thereby never blocked; the $(readlink) substitution, the
-  # activate script, and the ash promote all exercise NOMMU-era shell spawn
-  # machinery that now runs further than ever under MMU). Remove with the rest
-  # of the #166 diagnostics.
-  echo "pc-init: dhcp-launch"
   if [ -e /sys/class/net/eth0 ]; then
     sh -c 'ip link set eth0 up 2>/dev/null; udhcpc -i eth0 -f -t 0 -A 2 >/dev/null 2>&1 &'
   fi
-  echo "pc-init: dhcp-launched"
 
   # Resolve + activate the system, then hand off to init. The whole toolchain
   # (nix + multi-call entry points, clang, wasm-ld, cc, make) is now part of the
@@ -128,10 +118,8 @@ pkgs.writeText "init" ''
   # see store-manifest.py), so a plain readlink resolves it — no `-f`/realpath
   # canonicalization (musl realpath corrupts long targets read over 9p/overlay).
   sys=$(readlink /nix/var/nix/profiles/system 2>/dev/null)
-  echo "pc-init: resolved sys=$sys"
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
-    echo "pc-init: activate-done"
 
     # Promote the autoconf-capable forkshell ash to /bin/sh (the initramfs bakes
     # busybox hush there). hush isn't POSIX-enough for autoconf: a package's
@@ -145,7 +133,6 @@ pkgs.writeText "init" ''
     # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
     # forkMode: keep busybox-fork's hush as /bin/sh (see the header comment).
     ${pkgs.lib.optionalString (!forkMode) ''[ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh''}
-    echo "pc-init: ash-promoted"
 
     # nix-env channels (resolve `nix-env -iA <channel>.<name>`), real-NixOS-style.
     # Two channels in ~/.nix-defexpr (nix-env addresses each top-level dir as a
