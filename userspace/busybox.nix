@@ -177,6 +177,15 @@ cross.stdenv.mkDerivation {
     rmdir "$out/usr" 2>/dev/null || true
     rm -f "$out/linuxrc"
 
+    # pc (#166 diag, TEMPORARY — revert with the engine #166 probe): overwrite the
+    # installed (stripped) busybox with the pre-strip link output so it keeps its
+    # wasm "name" custom section. The remaining MMU-flip 0x0 fault storms in the
+    # MAIN busybox (getty/init/sh applets — the [mmu-null-fault] frames show a
+    # stable 8-frame stack in the stripped module, unnamed), and the same
+    # unstripped trick already named sommelier's fault down to the exact function.
+    # Runs identically; just larger.
+    cp build/busybox_unstripped "$out/bin/busybox"
+
     runHook postInstall
   '';
 
