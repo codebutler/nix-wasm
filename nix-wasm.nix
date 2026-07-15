@@ -223,7 +223,15 @@ pkgs.stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin
-    ${bt}/bin/llvm-strip nix.unstripped.wasm -o $out/bin/nix
+    # DIAGNOSTIC (#166, revert to the llvm-strip below once localized): ship the
+    # UNSTRIPPED nix so its wasm name section survives into the softmmu-instrumented
+    # module (the pass preserves custom sections and adds no import, so function
+    # indices stay valid) — the engine NULL-deref backtracer (kernel-worker.js
+    # mmu_nullfault_probe) then prints function NAMES instead of wasm-function[N],
+    # naming the C++-startup site that reads NULL+0x60. The name section is just
+    # symbol names (no DWARF) → a few MB, no squashfs-size risk.
+    cp nix.unstripped.wasm $out/bin/nix
+    # ${bt}/bin/llvm-strip nix.unstripped.wasm -o $out/bin/nix
     # nix is a MULTI-CALL binary (it dispatches on argv[0]); the bootstrap used to
     # create these symlinks on /usr/bin → /opt/bin/nix. With the toolchain folded
     # into the system profile they ship in the package, so the profile bin/ carries
