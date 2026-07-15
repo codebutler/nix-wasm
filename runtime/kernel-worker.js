@@ -114,11 +114,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // HERE names the exact guest wasm function doing the bad access. Fire when the
   // faulting ea is OBVIOUSLY a bad pointer, NOT a numeric demand-paging fault:
   //   (a) ea < 0x10000  — a NULL/small-offset deref (first 64 KiB never mapped), OR
-  //   (b) all 4 bytes of ea are printable ASCII — a STRING used as a pointer. The
-  //       dbg kernel caught the nix-env SIGSEGV at ea=0x616e6962 = "bina" (kind=0
-  //       load), a clobbered/confused pointer holding nix "binary cache" text; a
-  //       legit demand-paging fault addr (0x4000xxxx region) always carries a 0x00
-  //       or high byte, so it never trips the ASCII test → no flood.
+  //   (b) all 4 bytes of ea are printable ASCII AND ea >= 0x50000000 — a STRING
+  //       used as a pointer, OUTSIDE the user heap/mmap region. The dbg kernel
+  //       caught the nix-env SIGSEGV at ea=0x616e6962 = "bina" (kind=0 load), a
+  //       clobbered pointer holding nix "binary cache" text (~1.6 GiB VA). The
+  //       0x50000000 floor is LOAD-BEARING: legit demand-paging faults in the
+  //       0x40xxxxxx heap region ARE all-ASCII-prone (0x40='@'; run #344 caught a
+  //       benign 0x4073406c="l@s@" store in alloc_slot and exhausted the budget
+  //       before the fatal fault). Excluding <0x50000000 keeps the budget for the
+  //       real thing.
+  //   (c) ea === 0x616e6962 exactly — the DETERMINISTIC fatal address (identical
+  //       across run #342/#344), a belt-and-suspenders guarantee it's captured.
   // Budgeted so a refault loop can't flood; prints the ASCII rendering for clarity.
   const printable = (b) => b >= 0x20 && b <= 0x7e;
   let mmu_nullfault_budget = 24;
@@ -127,11 +133,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     (...args) => {
       const ea = args[3] >>> 0;
       const asciiPtr =
+        ea >= 0x50000000 &&
         printable(ea & 0xff) &&
         printable((ea >> 8) & 0xff) &&
         printable((ea >> 16) & 0xff) &&
         printable((ea >> 24) & 0xff);
-      if (args[2] === 244 && (ea < 0x10000 || asciiPtr) && mmu_nullfault_budget > 0) {
+      if (
+        args[2] === 244 &&
+        (ea < 0x10000 || ea === 0x616e6962 || asciiPtr) &&
+        mmu_nullfault_budget > 0
+      ) {
         mmu_nullfault_budget--;
         const chars = String.fromCharCode(
           ea & 0xff,
