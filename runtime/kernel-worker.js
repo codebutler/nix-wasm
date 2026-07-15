@@ -106,19 +106,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     syscall_trace_budget = 120;
   };
 
-  // DIAGNOSTIC (#166/#128, revert once localized): a NULL-page-deref backtracer.
+  // DIAGNOSTIC (#166/#128, revert once localized): a low-address-deref backtracer.
   // Under the software MMU the A2 present-checked translate routes an unresolved
   // fault through `__wasm_syscall_2(sp, tp, NR_MMU_FAULT=244, ea, kind)` — emitted
-  // INLINE at the faulting deref site, so a `new Error().stack` captured HERE
-  // names the exact guest wasm function doing the bad access. Fire only on a
-  // NULL-page ea (< 0x1000 = a genuine NULL/small-offset deref, e.g. nix-env's
-  // 0x60), budgeted so a refault loop can't flood. This localizes the shared
-  // C++/libc++-startup NULL-deref (#166: sommelier + nix-env both fault at 0x60).
-  let mmu_nullfault_budget = 8;
+  // INLINE at the faulting deref site (or via the helper-call translate for an
+  // over-6MB function like nix.wasm's #2), so a `new Error().stack` captured HERE
+  // names the exact guest wasm function doing the bad access. Fire on a low ea
+  // (< 0x10000 = a NULL/small-offset deref through an unseeded/wild base — the
+  // first 64 KiB is never a valid user mapping), budgeted so a refault loop can't
+  // flood. #166's libc++-startup fault was at 0x60; the current nix-env SIGSEGV is
+  // ABOVE the old 0x1000 window (no probe hit), so this widens to 0x10000 to catch
+  // a small-offset sibling in the SAME cycle the dbg kernel's MMUSEGV prints the
+  // exact addr (if it's higher, MMUSEGV localizes it and a targeted probe follows).
+  let mmu_nullfault_budget = 24;
   const mmu_nullfault_probe =
     (fn) =>
     (...args) => {
-      if (args[2] === 244 && args[3] >>> 0 < 0x1000 && mmu_nullfault_budget > 0) {
+      if (args[2] === 244 && args[3] >>> 0 < 0x10000 && mmu_nullfault_budget > 0) {
         mmu_nullfault_budget--;
         console.error(
           `[mmu-nullderef ${runner_name}] ea=0x${(args[3] >>> 0).toString(16)} kind=${args[4]}\n${new Error().stack}`,

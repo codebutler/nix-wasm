@@ -663,7 +663,15 @@ jobs:
       - name: Assemble MMU nix:true artifacts (substitute from Cachix)
         run: |
           mkdir -p .artifacts-nix-mmu
-          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
+          # DIAGNOSTIC (#166/#128 post-fix, revert to .#kernel-mmu-a2 once localized):
+          # the __wasm_early_tp_init export fixed the libc++-ctor 0x60 crash (boot now
+          # reaches the shell + 9P works), but `nix-env -iA` still SIGSEGVs at an addr
+          # ABOVE the engine probe's window. The dbg kernel (patch 0025) prints
+          # `MMUSEGV comm= pid= addr= kind=` on the fatal fault path so the exact
+          # faulting address + process are captured — distinguishing a genuine
+          # nix.wasm wild-pointer deref from a softmmu helper-call-translate bug (this
+          # is the first REAL binary big enough to trip the >6MB helper fallback).
+          ln -sfn "$(nix build -L '.#kernel-mmu-a2-dbg' --no-link --print-out-paths)/vmlinux.wasm" \
             .artifacts-nix-mmu/vmlinux.wasm
           ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz
