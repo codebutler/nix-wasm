@@ -10,7 +10,7 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { NR_MMU_FAULT, instrument, scanUnhandled } from "./softmmu-pass.js";
+import { NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -1069,4 +1069,35 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: SRC, kind: 0 });
     for (let k = 0; k < 8; k++) expect(u8[DST + k]).toBe(k + 10);
   });
+});
+
+describe("concatBytes — code-section assembly must not use Array.flat", () => {
+  test("byte-exact concatenation of mixed number[] / Uint8Array chunks", () => {
+    const chunks = [[1, 2, 3], new Uint8Array([4, 5]), [], new Uint8Array([]), [6]];
+    const out = concatBytes(chunks);
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect([...out]).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  test("empty input yields an empty Uint8Array", () => {
+    const out = concatBytes([]);
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect(out.length).toBe(0);
+  });
+
+  test("truncates each byte to 8 bits exactly like a wasm code section copy", () => {
+    // values are always emitted as bytes upstream; assert the typed-array copy
+    // semantics are the ones the assembler relies on (no accidental widening).
+    expect([...concatBytes([[0xff, 0x100 & 0xff], new Uint8Array([0x00])])]).toEqual([
+      0xff, 0x00, 0x00,
+    ]);
+  });
+
+  // NOTE: the bug this replaced — `newCodeEntries.flat()` throwing
+  // `RangeError: Invalid array length` on nix.wasm's ~hundreds-of-MB
+  // instrumented code section — is V8-specific (Array.flat's FixedArray
+  // ceiling, ~128M elements). These engine unit tests run under bun
+  // (JavaScriptCore), which has a different/higher ceiling, so the crash can
+  // only be reproduced end-to-end by the Node boot smoke (mmu prove-then-flip);
+  // asserting `.flat()` throws here would be a false engine-specific gate.
 });

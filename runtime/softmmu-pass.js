@@ -424,6 +424,30 @@ function s(n) {
 }
 const vec = (items) => [...u(items.length), ...items.flat()];
 
+/**
+ * Concatenate an ordered list of byte chunks (each a `number[]` or `Uint8Array`)
+ * into a single `Uint8Array`. Use this instead of `chunks.flat()` + spread when
+ * the aggregate can be large: V8's `Array.prototype.flat` throws
+ * `RangeError: Invalid array length` once the flattened result exceeds its
+ * FixedArray accumulator ceiling (~128M elements empirically — far below
+ * 2**32), which the instrumented code section of a large binary like nix.wasm
+ * (hundreds of MB) blows past mid-boot at `execve`. A summed typed-array copy
+ * has no such ceiling and never materializes a giant intermediate number array.
+ * @param {Array<number[]|Uint8Array>} chunks
+ * @returns {Uint8Array}
+ */
+export function concatBytes(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
 /** Split a module into [{id, body}] (body excludes id + size). */
 function splitSections(bytes) {
   if (bytes[0] !== 0 || bytes[1] !== 0x61) throw new Error("not wasm");
@@ -1593,7 +1617,7 @@ export function instrument(bytes, opts = {}) {
       );
       rewritten = viaHelper;
     }
-    newCodeEntries.push([...u(rewritten.length), ...rewritten]);
+    newCodeEntries.push(concatBytes([u(rewritten.length), rewritten]));
   }
   // append the translate helper body (RAW loads — it IS the translate):
   //   translate(va): pt_base + ((u32[pt_base + (va>>>12<<2)]) not inlined here)
@@ -1642,22 +1666,26 @@ export function instrument(bytes, opts = {}) {
     0x6a, // +
     0x0b,
   ];
-  newCodeEntries.push([...u(translateBody.length), ...translateBody]);
+  newCodeEntries.push(concatBytes([u(translateBody.length), translateBody]));
   for (const body of [
     memcpyHelperBody(translateFunc, checkedTranslateFunc),
     memfillHelperBody(translateFunc, checkedTranslateFunc),
     ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
   ]) {
-    newCodeEntries.push([...u(body.length), ...body]);
+    newCodeEntries.push(concatBytes([u(body.length), body]));
   }
   if (checkedCtx) {
     const ckBody = checkedTranslateBody(ptBaseGlobal, checkedCtx);
-    newCodeEntries.push([...u(ckBody.length), ...ckBody]);
+    newCodeEntries.push(concatBytes([u(ckBody.length), ckBody]));
   }
-  const newCodeBody = [
-    ...u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0)),
-    ...newCodeEntries.flat(),
-  ];
+  // Assemble the code section as a Uint8Array via a summed byte copy, NOT
+  // `newCodeEntries.flat()` + spread: the flattened number array of a large
+  // instrumented binary (nix.wasm, hundreds of MB) exceeds V8's Array.flat
+  // ceiling → `RangeError: Invalid array length` (see concatBytes).
+  const newCodeBody = concatBytes([
+    u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0)),
+    ...newCodeEntries,
+  ]);
 
   // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
   // only) (i32,i32)->i32 -------------------------------------------------
@@ -1731,12 +1759,14 @@ export function instrument(bytes, opts = {}) {
   const newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
 
   // --- reassemble (insert sections that were absent, in canonical order) -----
-  const replaced = new Map([
-    [1, newTypeBody],
-    [3, newFuncBody],
-    [6, newGlobalBody],
-    [10, newCodeBody],
-  ]);
+  // Section bodies are number[] except the code section (newCodeBody), which is
+  // a Uint8Array (assembled via concatBytes to dodge Array.flat's ceiling).
+  /** @type {Map<number, number[]|Uint8Array>} */
+  const replaced = new Map();
+  replaced.set(1, newTypeBody);
+  replaced.set(3, newFuncBody);
+  replaced.set(6, newGlobalBody);
+  replaced.set(10, newCodeBody);
   if (newExportBody) replaced.set(7, newExportBody);
   const present = new Set(secs.map((x) => x.id));
 
