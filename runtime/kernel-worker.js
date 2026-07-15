@@ -144,6 +144,29 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// A string denoting the runner name (same as Worker name), useful for debugging.
   let runner_name = "[Unknown]";
 
+  /// pc (#128 MMU boot speed): content-keyed cache of compiled user-executable
+  /// Modules, seeded from the host at worker creation (init message). Under the
+  /// software MMU EVERY exec must instrument the binary (softmmu-pass over a
+  /// multi-MB wasm) + compile it — seconds per exec — and a shell-heavy boot
+  /// spawns the SAME busybox dozens of times, each in a FRESH worker, so nothing
+  /// was ever reused (the boot took minutes and CI timed out once the #166
+  /// crashes were fixed). WebAssembly.Module is structured-cloneable and clones
+  /// share compiled code, so the host holds the canonical cache and each new
+  /// worker gets a snapshot; a miss here instruments+compiles locally and posts
+  /// the module back (exec_module_add) for all future workers. Keyed on a
+  /// 2xFNV-1a content hash + length of the PRE-instrument bytes (instrumentation
+  /// is deterministic, so equal inputs => equal instrumented module).
+  let exec_modules = new Map();
+  const exec_hash = (bytes) => {
+    let h1 = 0x811c9dc5 | 0;
+    let h2 = 0x01000193 | 0;
+    for (let i = 0; i < bytes.length; i++) {
+      h1 = (Math.imul(h1 ^ bytes[i], 0x01000193) | 0) >>> 0;
+      h2 = (Math.imul(h2 ^ bytes[i], 0x0100019b) | 0) >>> 0;
+    }
+    return h1.toString(16) + ":" + h2.toString(16) + ":" + bytes.length;
+  };
+
   /// SAB-backed storage for last process in switch_to (when it returns back from another task).
   let switch_to_last_task = null;
 
@@ -730,10 +753,36 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // layout. Skip if the image is already instrumented (a test fixture the
       // harness pre-instrumented — isInstrumented checks the __mmu_start export).
       // NOMMU kernels pass pt_base 0 and this is a no-op (byte-identical boot).
-      if (Number(pt_base || 0) !== 0 && !isInstrumented(bytes)) {
-        bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+      // pc (#128 MMU boot speed): on the software MMU, check the content-keyed
+      // Module cache BEFORE the expensive instrument+compile (see exec_modules'
+      // declaration for the design). NOMMU (pt_base 0) keeps its original
+      // byte-identical path.
+      let table_initial;
+      if (Number(pt_base || 0) !== 0) {
+        const key = exec_hash(bytes);
+        const hit = exec_modules.get(key);
+        if (hit) {
+          user_executable = Promise.resolve(hit.module);
+          table_initial = hit.table_initial;
+        } else {
+          if (!isInstrumented(bytes)) {
+            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+          }
+          table_initial = table_import_initial(bytes);
+          user_executable = WebAssembly.compile(bytes);
+          const ti = table_initial;
+          user_executable.then(
+            (m) => {
+              exec_modules.set(key, { module: m, table_initial: ti });
+              port.postMessage({ method: "exec_module_add", hash: key, module: m, table_initial: ti });
+            },
+            () => {}, // compile errors surface via the normal await path
+          );
+        }
+      } else {
+        user_executable = WebAssembly.compile(bytes);
+        table_initial = table_import_initial(bytes);
       }
-      user_executable = WebAssembly.compile(bytes);
       user_executable_params = {
         data_start: data_start,
         table_start: table_start,
@@ -743,7 +792,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         pt_base: Number(pt_base || 0),
         // pc (#139 Gate 0.2): size the user table from the binary's import
         // section (a table smaller than declared fails instantiate).
-        table_initial: table_import_initial(bytes),
+        table_initial: table_initial,
       };
 
       // We release our reference already, just to be sure. The promise chain will still have a reference until the
@@ -885,6 +934,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 
       runner_name = message.runner_name;
       if (message.trace_syscalls) trace_enabled = true; // pc (#139): opt-in deep-debug syscall tracing (off by default)
+      // pc (#128 MMU boot speed): compiled-Module cache seeded by the host at
+      // worker creation (see exec_module_cache in kernel-host.js). A snapshot —
+      // modules first compiled AFTER this worker was created aren't in it, which
+      // is fine: exec falls back to instrument+compile and posts the result back
+      // for future workers.
+      if (message.exec_modules) exec_modules = message.exec_modules;
       memory = message.memory;
       locks = message.locks;
       switch_to_last_task = message.last_task; // Only defined for tasks and CPU 0 (init task).
