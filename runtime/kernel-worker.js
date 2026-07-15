@@ -117,6 +117,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// syscall_2 handler (runs on syscall_logged's fast path too), so it fires with
   /// tracing off. A legit demand-page fault has ea >= a page and is ignored.
   let mmu_null_fault_budget = 24;
+  let exec_tp_probe_budget = 40; // pc (#166 diag): per-exec TP-seed export presence
   const mmu_fault_probe =
     (fn) =>
     (...args) => {
@@ -129,7 +130,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           .slice(0, 12)
           .map((l) => l.trim())
           .join(" <- ");
-        console.error(`[mmu-null-fault ${runner_name}] ea=${args[3]} kind=${args[4]} ${frames}`);
+        const earlytp = !!(
+          user_executable_instance &&
+          user_executable_instance.exports &&
+          user_executable_instance.exports.__wasm_early_tp_init
+        );
+        console.error(
+          `[mmu-null-fault ${runner_name}] ea=${args[3]} kind=${args[4]} earlytp_export=${earlytp} ${frames}`,
+        );
       }
       return fn(...args);
     };
@@ -1465,7 +1473,16 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
             // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
             // export just keeps the pre-fix behaviour (fine on NOMMU).
-            if (instance.exports.__wasm_early_tp_init) {
+            const __has_early_tp = !!instance.exports.__wasm_early_tp_init;
+            if (exec_tp_probe_budget > 0) {
+              exec_tp_probe_budget--;
+              // pc (#166 diag): does the exec'd binary export the TP seed, and does it
+              // run? Tells getty(fixed) vs sh/ash(still faulting) apart — is ash even
+              // getting the seed, or is its ea=0 a different ctor null-deref? Revert
+              // with the rest of the #166 probe once prove-then-flip is green.
+              console.error(`[exec-tp ${runner_name}] early_tp_export=${__has_early_tp}`);
+            }
+            if (__has_early_tp) {
               instance.exports.__wasm_early_tp_init();
             }
             if (instance.exports.__wasm_call_ctors) {
