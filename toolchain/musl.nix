@@ -117,6 +117,37 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace src/internal/libc.c \
       --replace-fail 'struct __libc __libc = { .page_size = 4096 };' \
                      'static size_t __wasm_empty_auxv[1]; struct __libc __libc = { .page_size = 4096, .auxv = __wasm_empty_auxv };'
+    # MMU flip (#166, class 4 — the wasm ZERO-VARARG ABI vs POSIX optional
+    # args): LLVM's wasm backend passes a NULL vararg-buffer pointer when a
+    # variadic call supplies NO variadic arguments, and clang's wasm va_list is
+    # a bare char* (CharPtrBuiltinVaList) — so a callee's va_arg reads *(NULL).
+    # musl reads POSIX-OPTIONAL trailing args UNCONDITIONALLY in ioctl/fcntl/
+    # prctl/syscall, so any legal 2-arg call faults at ea=0: named frame
+    # `busybox_unstripped.ioctl <- getty_main` = getty's setsid-fail fallback
+    # `ioctl(fd, TIOCNOTTY)` (the getty respawn storm); busybox ndelay_on/off's
+    # 2-arg `fcntl(fd, F_GETFL)` is the same shape (udhcpc, shells). On NOMMU
+    # the *(NULL) read returned harmless garbage (the value is unused for these
+    # requests); under CONFIG_MMU page 0 is unmapped -> SIGSEGV. POSIX requires
+    # libc to tolerate the omitted optional arg, and glibc/x86 does so by
+    # accident (reads a garbage register) — so the correct general fix is the
+    # libc guard, NOT patching LLVM's calling convention (userspace stays on
+    # stock LLVM per the architecture) and NOT per-caller busybox patches.
+    # va_list == char* here, so `ap ? ... : 0` is exactly "was a vararg buffer
+    # passed". No-op for every well-formed >=3-arg call.
+    substituteInPlace src/misc/ioctl.c \
+      --replace-fail 'arg = va_arg(ap, void *);' \
+                     'arg = ap ? va_arg(ap, void *) : 0;'
+    substituteInPlace src/fcntl/fcntl.c \
+      --replace-fail 'arg = va_arg(ap, unsigned long);' \
+                     'arg = ap ? va_arg(ap, unsigned long) : 0;'
+    substituteInPlace src/linux/prctl.c \
+      --replace-fail 'for (i=0; i<4; i++) x[i] = va_arg(ap, unsigned long);' \
+                     'for (i=0; i<4; i++) x[i] = ap ? va_arg(ap, unsigned long) : 0;'
+    for r in a b c d e f; do
+      substituteInPlace src/misc/syscall.c \
+        --replace-fail "$r=va_arg(ap, syscall_arg_t);" \
+                       "$r=ap ? va_arg(ap, syscall_arg_t) : 0;"
+    done
     # MMU flip (#166): seed a VALID main-thread pointer BEFORE global ctors run.
     # The host runtime (runtime/kernel-worker.js, user_executable_run) calls
     # __wasm_call_ctors — the C++/init_array static initializers — BEFORE
