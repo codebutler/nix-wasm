@@ -116,8 +116,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// Budgeted so the respawn storm can't flood the log. Composed AROUND the real
   /// syscall_2 handler (runs on syscall_logged's fast path too), so it fires with
   /// tracing off. A legit demand-page fault has ea >= a page and is ignored.
-  let mmu_null_fault_budget = 24;
-  let exec_tp_probe_budget = 40; // pc (#166 diag): per-exec TP-seed export presence
+  let mmu_null_fault_budget = 64; // pc (#166 diag): capture the whole 0x0 storm, not just the first
   const mmu_fault_probe =
     (fn) =>
     (...args) => {
@@ -1473,16 +1472,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
             // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
             // export just keeps the pre-fix behaviour (fine on NOMMU).
-            const __has_early_tp = !!instance.exports.__wasm_early_tp_init;
-            if (exec_tp_probe_budget > 0) {
-              exec_tp_probe_budget--;
-              // pc (#166 diag): does the exec'd binary export the TP seed, and does it
-              // run? Tells getty(fixed) vs sh/ash(still faulting) apart — is ash even
-              // getting the seed, or is its ea=0 a different ctor null-deref? Revert
-              // with the rest of the #166 probe once prove-then-flip is green.
-              console.error(`[exec-tp ${runner_name}] early_tp_export=${__has_early_tp}`);
-            }
-            if (__has_early_tp) {
+            // pc (#166): seed a valid main-thread pointer before ctors (see the musl
+            // __wasm_early_tp_init note). Diagnostic confirmed every exec'd binary
+            // exports+runs this (early_tp_export=true), and it fixed the locale (0x60)
+            // fault class — the per-exec log is removed so it can't drown the
+            // [mmu-null-fault] frames that localize the remaining 0x0 deref.
+            if (instance.exports.__wasm_early_tp_init) {
               instance.exports.__wasm_early_tp_init();
             }
             if (instance.exports.__wasm_call_ctors) {
