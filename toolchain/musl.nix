@@ -143,11 +143,10 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace src/linux/prctl.c \
       --replace-fail 'for (i=0; i<4; i++) x[i] = va_arg(ap, unsigned long);' \
                      'for (i=0; i<4; i++) x[i] = ap ? va_arg(ap, unsigned long) : 0;'
-    for r in a b c d e f; do
-      substituteInPlace src/misc/syscall.c \
-        --replace-fail "$r=va_arg(ap, syscall_arg_t);" \
-                       "$r=ap ? va_arg(ap, syscall_arg_t) : 0;"
-    done
+    # (syscall() needs NO guard: the wasm arch patch 0000 already rewrote it to
+    # a count-dispatched form — `syscall(count, n, ...)` reads exactly `count`
+    # va_args and case 0 reads none, so a zero-vararg call never touches the
+    # NULL buffer.)
     # MMU flip (#166): seed a VALID main-thread pointer BEFORE global ctors run.
     # The host runtime (runtime/kernel-worker.js, user_executable_run) calls
     # __wasm_call_ctors — the C++/init_array static initializers — BEFORE
