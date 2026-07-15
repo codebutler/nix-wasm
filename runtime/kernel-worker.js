@@ -106,26 +106,41 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     syscall_trace_budget = 120;
   };
 
-  // DIAGNOSTIC (#166/#128, revert once localized): a low-address-deref backtracer.
+  // DIAGNOSTIC (#166/#128, revert once localized): a bad-pointer-deref backtracer.
   // Under the software MMU the A2 present-checked translate routes an unresolved
   // fault through `__wasm_syscall_2(sp, tp, NR_MMU_FAULT=244, ea, kind)` — emitted
   // INLINE at the faulting deref site (or via the helper-call translate for an
-  // over-6MB function like nix.wasm's #2), so a `new Error().stack` captured HERE
-  // names the exact guest wasm function doing the bad access. Fire on a low ea
-  // (< 0x10000 = a NULL/small-offset deref through an unseeded/wild base — the
-  // first 64 KiB is never a valid user mapping), budgeted so a refault loop can't
-  // flood. #166's libc++-startup fault was at 0x60; the current nix-env SIGSEGV is
-  // ABOVE the old 0x1000 window (no probe hit), so this widens to 0x10000 to catch
-  // a small-offset sibling in the SAME cycle the dbg kernel's MMUSEGV prints the
-  // exact addr (if it's higher, MMUSEGV localizes it and a targeted probe follows).
+  // over-6MB function like nix.wasm's #2/#3830), so a `new Error().stack` captured
+  // HERE names the exact guest wasm function doing the bad access. Fire when the
+  // faulting ea is OBVIOUSLY a bad pointer, NOT a numeric demand-paging fault:
+  //   (a) ea < 0x10000  — a NULL/small-offset deref (first 64 KiB never mapped), OR
+  //   (b) all 4 bytes of ea are printable ASCII — a STRING used as a pointer. The
+  //       dbg kernel caught the nix-env SIGSEGV at ea=0x616e6962 = "bina" (kind=0
+  //       load), a clobbered/confused pointer holding nix "binary cache" text; a
+  //       legit demand-paging fault addr (0x4000xxxx region) always carries a 0x00
+  //       or high byte, so it never trips the ASCII test → no flood.
+  // Budgeted so a refault loop can't flood; prints the ASCII rendering for clarity.
+  const printable = (b) => b >= 0x20 && b <= 0x7e;
   let mmu_nullfault_budget = 24;
   const mmu_nullfault_probe =
     (fn) =>
     (...args) => {
-      if (args[2] === 244 && args[3] >>> 0 < 0x10000 && mmu_nullfault_budget > 0) {
+      const ea = args[3] >>> 0;
+      const asciiPtr =
+        printable(ea & 0xff) &&
+        printable((ea >> 8) & 0xff) &&
+        printable((ea >> 16) & 0xff) &&
+        printable((ea >> 24) & 0xff);
+      if (args[2] === 244 && (ea < 0x10000 || asciiPtr) && mmu_nullfault_budget > 0) {
         mmu_nullfault_budget--;
+        const chars = String.fromCharCode(
+          ea & 0xff,
+          (ea >> 8) & 0xff,
+          (ea >> 16) & 0xff,
+          (ea >> 24) & 0xff,
+        );
         console.error(
-          `[mmu-nullderef ${runner_name}] ea=0x${(args[3] >>> 0).toString(16)} kind=${args[4]}\n${new Error().stack}`,
+          `[mmu-nullderef ${runner_name}] ea=0x${ea.toString(16)} ("${chars}") kind=${args[4]}\n${new Error().stack}`,
         );
       }
       return fn(...args);
