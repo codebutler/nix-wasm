@@ -101,6 +101,22 @@ pkgs.stdenv.mkDerivation {
     substituteInPlace src/env/__libc_start_main.c \
       --replace-fail 'exit(main(argc, argv, envp));' \
                      'do { extern long __wasm_syscall_2(long,long,long,long,long); volatile int __softmmu_keep = 0; if (__softmmu_keep) __wasm_syscall_2(0,0,244,0,0); } while (0); exit(((int(*)(int,char**))(void*)main)(argc, argv));'
+    # MMU flip (#166): also seed libc.auxv before ctors (same root as page_size
+    # / patch 0006). mallocng's first alloc_meta -> get_random_secret() loops
+    # `for (i=0; libc.auxv[i]; i+=2)` reading libc.auxv[0]. __init_libc sets
+    # libc.auxv from the process auxv, but that runs in _start AFTER the host's
+    # __wasm_call_ctors — so a malloc() from a global constructor (sommelier's
+    # pixman_constructor, busybox ctors) reads libc.auxv[0] == *(size_t*)NULL at
+    # ea=0. Readable garbage on NOMMU; SIGSEGV under CONFIG_MMU (localized by the
+    # #166 fault probe: __malloc_alloc_meta <- get_random_secret <- alloc_meta).
+    # Point auxv at a static empty vector (single 0 terminator, BSS) so the loop
+    # terminates immediately (secret falls back to the &secret-based value);
+    # __init_libc installs the real auxv moments later. Static initializer =
+    # applied by __wasm_apply_data_relocs before any ctor runs (no runtime call,
+    # unlike the TP seed below). Extends patch 0006's seeded __libc.
+    substituteInPlace src/internal/libc.c \
+      --replace-fail 'struct __libc __libc = { .page_size = 4096 };' \
+                     'static size_t __wasm_empty_auxv[1]; struct __libc __libc = { .page_size = 4096, .auxv = __wasm_empty_auxv };'
     # MMU flip (#166): seed a VALID main-thread pointer BEFORE global ctors run.
     # The host runtime (runtime/kernel-worker.js, user_executable_run) calls
     # __wasm_call_ctors — the C++/init_array static initializers — BEFORE
