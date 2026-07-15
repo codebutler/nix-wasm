@@ -1471,6 +1471,45 @@ export function isInstrumented(bytes) {
   return false;
 }
 
+/**
+ * #128 diagnostic: the wasm "name" custom-section FUNCTION name for a GLOBAL
+ * function index (imports + defined), or null. Labels which real function hit the
+ * >6 MB helper-call fallback so a boot log names it (e.g. is it a global-ctor
+ * that builds a data structure — corruption-prone if the helper path is buggy).
+ */
+function functionName(bytes, funcIdx) {
+  try {
+    for (const s of splitSections(bytes)) {
+      if (s.id !== 0) continue; // custom section
+      let i, nm;
+      [nm, i] = readName(s.body, 0);
+      if (nm !== "name") continue;
+      while (i < s.body.length) {
+        const sub = s.body[i++];
+        let sz;
+        [sz, i] = readU(s.body, i);
+        const end = i + sz;
+        if (sub === 1) {
+          // function-name subsection: count, then (idx, name) pairs
+          let n, j;
+          [n, j] = readU(s.body, i);
+          for (let k = 0; k < n; k++) {
+            let idx, name;
+            [idx, j] = readU(s.body, j);
+            [name, j] = readName(s.body, j);
+            if (idx === funcIdx) return name;
+          }
+          return null;
+        }
+        i = end;
+      }
+    }
+  } catch {
+    /* best-effort diagnostic only */
+  }
+  return null;
+}
+
 /** #152 diagnostic: the wasm "name" custom-section module name, or null. */
 function moduleName(bytes) {
   try {
@@ -1612,8 +1651,8 @@ export function instrument(bytes, opts = {}) {
       // fallback + both sizes so a boot log shows exactly which function and why.
       // eslint-disable-next-line no-console
       console.warn(
-        `softmmu: function #${f} inline body ${rewritten.length}B exceeds ${inlineLimit}B ` +
-          `— using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
+        `softmmu: function #${f} <${functionName(bytes, nImpFuncs + f) ?? "?"}> inline body ${rewritten.length}B ` +
+          `exceeds ${inlineLimit}B — using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
       );
       rewritten = viaHelper;
     }
