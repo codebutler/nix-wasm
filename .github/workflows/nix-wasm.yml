@@ -663,12 +663,7 @@ jobs:
       - name: Assemble MMU nix:true artifacts (substitute from Cachix)
         run: |
           mkdir -p .artifacts-nix-mmu
-          # DIAGNOSTIC (revert to .#kernel-mmu-a2 once localized): the dbg kernel
-          # (patch 0025) prints `MMUSEGV comm= pid= addr= kind=` on the fatal fault
-          # so we can localize nix.wasm's SIGSEGV during `nix-env -iA` under the MMU.
-          # Shares the cached kernel-llvm toolchain with .#kernel-mmu-a2 → only the
-          # vmlinux C recompiles (~minutes), not the from-source LLVM pole.
-          ln -sfn "$(nix build -L '.#kernel-mmu-a2-dbg' --no-link --print-out-paths)/vmlinux.wasm" \
+          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
             .artifacts-nix-mmu/vmlinux.wasm
           ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz

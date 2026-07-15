@@ -106,6 +106,27 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     syscall_trace_budget = 120;
   };
 
+  // DIAGNOSTIC (#166/#128, revert once localized): a NULL-page-deref backtracer.
+  // Under the software MMU the A2 present-checked translate routes an unresolved
+  // fault through `__wasm_syscall_2(sp, tp, NR_MMU_FAULT=244, ea, kind)` — emitted
+  // INLINE at the faulting deref site, so a `new Error().stack` captured HERE
+  // names the exact guest wasm function doing the bad access. Fire only on a
+  // NULL-page ea (< 0x1000 = a genuine NULL/small-offset deref, e.g. nix-env's
+  // 0x60), budgeted so a refault loop can't flood. This localizes the shared
+  // C++/libc++-startup NULL-deref (#166: sommelier + nix-env both fault at 0x60).
+  let mmu_nullfault_budget = 8;
+  const mmu_nullfault_probe =
+    (fn) =>
+    (...args) => {
+      if (args[2] === 244 && args[3] >>> 0 < 0x1000 && mmu_nullfault_budget > 0) {
+        mmu_nullfault_budget--;
+        console.error(
+          `[mmu-nullderef ${runner_name}] ea=0x${(args[3] >>> 0).toString(16)} kind=${args[4]}\n${new Error().stack}`,
+        );
+      }
+      return fn(...args);
+    };
+
   /// A string denoting the runner name (same as Worker name), useful for debugging.
   let runner_name = "[Unknown]";
 
@@ -739,7 +760,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           user_executable.then(
             (m) => {
               exec_modules.set(key, { module: m, table_initial: ti });
-              port.postMessage({ method: "exec_module_add", hash: key, module: m, table_initial: ti });
+              port.postMessage({
+                method: "exec_module_add",
+                hash: key,
+                module: m,
+                table_initial: ti,
+              });
             },
             () => {}, // compile errors surface via the normal await path
           );
@@ -1149,7 +1175,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // signal being handled in its return path would need to save (and restore) them on its signal stack.
             __wasm_syscall_0: syscall_logged(vmlinux_instance.exports.wasm_syscall_0),
             __wasm_syscall_1: syscall_logged(vmlinux_instance.exports.wasm_syscall_1),
-            __wasm_syscall_2: syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
+            __wasm_syscall_2: mmu_nullfault_probe(
+              syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
+            ),
             __wasm_syscall_3: syscall_logged(vmlinux_instance.exports.wasm_syscall_3),
             // pc: futex_time64 (nr=422) split-arity shim — see patch 0015.
             // glib's g_futex_simple calls __NR_futex_time64 with 4 args
