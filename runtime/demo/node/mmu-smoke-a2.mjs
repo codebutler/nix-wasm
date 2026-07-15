@@ -64,9 +64,22 @@ function cpioNewc(entries) {
 const initRaw = new Uint8Array(readFileSync(initPath));
 // CHECKED mode: the present-checked translate that demand-pages via the fault
 // syscall — the whole point of A2.
-const initInstr = instrument(initRaw, { checked: true, exportControls: true });
+//
+// inlineLimit: 1 (#164 helper-path real-boot gate) — force EVERY function onto
+// the >6MB helper-call translate (__mmu_translate_ck) instead of the inline
+// walk. nix.wasm's __wasm_apply_data_relocs (fn #2, 10.7MB inline) is the ONLY
+// startup function big enough to take this path, so it is otherwise NEVER
+// boot-exercised: the nix-env Config::set "bina" fault is the first time it
+// runs on a real kernel. inlineLimit:1 makes this tiny init (incl. the 128 MiB
+// fragmented pointer-chase below) drive its ENTIRE execution through the helper
+// translate, so a helper-path mis-encode corrupts here in the ~3-min a2 smoke.
+// The helper path is size-independent (a call is a call at 10B or 10MB), so
+// this is a faithful correctness test of it. If this PASSES, the helper path is
+// exonerated on real hardware; the inline path already passed at the default
+// 6MB limit (run #347), so both translate paths are then boot-proven.
+const initInstr = instrument(initRaw, { checked: true, exportControls: true, inlineLimit: 1 });
 console.log(
-  `[mmu-smoke-a2] instrumented (checked): ${initRaw.length} -> ${initInstr.length} bytes`,
+  `[mmu-smoke-a2] instrumented (checked, inlineLimit=1 -> all-helper): ${initRaw.length} -> ${initInstr.length} bytes`,
 );
 
 // expected mmap checksum: sum over 8MiB / 4KiB pages of ((i>>12) & 0xff)
