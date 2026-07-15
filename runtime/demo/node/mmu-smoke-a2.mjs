@@ -102,10 +102,20 @@ try {
   const cowOk = snap.includes("MMU-A2: cow ro-read 0x00000000 wr-read 0x000000ab");
   // mprotect narrow->read->widen->write round-trip returned 1.
   const mprotectOk = snap.includes("MMU-A2: mprotect 0x00000001");
-  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk;
+  // Large fragmented pointer-chase (128 MiB / ~32 pgd entries): every stored
+  // ->next dereferences correctly and every ->tag round-trips (sumok=1). A
+  // multi-pgd translation bug corrupts a node -> "chase CORRUPT" (clean hang,
+  // no OK). This is the fast repro for the nix-env Config::set "bina" fault.
+  const chaseOk =
+    /MMU-A2: chase nodes 0x[0-9a-f]{8} seen 0x[0-9a-f]{8} sumok 0x00000001/.test(snap) &&
+    !snap.includes("chase CORRUPT") &&
+    !snap.includes("chase mmap FAIL");
+  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk && chaseOk;
   if (ok && !mmapOk) console.log(`[mmu-smoke-a2] mmap checksum MISMATCH (want ${expHex})`);
   if (ok && !cowOk) console.log("[mmu-smoke-a2] COW write-protect FAULT path FAILED");
   if (ok && !mprotectOk) console.log("[mmu-smoke-a2] mprotect round-trip FAILED");
+  if (!chaseOk)
+    console.log("[mmu-smoke-a2] large fragmented pointer-chase FAILED (see BAD@/CORRUPT)");
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
   s.kill();
