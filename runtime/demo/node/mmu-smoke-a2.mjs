@@ -123,7 +123,16 @@ try {
     /MMU-A2: chase nodes 0x[0-9a-f]{8} seen 0x[0-9a-f]{8} sumok 0x00000001/.test(snap) &&
     !snap.includes("chase CORRUPT") &&
     !snap.includes("chase mmap FAIL");
-  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk && chaseOk;
+  // Low-VA .bss pointer-chase (128 MiB static array, exec-mapped at low VA):
+  // the discriminating control vs the high-VA mmap chase for the nix-env
+  // Config::set fault. A multi-pgd translation bug specific to the exec-time
+  // data-segment mapping / low VA corrupts here -> "bsschase CORRUPT".
+  const bssChaseOk =
+    /MMU-A2: bsschase nodes 0x[0-9a-f]{8} seen 0x[0-9a-f]{8} sumok 0x00000001/.test(snap) &&
+    !snap.includes("bsschase CORRUPT");
+  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk && chaseOk && bssChaseOk;
+  if (ok && !bssChaseOk)
+    console.log("[mmu-smoke-a2] low-VA .bss pointer-chase FAILED (exec-data/low-VA translation)");
   if (ok && !mmapOk) console.log(`[mmu-smoke-a2] mmap checksum MISMATCH (want ${expHex})`);
   if (ok && !cowOk) console.log("[mmu-smoke-a2] COW write-protect FAULT path FAILED");
   if (ok && !mprotectOk) console.log("[mmu-smoke-a2] mprotect round-trip FAILED");
