@@ -202,23 +202,33 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               }
               peek += `\n  0x${va.toString(16)}: ${hex} |${asc}|`;
             }
-            // HEAP SCAN: find where the value 0x616e6962 is STORED. The faulting
-            // load read a pointer FIELD holding 0x616e6962 (not on the stack, per
-            // the dump), so it lives on the heap — a std::string object. Scan the
-            // malloc/mmap arena (run #353's long-string data ptr 0x407381b0 is
-            // here, so musl-malloc's arenas map into 0x40000000+) one page at a
-            // time (xlate the base once, scan the physical page's 1024 words).
-            // Classify each hit: if the two PRECEDING words look like a libc++
-            // wasm32 string control block (cap@-8 with is_long LSB + small,
-            // size@-4 small and <= cap>>1), it's a CORRUPT _M_p (a data pointer
-            // overwritten with "bina" content). A hit whose neighbours are ASCII
-            // is just "binary..." string CONTENT. Cap reports so a content-heavy
-            // heap can't flood the one captured console.error.
+            // HEAP SCAN v2: find the CORRUPT MAP NODE. E0 (disassembly of the
+            // fault site at fn13502+0xf71) proved the faulting load is the VPTR
+            // fetch through `i->second.setting` — i.e. the std::map node's
+            // SettingData::setting field at node+32 holds 0x616e6962. v1 found
+            // 38 stores of the value but only classified string-control-block
+            // shapes (cands=0) and reported just the first 8 (all data-segment
+            // literals). v2 template-matches each hit H as node = H-32 against
+            // the libc++ wasm32 __tree node layout {__left_@0, __right_@4,
+            // __parent_@8, __is_black_@12, key std::string @16 (capword,size,
+            // data | SSO byte0=len<<1 + inline chars), SettingData{isAlias@28,
+            // setting@32}} and on a match dumps the KEY TEXT — naming exactly
+            // WHICH setting's node got its value-half trashed — plus the node
+            // bytes. Every hit address is listed compactly so none hide behind
+            // a report budget.
             const TARGET = 0x616e6962 >>> 0;
             let hits = 0;
-            let cands = 0;
-            let reported = 0;
-            for (let base = 0x40000000; base < 0x50000000 && reported < 32; base += 4096) {
+            let nodes = 0;
+            let addrs = "";
+            const keyText = (p, len) => {
+              let s = "";
+              for (let k = 0; k < Math.min(len, 48); k++) {
+                const b = u8[p + k];
+                s += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : ".";
+              }
+              return s;
+            };
+            for (let base = 0x40000000; base < 0x50000000; base += 4096) {
               const pp = xlate(base >>> 0);
               if (pp < 0) continue;
               const pw = pp >>> 2;
@@ -226,29 +236,59 @@ import { SharedQueues } from "./virtio/shared-queues.js";
                 if (u32[pw + i] >>> 0 !== TARGET) continue;
                 hits++;
                 const va = (base + i * 4) >>> 0;
-                let tag = "content?";
-                if (i >= 2) {
-                  const capw = u32[pw + i - 2] >>> 0;
-                  const szw = u32[pw + i - 1] >>> 0;
-                  if (capw & 1 && capw < 0x10000 && szw < 0x10000 && szw <= capw >>> 1) {
-                    tag = "CAND-_M_p";
-                    cands++;
+                // The node candidate spans [va-32, va+4); it may cross a page
+                // boundary, so re-translate word-wise via VAs.
+                const w = (off) => {
+                  const p = xlate((va + off) >>> 0);
+                  return p < 0 ? -1 : u32[p >>> 2] >>> 0;
+                };
+                const isBlack = w(-20); // node+12
+                const capw = w(-16); // key capword / SSO byte0 (node+16)
+                const size = w(-12); // key size (node+20)
+                const dataP = w(-8); // key __data_ (node+24)
+                const isAlias = w(-4); // SettingData.isAlias (node+28)
+                // Key printability is the discriminator (the long capword's
+                // exact cap encoding — shift vs mask of the is_long LSB — is
+                // ambiguous, so don't gate on cap>=size).
+                const printableKey = (s, n) =>
+                  n >= 1 && s.length >= Math.min(n, 48) && !s.includes(".");
+                let tag = "content";
+                let key = "";
+                if (isBlack >>> 0 <= 1 && isAlias >>> 0 <= 1 && capw !== -1) {
+                  if (capw & 1 && size >= 1 && size < 0x100) {
+                    const kp = xlate(dataP);
+                    if (kp >= 0) {
+                      const k = keyText(kp, size);
+                      if (printableKey(k, size)) {
+                        tag = "NODE-long";
+                        key = k;
+                      }
+                    }
+                  } else if (!(capw & 1) && (capw & 0xff) >>> 1 >= 1 && (capw & 0xff) >>> 1 <= 10) {
+                    const kp = xlate((va - 16 + 1) >>> 0);
+                    if (kp >= 0) {
+                      const n = (capw & 0xff) >>> 1;
+                      const k = keyText(kp, n);
+                      if (printableKey(k, n)) {
+                        tag = "NODE-sso";
+                        key = k;
+                      }
+                    }
                   }
                 }
-                if (reported < 32 && (tag === "CAND-_M_p" || reported < 8)) {
-                  reported++;
-                  let ctx = "";
-                  const from = Math.max(0, i - 3);
-                  const to = Math.min(1024, i + 5);
-                  for (let k = from; k < to; k++) {
-                    const w = (u32[pw + k] >>> 0).toString(16).padStart(8, "0");
-                    ctx += k === i ? ` [${w}]` : ` ${w}`;
+                if (tag !== "content") {
+                  nodes++;
+                  let dump = "";
+                  for (let off = -48; off < 16; off += 4) {
+                    const v = w(off);
+                    dump += ` ${v === -1 ? "<unmap>" : (v >>> 0).toString(16).padStart(8, "0")}${off === 0 ? "*" : ""}`;
                   }
-                  peek += `\n  ${tag} @0x${va.toString(16)}:${ctx}`;
+                  peek += `\n  ${tag} node=0x${((va - 32) >>> 0).toString(16)} key="${key}" isAlias=${isAlias}\n   [node-16..node+48]:${dump}`;
                 }
+                addrs += ` 0x${va.toString(16)}${tag !== "content" ? "!" : ""}`;
               }
             }
-            peek += `\n[mmu-heapscan] hits=${hits} cands=${cands}`;
+            peek += `\n[mmu-heapscan] hits=${hits} nodeMatches=${nodes} at:${addrs}`;
           } catch (e) {
             peek += ` THREW: ${(e && e.stack) || e}`;
           }
