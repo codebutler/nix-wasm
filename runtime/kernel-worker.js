@@ -202,6 +202,53 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               }
               peek += `\n  0x${va.toString(16)}: ${hex} |${asc}|`;
             }
+            // HEAP SCAN: find where the value 0x616e6962 is STORED. The faulting
+            // load read a pointer FIELD holding 0x616e6962 (not on the stack, per
+            // the dump), so it lives on the heap — a std::string object. Scan the
+            // malloc/mmap arena (run #353's long-string data ptr 0x407381b0 is
+            // here, so musl-malloc's arenas map into 0x40000000+) one page at a
+            // time (xlate the base once, scan the physical page's 1024 words).
+            // Classify each hit: if the two PRECEDING words look like a libc++
+            // wasm32 string control block (cap@-8 with is_long LSB + small,
+            // size@-4 small and <= cap>>1), it's a CORRUPT _M_p (a data pointer
+            // overwritten with "bina" content). A hit whose neighbours are ASCII
+            // is just "binary..." string CONTENT. Cap reports so a content-heavy
+            // heap can't flood the one captured console.error.
+            const TARGET = 0x616e6962 >>> 0;
+            let hits = 0;
+            let cands = 0;
+            let reported = 0;
+            for (let base = 0x40000000; base < 0x50000000 && reported < 32; base += 4096) {
+              const pp = xlate(base >>> 0);
+              if (pp < 0) continue;
+              const pw = pp >>> 2;
+              for (let i = 0; i < 1024; i++) {
+                if (u32[pw + i] >>> 0 !== TARGET) continue;
+                hits++;
+                const va = (base + i * 4) >>> 0;
+                let tag = "content?";
+                if (i >= 2) {
+                  const capw = u32[pw + i - 2] >>> 0;
+                  const szw = u32[pw + i - 1] >>> 0;
+                  if (capw & 1 && capw < 0x10000 && szw < 0x10000 && szw <= capw >>> 1) {
+                    tag = "CAND-_M_p";
+                    cands++;
+                  }
+                }
+                if (reported < 32 && (tag === "CAND-_M_p" || reported < 8)) {
+                  reported++;
+                  let ctx = "";
+                  const from = Math.max(0, i - 3);
+                  const to = Math.min(1024, i + 5);
+                  for (let k = from; k < to; k++) {
+                    const w = (u32[pw + k] >>> 0).toString(16).padStart(8, "0");
+                    ctx += k === i ? ` [${w}]` : ` ${w}`;
+                  }
+                  peek += `\n  ${tag} @0x${va.toString(16)}:${ctx}`;
+                }
+              }
+            }
+            peek += `\n[mmu-heapscan] hits=${hits} cands=${cands}`;
           } catch (e) {
             peek += ` THREW: ${(e && e.stack) || e}`;
           }
