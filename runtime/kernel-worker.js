@@ -164,10 +164,21 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // (SSO/layout: content "binary…" intact, data-pointer field wrong) or
         // wholesale garbage. Best-effort + guarded; ONE shot (fatal ea only).
         if (ea === 0x616e6962) {
+          // Build ONE string + ONE console.error: the previous 65-call version
+          // produced NO captured output (worker postMessage loss / a silent
+          // throw), so make it a single message with an ENTER marker + typeof of
+          // each closure var, so a run that still shows nothing localizes the
+          // silence and a run that throws reports the full stack.
+          let out = "[mmu-peek] ENTER";
           try {
-            const u32 = new Uint32Array(memory.buffer);
-            const u8 = new Uint8Array(memory.buffer);
-            const pt = own_pt_base >>> 0;
+            out += ` typeof memory=${typeof memory} uei=${typeof user_executable_imports} opb=${typeof own_pt_base}`;
+            const mem = memory;
+            const uei = user_executable_imports;
+            const u32 = new Uint32Array(mem.buffer);
+            const u8 = new Uint8Array(mem.buffer);
+            const pt = (own_pt_base || 0) >>> 0;
+            const sp = (uei.env.__stack_pointer.value || 0) >>> 0;
+            out += ` pt=0x${pt.toString(16)} sp=0x${sp.toString(16)}`;
             const xlate = (va) => {
               va >>>= 0;
               const pgd_e = u32[(pt + ((va >>> 22) << 2)) >>> 2] >>> 0;
@@ -176,14 +187,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               if (!(pte & 1)) return -1;
               return ((pte & ~0xfff) + (va & 0xfff)) >>> 0;
             };
-            const sp = user_executable_imports.env.__stack_pointer.value >>> 0;
-            console.error(`[mmu-peek] own_pt_base=0x${pt.toString(16)} sp=0x${sp.toString(16)}`);
-            // dump [sp, sp+0x400): the active Config::set frame grows up from sp.
-            for (let off = 0; off < 0x400; off += 16) {
+            // dump [sp-0x40, sp+0x400): the active Config::set frame.
+            for (let off = -0x40; off < 0x400; off += 16) {
               const va = (sp + off) >>> 0;
               const p = xlate(va);
               if (p < 0) {
-                console.error(`[mmu-peek] 0x${va.toString(16)}: <unmapped>`);
+                out += `\n  0x${va.toString(16)}: <unmapped>`;
                 continue;
               }
               let hex = "";
@@ -193,11 +202,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
                 hex += b.toString(16).padStart(2, "0") + (k === 7 ? "  " : " ");
                 asc += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : ".";
               }
-              console.error(`[mmu-peek] 0x${va.toString(16)}: ${hex} |${asc}|`);
+              out += `\n  0x${va.toString(16)}: ${hex} |${asc}|`;
             }
           } catch (e) {
-            console.error(`[mmu-peek] failed: ${e && e.message}`);
+            out += ` THREW: ${(e && e.stack) || e}`;
           }
+          console.error(out);
         }
       }
       return fn(...args);
