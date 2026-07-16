@@ -1076,6 +1076,31 @@ describe("checked (A2 present-check) translate", () => {
     for (let k = 0; k < 8; k++) expect(u8[V + k]).toBe(k + 1);
   });
 
+  test("#131 DIAGNOSTIC bulk watchpoint: dest overlapping the window reports sentinel kind 0x78; non-overlapping doesn't", () => {
+    const W = HEAP + 0xa8000;
+    const bytes = instrument(buildCheckedBulkFixture(), {
+      checked: true,
+      watchLo: W,
+      watchHi: W + 16,
+    });
+    const b = bootChecked(bytes, HEAP + 0xb0000);
+    const watchCalls = () => b.calls.filter((c) => c.kind === 0x78);
+
+    b.inst.exports.bulk_fill(W - 8, 0xcd, 16); // [W-8, W+8) overlaps -> sentinel
+    expect(watchCalls().length).toBe(1);
+    expect(watchCalls()[0]).toEqual({ nr: NR_MMU_FAULT, ea: W - 8, kind: 0x78 });
+    const u8 = new Uint8Array(b.mem.buffer);
+    for (let k = 0; k < 16; k++) expect(u8[W - 8 + k]).toBe(0xcd); // fill still lands
+
+    b.inst.exports.bulk_fill(W + 16, 0xee, 16); // [W+16, W+32) — no overlap
+    b.inst.exports.bulk_copy(W + 16, W - 8, 8); // dest past the window — no overlap
+    expect(watchCalls().length).toBe(1);
+
+    b.inst.exports.bulk_copy(W + 8, W + 32, 8); // [W+8, W+16) overlaps -> sentinel
+    expect(watchCalls().length).toBe(2);
+    expect(watchCalls()[1]).toEqual({ nr: NR_MMU_FAULT, ea: W + 8, kind: 0x78 });
+  });
+
   test("bulk_copy: not-present SRC faults kind=0 (read), never write-faults a read-only source", () => {
     const SRC = HEAP + 0x90000; // src, not present
     const DST = HEAP + 0x20000; // dest, present (default identity mapping)

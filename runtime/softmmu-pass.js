@@ -1232,6 +1232,28 @@ function emitTranslateCall(o, translateFunc, ckFunc, kind) {
   }
 }
 
+// #131 DIAGNOSTIC bulk-op watchpoint head (revert with the investigation): the
+// bulk helpers are the ONLY write channel the scalar watch can't see — a
+// memcpy/memset/meminit whose DEST range overlaps [watchLo, watchHi) reports
+// via the fault import with SENTINEL kind 0x78 (EA = dest base; the engine
+// logs + swallows). `ctx` is the checked ctx carrying the window + import
+// indices; no-op when null / no window.
+function emitBulkWatchHead(o, ctx, d, n) {
+  if (!ctx || ctx.watchLo === undefined) return;
+  o.push(I.lget, ...u(d), I.i32c, ...s(ctx.watchHi | 0), I.lt_u); // d < hi
+  o.push(I.i32c, ...s(ctx.watchLo | 0), I.lget, ...u(d), I.lget, ...u(n), I.add, I.lt_u); // lo < d+n
+  o.push(I.and);
+  o.push(0x04, VOID); // if
+  o.push(0x23, ...u(ctx.spGlobalIdx)); // global.get __stack_pointer
+  o.push(I.call, ...u(ctx.tlsFuncIdx)); // call __get_tls_base -> tp
+  o.push(I.i32c, ...s(NR_MMU_FAULT));
+  o.push(I.lget, ...u(d)); // ea = dest base
+  o.push(I.i32c, ...s(0x78)); // sentinel kind (bulk)
+  o.push(I.call, ...u(ctx.syscallFuncIdx)); // call __wasm_syscall_2
+  o.push(0x1a); // drop
+  o.push(I.end);
+}
+
 /**
  * __mmu_memcpy(d,s,n) body — overlap-aware page-chunked memory.copy.
  *
@@ -1239,8 +1261,9 @@ function emitTranslateCall(o, translateFunc, ckFunc, kind) {
  * @param {number|null} [ckFunc] the checked `__mmu_translate_ck(va,kind)`
  *   helper — when given, dest chunks fault in with kind=1 (write) and src
  *   chunks with kind=0 (read); omit/null for the unchecked A1 fast path.
+ * @param {*} [watchCtx] DIAGNOSTIC watch ctx (see emitBulkWatchHead).
  */
-function memcpyHelperBody(translateFunc, ckFunc = null) {
+function memcpyHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -1248,6 +1271,7 @@ function memcpyHelperBody(translateFunc, ckFunc = null) {
     t = 4;
   const o = [];
   o.push(...u(1), ...u(2), VT.i32); // locals: c, t
+  emitBulkWatchHead(o, watchCtx, d, n);
   // if (d > s && d < s + n) -> backward, else forward
   o.push(I.block, VOID); // A ($forward)
   o.push(I.lget, ...u(d), I.lget, ...u(sp), I.le_u, I.br_if, ...u(0)); // d <= s
@@ -1300,13 +1324,14 @@ function memcpyHelperBody(translateFunc, ckFunc = null) {
  *   helper — when given, dest chunks fault in with kind=1 (write); omit/null
  *   for the unchecked A1 fast path.
  */
-function memfillHelperBody(translateFunc, ckFunc = null) {
+function memfillHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
   const d = 0,
     v = 1,
     n = 2,
     c = 3;
   const o = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
+  emitBulkWatchHead(o, watchCtx, d, n);
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
@@ -1332,13 +1357,14 @@ function memfillHelperBody(translateFunc, ckFunc = null) {
  *   for the unchecked A1 fast path.
  * @param {number} seg the data-segment index
  */
-function meminitHelperBody(translateFunc, ckFunc, seg) {
+function meminitHelperBody(translateFunc, ckFunc, seg, watchCtx = null) {
   const d = 0,
     sp = 1,
     n = 2,
     c = 3;
   const o = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
+  emitBulkWatchHead(o, watchCtx, d, n);
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
@@ -1756,9 +1782,11 @@ export function instrument(bytes, opts = {}) {
   ];
   newCodeEntries.push(concatBytes([u(translateBody.length), translateBody]));
   for (const body of [
-    memcpyHelperBody(translateFunc, checkedTranslateFunc),
-    memfillHelperBody(translateFunc, checkedTranslateFunc),
-    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
+    memcpyHelperBody(translateFunc, checkedTranslateFunc, checkedCtx),
+    memfillHelperBody(translateFunc, checkedTranslateFunc, checkedCtx),
+    ...unhandled.initSegs.map((seg) =>
+      meminitHelperBody(translateFunc, checkedTranslateFunc, seg, checkedCtx),
+    ),
   ]) {
     newCodeEntries.push(concatBytes([u(body.length), body]));
   }

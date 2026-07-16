@@ -137,7 +137,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // softmmu pass's watchLo/watchHi window): log the store's EA, the
       // PRE-store value at that VA (own_pt_base walk), and the wasm backtrace
       // naming the writer — then swallow (the kernel must never see kind 0x77).
-      if (args[2] === 244 && args[4] === 0x77) {
+      if (args[2] === 244 && (args[4] === 0x77 || args[4] === 0x78)) {
         if (mmu_watch_budget > 0) {
           mmu_watch_budget--;
           const va = args[3] >>> 0;
@@ -156,7 +156,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             /* best-effort */
           }
           console.error(
-            `[mmu-watch ${runner_name}] store EA=0x${va.toString(16)} pre=${pre}\n${new Error().stack}`,
+            `[mmu-watch ${runner_name}] ${args[4] === 0x78 ? "BULK dest" : "store"} EA=0x${va.toString(16)} pre=${pre}\n${new Error().stack}`,
           );
         }
         return 0;
@@ -970,7 +970,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // al, whose heaps reuse the same per-process VAs) neither pay the
             // sentinel calls nor flood the report budget.
             const watch =
-              bytes.length > 20_000_000 ? { watchLo: 0x40733ff0, watchHi: 0x40734008 } : {};
+              bytes.length > 20_000_000 ? { watchLo: 0x40733fe0, watchHi: 0x40734008 } : {};
             bytes = softmmuInstrument(bytes, { checked: true, exportControls: true, ...watch });
           }
           table_initial = table_import_initial(bytes);
