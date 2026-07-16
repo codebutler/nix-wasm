@@ -150,35 +150,33 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           (ea >> 16) & 0xff,
           (ea >> 24) & 0xff,
         );
-        console.error(
-          `[mmu-nullderef ${runner_name}] ea=0x${ea.toString(16)} ("${chars}") kind=${args[4]}\n${new Error().stack}`,
-        );
         // #128 GROUND-TRUTH peek (revert with the probe): translation is proven
         // correct (all VA ranges, both paths, 128 MiB scale), so the pointer
         // field genuinely HOLDS 0x616e6962 — a real corruption or a nix latent
         // UB, not a mistranslation. Walk THIS task's page table (own_pt_base,
         // nix-env's root since the faulting user code called this syscall in its
         // own worker) over the shared physical arena and hex+ASCII-dump the live
-        // stack frame of Config::set (`_settings.find(name)`), so we can SEE
-        // whether the offending std::string is an intact-but-misread object
-        // (SSO/layout: content "binary…" intact, data-pointer field wrong) or
-        // wholesale garbage. Best-effort + guarded; ONE shot (fatal ea only).
+        // stack frame of Config::set (`_settings.find(name)`) to SEE whether the
+        // offending std::string is an intact-but-misread object (SSO/layout:
+        // content "binary…" intact, data-pointer field wrong) or wholesale
+        // garbage. Build the dump FIRST and APPEND it to the SAME console.error
+        // as the backtrace: a SEPARATE console.error for the dump produced NO
+        // captured output across 3 runs (only the FIRST console.error of the
+        // burst survives — the worker blocks handling the fault before the rest
+        // flush), whereas the backtrace message is reliably captured, so
+        // piggyback the peek onto it. Best-effort + guarded; ONE shot.
+        let peek = "";
         if (ea === 0x616e6962) {
-          // Build ONE string + ONE console.error: the previous 65-call version
-          // produced NO captured output (worker postMessage loss / a silent
-          // throw), so make it a single message with an ENTER marker + typeof of
-          // each closure var, so a run that still shows nothing localizes the
-          // silence and a run that throws reports the full stack.
-          let out = "[mmu-peek] ENTER";
+          peek = "\n[mmu-peek] ENTER";
           try {
-            out += ` typeof memory=${typeof memory} uei=${typeof user_executable_imports} opb=${typeof own_pt_base}`;
+            peek += ` typeof memory=${typeof memory} uei=${typeof user_executable_imports} opb=${typeof own_pt_base}`;
             const mem = memory;
             const uei = user_executable_imports;
             const u32 = new Uint32Array(mem.buffer);
             const u8 = new Uint8Array(mem.buffer);
             const pt = (own_pt_base || 0) >>> 0;
             const sp = (uei.env.__stack_pointer.value || 0) >>> 0;
-            out += ` pt=0x${pt.toString(16)} sp=0x${sp.toString(16)}`;
+            peek += ` pt=0x${pt.toString(16)} sp=0x${sp.toString(16)}`;
             const xlate = (va) => {
               va >>>= 0;
               const pgd_e = u32[(pt + ((va >>> 22) << 2)) >>> 2] >>> 0;
@@ -192,7 +190,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               const va = (sp + off) >>> 0;
               const p = xlate(va);
               if (p < 0) {
-                out += `\n  0x${va.toString(16)}: <unmapped>`;
+                peek += `\n  0x${va.toString(16)}: <unmapped>`;
                 continue;
               }
               let hex = "";
@@ -202,13 +200,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
                 hex += b.toString(16).padStart(2, "0") + (k === 7 ? "  " : " ");
                 asc += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : ".";
               }
-              out += `\n  0x${va.toString(16)}: ${hex} |${asc}|`;
+              peek += `\n  0x${va.toString(16)}: ${hex} |${asc}|`;
             }
           } catch (e) {
-            out += ` THREW: ${(e && e.stack) || e}`;
+            peek += ` THREW: ${(e && e.stack) || e}`;
           }
-          console.error(out);
         }
+        console.error(
+          `[mmu-nullderef ${runner_name}] ea=0x${ea.toString(16)} ("${chars}") kind=${args[4]}\n${new Error().stack}${peek}`,
+        );
       }
       return fn(...args);
     };
