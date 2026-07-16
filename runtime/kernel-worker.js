@@ -247,48 +247,54 @@ import { SharedQueues } from "./virtio/shared-queues.js";
                 const size = w(-12); // key size (node+20)
                 const dataP = w(-8); // key __data_ (node+24)
                 const isAlias = w(-4); // SettingData.isAlias (node+28)
-                // Key printability is the discriminator (the long capword's
-                // exact cap encoding — shift vs mask of the is_long LSB — is
-                // ambiguous, so don't gate on cap>=size).
-                const printableKey = (s, n) =>
-                  n >= 1 && s.length >= Math.min(n, 48) && !s.includes(".");
-                let tag = "content";
-                let key = "";
-                if (isBlack >>> 0 <= 1 && isAlias >>> 0 <= 1 && capw !== -1) {
-                  if (capw & 1 && size >= 1 && size < 0x100) {
-                    const kp = xlate(dataP);
-                    if (kp >= 0) {
-                      const k = keyText(kp, size);
-                      if (printableKey(k, size)) {
-                        tag = "NODE-long";
-                        key = k;
-                      }
-                    }
-                  } else if (!(capw & 1) && (capw & 0xff) >>> 1 >= 1 && (capw & 0xff) >>> 1 <= 10) {
-                    const kp = xlate((va - 16 + 1) >>> 0);
-                    if (kp >= 0) {
-                      const n = (capw & 0xff) >>> 1;
-                      const k = keyText(kp, n);
-                      if (printableKey(k, n)) {
-                        tag = "NODE-sso";
-                        key = k;
-                      }
-                    }
-                  }
-                }
-                if (tag !== "content") {
+                // v3: v2's node template matched NOTHING (nodeMatches=0 across
+                // all 38 hits) even though E0 proves the fault loads a node+32
+                // slot holding this value — so either the corruption smashed
+                // MORE of the node than the setting field (the key checks then
+                // reject it) or the "node" the find-iterator points at isn't
+                // well-formed. Stop gating: for every HEAP-region hit (the low
+                // hits <0x40200000 are exec data-segment literals), dump full
+                // context [H-64, H+48) hex+ascii AND the raw node-candidate
+                // field decode so the failure mode is visible directly.
+                const isHeap = va >= 0x40200000;
+                if (isHeap && nodes < 16) {
                   nodes++;
-                  let dump = "";
-                  for (let off = -48; off < 16; off += 4) {
-                    const v = w(off);
-                    dump += ` ${v === -1 ? "<unmap>" : (v >>> 0).toString(16).padStart(8, "0")}${off === 0 ? "*" : ""}`;
+                  peek += `\n  heap-hit @0x${va.toString(16)} as-node(0x${((va - 32) >>> 0).toString(16)}): isBlack=0x${(isBlack >>> 0).toString(16)} capw=0x${(capw >>> 0).toString(16)} size=0x${(size >>> 0).toString(16)} dataP=0x${(dataP >>> 0).toString(16)} isAlias=0x${(isAlias >>> 0).toString(16)}`;
+                  if (capw !== -1 && capw & 1 && size >= 1 && size < 0x100) {
+                    const kp = xlate(dataP);
+                    peek += ` key(long)="${kp >= 0 ? keyText(kp, size) : "<data unmapped>"}"`;
+                  } else if (
+                    capw !== -1 &&
+                    !(capw & 1) &&
+                    (capw & 0xff) >>> 1 >= 1 &&
+                    (capw & 0xff) >>> 1 <= 10
+                  ) {
+                    const kp = xlate((va - 16 + 1) >>> 0);
+                    if (kp >= 0) peek += ` key(sso)="${keyText(kp, (capw & 0xff) >>> 1)}"`;
                   }
-                  peek += `\n  ${tag} node=0x${((va - 32) >>> 0).toString(16)} key="${key}" isAlias=${isAlias}\n   [node-16..node+48]:${dump}`;
+                  for (let row = -64; row < 48; row += 16) {
+                    let hex = "";
+                    let asc = "";
+                    for (let k = 0; k < 16; k += 4) {
+                      const v = w(row + k);
+                      if (v === -1) {
+                        hex += "<unmap>     ";
+                        asc += "????";
+                        continue;
+                      }
+                      for (let b = 0; b < 4; b++) {
+                        const byte = (v >>> (8 * b)) & 0xff;
+                        hex += byte.toString(16).padStart(2, "0") + " ";
+                        asc += byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ".";
+                      }
+                    }
+                    peek += `\n   0x${((va + row) >>> 0).toString(16)}: ${hex}|${asc}|${row === 0 ? " <hit" : ""}`;
+                  }
                 }
-                addrs += ` 0x${va.toString(16)}${tag !== "content" ? "!" : ""}`;
+                addrs += ` 0x${va.toString(16)}${isHeap ? "!" : ""}`;
               }
             }
-            peek += `\n[mmu-heapscan] hits=${hits} nodeMatches=${nodes} at:${addrs}`;
+            peek += `\n[mmu-heapscan] hits=${hits} heapDumps=${nodes} at:${addrs}`;
           } catch (e) {
             peek += ` THREW: ${(e && e.stack) || e}`;
           }
