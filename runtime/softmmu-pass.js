@@ -244,7 +244,7 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}}
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}}
  */
 function resolveCheckedImports(importSec, typeSec, exportSec) {
   if (!importSec) {
@@ -667,7 +667,7 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}|null} [checked]
  *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
  *   default A1 unchecked fast path (byte-identical to before A2 existed).
  * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
@@ -775,6 +775,22 @@ export function rewriteFuncBody(
   // present-bit test can consume a copy while the raw value survives for the
   // next level / the final address computation.
   const emitTranslate = (kind) => {
+    // #131 DIAGNOSTIC store-watchpoint (revert with the investigation): when
+    // `checked.watchLo/Hi` are set, every STORE/RMW whose EA falls in
+    // [watchLo, watchHi) first reports via the fault import with SENTINEL kind
+    // 0x77 — the engine's probe logs the backtrace + pre-store value and
+    // returns WITHOUT forwarding to the kernel. Inline path only; the helper
+    // path gets the same check inside __mmu_translate_ck.
+    if (!helper && checked && checked.watchLo !== undefined && kind !== 0) {
+      out.push(0x20, ...u(EA)); // local.get ea
+      out.push(0x41, ...s(checked.watchLo | 0), 0x4f); // >= lo (i32.ge_u)
+      out.push(0x20, ...u(EA)); // local.get ea
+      out.push(0x41, ...s(checked.watchHi | 0), 0x49); // < hi (i32.lt_u)
+      out.push(0x71); // i32.and
+      out.push(0x04, 0x40); // if (void)
+      emitFaultCall(0x77); // sentinel — logged + swallowed by the engine
+      out.push(0x0b); // end if
+    }
     if (helper) {
       // #164: helper-call translate — call the appended walk function instead
       // of inlining it, keeping this (over-limit) function under V8's max
@@ -1352,7 +1368,7 @@ function meminitHelperBody(translateFunc, ckFunc, seg) {
  * bulk callers pass a fresh `(va, kind)` per page-chunk via `call`.
  *
  * @param {number} ptBaseGlobal the pt_base global index
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}} checkedCtx
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}} checkedCtx
  */
 function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const VA = 0;
@@ -1371,6 +1387,28 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
     o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
     o.push(0x1a); // drop
   };
+  // #131 DIAGNOSTIC store-watchpoint — the helper-path counterpart of the
+  // inline check in rewriteFuncBody's emitTranslate (see there; revert with
+  // the investigation). kind is 0/1 at runtime here, so `and` with the
+  // window test gates loads out.
+  if (checkedCtx.watchLo !== undefined) {
+    o.push(0x20, ...u(VA)); // local.get va
+    o.push(0x41, ...s(checkedCtx.watchLo | 0), 0x4f); // >= lo (i32.ge_u)
+    o.push(0x20, ...u(VA)); // local.get va
+    o.push(0x41, ...s(checkedCtx.watchHi | 0), 0x49); // < hi (i32.lt_u)
+    o.push(0x71); // i32.and
+    o.push(0x20, ...u(KIND)); // local.get kind (0=load, 1=store)
+    o.push(0x71); // i32.and -> in-window store
+    o.push(0x04, 0x40); // if (void)
+    o.push(0x23, ...u(checkedCtx.spGlobalIdx)); // global.get __stack_pointer
+    o.push(0x10, ...u(checkedCtx.tlsFuncIdx)); // call __get_tls_base -> tp
+    o.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
+    o.push(0x20, ...u(VA)); // local.get va
+    o.push(0x41, ...s(0x77)); // i32.const 0x77 (sentinel kind)
+    o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
+    o.push(0x1a); // drop
+    o.push(0x0b); // end if
+  }
   o.push(0x02, VT.i32); // block $done (result i32)
   o.push(0x03, 0x40); // loop $retry (void)
   // level 1: pgd_e = u32[ pt_base + (va>>>22)<<2 ]
@@ -1536,11 +1574,15 @@ function moduleName(bytes) {
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
- * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number }} [opts]
+ * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number,
+ *   watchLo?: number, watchHi?: number }} [opts]
  *   `inlineLimit` (#164): the byte size above which a function's inline
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
  *   fallback on small functions.
+ *   `watchLo`/`watchHi` (#131 DIAGNOSTIC, checked mode only): store-watchpoint
+ *   window — every store/RMW whose EA lands in [watchLo, watchHi) first calls
+ *   the fault import with SENTINEL kind 0x77 (the engine logs + swallows it).
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -1574,6 +1616,13 @@ export function instrument(bytes, opts = {}) {
       e.message += ` [binary: ${bytes.length} bytes, module="${moduleName(bytes) ?? "?"}"]`;
     }
     throw e;
+  }
+  // #131 DIAGNOSTIC store-watchpoint window (revert with the investigation):
+  // rides the checked ctx into both the inline emitTranslate and
+  // __mmu_translate_ck. Checked mode only.
+  if (checkedCtx && opts.watchLo !== undefined) {
+    checkedCtx.watchLo = opts.watchLo >>> 0;
+    checkedCtx.watchHi = opts.watchHi >>> 0;
   }
 
   // The wasm START function (__wasm_init_memory under --shared-memory) runs

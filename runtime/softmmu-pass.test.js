@@ -675,6 +675,27 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.rawCalls[0].tp).toBe(0x1234);
   });
 
+  test("#131 DIAGNOSTIC store-watchpoint: in-window stores report sentinel kind 0x77, loads and out-of-window stores don't", () => {
+    const V = HEAP + 0x48000;
+    const bytes = instrument(buildCheckedFixture(), {
+      checked: true,
+      watchLo: V,
+      watchHi: V + 8,
+    });
+    const b = bootChecked(bytes, HEAP + 0x70000);
+    const watchCalls = () => b.calls.filter((c) => c.kind === 0x77);
+
+    b.inst.exports.store_u8(V + 4, 0xab); // in-window store -> sentinel
+    expect(watchCalls().length).toBe(1);
+    expect(watchCalls()[0]).toEqual({ nr: NR_MMU_FAULT, ea: V + 4, kind: 0x77 });
+    expect(new Uint8Array(b.mem.buffer)[V + 4]).toBe(0xab); // store still lands
+
+    b.inst.exports.store_u8(V + 8, 0xcd); // one past the window -> no sentinel
+    b.inst.exports.store_u8(V - 1, 0xef); // below the window -> no sentinel
+    b.inst.exports.load_u8(V + 4); // in-window LOAD -> no sentinel
+    expect(watchCalls().length).toBe(1);
+  });
+
   test("a leading __cpp_exception TAG import does not hide the syscall import (#152)", () => {
     // The #152 sommelier panic: a guest C++ binary imports the
     // `__cpp_exception` tag (import kind 0x04) BEFORE its `__wasm_syscall_*`

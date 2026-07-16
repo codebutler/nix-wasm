@@ -128,9 +128,39 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // Budgeted so a refault loop can't flood; prints the ASCII rendering for clarity.
   const printable = (b) => b >= 0x20 && b <= 0x7e;
   let mmu_nullfault_budget = 24;
+  // #131 DIAGNOSTIC watch sentinel budget (revert with the probe).
+  let mmu_watch_budget = 48;
   const mmu_nullfault_probe =
     (fn) =>
     (...args) => {
+      // #131 DIAGNOSTIC store-watchpoint sentinel (kind 0x77, emitted by the
+      // softmmu pass's watchLo/watchHi window): log the store's EA, the
+      // PRE-store value at that VA (own_pt_base walk), and the wasm backtrace
+      // naming the writer — then swallow (the kernel must never see kind 0x77).
+      if (args[2] === 244 && args[4] === 0x77) {
+        if (mmu_watch_budget > 0) {
+          mmu_watch_budget--;
+          const va = args[3] >>> 0;
+          let pre = "?";
+          try {
+            const u32 = new Uint32Array(memory.buffer);
+            const pt = (own_pt_base || 0) >>> 0;
+            const pgd_e = u32[(pt + ((va >>> 22) << 2)) >>> 2] >>> 0;
+            const pte = pgd_e
+              ? u32[((pgd_e & ~0xfff) + (((va >>> 12) & 0x3ff) << 2)) >>> 2] >>> 0
+              : 0;
+            if (pte & 1) {
+              pre = "0x" + (u32[((pte & ~0xfff) + (va & 0xfff)) >>> 2] >>> 0).toString(16);
+            }
+          } catch {
+            /* best-effort */
+          }
+          console.error(
+            `[mmu-watch ${runner_name}] store EA=0x${va.toString(16)} pre=${pre}\n${new Error().stack}`,
+          );
+        }
+        return 0;
+      }
       const ea = args[3] >>> 0;
       const asciiPtr =
         ea >= 0x50000000 &&
@@ -931,7 +961,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           table_initial = hit.table_initial;
         } else {
           if (!isInstrumented(bytes)) {
-            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+            // #131 DIAGNOSTIC store-watchpoint (revert with the probe): the
+            // corrupt _settings["system-features"] node lives at 0x40733fe0 in
+            // nix-env (deterministic across boots); watch stores to its
+            // key/SettingData region [node+16, node+40) to catch the writer —
+            // or prove NO store ever lands on node+32 (uninit / lost store).
+            // Size-gated to nix.wasm (~28.8 MB) so other binaries (busybox et
+            // al, whose heaps reuse the same per-process VAs) neither pay the
+            // sentinel calls nor flood the report budget.
+            const watch =
+              bytes.length > 20_000_000 ? { watchLo: 0x40733ff0, watchHi: 0x40734008 } : {};
+            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true, ...watch });
           }
           table_initial = table_import_initial(bytes);
           user_executable = WebAssembly.compile(bytes);
