@@ -187,6 +187,28 @@ jobs:
             '.#userspace-busybox-fork' \
             --print-out-paths --no-link 2>&1 | tee build.log
 
+      # `nix-env -iA wasm-tools.<tool>` (the static pkgs.nix catalog) SUBSTITUTES
+      # the .drv (then the output). cachix-action's post-build-hook pushes only
+      # built OUTPUTS, so the toolchain .drv closures never reach Cachix on their
+      # own — push them explicitly so the guest, which now substitutes from
+      # nix-wasm.cachix.org over the Wisp uplink (exactly like real NixOS), can
+      # resolve them. Master-only: fork PRs lack the push token, and only the
+      # channel the live guest boots from needs a complete cache. (Real NixOS
+      # never needs this — it instantiates .drvs locally from nixpkgs; the
+      # `nixpkgs.<pkg>` path here does too and needs only the already-pushed
+      # output. This backs solely the nix-wasm-specific static catalog.)
+      - name: Push wasm-tools .drv closures to Cachix
+        if: ${{ github.ref == 'refs/heads/master' }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          roots=$(nix build -L '.#wasm-cache-drv-roots' --no-link --print-out-paths)
+          while IFS= read -r drv; do
+            [ -n "$drv" ] || continue
+            echo "cachix push (drv): $drv"
+            cachix push nix-wasm "$drv"
+          done < "$roots"
+
       # Failure forensics: the interesting nix error is buried mid-log behind
       # the Cachix post-job flood, out of reach of API log tails. Post the
       # error tail straight onto the PR so it's readable (and webhook-visible).
