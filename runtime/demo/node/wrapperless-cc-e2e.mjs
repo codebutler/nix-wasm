@@ -12,7 +12,7 @@
 //
 // LINUX_WASM_ARTIFACTS points at vmlinux.wasm/initramfs.cpio.gz/base.squashfs/
 // nix-cache (the .#wasm-binary-cache built from the #3 branch). Exit 0/1/2.
-import { bootNode } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 const checks = [];
@@ -45,6 +45,9 @@ try {
     s.kill();
     process.exit(1);
   }
+  // Offline CI: substitute from the local /nix-cache (the baked guest config is
+  // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
+  await primeLocalNixCache(s);
 
   console.log("  [installing guest-clang-wasm32 + guest-cc + guest-cxx from nix-cache…]");
   check(

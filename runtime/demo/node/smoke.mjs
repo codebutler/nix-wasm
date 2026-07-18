@@ -5,7 +5,7 @@
 // (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
-import { bootNode } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
 import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const vfs = MemVfs.from({
@@ -33,6 +33,9 @@ try {
     throw e;
   }
   check(reached, "shell prompt reached");
+  // Offline CI: substitute from the local /nix-cache (the baked guest config is
+  // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
+  await primeLocalNixCache(s);
   // The 9P-over-virtio transport negotiated a mount (printed per mount when the
   // guest clamps msize to the device max). This gates the #87 regression — if the
   // 9P virtio devices fail to register there is no mount and this line never prints

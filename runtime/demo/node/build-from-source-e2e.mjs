@@ -24,7 +24,7 @@
 // + paths.nix). Wired into the nix-wasm.yml `nix-boot-smoke` CI job.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
-import { bootNode } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 let pass = true;
@@ -58,6 +58,9 @@ try {
     s.kill();
     process.exit(1);
   }
+  // Offline CI: substitute from the local /nix-cache (the baked guest config is
+  // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
+  await primeLocalNixCache(s);
 
   // 1. Trivial sh-builder build from source (shell builtins only).
   console.log("  [build #1: trivial /bin/sh builder → $out …]");
