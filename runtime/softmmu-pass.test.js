@@ -157,6 +157,42 @@ describe("instrument()", () => {
     expect(u[V / 4]).toBe(0);
   });
 
+  test("#128 page-crossing scalar access reaches TWO non-adjacent physical frames", () => {
+    // The bug this proves fixed: a multi-byte scalar store/load whose bytes span
+    // a page boundary must reach the two frames the two virtual pages map to —
+    // NOT write the tail bytes into the frame physically-after the first one.
+    // Map two ADJACENT virtual pages to two NON-adjacent physical frames:
+    //   virtual 0x300xxx -> phys frame P1=0x210000
+    //   virtual 0x301xxx -> phys frame P2=0x260000  (P1's next frame is 0x211000)
+    const VB = 0x300000; // virtual page 0x300 base
+    const P1 = 0x210000;
+    const P2 = 0x260000; // deliberately != P1 + 0x1000
+    const b = boot(instrument(prog, { exportControls: true }), {
+      instrumented: true,
+      remap: (setPte) => {
+        setPte(VB, P1);
+        setPte(VB + 0x1000, P2);
+      },
+    });
+    // a single i32.store at VB+0xffe spans 0xffe,0xfff (page 0x300 -> P1) and
+    // 0x1000,0x1001 (page 0x301 -> P2). value little-endian 44 33 22 11.
+    const CROSS = VB + 0xffe;
+    b.inst.exports.fill(CROSS, 1, 0x11223344);
+    const u8 = new Uint8Array(b.mem.buffer);
+    // low two bytes land in P1's tail...
+    expect(u8[P1 + 0xffe]).toBe(0x44);
+    expect(u8[P1 + 0xfff]).toBe(0x33);
+    // ...high two bytes land in P2's head (the correct frame, NOT P1+0x1000).
+    expect(u8[P2 + 0]).toBe(0x22);
+    expect(u8[P2 + 1]).toBe(0x11);
+    // the frame physically after P1 (what the pre-fix raw store would have hit)
+    // is untouched.
+    expect(u8[P1 + 0x1000]).toBe(0);
+    expect(u8[P1 + 0x1001]).toBe(0);
+    // and a crossing i32.load reads the value back whole across both frames.
+    expect(b.inst.exports.sum_scan(CROSS, 1) >>> 0).toBe(0x11223344);
+  });
+
   test("refuses a module containing SIMD memory ops (documented follow-up)", () => {
     // Hand-craft a module with a v128.load (0xfd 0x00) so scanUnhandled flags SIMD.
     const simdMod = new Uint8Array([

@@ -87,6 +87,86 @@ const VALTYPE = {
 
 const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
+// #128 PAGE-CROSSING scalar accesses: a multi-byte load/store whose
+// `(ea & 0xfff) + width > 0x1000` spans TWO virtual pages, which map to two
+// (generally non-adjacent) physical frames. The single-translate raw access
+// (`phys = translate(ea); raw op@phys`) writes/reads the tail bytes past frame
+// one's end into the physically-next arena bytes — a DIFFERENT virtual page's
+// frame — corrupting/reading foreign memory. (Invisible on NOMMU: no
+// translation, memory is flat/contiguous.) These tables drive the split: for
+// width>=2 accesses the pass emits a fast within-page path + a byte-wise slow
+// path (`__mmu_{load,store}_bytes`) that translates EACH byte's page separately.
+const ACCESS_W = {
+  0x28: 4,
+  0x29: 8,
+  0x2a: 4,
+  0x2b: 8,
+  0x2c: 1,
+  0x2d: 1,
+  0x2e: 2,
+  0x2f: 2,
+  0x30: 1,
+  0x31: 1,
+  0x32: 2,
+  0x33: 2,
+  0x34: 4,
+  0x35: 4,
+  0x36: 4,
+  0x37: 8,
+  0x38: 4,
+  0x39: 8,
+  0x3a: 1,
+  0x3b: 2,
+  0x3c: 1,
+  0x3d: 2,
+  0x3e: 4,
+};
+// Result value-type of each load op (the `if`/`block` result type on the split).
+const LOAD_RESVT = {
+  0x28: VT.i32,
+  0x29: VT.i64,
+  0x2a: VT.f32,
+  0x2b: VT.f64,
+  0x2c: VT.i32,
+  0x2d: VT.i32,
+  0x2e: VT.i32,
+  0x2f: VT.i32,
+  0x30: VT.i64,
+  0x31: VT.i64,
+  0x32: VT.i64,
+  0x33: VT.i64,
+  0x34: VT.i64,
+  0x35: VT.i64,
+};
+// Post-process a load's raw little-endian i64 (from __mmu_load_bytes) into the
+// op's result type: wrap/reinterpret/sign-extend. Opcodes: 0xa7 i32.wrap_i64,
+// 0xbe f32.reinterpret_i32, 0xbf f64.reinterpret_i64, 0xc1 i32.extend16_s,
+// 0xc3 i64.extend16_s, 0xc4 i64.extend32_s. (8/16u/32u already zero-extended.)
+const LOAD_POST = {
+  0x28: [0xa7],
+  0x29: [],
+  0x2a: [0xa7, 0xbe],
+  0x2b: [0xbf],
+  0x2e: [0xa7, 0xc1],
+  0x2f: [0xa7],
+  0x32: [0xc3],
+  0x33: [],
+  0x34: [0xc4],
+  0x35: [],
+};
+// Convert a store's typed value (already on the stack) to the i64 the byte
+// helper stores from (it uses only the low `width` bytes). Opcodes: 0xad
+// i64.extend_i32_u, 0xbc i32.reinterpret_f32, 0xbd i64.reinterpret_f64.
+const STORE_TOI64 = {
+  0x36: [0xad],
+  0x37: [],
+  0x38: [0xbc, 0xad],
+  0x39: [0xbd],
+  0x3b: [0xad],
+  0x3d: [],
+  0x3e: [],
+};
+
 // ---- A2: present-checked translate (#128 Track A2) -------------------------
 //
 // The A1 fast path (above) assumes every PTE is present — correct only under
@@ -678,6 +758,15 @@ function skipAtomic(b, i) {
  *   a function whose inline body would exceed V8's per-function size limit
  *   (`kV8MaxWasmFunctionSize`); every other function keeps the measured-fast
  *   inline path. Null (default) = inline, byte-identical to before #164.
+ * @param {{loadBytes:number, storeBytes:number}|null} [splitFns]
+ *   #128 PAGE-CROSSING split: indices of the appended byte-wise slow-path
+ *   helpers (`__mmu_load_bytes(ea,width)->i64` / `__mmu_store_bytes(ea,val,width)`).
+ *   For every scalar access of width>=2 the pass adds a fast within-page path
+ *   (`(ea&0xfff) <= 0x1000-width`) + a slow byte-wise path that translates each
+ *   byte's page separately, so an access straddling a page boundary reaches the
+ *   correct two (non-adjacent) physical frames. In helper mode a width>=2 access
+ *   ALWAYS takes the byte helper (no inline fast path — keeps the over-limit
+ *   function compact). Null (unit-test direct calls) = pre-fix raw access.
  * @returns {number[]}
  */
 export function rewriteFuncBody(
@@ -687,6 +776,7 @@ export function rewriteFuncBody(
   bulkFns,
   checked = null,
   helper = null,
+  splitFns = null,
 ) {
   let i = 0;
   let nLocals;
@@ -909,8 +999,32 @@ export function rewriteFuncBody(
         // stack: va  ->  ea = va + offset (in $EA), then phys, then raw load
         if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
         out.push(0x21, ...u(EA)); // local.set ea
-        emitTranslate(0); // -> phys (kind=0 load)
-        out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+        const W = ACCESS_W[op];
+        if (splitFns && W >= 2 && helper) {
+          // #128 helper mode: a width>=2 access ALWAYS takes the byte-wise slow
+          // path (correct for any straddle; no inline fast path so the already-
+          // over-limit function stays compact). load_bytes(ea,W) -> i64, then
+          // post-process into the op's result type.
+          out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes));
+          out.push(...LOAD_POST[op]);
+        } else if (splitFns && W >= 2) {
+          // #128 inline mode: fast within-page path when the whole access fits
+          // in one page ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path
+          // that translates each byte's page separately. Both leave the op's
+          // result value on the stack (the `if`'s result type).
+          out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
+          out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
+          out.push(0x04, LOAD_RESVT[op]); // if (result <loadvt>)
+          emitTranslate(0); // -> phys (kind=0 load)
+          out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+          out.push(0x05); // else
+          out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes)); // -> i64
+          out.push(...LOAD_POST[op]); // post-process to loadvt
+          out.push(0x0b); // end if
+        } else {
+          emitTranslate(0); // -> phys (kind=0 load)
+          out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+        }
         // #131 DIAGNOSTIC value-load trace (revert with the investigation): for
         // an i32.load whose RESULT equals the target and whose EA is in the heap
         // (>=0x40000000), report EA via the fault import with SENTINEL kind 0x79.
@@ -936,9 +1050,34 @@ export function rewriteFuncBody(
         out.push(0x21, ...u(vl)); // local.set val
         if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
         out.push(0x21, ...u(EA)); // local.set ea
-        emitTranslate(1); // -> phys (kind=1 store)
-        out.push(0x20, ...u(vl)); // local.get val
-        out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+        const W = ACCESS_W[op];
+        if (splitFns && W >= 2 && helper) {
+          // #128 helper mode: width>=2 store ALWAYS byte-wise (see the load
+          // branch). store_bytes(ea, val_as_i64, W) writes the low W bytes,
+          // translating each byte's page (write-kind) separately.
+          out.push(0x20, ...u(EA)); // ea
+          out.push(0x20, ...u(vl)); // val (typed)
+          out.push(...STORE_TOI64[op]); // -> i64
+          out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+        } else if (splitFns && W >= 2) {
+          // #128 inline mode: fast within-page path else byte-wise slow path.
+          out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
+          out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
+          out.push(0x04, 0x40); // if (void)
+          emitTranslate(1); // -> phys (kind=1 store)
+          out.push(0x20, ...u(vl)); // local.get val
+          out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+          out.push(0x05); // else
+          out.push(0x20, ...u(EA)); // ea
+          out.push(0x20, ...u(vl)); // val (typed)
+          out.push(...STORE_TOI64[op]); // -> i64
+          out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+          out.push(0x0b); // end if
+        } else {
+          emitTranslate(1); // -> phys (kind=1 store)
+          out.push(0x20, ...u(vl)); // local.get val
+          out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+        }
       }
       i = j;
       continue;
@@ -1401,6 +1540,79 @@ function meminitHelperBody(translateFunc, ckFunc, seg, watchCtx = null) {
 }
 
 /**
+ * __mmu_load_bytes(ea, width) -> i64 — the PAGE-CROSSING slow path for loads.
+ * Reads `width` bytes starting at virtual `ea`, translating EACH byte's page
+ * separately (so a load straddling a page boundary reads the correct two
+ * frames), and assembles them little-endian, zero-extended, into an i64. The
+ * caller post-processes (wrap / reinterpret / sign-extend) per LOAD_POST. Uses
+ * the checked translate when present (each byte's page can independently
+ * demand-fault) else the plain one — same as the bulk helpers.
+ *
+ * @param {number} translateFunc plain `__mmu_translate(va)` index
+ * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
+ */
+function loadBytesHelperBody(translateFunc, ckFunc = null) {
+  const EA = 0,
+    W = 1,
+    I = 2,
+    RES = 3;
+  const o = [];
+  o.push(...u(2), ...u(1), VT.i32, ...u(1), VT.i64); // locals: i(i32), res(i64)
+  o.push(0x42, 0x00, 0x21, ...u(RES)); // res = 0
+  o.push(0x41, 0x00, 0x21, ...u(I)); // i = 0
+  o.push(0x02, 0x40, 0x03, 0x40); // block $done ; loop $loop
+  o.push(0x20, ...u(I), 0x20, ...u(W), 0x4f, 0x0d, ...u(1)); // if i>=width br $done
+  o.push(0x20, ...u(EA), 0x20, ...u(I), 0x6a); // ea + i
+  emitTranslateCall(o, translateFunc, ckFunc, 0); // -> phys (kind=0 read)
+  o.push(0x2d, 0x00, 0x00); // i32.load8_u phys -> byte
+  o.push(0xad); // i64.extend_i32_u -> (i64)byte
+  o.push(0x20, ...u(I), 0xad, 0x42, 0x03, 0x86); // shiftAmt = (i64)i << 3
+  o.push(0x86); // (i64)byte << shiftAmt
+  o.push(0x20, ...u(RES), 0x84, 0x21, ...u(RES)); // res |= that
+  o.push(0x20, ...u(I), 0x41, 0x01, 0x6a, 0x21, ...u(I)); // i++
+  o.push(0x0c, ...u(0)); // br $loop
+  o.push(0x0b, 0x0b); // end loop, end block
+  o.push(0x20, ...u(RES)); // -> res
+  o.push(0x0b); // end function
+  return o;
+}
+
+/**
+ * __mmu_store_bytes(ea, val, width) — the PAGE-CROSSING slow path for stores.
+ * Writes the low `width` bytes of i64 `val` starting at virtual `ea`,
+ * translating EACH byte's page separately with WRITE kind (so a store
+ * straddling a page boundary writes the correct two frames AND each page
+ * independently write-permission-checks / COW-faults). Caller converts the
+ * typed value to i64 per STORE_TOI64 before the call.
+ *
+ * @param {number} translateFunc plain `__mmu_translate(va)` index
+ * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
+ */
+function storeBytesHelperBody(translateFunc, ckFunc = null) {
+  const EA = 0,
+    VAL = 1,
+    W = 2,
+    I = 3;
+  const o = [];
+  o.push(...u(1), ...u(1), VT.i32); // local: i (i32)
+  o.push(0x41, 0x00, 0x21, ...u(I)); // i = 0
+  o.push(0x02, 0x40, 0x03, 0x40); // block $done ; loop $loop
+  o.push(0x20, ...u(I), 0x20, ...u(W), 0x4f, 0x0d, ...u(1)); // if i>=width br $done
+  o.push(0x20, ...u(EA), 0x20, ...u(I), 0x6a); // ea + i
+  emitTranslateCall(o, translateFunc, ckFunc, 1); // -> phys (kind=1 write)
+  o.push(0x20, ...u(VAL)); // val (i64)
+  o.push(0x20, ...u(I), 0xad, 0x42, 0x03, 0x86); // shiftAmt = (i64)i << 3
+  o.push(0x88); // val >> shiftAmt (i64.shr_u)
+  o.push(0xa7); // i32.wrap_i64 -> byte (low 8 used)
+  o.push(0x3a, 0x00, 0x00); // i32.store8 phys, byte
+  o.push(0x20, ...u(I), 0x41, 0x01, 0x6a, 0x21, ...u(I)); // i++
+  o.push(0x0c, ...u(0)); // br $loop
+  o.push(0x0b, 0x0b); // end loop, end block
+  o.push(0x0b); // end function
+  return o;
+}
+
+/**
  * __mmu_translate_ck(va, kind) -> phys — the CHECKED counterpart to the plain
  * `__mmu_translate` helper (translateBody below), appended ONLY when
  * `checked: true`. Bulk-memory helpers (memcpy/memfill/meminit) call THIS
@@ -1712,6 +1924,15 @@ export function instrument(bytes, opts = {}) {
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
   const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
 
+  // #128 PAGE-CROSSING byte-wise slow-path helpers, appended AFTER the checked
+  // translate (or after the bulk set when unchecked) so every existing index
+  // formula above stays untouched. Two new types: (i32,i32)->i64 for load_bytes
+  // and (i32,i64,i32)->() for store_bytes.
+  const splitBase = translateFunc + 1 + nAppended + (checkedCtx ? 1 : 0);
+  const splitFns = { loadBytes: splitBase, storeBytes: splitBase + 1 };
+  const loadBytesType = nTypes + 2 + (checkedCtx ? 1 : 0);
+  const storeBytesType = loadBytesType + 1;
+
   // --- rewrite each defined function body inline -----------------------------
   // #164: the inline translate expands each access ~4-10× — a large, memory-op-
   // dense function (seen in nix.wasm: one function inflated to 23 MB) can exceed
@@ -1734,7 +1955,15 @@ export function instrument(bytes, opts = {}) {
     const body = cb.subarray(ci, ci + size);
     ci += size;
     const numParams = paramCounts[defTypes[f]] ?? 0;
-    let rewritten = rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx);
+    let rewritten = rewriteFuncBody(
+      body,
+      numParams,
+      ptBaseGlobal,
+      bulkFns,
+      checkedCtx,
+      null,
+      splitFns,
+    );
     if (rewritten.length > inlineLimit) {
       const viaHelper = rewriteFuncBody(
         body,
@@ -1743,6 +1972,7 @@ export function instrument(bytes, opts = {}) {
         bulkFns,
         checkedCtx,
         helperFns,
+        splitFns,
       );
       // Not a silent cap (per #128's boot-debuggability ethos): announce the
       // fallback + both sizes so a boot log shows exactly which function and why.
@@ -1816,12 +2046,20 @@ export function instrument(bytes, opts = {}) {
     const ckBody = checkedTranslateBody(ptBaseGlobal, checkedCtx);
     newCodeEntries.push(concatBytes([u(ckBody.length), ckBody]));
   }
+  // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
+  // checked translate). Each translates every byte's page separately.
+  {
+    const lb = loadBytesHelperBody(translateFunc, checkedTranslateFunc);
+    const sb = storeBytesHelperBody(translateFunc, checkedTranslateFunc);
+    newCodeEntries.push(concatBytes([u(lb.length), lb]));
+    newCodeEntries.push(concatBytes([u(sb.length), sb]));
+  }
   // Assemble the code section as a Uint8Array via a summed byte copy, NOT
   // `newCodeEntries.flat()` + spread: the flattened number array of a large
   // instrumented binary (nix.wasm, hundreds of MB) exceeds V8's Array.flat
   // ceiling → `RangeError: Invalid array length` (see concatBytes).
   const newCodeBody = concatBytes([
-    u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0)),
+    u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes
     ...newCodeEntries,
   ]);
 
@@ -1829,7 +2067,7 @@ export function instrument(bytes, opts = {}) {
   // only) (i32,i32)->i32 -------------------------------------------------
   const typeExistingTail = typeSec ? typeSec.body.subarray(u(nTypes).length) : [];
   const newTypeBody = [
-    ...u(nTypes + 2 + (checkedCtx ? 1 : 0)),
+    ...u(nTypes + 2 + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes types
     ...typeExistingTail,
     0x60,
     ...u(1),
@@ -1852,17 +2090,32 @@ export function instrument(bytes, opts = {}) {
           VT.i32, // (i32,i32)->i32: checked translate (va,kind)->phys
         ]
       : []),
+    // #128 page-crossing byte helpers:
+    0x60,
+    ...u(2),
+    VT.i32,
+    VT.i32,
+    ...u(1),
+    VT.i64, // (i32,i32)->i64: __mmu_load_bytes(ea,width)
+    0x60,
+    ...u(3),
+    VT.i32,
+    VT.i64,
+    VT.i32,
+    ...u(0), // (i32,i64,i32)->(): __mmu_store_bytes(ea,val,width)
   ];
 
   // --- function section: append the translate helper's type index, then the
   // bulk helpers', then (checked only) the checked translate helper's -------
   const funcExistingTail = funcSec ? funcSec.body.subarray(u(nDefFuncs).length) : [];
   const newFuncBody = [
-    ...u(nDefFuncs + 1 + nAppended + (checkedCtx ? 1 : 0)),
+    ...u(nDefFuncs + 1 + nAppended + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes
     ...funcExistingTail,
     ...u(translateType),
     ...Array.from({ length: nAppended }, () => u(bulkType)).flat(),
     ...(checkedCtx ? u(checkedTranslateType) : []),
+    ...u(loadBytesType), // #128 __mmu_load_bytes
+    ...u(storeBytesType), // #128 __mmu_store_bytes
   ];
 
   // --- global section: append pt_base (i32 mutable, init 0) -------------------
