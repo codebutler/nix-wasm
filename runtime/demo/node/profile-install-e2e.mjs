@@ -47,7 +47,7 @@
 // pkgs.nix + paths.nix) and base.squashfs carries nix.conf with `substitute=true`.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
-import { bootNode } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 
@@ -77,6 +77,9 @@ try {
     s.kill();
     process.exit(1);
   }
+  // Offline CI: substitute from the local /nix-cache (the baked guest config is
+  // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
+  await primeLocalNixCache(s);
 
   // Step 2: assert cc is NOT present (toolchain removed from base)
   s.send("which cc 2>/dev/null || echo CC_ABSENT_OK\n");

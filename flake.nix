@@ -870,6 +870,21 @@
         # Served by runtime/nix-cache.js; in-guest: `nix-env -iA guest-cc`.
         wasm-binary-cache = wasmBinaryCache;
 
+        # The toolchain .drv closures the wasm-tools catalog (pkgs.nix) is
+        # realised from — one .drv store path per line. `nix-env -iA
+        # wasm-tools.<tool>` on a build-incapable guest SUBSTITUTES the .drv (then
+        # the output), so once the guest substitutes from nix-wasm.cachix.org over
+        # the wan0 Wisp uplink (exactly like real NixOS) the .drvs must be ON
+        # Cachix. cachix-action's post-build-hook pushes only built OUTPUTS, so CI
+        # reads this file and `cachix push`es each .drv closure explicitly (see
+        # .github/workflows/nix-wasm.yml). Real NixOS never needs this: it
+        # instantiates .drvs locally from nixpkgs — the static wasm-tools catalog
+        # is the nix-wasm-specific bit that substitutes them. (The
+        # `nix-env -iA nixpkgs.<pkg>` path instantiates locally too, needing only
+        # the output, which is already on Cachix.)
+        wasm-cache-drv-roots = pkgs.writeText "wasm-cache-drv-roots"
+          (builtins.concatStringsSep "\n" (map (d: d.drvPath) wasmDevPaths));
+
         # The in-guest nixpkgs channel (M1): pinned nixpkgs + wasm cross config +
         # default.nix, so the guest can `nix-env -iA <any nixpkgs attr>` against the
         # wasm crossSystem. Build with `nix build .#wasm-nixpkgs-channel`; verify it
