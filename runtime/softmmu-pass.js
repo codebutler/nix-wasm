@@ -324,7 +324,7 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}}
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}}
  */
 function resolveCheckedImports(importSec, typeSec, exportSec) {
   if (!importSec) {
@@ -747,7 +747,7 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}|null} [checked]
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
  *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
  *   default A1 unchecked fast path (byte-identical to before A2 existed).
  * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
@@ -865,22 +865,6 @@ export function rewriteFuncBody(
   // present-bit test can consume a copy while the raw value survives for the
   // next level / the final address computation.
   const emitTranslate = (kind) => {
-    // #131 DIAGNOSTIC store-watchpoint (revert with the investigation): when
-    // `checked.watchLo/Hi` are set, every STORE/RMW whose EA falls in
-    // [watchLo, watchHi) first reports via the fault import with SENTINEL kind
-    // 0x77 — the engine's probe logs the backtrace + pre-store value and
-    // returns WITHOUT forwarding to the kernel. Inline path only; the helper
-    // path gets the same check inside __mmu_translate_ck.
-    if (!helper && checked && checked.watchLo !== undefined && kind !== 0) {
-      out.push(0x20, ...u(EA)); // local.get ea
-      out.push(0x41, ...s(checked.watchLo | 0), 0x4f); // >= lo (i32.ge_u)
-      out.push(0x20, ...u(EA)); // local.get ea
-      out.push(0x41, ...s(checked.watchHi | 0), 0x49); // < hi (i32.lt_u)
-      out.push(0x71); // i32.and
-      out.push(0x04, 0x40); // if (void)
-      emitFaultCall(0x77); // sentinel — logged + swallowed by the engine
-      out.push(0x0b); // end if
-    }
     if (helper) {
       // #164: helper-call translate — call the appended walk function instead
       // of inlining it, keeping this (over-limit) function under V8's max
@@ -1024,25 +1008,6 @@ export function rewriteFuncBody(
         } else {
           emitTranslate(0); // -> phys (kind=0 load)
           out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
-        }
-        // #131 DIAGNOSTIC value-load trace (revert with the investigation): for
-        // an i32.load whose RESULT equals the target and whose EA is in the heap
-        // (>=0x40000000), report EA via the fault import with SENTINEL kind 0x79.
-        // The engine keeps the LAST such EA; at the real fault (deref of the
-        // target value) that EA is the address the pointer was loaded FROM — i.e.
-        // the corrupt node's +32 field — because the faulting deref immediately
-        // follows that load. Names the TRUE node (the heap-scan only found 38
-        // content copies of the value).
-        if (checked && checked.traceLoadVal !== undefined && op === 0x28) {
-          out.push(0x22, ...u(VAL.i32)); // local.tee val (result stays on stack)
-          out.push(0x20, ...u(VAL.i32)); // local.get val
-          out.push(0x41, ...s(checked.traceLoadVal | 0), 0x46); // i32.eq target
-          out.push(0x20, ...u(EA)); // local.get ea
-          out.push(0x41, ...s(0x40000000), 0x4f); // i32.const 0x40000000 ; i32.ge_u
-          out.push(0x71); // i32.and
-          out.push(0x04, 0x40); // if (void)
-          emitFaultCall(0x79); // sentinel — engine records EA, swallows
-          out.push(0x0b); // end if
         }
       } else {
         // stack: va, value  ->  save value, ea, phys, value, raw store
@@ -1390,28 +1355,6 @@ function emitTranslateCall(o, translateFunc, ckFunc, kind) {
   }
 }
 
-// #131 DIAGNOSTIC bulk-op watchpoint head (revert with the investigation): the
-// bulk helpers are the ONLY write channel the scalar watch can't see — a
-// memcpy/memset/meminit whose DEST range overlaps [watchLo, watchHi) reports
-// via the fault import with SENTINEL kind 0x78 (EA = dest base; the engine
-// logs + swallows). `ctx` is the checked ctx carrying the window + import
-// indices; no-op when null / no window.
-function emitBulkWatchHead(o, ctx, d, n) {
-  if (!ctx || ctx.watchLo === undefined) return;
-  o.push(I.lget, ...u(d), I.i32c, ...s(ctx.watchHi | 0), I.lt_u); // d < hi
-  o.push(I.i32c, ...s(ctx.watchLo | 0), I.lget, ...u(d), I.lget, ...u(n), I.add, I.lt_u); // lo < d+n
-  o.push(I.and);
-  o.push(0x04, VOID); // if
-  o.push(0x23, ...u(ctx.spGlobalIdx)); // global.get __stack_pointer
-  o.push(I.call, ...u(ctx.tlsFuncIdx)); // call __get_tls_base -> tp
-  o.push(I.i32c, ...s(NR_MMU_FAULT));
-  o.push(I.lget, ...u(d)); // ea = dest base
-  o.push(I.i32c, ...s(0x78)); // sentinel kind (bulk)
-  o.push(I.call, ...u(ctx.syscallFuncIdx)); // call __wasm_syscall_2
-  o.push(0x1a); // drop
-  o.push(I.end);
-}
-
 /**
  * __mmu_memcpy(d,s,n) body — overlap-aware page-chunked memory.copy.
  *
@@ -1419,9 +1362,8 @@ function emitBulkWatchHead(o, ctx, d, n) {
  * @param {number|null} [ckFunc] the checked `__mmu_translate_ck(va,kind)`
  *   helper — when given, dest chunks fault in with kind=1 (write) and src
  *   chunks with kind=0 (read); omit/null for the unchecked A1 fast path.
- * @param {*} [watchCtx] DIAGNOSTIC watch ctx (see emitBulkWatchHead).
  */
-function memcpyHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
+function memcpyHelperBody(translateFunc, ckFunc = null) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -1429,7 +1371,6 @@ function memcpyHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
     t = 4;
   const o = [];
   o.push(...u(1), ...u(2), VT.i32); // locals: c, t
-  emitBulkWatchHead(o, watchCtx, d, n);
   // if (d > s && d < s + n) -> backward, else forward
   o.push(I.block, VOID); // A ($forward)
   o.push(I.lget, ...u(d), I.lget, ...u(sp), I.le_u, I.br_if, ...u(0)); // d <= s
@@ -1482,14 +1423,13 @@ function memcpyHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
  *   helper — when given, dest chunks fault in with kind=1 (write); omit/null
  *   for the unchecked A1 fast path.
  */
-function memfillHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
+function memfillHelperBody(translateFunc, ckFunc = null) {
   const d = 0,
     v = 1,
     n = 2,
     c = 3;
   const o = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
-  emitBulkWatchHead(o, watchCtx, d, n);
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
@@ -1515,14 +1455,13 @@ function memfillHelperBody(translateFunc, ckFunc = null, watchCtx = null) {
  *   for the unchecked A1 fast path.
  * @param {number} seg the data-segment index
  */
-function meminitHelperBody(translateFunc, ckFunc, seg, watchCtx = null) {
+function meminitHelperBody(translateFunc, ckFunc, seg) {
   const d = 0,
     sp = 1,
     n = 2,
     c = 3;
   const o = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
-  emitBulkWatchHead(o, watchCtx, d, n);
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
   emitFwdBound(o, d, c);
@@ -1625,7 +1564,7 @@ function storeBytesHelperBody(translateFunc, ckFunc = null) {
  * bulk callers pass a fresh `(va, kind)` per page-chunk via `call`.
  *
  * @param {number} ptBaseGlobal the pt_base global index
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}} checkedCtx
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}} checkedCtx
  */
 function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const VA = 0;
@@ -1644,28 +1583,6 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
     o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
     o.push(0x1a); // drop
   };
-  // #131 DIAGNOSTIC store-watchpoint — the helper-path counterpart of the
-  // inline check in rewriteFuncBody's emitTranslate (see there; revert with
-  // the investigation). kind is 0/1 at runtime here, so `and` with the
-  // window test gates loads out.
-  if (checkedCtx.watchLo !== undefined) {
-    o.push(0x20, ...u(VA)); // local.get va
-    o.push(0x41, ...s(checkedCtx.watchLo | 0), 0x4f); // >= lo (i32.ge_u)
-    o.push(0x20, ...u(VA)); // local.get va
-    o.push(0x41, ...s(checkedCtx.watchHi | 0), 0x49); // < hi (i32.lt_u)
-    o.push(0x71); // i32.and
-    o.push(0x20, ...u(KIND)); // local.get kind (0=load, 1=store)
-    o.push(0x71); // i32.and -> in-window store
-    o.push(0x04, 0x40); // if (void)
-    o.push(0x23, ...u(checkedCtx.spGlobalIdx)); // global.get __stack_pointer
-    o.push(0x10, ...u(checkedCtx.tlsFuncIdx)); // call __get_tls_base -> tp
-    o.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
-    o.push(0x20, ...u(VA)); // local.get va
-    o.push(0x41, ...s(0x77)); // i32.const 0x77 (sentinel kind)
-    o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
-    o.push(0x1a); // drop
-    o.push(0x0b); // end if
-  }
   o.push(0x02, VT.i32); // block $done (result i32)
   o.push(0x03, 0x40); // loop $retry (void)
   // level 1: pgd_e = u32[ pt_base + (va>>>22)<<2 ]
@@ -1766,45 +1683,6 @@ export function isInstrumented(bytes) {
   return false;
 }
 
-/**
- * #128 diagnostic: the wasm "name" custom-section FUNCTION name for a GLOBAL
- * function index (imports + defined), or null. Labels which real function hit the
- * >6 MB helper-call fallback so a boot log names it (e.g. is it a global-ctor
- * that builds a data structure — corruption-prone if the helper path is buggy).
- */
-function functionName(bytes, funcIdx) {
-  try {
-    for (const s of splitSections(bytes)) {
-      if (s.id !== 0) continue; // custom section
-      let i, nm;
-      [nm, i] = readName(s.body, 0);
-      if (nm !== "name") continue;
-      while (i < s.body.length) {
-        const sub = s.body[i++];
-        let sz;
-        [sz, i] = readU(s.body, i);
-        const end = i + sz;
-        if (sub === 1) {
-          // function-name subsection: count, then (idx, name) pairs
-          let n, j;
-          [n, j] = readU(s.body, i);
-          for (let k = 0; k < n; k++) {
-            let idx, name;
-            [idx, j] = readU(s.body, j);
-            [name, j] = readName(s.body, j);
-            if (idx === funcIdx) return name;
-          }
-          return null;
-        }
-        i = end;
-      }
-    }
-  } catch {
-    /* best-effort diagnostic only */
-  }
-  return null;
-}
-
 /** #152 diagnostic: the wasm "name" custom-section module name, or null. */
 function moduleName(bytes) {
   try {
@@ -1831,15 +1709,11 @@ function moduleName(bytes) {
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
- * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number,
- *   watchLo?: number, watchHi?: number, traceLoadVal?: number }} [opts]
+ * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number }} [opts]
  *   `inlineLimit` (#164): the byte size above which a function's inline
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
  *   fallback on small functions.
- *   `watchLo`/`watchHi` (#131 DIAGNOSTIC, checked mode only): store-watchpoint
- *   window — every store/RMW whose EA lands in [watchLo, watchHi) first calls
- *   the fault import with SENTINEL kind 0x77 (the engine logs + swallows it).
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -1874,17 +1748,6 @@ export function instrument(bytes, opts = {}) {
     }
     throw e;
   }
-  // #131 DIAGNOSTIC store-watchpoint window (revert with the investigation):
-  // rides the checked ctx into both the inline emitTranslate and
-  // __mmu_translate_ck. Checked mode only.
-  if (checkedCtx && opts.watchLo !== undefined) {
-    checkedCtx.watchLo = opts.watchLo >>> 0;
-    checkedCtx.watchHi = opts.watchHi >>> 0;
-  }
-  if (checkedCtx && opts.traceLoadVal !== undefined) {
-    checkedCtx.traceLoadVal = opts.traceLoadVal >>> 0;
-  }
-
   // The wasm START function (__wasm_init_memory under --shared-memory) runs
   // DURING instantiation — before the embedder can set __mmu_pt_base — so its
   // (translated) memory.init/stores would walk a zero table and place data at
@@ -1978,7 +1841,7 @@ export function instrument(bytes, opts = {}) {
       // fallback + both sizes so a boot log shows exactly which function and why.
       // eslint-disable-next-line no-console
       console.warn(
-        `softmmu: function #${f} <${functionName(bytes, nImpFuncs + f) ?? "?"}> inline body ${rewritten.length}B ` +
+        `softmmu: function #${f} inline body ${rewritten.length}B ` +
           `exceeds ${inlineLimit}B — using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
       );
       rewritten = viaHelper;
@@ -2034,11 +1897,9 @@ export function instrument(bytes, opts = {}) {
   ];
   newCodeEntries.push(concatBytes([u(translateBody.length), translateBody]));
   for (const body of [
-    memcpyHelperBody(translateFunc, checkedTranslateFunc, checkedCtx),
-    memfillHelperBody(translateFunc, checkedTranslateFunc, checkedCtx),
-    ...unhandled.initSegs.map((seg) =>
-      meminitHelperBody(translateFunc, checkedTranslateFunc, seg, checkedCtx),
-    ),
+    memcpyHelperBody(translateFunc, checkedTranslateFunc),
+    memfillHelperBody(translateFunc, checkedTranslateFunc),
+    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
   ]) {
     newCodeEntries.push(concatBytes([u(body.length), body]));
   }

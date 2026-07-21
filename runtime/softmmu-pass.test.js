@@ -711,43 +711,6 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.rawCalls[0].tp).toBe(0x1234);
   });
 
-  test("#131 DIAGNOSTIC store-watchpoint: in-window stores report sentinel kind 0x77, loads and out-of-window stores don't", () => {
-    const V = HEAP + 0x48000;
-    const bytes = instrument(buildCheckedFixture(), {
-      checked: true,
-      watchLo: V,
-      watchHi: V + 8,
-    });
-    const b = bootChecked(bytes, HEAP + 0x70000);
-    const watchCalls = () => b.calls.filter((c) => c.kind === 0x77);
-
-    b.inst.exports.store_u8(V + 4, 0xab); // in-window store -> sentinel
-    expect(watchCalls().length).toBe(1);
-    expect(watchCalls()[0]).toEqual({ nr: NR_MMU_FAULT, ea: V + 4, kind: 0x77 });
-    expect(new Uint8Array(b.mem.buffer)[V + 4]).toBe(0xab); // store still lands
-
-    b.inst.exports.store_u8(V + 8, 0xcd); // one past the window -> no sentinel
-    b.inst.exports.store_u8(V - 1, 0xef); // below the window -> no sentinel
-    b.inst.exports.load_u8(V + 4); // in-window LOAD -> no sentinel
-    expect(watchCalls().length).toBe(1);
-  });
-
-  test("#131 DIAGNOSTIC value-load trace: option threads through, grows the module, and boots+faults correctly", () => {
-    // The trace only fires on i32.load (op 0x28); the fixtures' loads are
-    // i32.load8_u (0x2d), so a positive fire is exercised by the real boot. Here
-    // assert the option is ACCEPTED and inert on non-i32 loads: the module still
-    // boots + faults identically for a byte load, with no 0x79 sentinel.
-    const traced = instrument(buildCheckedFixture(), { checked: true, traceLoadVal: 0xdeadbeef });
-
-    const V = HEAP + 0x58000;
-    const b = bootChecked(traced, V);
-    new Uint8Array(b.mem.buffer)[V] = 0x5c;
-    const val = b.inst.exports.load_u8(V);
-    expect(val).toBe(0x5c);
-    expect(b.calls.filter((c) => c.kind === 0x79).length).toBe(0); // inert on byte loads
-    expect(b.calls.filter((c) => c.kind === 0).length).toBe(1); // the normal demand fault
-  });
-
   test("a leading __cpp_exception TAG import does not hide the syscall import (#152)", () => {
     // The #152 sommelier panic: a guest C++ binary imports the
     // `__cpp_exception` tag (import kind 0x04) BEFORE its `__wasm_syscall_*`
@@ -1126,31 +1089,6 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.calls.length).toBe(1);
     expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
     for (let k = 0; k < 8; k++) expect(u8[V + k]).toBe(k + 1);
-  });
-
-  test("#131 DIAGNOSTIC bulk watchpoint: dest overlapping the window reports sentinel kind 0x78; non-overlapping doesn't", () => {
-    const W = HEAP + 0xa8000;
-    const bytes = instrument(buildCheckedBulkFixture(), {
-      checked: true,
-      watchLo: W,
-      watchHi: W + 16,
-    });
-    const b = bootChecked(bytes, HEAP + 0xb0000);
-    const watchCalls = () => b.calls.filter((c) => c.kind === 0x78);
-
-    b.inst.exports.bulk_fill(W - 8, 0xcd, 16); // [W-8, W+8) overlaps -> sentinel
-    expect(watchCalls().length).toBe(1);
-    expect(watchCalls()[0]).toEqual({ nr: NR_MMU_FAULT, ea: W - 8, kind: 0x78 });
-    const u8 = new Uint8Array(b.mem.buffer);
-    for (let k = 0; k < 16; k++) expect(u8[W - 8 + k]).toBe(0xcd); // fill still lands
-
-    b.inst.exports.bulk_fill(W + 16, 0xee, 16); // [W+16, W+32) — no overlap
-    b.inst.exports.bulk_copy(W + 16, W - 8, 8); // dest past the window — no overlap
-    expect(watchCalls().length).toBe(1);
-
-    b.inst.exports.bulk_copy(W + 8, W + 32, 8); // [W+8, W+16) overlaps -> sentinel
-    expect(watchCalls().length).toBe(2);
-    expect(watchCalls()[1]).toEqual({ nr: NR_MMU_FAULT, ea: W + 8, kind: 0x78 });
   });
 
   test("bulk_copy: not-present SRC faults kind=0 (read), never write-faults a read-only source", () => {
