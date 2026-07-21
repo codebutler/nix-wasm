@@ -1014,17 +1014,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           table_initial = hit.table_initial;
         } else {
           if (!isInstrumented(bytes)) {
-            // #131 DIAGNOSTIC value-load trace (revert with the probe): the
-            // prior store/bulk watch on a GUESSED node region caught only a
-            // description-string write — 0x40733fe0 is a std::string buffer,
-            // NOT the node (0x40734000 = that string's "…caching bina|ry…"
-            // content at +32). Instead trace the VALUE: record the EA of the
-            // last i32-load returning 0x616e6962 so the fault peek dumps the
-            // TRUE corrupt node (the faulting deref immediately follows that
-            // load). Size-gated to nix.wasm (~28.8 MB) so busybox et al don't
-            // pay the per-load compare or flood the sentinel.
-            const diag = bytes.length > 20_000_000 ? { traceLoadVal: 0x616e6962 } : {};
-            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true, ...diag });
+            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
           }
           table_initial = table_import_initial(bytes);
           user_executable = WebAssembly.compile(bytes);

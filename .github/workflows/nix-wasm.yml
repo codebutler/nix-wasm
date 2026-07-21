@@ -692,10 +692,12 @@ jobs:
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
-          # #151 localizer: trace host-side 9P RPCs (`[9p] …`) so this boot shows
-          # whether the guest issues Twrite/Tread under the software MMU (see
-          # runtime/ninep/server.js traceRpc). MMU boot only; NOMMU stays quiet.
-          NINEP_TRACE: "1"
+          # The software-MMU guest runs the substitute+unpack ~2-3x slower than
+          # NOMMU (every access is a 2-level walk; page-crossing accesses split
+          # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
+          # budget than the shared 180s default so the (correct, slower) install
+          # can finish. NOMMU nix-boot-smoke keeps the 180s default.
+          NIX_MAKE_TIMEOUT_MS: "600000"
         run: |
           run_smoke() {
             local script="$1" attempt rc
