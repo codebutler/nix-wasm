@@ -696,6 +696,22 @@ describe("checked (A2 present-check) translate", () => {
     expect(watchCalls().length).toBe(1);
   });
 
+  test("#131 DIAGNOSTIC value-load trace: option threads through, grows the module, and boots+faults correctly", () => {
+    // The trace only fires on i32.load (op 0x28); the fixtures' loads are
+    // i32.load8_u (0x2d), so a positive fire is exercised by the real boot. Here
+    // assert the option is ACCEPTED and inert on non-i32 loads: the module still
+    // boots + faults identically for a byte load, with no 0x79 sentinel.
+    const traced = instrument(buildCheckedFixture(), { checked: true, traceLoadVal: 0xdeadbeef });
+
+    const V = HEAP + 0x58000;
+    const b = bootChecked(traced, V);
+    new Uint8Array(b.mem.buffer)[V] = 0x5c;
+    const val = b.inst.exports.load_u8(V);
+    expect(val).toBe(0x5c);
+    expect(b.calls.filter((c) => c.kind === 0x79).length).toBe(0); // inert on byte loads
+    expect(b.calls.filter((c) => c.kind === 0).length).toBe(1); // the normal demand fault
+  });
+
   test("a leading __cpp_exception TAG import does not hide the syscall import (#152)", () => {
     // The #152 sommelier panic: a guest C++ binary imports the
     // `__cpp_exception` tag (import kind 0x04) BEFORE its `__wasm_syscall_*`

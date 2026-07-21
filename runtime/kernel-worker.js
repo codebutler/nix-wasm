@@ -130,9 +130,19 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   let mmu_nullfault_budget = 24;
   // #131 DIAGNOSTIC watch sentinel budget (revert with the probe).
   let mmu_watch_budget = 48;
+  // #131 DIAGNOSTIC value-load trace (sentinel 0x79): the EA of the LAST i32 load
+  // that returned the target value. At the fault (deref of the target) this is
+  // the address the pointer was loaded from = the corrupt node's +32 field.
+  let mmu_last_traced_ea = 0;
   const mmu_nullfault_probe =
     (fn) =>
     (...args) => {
+      // #131 DIAGNOSTIC value-load-trace sentinel (kind 0x79): silently record
+      // the load EA; no log (fires often on content). Swallow.
+      if (args[2] === 244 && args[4] === 0x79) {
+        mmu_last_traced_ea = args[3] >>> 0;
+        return 0;
+      }
       // #131 DIAGNOSTIC store-watchpoint sentinel (kind 0x77, emitted by the
       // softmmu pass's watchLo/watchHi window): log the store's EA, the
       // PRE-store value at that VA (own_pt_base walk), and the wasm backtrace
@@ -215,6 +225,49 @@ import { SharedQueues } from "./virtio/shared-queues.js";
               if (!(pte & 1)) return -1;
               return ((pte & ~0xfff) + (va & 0xfff)) >>> 0;
             };
+            // #131 value-load trace: mmu_last_traced_ea is the address the
+            // faulting pointer was loaded from = the corrupt node's +32 field.
+            // Dump [ea-48, ea+32) — the whole __tree node — and decode the key.
+            {
+              const ne = mmu_last_traced_ea >>> 0;
+              peek += `\n[mmu-node] setting-field @0x${ne.toString(16)} (node=0x${((ne - 32) >>> 0).toString(16)})`;
+              const rd = (va) => {
+                const p = xlate(va >>> 0);
+                return p < 0 ? -1 : u32[p >>> 2] >>> 0;
+              };
+              const kcap = rd(ne - 16);
+              const ksz = rd(ne - 12);
+              const kdat = rd(ne - 8);
+              let key = "";
+              if (kcap !== -1 && kcap & 1 && ksz >= 1 && ksz < 0x100) {
+                const kp = xlate(kdat >>> 0);
+                if (kp >= 0)
+                  for (let k = 0; k < Math.min(ksz, 48); k++)
+                    key += String.fromCharCode(u8[kp + k]);
+              } else if (kcap !== -1 && !(kcap & 1)) {
+                const kp = xlate((ne - 16 + 1) >>> 0);
+                const n = (kcap & 0xff) >>> 1;
+                if (kp >= 0)
+                  for (let k = 0; k < Math.min(n, 11); k++) key += String.fromCharCode(u8[kp + k]);
+              }
+              peek += ` key="${key}"`;
+              for (let off = -48; off < 32; off += 16) {
+                const va = (ne + off) >>> 0;
+                const p = xlate(va);
+                if (p < 0) {
+                  peek += `\n  0x${va.toString(16)}: <unmapped>`;
+                  continue;
+                }
+                let hex = "";
+                let asc = "";
+                for (let k = 0; k < 16; k++) {
+                  const b = u8[p + k];
+                  hex += b.toString(16).padStart(2, "0") + (k === 7 ? "  " : " ");
+                  asc += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : ".";
+                }
+                peek += `\n  0x${va.toString(16)}: ${hex} |${asc}|${off === 0 ? " <setting" : ""}`;
+              }
+            }
             // dump [sp-0x40, sp+0x400): the active Config::set frame.
             for (let off = -0x40; off < 0x400; off += 16) {
               const va = (sp + off) >>> 0;
@@ -961,17 +1014,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           table_initial = hit.table_initial;
         } else {
           if (!isInstrumented(bytes)) {
-            // #131 DIAGNOSTIC store-watchpoint (revert with the probe): the
-            // corrupt _settings["system-features"] node lives at 0x40733fe0 in
-            // nix-env (deterministic across boots); watch stores to its
-            // key/SettingData region [node+16, node+40) to catch the writer —
-            // or prove NO store ever lands on node+32 (uninit / lost store).
-            // Size-gated to nix.wasm (~28.8 MB) so other binaries (busybox et
-            // al, whose heaps reuse the same per-process VAs) neither pay the
-            // sentinel calls nor flood the report budget.
-            const watch =
-              bytes.length > 20_000_000 ? { watchLo: 0x40733fe0, watchHi: 0x40734008 } : {};
-            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true, ...watch });
+            // #131 DIAGNOSTIC value-load trace (revert with the probe): the
+            // prior store/bulk watch on a GUESSED node region caught only a
+            // description-string write — 0x40733fe0 is a std::string buffer,
+            // NOT the node (0x40734000 = that string's "…caching bina|ry…"
+            // content at +32). Instead trace the VALUE: record the EA of the
+            // last i32-load returning 0x616e6962 so the fault peek dumps the
+            // TRUE corrupt node (the faulting deref immediately follows that
+            // load). Size-gated to nix.wasm (~28.8 MB) so busybox et al don't
+            // pay the per-load compare or flood the sentinel.
+            const diag = bytes.length > 20_000_000 ? { traceLoadVal: 0x616e6962 } : {};
+            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true, ...diag });
           }
           table_initial = table_import_initial(bytes);
           user_executable = WebAssembly.compile(bytes);

@@ -244,7 +244,7 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}}
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}}
  */
 function resolveCheckedImports(importSec, typeSec, exportSec) {
   if (!importSec) {
@@ -667,7 +667,7 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}|null} [checked]
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}|null} [checked]
  *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
  *   default A1 unchecked fast path (byte-identical to before A2 existed).
  * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
@@ -911,6 +911,25 @@ export function rewriteFuncBody(
         out.push(0x21, ...u(EA)); // local.set ea
         emitTranslate(0); // -> phys (kind=0 load)
         out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+        // #131 DIAGNOSTIC value-load trace (revert with the investigation): for
+        // an i32.load whose RESULT equals the target and whose EA is in the heap
+        // (>=0x40000000), report EA via the fault import with SENTINEL kind 0x79.
+        // The engine keeps the LAST such EA; at the real fault (deref of the
+        // target value) that EA is the address the pointer was loaded FROM — i.e.
+        // the corrupt node's +32 field — because the faulting deref immediately
+        // follows that load. Names the TRUE node (the heap-scan only found 38
+        // content copies of the value).
+        if (checked && checked.traceLoadVal !== undefined && op === 0x28) {
+          out.push(0x22, ...u(VAL.i32)); // local.tee val (result stays on stack)
+          out.push(0x20, ...u(VAL.i32)); // local.get val
+          out.push(0x41, ...s(checked.traceLoadVal | 0), 0x46); // i32.eq target
+          out.push(0x20, ...u(EA)); // local.get ea
+          out.push(0x41, ...s(0x40000000), 0x4f); // i32.const 0x40000000 ; i32.ge_u
+          out.push(0x71); // i32.and
+          out.push(0x04, 0x40); // if (void)
+          emitFaultCall(0x79); // sentinel — engine records EA, swallows
+          out.push(0x0b); // end if
+        }
       } else {
         // stack: va, value  ->  save value, ea, phys, value, raw store
         const vl = VAL[VALTYPE[m.n]];
@@ -1394,7 +1413,7 @@ function meminitHelperBody(translateFunc, ckFunc, seg, watchCtx = null) {
  * bulk callers pass a fresh `(va, kind)` per page-chunk via `call`.
  *
  * @param {number} ptBaseGlobal the pt_base global index
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number}} checkedCtx
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, watchLo?:number, watchHi?:number, traceLoadVal?:number}} checkedCtx
  */
 function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const VA = 0;
@@ -1601,7 +1620,7 @@ function moduleName(bytes) {
  *
  * @param {Uint8Array} bytes
  * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number,
- *   watchLo?: number, watchHi?: number }} [opts]
+ *   watchLo?: number, watchHi?: number, traceLoadVal?: number }} [opts]
  *   `inlineLimit` (#164): the byte size above which a function's inline
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
@@ -1649,6 +1668,9 @@ export function instrument(bytes, opts = {}) {
   if (checkedCtx && opts.watchLo !== undefined) {
     checkedCtx.watchLo = opts.watchLo >>> 0;
     checkedCtx.watchHi = opts.watchHi >>> 0;
+  }
+  if (checkedCtx && opts.traceLoadVal !== undefined) {
+    checkedCtx.traceLoadVal = opts.traceLoadVal >>> 0;
   }
 
   // The wasm START function (__wasm_init_memory under --shared-memory) runs
