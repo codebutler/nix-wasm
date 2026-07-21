@@ -87,31 +87,39 @@ try {
   // ~2-3x slower than the NOMMU path. Allow the MMU boot job to raise the ceiling
   // via NIX_MAKE_TIMEOUT_MS (default 180s keeps the NOMMU nix-boot-smoke unchanged).
   const makeTimeoutMs = Number(process.env.NIX_MAKE_TIMEOUT_MS) || 180000;
-  // DIAGNOSTIC (#166/#131 cache-fallthrough localizer, revert once fixed): the MMU
-  // prove-job's guest queried nix-wasm.cachix.org for make-wasm32.drv (external
-  // fetch → DNS fail) even though system.nix forces substituters=[file:///nix-cache].
-  // Dump the EFFECTIVE substituters, the nix.conf sources, NIX_CONFIG, and whether
-  // make-wasm32's .drv narinfo is actually present in the served /nix-cache — the
-  // one boot-only fact that pins whether the cache is incomplete or a stray
-  // substituter is configured. Printed unconditionally (before the install) so it
-  // lands in the log whether or not the install then succeeds.
+  // The offline guest has exactly ONE reachable substituter: the 9P-mounted
+  // file:///nix-cache. The NOMMU nix-boot-smoke installs make-wasm32 reliably;
+  // the MMU prove-job flaked (ba59b94 passed once, failed once) with the guest
+  // reaching out to nix-wasm.cachix.org for make-wasm32.drv → DNS fail. The guest
+  // /etc/nix/nix.conf carried a stray `substituters = https://nix-wasm.cachix.org`
+  // (not from any repo module — the cachix line is nowhere in the guest closure),
+  // so make the substitution SELF-CONTAINED: pass the local cache as a
+  // command-line `--option`, which overrides every nix.conf file (system + user)
+  // for certain — the offline guest can then never reach past its own cache. Also
+  // force `require-sigs false` (the cache is unsigned) so a leaked `require-sigs =
+  // true` can't reject the unsigned narinfos. This is the correct config for a
+  // network-less guest, not a workaround: there is no other substituter to use.
+  const localSubst = "--option substituters file:///nix-cache --option require-sigs false";
+  // Diagnostic: dump the AMBIENT effective substituters BEFORE forcing the local
+  // one, so a future failure log shows whether the stray cachix substituter is
+  // still in the resolved config. Greedy match to the LAST marker so the captured
+  // block is the command OUTPUT, not the shell's echo of the command (the earlier
+  // non-greedy match stopped inside the echoed command and captured nothing).
   s.send(
-    "echo MMUDIAG_START; nix show-config 2>/dev/null | grep -iE '^(substituters|substitute|require-sigs)'; " +
-      "echo ETC_CONF=$(tr '\\n' '|' </etc/nix/nix.conf 2>/dev/null); " +
-      "echo USER_CONF=$(tr '\\n' '|' <~/.config/nix/nix.conf 2>/dev/null); " +
-      'echo NIX_CONFIG_ENV="[$NIX_CONFIG]"; ' +
-      "echo MAKEWASM_DRV_IN_CACHE=$(ls /nix-cache 2>/dev/null | grep -c 'make-wasm32.*\\.drv'); " +
+    "echo MMUDIAG_START; " +
+      "echo SUBST=$(nix show-config 2>/dev/null | sed -n 's/^substituters = //p'); " +
+      "echo REQSIGS=$(nix show-config 2>/dev/null | sed -n 's/^require-sigs = //p'); " +
       "echo MMUDIAG_END\n",
   );
   await s.waitForOutput(/MMUDIAG_END/, 30000);
   console.log(
     "\n── MMUDIAG ──\n" +
-      (s.snapshot().match(/MMUDIAG_START[\s\S]*?MMUDIAG_END/)?.[0] ?? "(not captured)"),
+      (s.snapshot().match(/MMUDIAG_START[\s\S]*MMUDIAG_END/)?.[0] ?? "(not captured)"),
   );
-  s.send("nix-env -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
+  s.send(`nix-env ${localSubst} -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n`);
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
-    "nix-env -iA make-wasm32 substitutes from the cache",
+    "nix-env -iA make-wasm32 substitutes from the local cache",
   );
 } finally {
   if (!pass) console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));
