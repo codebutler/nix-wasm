@@ -87,6 +87,27 @@ try {
   // ~2-3x slower than the NOMMU path. Allow the MMU boot job to raise the ceiling
   // via NIX_MAKE_TIMEOUT_MS (default 180s keeps the NOMMU nix-boot-smoke unchanged).
   const makeTimeoutMs = Number(process.env.NIX_MAKE_TIMEOUT_MS) || 180000;
+  // DIAGNOSTIC (#166/#131 cache-fallthrough localizer, revert once fixed): the MMU
+  // prove-job's guest queried nix-wasm.cachix.org for make-wasm32.drv (external
+  // fetch → DNS fail) even though system.nix forces substituters=[file:///nix-cache].
+  // Dump the EFFECTIVE substituters, the nix.conf sources, NIX_CONFIG, and whether
+  // make-wasm32's .drv narinfo is actually present in the served /nix-cache — the
+  // one boot-only fact that pins whether the cache is incomplete or a stray
+  // substituter is configured. Printed unconditionally (before the install) so it
+  // lands in the log whether or not the install then succeeds.
+  s.send(
+    "echo MMUDIAG_START; nix show-config 2>/dev/null | grep -iE '^(substituters|substitute|require-sigs)'; " +
+      "echo ETC_CONF=$(tr '\\n' '|' </etc/nix/nix.conf 2>/dev/null); " +
+      "echo USER_CONF=$(tr '\\n' '|' <~/.config/nix/nix.conf 2>/dev/null); " +
+      'echo NIX_CONFIG_ENV="[$NIX_CONFIG]"; ' +
+      "echo MAKEWASM_DRV_IN_CACHE=$(ls /nix-cache 2>/dev/null | grep -c 'make-wasm32.*\\.drv'); " +
+      "echo MMUDIAG_END\n",
+  );
+  await s.waitForOutput(/MMUDIAG_END/, 30000);
+  console.log(
+    "\n── MMUDIAG ──\n" +
+      (s.snapshot().match(/MMUDIAG_START[\s\S]*?MMUDIAG_END/)?.[0] ?? "(not captured)"),
+  );
   s.send("nix-env -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
