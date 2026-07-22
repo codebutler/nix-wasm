@@ -397,6 +397,13 @@ jobs:
           # prefix must be BIT-EXACT. Gating.
           run_smoke demo/node/snd-smoke.mjs
 
+          # Guest WALL CLOCK (kernel patch 0028): read_persistent_clock64 off the
+          # epoch-anchored monotonic import — without it CLOCK_REALTIME boots at
+          # the 1970 epoch and TLS certificate validation ("not yet valid", curl
+          # 60) kills Cachix substitution. `date +%s` in-guest must be within
+          # 15 min of the host clock. Gating.
+          run_smoke demo/node/clock-smoke.mjs
+
       # #128 Track A software MMU: boot a softmmu-instrumented init under the
       # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
       # present check, pages populated at exec) checksums bit-exact; A2 (checked

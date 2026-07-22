@@ -11,8 +11,25 @@
 let
   lib = cross.lib;
   modulesPath = nixpkgs + "/nixos/modules";
-  result = lib.evalModules {
-    specialArgs = { inherit lib; modulesPath = modulesPath; };
+  # Upstream's minimal-NixOS evaluator (nixos/lib/eval-config-minimal.nix, via
+  # the nixos/lib entry point): lib.evalModules + `class = "nixos"` + the
+  # `modulesPath` specialArg. This is the upstream-maintained seam for exactly
+  # this curated-module-list shape ("A minimal module list … allows modules to
+  # be independently usable, supporting new use cases" — its own doc comment;
+  # regular NixOS eval routes through it too), so use it instead of hand-rolling
+  # the same call on raw `lib.evalModules`. The `class` stamp additionally
+  # rejects a non-NixOS module slipping into the list. Upstream marks the
+  # interface experimental; the flake pin insulates us, and the
+  # `minimalModules` featureFlag is the documented opt-in (also silences its
+  # warning). Upstream provides `modulesPath` (string form) in specialArgs; the
+  # local `modulesPath` binding above builds the file paths of the curated list
+  # and the utils.nix import below — same store dir.
+  nixosLib = import (nixpkgs + "/nixos/lib") {
+    inherit lib;
+    featureFlags.minimalModules = { };
+  };
+  result = nixosLib.evalModules {
+    specialArgs = { inherit lib; };
     modules = [
       (modulesPath + "/misc/assertions.nix")
       (modulesPath + "/misc/ids.nix")
