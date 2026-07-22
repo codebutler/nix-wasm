@@ -174,7 +174,7 @@ the `linux` channel's `nixCacheBaseUrl` points at). That Worker is deployed by
 mint the `*.workers.dev` URL → set it as the `PREVIEW_BASE_URL` repo variable) and
 auto-redeploy on a push to `infra/preview-worker/**` on master; it runs the
 Worker unit tests (`src/index.test.js`) before `bunx wrangler deploy`. Boot
-artifacts only — the guest `nix-cache/` substituter stays #2's concern. Setup
+artifacts only — the guest `nix-cache/` catalog tree stays #2's concern. Setup
 runbook: `infra/preview-worker/README.md`.
 
 Run these from the **runtime/** directory:
@@ -381,6 +381,27 @@ nixpkgs. What's installable = `wasmPublishedPkgs` (curated; the channel EVALUATE
 any package but only published outputs SUBSTITUTE — most won't cross-build to
 wasm32-NOMMU). Full record: `docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md`.
 
+**Guest substitution is Cachix-over-the-uplink** (#82/#167, 2026-07-21; trust
+anchors 2026-07-22): the shipped guest substitutes from
+`https://nix-wasm.cachix.org` — a real, signed HTTP binary cache — over its OWN
+TCP/IP (virtio-net NIC → pc's vnet bridge → the wan0 Wisp uplink), exactly like
+a real machine that ran `cachix use nix-wasm`. `require-sigs` is back to the
+real-NixOS default (true) with the cache's public key pinned. The
+`file:///nix-cache` substituter is RETIRED from the shipped config — no offline
+substitution, by design (a package not already in the store needs the uplink up,
+same as a real offline machine; the store/base squashfs still works offline).
+What remains of the 9P `/nix-cache` mount: the two catalogs
+(`pkgs.nix`/`paths.nix`, still read from `/nix-cache/…`), and the offline CI
+smokes, which re-point substitution at it via a TEST-ONLY user-level nix.conf
+(`primeLocalNixCache` in `runtime/demo/node/boot-node.mjs`) — the baked config
+stays Cachix-only. Two operational consequences: (1) `nix-env -iA` substitutes
+the `.drv` first, and cachix-action's post-build-hook pushes only OUTPUTS — so
+`nix-wasm.yml` has a master-only step that `cachix push`es the `.drv` closures
+(`.#wasm-cache-drv-roots`); (2) real HTTPS needs real **CA trust anchors**,
+which the guest closure never carried — see the learnings entry ("HTTPS
+substitution needs baked trust anchors") for the failure signature and the
+`security/ca.nix` + `SSL_CERT_FILE`/`NIX_SSL_CERT_FILE` fix in `system.nix`.
+
 Remaining: **Phase 5** (CI + binary cache — the design goal below: build on
 x86_64, publish the wasm outputs, guest substitutes; issue #2).
 In-guest installs work like a real NixOS system via BOTH `nix-env -iA` and
@@ -388,7 +409,8 @@ In-guest installs work like a real NixOS system via BOTH `nix-env -iA` and
 DIFFERENT paths through Nix. (1) `substitute = true` in the guest nix.conf
 (`system.nix`): the NEW CLI (`nix profile`/`nix build`) probes for Internet and,
 finding none, sets `useSubstitutes = false` UNLESS overridden — silently disabling
-substitution even for our `file:///nix-cache`. Marking it overridden leaves it on.
+substitution even for a local `file://` cache (the substituter at the time; the
+shipped config is Cachix-only now). Marking it overridden leaves it on.
 (2) TWO catalogs next to the cache (`userspace/binary-cache.nix`): `pkgs.nix`
 (REAL derivation entries) for `nix-env -iA <name>`, and `paths.nix` (a plain
 name → output-path map) for the new CLI: read the path (`nix eval --raw -f
@@ -414,11 +436,10 @@ nixpkgs.<pkg>` evaluates ANY nixpkgs package against the wasm crossSystem and
 substitutes the prebuilt wasm output (the `nixpkgs` channel; see "In-guest nixpkgs
 channel" below + `docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md`).
 (Building derivations FROM SOURCE in-guest is a separate axis and works — see #92
-below.) Archive ops work: `tar` (czf/xzf,
-patched) is
-validated; `wget` is N/A on the
-guest (no network — package sources arrive via the 9P-mounted Nix binary cache, not
-internet fetch), so the disabled network/service vfork applets aren't needed.
+below.) Archive ops work: `tar` (czf/xzf, patched) is validated. (The busybox
+network/service applets stay compiled out for their vfork use — a process-model
+matter, not a network one: the guest HAS real egress now, see the
+Cachix-over-the-uplink entry above.)
 
 ## Caching (design goal)
 
@@ -430,16 +451,19 @@ than building in-guest — that's the "install any package" model and what makes
 the crossSystem approach scale. From-source host rebuilds are a failure mode to
 design out (see the Environment notes under Hard-won learnings).
 
-**Two-tier cache wiring (#2, Phase 5):** the **host build cache is Cachix**
-(`nix-wasm.cachix.org`, public read; signing key
-`nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0=`); the
-**guest-facing cache** is served by the preview Worker's `/cachix/<v>` route
-(`runtime/nix-cache.js` resolves one baseUrl): the heavy nars + `*.narinfo` +
-`nix-cache-info` are **proxied from Cachix** (no second copy in R2), and only the
-small nix-wasm catalogs (`pkgs.nix`/`paths.nix`, not in Cachix) come from R2
-(nix-wasm#78). Both `publish-to-r2.sh` and `publish-linux-channel.sh` upload
-**only** the catalogs and point `nixCacheBaseUrl` at `/cachix/<v>` — never the
-raw nar tree. CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
+**Cache wiring (#2, Phase 5):** `nix-wasm.cachix.org` is BOTH the host build
+cache AND the guest's substituter (public read; signing key
+`nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0=`). Since
+#82/#167 the shipped guest substitutes from it DIRECTLY over its own TCP/IP
+(the wan0 Wisp uplink — see "Guest substitution is Cachix-over-the-uplink" in
+Current state); the former guest-facing tier — the preview Worker's
+`/cachix/<v>` route (`runtime/nix-cache.js` resolves one baseUrl; nars +
+`*.narinfo` proxied from Cachix, nix-wasm#78) feeding the 9P-mounted
+`/nix-cache` — now backs only the two catalogs (`pkgs.nix`/`paths.nix`, not in
+Cachix, uploaded to R2) and the offline CI smokes' test-only local substituter
+(`primeLocalNixCache`). Both `publish-to-r2.sh` and `publish-linux-channel.sh`
+upload **only** the catalogs and point `nixCacheBaseUrl` at `/cachix/<v>` —
+never the raw nar tree. CI runs on **x86_64-linux** (the flake is now parameterized over build hosts —
 `packagesFor system` + `genAttrs ["x86_64-linux" "aarch64-linux"]`, with
 `localSystem` threaded into `wasm-cross.nix`; `nix build .#X` picks the runner's
 system). Four workflows:
@@ -452,7 +476,10 @@ system). Four workflows:
   Content-addressed — a `flake.lock`/`patches/` change self-invalidates (no
   manual cache key). The `artifacts` job also builds `wasm-initramfs` + the full
   `linux-image` boot bundle (wl-eyes is vendored in-repo — #62/#63 — so the whole
-  guest is reproducible from a fresh checkout).
+  guest is reproducible from a fresh checkout). A master-only step `cachix push`es
+  the `.drv` closures (`.#wasm-cache-drv-roots`) — `nix-env -iA` substitutes the
+  `.drv` before the output, and cachix-action's post-build-hook pushes only
+  outputs (#82/#167).
 - `.github/workflows/publish-wasm-artifacts.yml` — on master, substitutes the
   closure from Cachix and uploads `base.squashfs` + the `nix-cache/` tree to R2
   (`scripts/publish-to-r2.sh`).
@@ -1086,6 +1113,24 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   Without this, large on-demand installs fail with `page allocation failure`.
 - **Single-user nix** (`userspace/system.nix`): `build-users-group = ""` +
   `filter-syscalls = false` (no seccomp on wasm) — either otherwise aborts `nix-env`.
+- **HTTPS substitution needs baked trust anchors** (`userspace/system.nix`:
+  `security/ca.nix` in the module list + `SSL_CERT_FILE`/`NIX_SSL_CERT_FILE`).
+  Retiring `file:///nix-cache` for direct Cachix substitution (#82/#167) made
+  nix's curl do real TLS for the first time — and the guest closure carried NO
+  CA bundle (nothing ever needed one before). Failure signature: every fetch
+  warns `unable to download 'https://nix-wasm.cachix.org/…': Problem with the
+  SSL CA cert (path? access rights?) (77) error adding trust anchors from
+  file:` and nix, treating the cache as empty, "falls back" to planning a
+  1321-drv from-source bootstrap that dies on `platform mismatch` (the drvs'
+  `system` is the x86_64 build host; wasm32-linux can't build) — the SSL line
+  is the root cause, the platform-mismatch wall is noise. Fix = the real NixOS
+  `security/ca.nix` module (PRIME DIRECTIVE: reuse module code, don't hand-roll
+  etc entries): `pkgs.cacert` is data-only (native `buildcatrust` over NSS
+  certdata — a trivial cross build) → `/etc/ssl/certs/ca-certificates.crt`,
+  which nix's `getDefaultSSLCertFile` probes by itself; the env vars cover
+  every other openssl consumer (the cross openssl's compiled-in OPENSSLDIR is
+  its own cert-less store path). Rebuilds `.#wasm-base-squashfs` (the /etc tree
+  + env live in the squashfs) — republish via `.#linux-image`, no engine change.
 **Dead-ends — do NOT retry:**
 - `crossSystem.hasSharedLibraries = false` — too aggressive; sqlite eval abort.
 - `stdenvAdapters.makeStaticLibraries` — doesn't compose with our
