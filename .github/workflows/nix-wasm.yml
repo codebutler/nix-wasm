@@ -672,7 +672,12 @@ jobs:
   nix-boot-smoke-mmu:
     name: boot full nix system on software MMU (#131 prove-then-flip)
     needs: [toolchain, artifacts]
-    runs-on: namespace-profile-default
+    # -lg (the LLVM-build profile) for RAM headroom: the real-fork nix.wasm is
+    # whole-module-asyncified, and the software-MMU pass instrumenting it at load
+    # produces multi-MB functions (helper-call-translated over V8's 6MB fn cap) —
+    # loading it OOM-killed the -default runner (#175, exit 137). If it still OOMs
+    # here, the whole-module asyncify doesn't scale to nix.wasm and needs bounding.
+    runs-on: namespace-profile-lg
     timeout-minutes: 120 # MMU load-time instrumentation + per-access translate is slower than NOMMU
     steps:
       - uses: actions/checkout@v4
