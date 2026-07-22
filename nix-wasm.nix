@@ -271,6 +271,10 @@ pkgs.stdenv.mkDerivation {
         --pass-arg=asyncify-imports@env.capture_stack \
         nix.unstripped.wasm -o nix.unstripped.wasm.fork
       mv nix.unstripped.wasm.fork nix.unstripped.wasm
+      # wasm-opt's `-o` output is 0644 — restore +x (mirrors busybox-fork.nix) so
+      # llvm-strip (which preserves the input mode) ships an EXECUTABLE $out/bin/nix.
+      # Without this the guest's `nix-env` exec fails EACCES ("Permission denied").
+      chmod +x nix.unstripped.wasm
       echo "[nix-wasm] asyncified -> $(wc -c < nix.unstripped.wasm) bytes"
     ''}
     runHook postBuild
