@@ -23,6 +23,17 @@ let
       (modulesPath + "/config/nix.nix")
       (modulesPath + "/config/shells-environment.nix")
       (modulesPath + "/config/system-environment.nix")
+      # CA trust anchors: the real NixOS module bakes the Mozilla root bundle
+      # (pkgs.cacert — data-only: native buildcatrust over NSS certdata.txt, so
+      # it cross-"builds" trivially) at /etc/ssl/certs/ca-certificates.crt (+ the
+      # ca-bundle.crt / pki/tls compat paths). Required since the guest
+      # substitutes over real HTTPS (nix-wasm.cachix.org, #82/#167): without it
+      # nix's curl has no trust anchors — every narinfo fetch fails "Problem
+      # with the SSL CA cert (77)" and nix falls back to a doomed from-source
+      # build plan. Nix finds this canonical path by itself
+      # (getDefaultSSLCertFile); other openssl consumers get it via the
+      # SSL_CERT_FILE/NIX_SSL_CERT_FILE vars below.
+      (modulesPath + "/security/ca.nix")
 
       # Stub: declare the options the curated modules write into but whose
       # DEFINING modules (systemd, initrd, activation) we deliberately exclude.
@@ -202,6 +213,17 @@ let
         environment.variables.XCURSOR_PATH = "/run/current-system/sw/share/icons";
         environment.variables.XCURSOR_THEME = "Adwaita";
         environment.variables.XCURSOR_SIZE = "24";
+
+        # TLS trust anchors for everything openssl-linked. security/ca.nix (in
+        # the module list above) installs the bundle at the canonical
+        # /etc/ssl/certs/ca-certificates.crt; nix.wasm's own default CA lookup
+        # (getDefaultSSLCertFile) probes exactly that path, but the cross
+        # openssl's compiled-in OPENSSLDIR is its cert-less store path, so any
+        # OTHER openssl consumer (a future curl/wget/git install) needs the
+        # standard env vars. Flows via /etc/set-environment → /etc/profile like
+        # the vars above.
+        environment.variables.SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+        environment.variables.NIX_SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
 
         users.mutableUsers = false;
         users.users.root = {
