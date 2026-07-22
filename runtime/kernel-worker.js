@@ -775,6 +775,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     wasm_cpu_clock_get_monotonic: () => {
       // Convert this double in ms to u64 in us.
       // Modern browsers can on good days reach 5us accuracy, given that the platform supports it.
+      // The `performance.timeOrigin +` anchoring is LOAD-BEARING, not decorative: the kernel's
+      // read_persistent_clock64 (patches/kernel/0028) reads this import's ABSOLUTE value at boot
+      // to initialize CLOCK_REALTIME (the guest's wall clock / "RTC"). A 0-based monotonic value
+      // here would silently boot the guest at the 1970 epoch, which breaks TLS certificate
+      // validation ("not yet valid") and with it Cachix substitution. The clocksource itself only
+      // consumes deltas, which is why this doubled as the persistent clock with no new import.
       return BigInt(Math.round(1000 * (performance.timeOrigin + performance.now()))) * 1000n;
     },
 

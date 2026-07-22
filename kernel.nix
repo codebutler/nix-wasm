@@ -125,6 +125,16 @@ pkgs.stdenv.mkDerivation {
     # counts + drives the control/event/tx/rx vqs (runtime/virtio/snd-device.js:
     # one s16 48kHz playback stream, capture out of scope).
     ./patches/kernel/0027-wasm-virtio-snd-device.patch
+    # Boot-time wall clock: implement read_persistent_clock64 off the engine's
+    # existing wasm_cpu_clock_get_monotonic import (epoch-anchored:
+    # performance.timeOrigin + performance.now() ns). Without it CLOCK_REALTIME
+    # boots at the 1970 epoch and TLS breaks — every certificate is "not yet
+    # valid" (curl 60), so the guest's Cachix substitution fails right after the
+    # CA-bundle fix exposed real verification. No new import → no ENGINE_ABI
+    # bump; the epoch anchoring of the import is now load-bearing (documented in
+    # the patch + at the formula in runtime/kernel-worker.js). Gated by
+    # clock-smoke.mjs.
+    ./patches/kernel/0028-wasm-persistent-clock.patch
   ] ++ pkgs.lib.optionals mmu [
     # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
     ./patches/kernel/0023-wasm-software-mmu.patch

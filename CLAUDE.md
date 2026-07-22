@@ -269,6 +269,13 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-probe-s
 # round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/vsock-ctl-smoke.mjs
 
+# Guest wall-clock smoke (busybox-only boot): patches/kernel/0028's
+# read_persistent_clock64 must give the guest real wall time (not the 1970
+# epoch, which breaks TLS "not yet valid" → Cachix substitution). PASS =
+# in-guest `date +%s` within 15 min of the host clock. Wired into
+# nix-wasm.yml boot-smoke (gating).
+LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/clock-smoke.mjs
+
 # #83 follow-up terminal-resize smoke (busybox-only boot): console(0).resize(cols,
 # rows) writes the virtio-console F_SIZE config space + raises the device's
 # config-change irq; the stock driver hvc_resize()s the tty. PASS = `stty size`
@@ -1113,6 +1120,22 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   Without this, large on-demand installs fail with `page allocation failure`.
 - **Single-user nix** (`userspace/system.nix`): `build-users-group = ""` +
   `filter-syscalls = false` (no seccomp on wasm) — either otherwise aborts `nix-env`.
+- **Guest wall clock = read_persistent_clock64 off the epoch-anchored monotonic
+  import** (`patches/kernel/0028`; the layer BELOW the trust-anchors entry
+  next). The wasm arch registered only a clocksource/clockevent — no
+  persistent clock — so CLOCK_REALTIME booted at the weak default of 0:
+  in-guest `date` said `Thu Jan 1 1970` + uptime, and the moment the CA bundle
+  made TLS verification real, every certificate was "not yet valid" (curl 60
+  this time, not 77) and substitution failed all over again. Fix: implement
+  `read_persistent_clock64` from the engine's EXISTING
+  `wasm_cpu_clock_get_monotonic` import — kernel-worker.js anchors it at the
+  UNIX epoch (`performance.timeOrigin + performance.now()` ns), so its
+  absolute value IS wall time while the timekeeping core keeps consuming only
+  deltas via the clocksource. That anchoring is now LOAD-BEARING (comment at
+  the formula); an engine returning 0-based monotonic degrades to the 1970
+  boot, no crash — wire surface unchanged, so NO ENGINE_ABI bump and no pc
+  sync (pc's vendored engine uses the identical formula). vmlinux-only
+  rebuild. Gate: `clock-smoke.mjs` (`date +%s` within 15 min of host).
 - **HTTPS substitution needs baked trust anchors** (`userspace/system.nix`:
   `security/ca.nix` in the module list + `SSL_CERT_FILE`/`NIX_SSL_CERT_FILE`).
   Retiring `file:///nix-cache` for direct Cachix substitution (#82/#167) made

@@ -1,0 +1,65 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] wasm: boot-time wall clock via read_persistent_clock64
+
+The wasm arch registered only a clocksource + clockevent; with no
+read_persistent_clock64 the weak default in kernel/time/timekeeping.c
+returns 0 and CLOCK_REALTIME boots at the 1970 epoch. That surfaced the
+moment the guest did real TLS (Cachix substitution over the wan0 uplink):
+curl/openssl reject every certificate as "not yet valid" (curl error 60),
+so nix treats the cache as empty and falls back to a doomed from-source
+plan — the same visible failure shape as the missing-CA-bundle bug it hid
+behind.
+
+Fix: implement read_persistent_clock64 from the engine's EXISTING
+wasm_cpu_clock_get_monotonic import. kernel-worker.js anchors that value at
+the UNIX epoch (performance.timeOrigin + performance.now(), in ns), so its
+absolute value IS real wall time; the timekeeping core keeps consuming only
+deltas of it through the clocksource, and the one absolute read at boot
+initializes the wall clock. The epoch anchoring becomes load-bearing for
+this function — an engine returning a 0-based monotonic value degrades
+back to the 1970 boot (no crash) — and the wire surface is unchanged, so
+no ENGINE_ABI bump and no pc engine sync (pc's vendored kernel-worker.js
+uses the identical timeOrigin formula).
+
+Gated by runtime/demo/node/clock-smoke.mjs (busybox-only boot: `date +%s`
+must be within tolerance of the host clock).
+
+--- a/arch/wasm/kernel/time.c	2026-07-22 02:30:58.600105479 +0000
++++ b/arch/wasm/kernel/time.c	2026-07-22 02:32:08.561980278 +0000
+@@ -3,6 +3,8 @@
+ #include <linux/clocksource.h>
+ #include <linux/clockchips.h>
+ #include <linux/interrupt.h>
++#include <linux/time64.h>
++#include <linux/timekeeping.h>
+ 
+ #include <asm/irq.h>
+ #include <asm/smp.h>
+@@ -10,6 +12,27 @@
+ 
+ extern unsigned long long wasm_cpu_clock_get_monotonic(void);
+ 
++/*
++ * Boot-time wall clock (the "RTC"). Without this override the weak default
++ * in kernel/time/timekeeping.c returns 0 and CLOCK_REALTIME starts at the
++ * 1970 epoch — every TLS certificate is then "not yet valid", which broke
++ * the guest's HTTPS substitution from nix-wasm.cachix.org.
++ *
++ * The engine's wasm_cpu_clock_get_monotonic import is anchored at the UNIX
++ * epoch (kernel-worker.js returns performance.timeOrigin + performance.now()
++ * in ns), so the very same import doubles as the persistent clock: its
++ * absolute value is real wall time, while the timekeeping core continues to
++ * consume only deltas of it through the clocksource. That epoch anchoring is
++ * LOAD-BEARING for this function — an engine returning a 0-based monotonic
++ * value degrades back to the 1970 boot (no crash), so this needs no
++ * ENGINE_ABI bump: the wire surface is unchanged and both shipped engines
++ * (nix-wasm runtime/ + pc's vendored copy) already anchor at timeOrigin.
++ */
++void read_persistent_clock64(struct timespec64 *ts)
++{
++	*ts = ns_to_timespec64(wasm_cpu_clock_get_monotonic());
++}
++
+ /* Wasm clock source: derived from Wasm host cpu clock (monotonic). */
+ 
+ static unsigned long long wasm_clocksource_read(struct clocksource *cs)
