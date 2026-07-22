@@ -8,7 +8,14 @@
 # per-TU .o files because meson's `-r` relocatable prelink can't emit wasm TLS
 # relocations (a real wasm limitation, not a shortcut). The meson config probes
 # are fixed in postPatch (the versioned replacement for the old shell build's sed).
-{ pkgs, cross, sysroot, kernelHeaders, libcxx, compilerRt, nixSrc }:
+# realFork (#175): OFF by default → the shipped NOMMU guest's nix.wasm (clone-
+# vfork spawn, sysroot musl, no asyncify — byte-identical to before, so cross.*
+# and the default squashfs stay cached). ON → the software-MMU fork variant
+# (.#nix-wasm-fork): upstream startProcess `fork()` (WASM_REAL_FORK defines out
+# the CLONE_VM|CLONE_VFORK hack that SIGSEGV'd under the software MMU), linked
+# against muslFork's asyncify _Fork seam + a whole-module wasm-opt --asyncify.
+{ pkgs, cross, sysroot, kernelHeaders, libcxx, compilerRt, nixSrc
+, muslFork, binaryen ? pkgs.buildPackages.binaryen, realFork ? false }:
 let
   lib = pkgs.lib;
   llvm = pkgs.llvmPackages_21;
@@ -22,7 +29,24 @@ let
   # may leave undefined (incl. the __cpp_exception EH tag and the __wasm_syscall_*
   # bridge). Passed to wasm-ld via --allow-undefined-file instead of a blanket
   # --allow-undefined, so an accidental fork/exec reference fails the link.
-  allowUndefined = import ./toolchain/wasm-host-imports.nix { inherit pkgs; };
+  #
+  # The fork variant (realFork, #175) takes upstream startProcess's `fork()` path,
+  # provided by muslFork's asyncify seam (_Fork → capture_stack), so `capture_stack`
+  # must be an allowed undefined import — the ONE host symbol the seam adds. We
+  # extend the SHARED list LOCALLY rather than editing the shared file (which is
+  # baked into the cross cc-wrapper's store path → adding it there would force a
+  # full cross.* world rebuild for a symbol nix.wasm alone needs, per that file's
+  # header note). The DEFAULT build uses the shared list verbatim (byte-identical
+  # to before → stays cached). Every other undefined stays a loud link error.
+  allowUndefinedBase = import ./toolchain/wasm-host-imports.nix { inherit pkgs; };
+  allowUndefined =
+    if realFork then
+      pkgs.runCommand "nix-wasm-allow-undefined.txt" { } ''
+        cp ${allowUndefinedBase} $out
+        chmod +w $out
+        echo capture_stack >> $out
+      ''
+    else allowUndefinedBase;
 
   # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
   # builtins from its DEFAULT resource dir, which has no wasm builtins → the final
@@ -91,13 +115,16 @@ let
     # `fromTOML` global) unevaluable, i.e. NO nixpkgs package can be evaluated
     # in-guest. The version pinned in the patch matches `pkgs.toml11` (4.4.0) so
     # libexpr's `HAVE_TOML11_4` selects the v4 toml11 API path in fromTOML.cc.
-    + " -isystem ${pkgs.toml11}/include";
+    + " -isystem ${pkgs.toml11}/include"
+    # #175: in the fork variant, define out the wasm32-port patch's
+    # CLONE_VM|CLONE_VFORK spawn hack so startProcess uses upstream `fork()`.
+    + lib.optionalString realFork " -DWASM_REAL_FORK";
   cxxWarn = "-Wno-error -Wno-error=suggest-override -Wno-error=switch -Wno-error=switch-enum"
     + " -Wno-error=undef -Wno-error=unused-result -Wno-error=sign-compare -Wno-error=return-type"
     + " -Wno-error=non-virtual-dtor -Wno-error=c99-designator";
 in
 pkgs.stdenv.mkDerivation {
-  pname = "nix-wasm";
+  pname = "nix-wasm" + lib.optionalString realFork "-fork";
   version = "2.34.7";
   src = nixSrc;
 
@@ -126,7 +153,7 @@ pkgs.stdenv.mkDerivation {
     pkgs.perl
     pkgs.bison # libexpr parser generator (native build tool)
     pkgs.flex # libexpr lexer generator (native build tool)
-  ];
+  ] ++ lib.optional realFork binaryen; # wasm-opt --asyncify for the real-fork seam (#175)
 
   # The meson setup-hook's configurePhase would run a NATIVE `meson setup build`
   # (aarch64/g++) before our cross buildPhase, failing on the wasm-only deps
@@ -212,12 +239,40 @@ pkgs.stdenv.mkDerivation {
     echo "linking $nobj objects → nix.wasm"
     [ "$nobj" -gt 250 ] || { echo "too few objects ($nobj) — compile failed"; exit 1; }
 
-    ( cd build-wasm && "$WRAP/bin/wcxx" @../objs.txt ${depLib} \
+    # Fork variant only (#175): muslFork's libc.a FIRST (before the sysroot's
+    # implicit -lc), so its asyncify-seam _Fork() — which unwinds through the
+    # capture_stack host import to return twice (runtime/asyncify.js) — overrides
+    # the sysroot musl's clone-syscall _Fork. Every other archive member is
+    # byte-identical to the sysroot's, so no ODR risk (same rule as
+    # userspace/busybox-fork.nix). This is what makes nix's upstream startProcess
+    # `else pid = fork();` path work on the software-MMU guest. The DEFAULT build
+    # links the sysroot musl only (no fork symbol) — a stray fork would fail the
+    # link, preserving the NOMMU no-fork contract.
+    ( cd build-wasm && "$WRAP/bin/wcxx" @../objs.txt ${lib.optionalString realFork "${muslFork}/lib/libc.a "}${depLib} \
         -lsqlite3 -lsodium -lbz2 -llzma -lz \
         -lbrotlienc -lbrotlidec -lbrotlicommon -larchive \
         -lcrypto -lssl -lblake3 -leditline -lboost_url \
         -lcurl -lgit2 -lpcre2-8 -lllhttp -lzstd ${builtins_a} \
         -o "$PWD/../nix.unstripped.wasm" )
+    ${lib.optionalString realFork ''
+      # Whole-module asyncify for the fork seam (env.capture_stack is the unwind
+      # import). nix.wasm reaches capture_stack through musl's GOT-indirect _Fork,
+      # so asyncify's own reachability can't bound the fork call graph to an
+      # addlist — instrument the whole module (same rationale as busybox-fork.nix /
+      # forkStdenv). The full wasm feature set must be enabled so the pass
+      # preserves the dylink module's threads/bulk-memory/reference-types shape.
+      # Runs BEFORE the strip in installPhase.
+      echo "[nix-wasm] asyncify $(wc -c < nix.unstripped.wasm) bytes ..."
+      wasm-opt \
+        --enable-threads --enable-bulk-memory --enable-mutable-globals \
+        --enable-nontrapping-float-to-int --enable-sign-ext \
+        --enable-reference-types --enable-multivalue \
+        --asyncify \
+        --pass-arg=asyncify-imports@env.capture_stack \
+        nix.unstripped.wasm -o nix.unstripped.wasm.fork
+      mv nix.unstripped.wasm.fork nix.unstripped.wasm
+      echo "[nix-wasm] asyncified -> $(wc -c < nix.unstripped.wasm) bytes"
+    ''}
     runHook postBuild
   '';
 

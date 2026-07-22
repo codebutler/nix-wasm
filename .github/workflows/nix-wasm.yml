@@ -169,6 +169,7 @@ jobs:
             '.#nix-wasm' \
             '.#wasm-binary-cache' \
             '.#wasm-base-squashfs' \
+            '.#wasm-base-squashfs-fork' \
             '.#wasm-initramfs' \
             '.#wasm-initramfs-fork' \
             '.#linux-image' \
@@ -651,15 +652,23 @@ jobs:
   #   • vmlinux    ← .#kernel-mmu-a2 (CONFIG_MMU + patch 0026 fork + A2 demand-page)
   #   • initramfs  ← .#wasm-initramfs-fork (busybox-fork PID 1 + a fork bootstrap
   #                  that keeps hush as /bin/sh — no NOMMU forkshell-ash promotion)
-  #   • squashfs + nix-cache ← the SAME .#wasm-base-squashfs / .#wasm-binary-cache
-  #     (built against the no-fork musl; nix spawns builders via posix_spawn). The
-  #     engine software-MMU-instruments EVERY exec'd binary at load (kernel-worker
-  #     wasm_load_executable, gated on the MMU kernel's nonzero pt_base), so no
-  #     rebuild of the userspace is needed for this first proof.
-  # Scope: smoke.mjs ONLY (9P mount of /mnt/pc + `nix-env -iA make` substitution
-  # over the nixcache 9P channel) — the smallest "full system boots + 9P + nix
-  # works on MMU" signal. The heavier layers (build-from-source posix_spawn,
-  # GTK graphics, autoconf real-fork ash) come in follow-ups once this is green.
+  #   • squashfs   ← .#wasm-base-squashfs-fork (#175): the base system with the
+  #                  REAL-FORK nix.wasm + real-fork busybox. nix's OWN startProcess
+  #                  spawns a builder via clone(CLONE_VM|CLONE_VFORK) on the default
+  #                  build — that SIGSEGVs under the software MMU (the CLONE_VM child
+  #                  gets a private page table, so the parent-mmap'd child stack is
+  #                  unmapped in the child). The fork squashfs builds nix with
+  #                  -DWASM_REAL_FORK so startProcess uses upstream fork()+exec over
+  #                  muslFork's asyncify seam — real COW fork works here.
+  #   • nix-cache  ← the SAME .#wasm-binary-cache (guest-cc is substituted, not
+  #                  forked; unchanged). The engine software-MMU-instruments EVERY
+  #                  exec'd binary at load (kernel-worker wasm_load_executable, gated
+  #                  on the MMU kernel's nonzero pt_base).
+  # Scope: smoke.mjs (9P mount of /mnt/pc + `nix-env -iA make` substitution) +
+  # selftests-batch.mjs (M2/M3a graphics + FFI under the per-access translate) +
+  # build-from-source-e2e.mjs (#175: nix FORKS a builder in-guest — the path that
+  # SIGSEGV'd on the clone-vfork nix under the MMU, now the real-fork proof). The
+  # remaining heavy layers (GTK graphics, autoconf real-fork ash) follow.
   nix-boot-smoke-mmu:
     name: boot full nix system on software MMU (#131 prove-then-flip)
     needs: [toolchain, artifacts]
@@ -696,7 +705,7 @@ jobs:
             .artifacts-nix-mmu/vmlinux.wasm
           ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz
-          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs-fork' --no-link --print-out-paths)/base.squashfs" \
             .artifacts-nix-mmu/base.squashfs
           ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
             .artifacts-nix-mmu/nix-cache
@@ -749,6 +758,15 @@ jobs:
           # real MMU-hardening gate. Same binaries the NOMMU nix-boot-smoke runs;
           # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
           run_smoke demo/node/selftests-batch.mjs
+          # #175: the headline gate. nix's local-derivation-goal FORKS a builder
+          # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm under the
+          # software MMU (a CLONE_VM child gets a private page table, so the parent-
+          # mmap'd child stack is unmapped in the child). With .#wasm-base-squashfs-
+          # fork (real-fork nix.wasm: upstream fork()+exec over muslFork's asyncify
+          # seam), the whole build path — nix forks → builder /bin/sh (busybox-fork)
+          # forks → in-guest guest-cc compiles → the wasm binary runs → exit 42 —
+          # must complete on the real-COW-fork MMU guest.
+          run_smoke demo/node/build-from-source-e2e.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because
