@@ -170,6 +170,7 @@ jobs:
             '.#wasm-binary-cache' \
             '.#wasm-base-squashfs' \
             '.#wasm-initramfs' \
+            '.#wasm-initramfs-fork' \
             '.#linux-image' \
             '.#kernel-mmu' \
             '.#kernel-mmu-a2' \
@@ -629,6 +630,108 @@ jobs:
             # GTK siblings. Gating.
             run_smoke demo/node/l3afpad-smoke.mjs
           fi
+
+  # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --
+  # Issue #131 "prove-then-flip" (the payoff epic's prerequisite gate). Every
+  # NOMMU/no-fork/built-in-loader accommodation is still load-bearing for the
+  # DEFAULT guest (.#kernel, NOMMU). Before any of them can be deleted, the whole
+  # userspace + 9P + nix stack must be PROVEN to boot on the MMU+real-fork guest.
+  # No existing smoke does that: nix-boot-smoke boots .#kernel (NOMMU); the MMU
+  # smokes in boot-smoke boot only tiny custom inits (mmu-init, fork-init) or a
+  # bare busybox-fork script (busybox-fork-smoke) — never the full squashfs system.
+  #
+  # This job assembles the SAME nix:true artifact set as nix-boot-smoke but with:
+  #   • vmlinux    ← .#kernel-mmu-a2 (CONFIG_MMU + patch 0026 fork + A2 demand-page)
+  #   • initramfs  ← .#wasm-initramfs-fork (busybox-fork PID 1 + a fork bootstrap
+  #                  that keeps hush as /bin/sh — no NOMMU forkshell-ash promotion)
+  #   • squashfs + nix-cache ← the SAME .#wasm-base-squashfs / .#wasm-binary-cache
+  #     (built against the no-fork musl; nix spawns builders via posix_spawn). The
+  #     engine software-MMU-instruments EVERY exec'd binary at load (kernel-worker
+  #     wasm_load_executable, gated on the MMU kernel's nonzero pt_base), so no
+  #     rebuild of the userspace is needed for this first proof.
+  # Scope: smoke.mjs ONLY (9P mount of /mnt/pc + `nix-env -iA make` substitution
+  # over the nixcache 9P channel) — the smallest "full system boots + 9P + nix
+  # works on MMU" signal. The heavier layers (build-from-source posix_spawn,
+  # GTK graphics, autoconf real-fork ash) come in follow-ups once this is green.
+  nix-boot-smoke-mmu:
+    name: boot full nix system on software MMU (#131 prove-then-flip)
+    needs: [toolchain, artifacts]
+    runs-on: namespace-profile-default
+    timeout-minutes: 120 # MMU load-time instrumentation + per-access translate is slower than NOMMU
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Same nix:true layout as nix-boot-smoke, but the MMU kernel + fork initramfs.
+      - name: Assemble MMU nix:true artifacts (substitute from Cachix)
+        run: |
+          mkdir -p .artifacts-nix-mmu
+          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-nix-mmu/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-nix-mmu/initramfs.cpio.gz
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+            .artifacts-nix-mmu/base.squashfs
+          ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
+            .artifacts-nix-mmu/nix-cache
+          ls -lL .artifacts-nix-mmu
+
+      - name: Install runtime deps
+        working-directory: runtime
+        run: bun install --frozen-lockfile
+
+      # The MMU kernel is auto-detected by the engine (nonzero pt_base) — smoke.mjs
+      # boots unmodified and the userspace is instrumented at load. Retry a boot
+      # panic (exit 2); 0 pass / 1 fail are terminal.
+      - name: Boot full nix system on MMU + 9P/install smoke
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
+          # The software-MMU guest runs the substitute+unpack ~2-3x slower than
+          # NOMMU (every access is a 2-level walk; page-crossing accesses split
+          # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
+          # budget than the shared 180s default so the (correct, slower) install
+          # can finish. NOMMU nix-boot-smoke keeps the 180s default.
+          NIX_MAKE_TIMEOUT_MS: "600000"
+        run: |
+          run_smoke() {
+            local script="$1" attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt)"
+              set +e
+              node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then echo "$script inconclusive (boot panic) — retrying"; continue; fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"
+            return 2
+          }
+          # 9P transport + `nix-env -iA make` substitution — the same end-to-end
+          # exercise as the NOMMU nix-boot-smoke, now on the software-MMU guest.
+          run_smoke demo/node/smoke.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because

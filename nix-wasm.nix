@@ -154,6 +154,7 @@ pkgs.stdenv.mkDerivation {
         -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \
         -Wl,--import-table -Wl,--allow-undefined-file=${allowUndefined} -Wl,--export=_start \
         -Wl,--export-if-defined=__wasm_apply_data_relocs -Wl,--export-if-defined=__wasm_call_ctors \
+        -Wl,--export-if-defined=__wasm_early_tp_init \
         -Wl,--export-if-defined=__set_tls_base -Wl,--export-if-defined=__libc_clone_callback \
         -Wl,--export-if-defined=__libc_handle_signal ${cxxWarn}
     fi

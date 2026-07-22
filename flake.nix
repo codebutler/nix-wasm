@@ -525,13 +525,32 @@
         pkgs = cross;
         nixpkgsChannel = wasmNixpkgsChannel;
       };
+      # #131 prove-then-flip: the same bootstrap in real-fork mode (skips the
+      # NOMMU forkshell-ash promotion) for the software-MMU full-stack boot smoke.
+      wasmBootstrapFork = import ./userspace/bootstrap.nix {
+        pkgs = cross;
+        nixpkgsChannel = wasmNixpkgsChannel;
+        forkMode = true;
+      };
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
+      # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
+      # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
+      # nix:true boot resolves the compiled-in /nix/store datadir instead).
+      initramfsExtraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
-        # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
-        # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
-        # nix:true boot resolves the compiled-in /nix/store datadir instead).
-        extraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
+        extraBins = initramfsExtraBins;
+        extraShare = initramfsExtraShare;
+      };
+      # #131 prove-then-flip: the same initramfs with the REAL-FORK busybox +
+      # bootstrap, for booting the FULL nix system on .#kernel-mmu-a2 (the
+      # prerequisite gate before any accommodation can be deleted). The graphics
+      # extraBins/extraShare are unchanged — the engine software-MMU-instruments
+      # each binary at load.
+      wasmInitramfsFork = import ./userspace/initramfs.nix {
+        inherit pkgs; busybox = wasmBusyboxFork; init = wasmBootstrapFork;
+        extraBins = initramfsExtraBins;
+        extraShare = initramfsExtraShare;
       };
 
       # ---- the on-demand compiler-toolchain packages -----------------------
@@ -861,6 +880,12 @@
 
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
         wasm-initramfs = wasmInitramfs;
+
+        # #131 prove-then-flip: the real-fork initramfs (busybox-fork + fork
+        # bootstrap) for booting the full nix system on .#kernel-mmu-a2 — the
+        # nix-boot-smoke-mmu gate that must go green before any NOMMU/no-fork
+        # accommodation can be deleted.
+        wasm-initramfs-fork = wasmInitramfsFork;
 
         # The base-system store closure as a single squashfs image for virtio-blk.
         wasm-base-squashfs = wasmBaseSquashfs;

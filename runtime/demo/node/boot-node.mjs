@@ -85,11 +85,18 @@ export async function bootNode(opts = {}) {
 // cache" shape, with NO change to the baked (Cachix-only) system config. Call
 // AFTER waitForPrompt(), before any nix command.
 export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
+  // Write via $HOME, NOT ~. The MMU/fork boot's /bin/sh is busybox hush, built
+  // WITHOUT CONFIG_HUSH_TILDE, so it does NOT expand `~` — `~/.config/nix` would
+  // become a literal `~` directory and nix (which reads $HOME/.config/nix/nix.conf)
+  // never sees the primed override, falling back to the baked Cachix substituter
+  // (DNS-fails offline). The NOMMU boot's forkshell ash expands `~`, so this only
+  // bit the MMU nix-boot-smoke. $HOME is expanded by both shells and is exactly
+  // the path nix resolves, so it works everywhere.
   session.send(
-    "mkdir -p ~/.config/nix && " +
+    "mkdir -p $HOME/.config/nix && " +
       "printf 'substituters = file:///nix-cache\\n" +
       "trusted-substituters = file:///nix-cache\\nrequire-sigs = false\\n' " +
-      "> ~/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
+      "> $HOME/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
   );
   const ok = await session.waitForOutput(/LOCAL_NIX_CACHE_READY=0/, timeoutMs);
   if (!ok) throw new Error("primeLocalNixCache: guest did not confirm the nix.conf write");

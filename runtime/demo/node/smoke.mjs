@@ -85,9 +85,21 @@ try {
   // The catalog attrs are `lib.getName`-derived (#79), so this is `make-wasm32`, not
   // `make` (the stale `make` attr is what nix-boot-smoke caught when it was first run
   // in CI — see #88).
+  // The software-MMU guest translates every memory access (2-level walk) + splits
+  // page-crossing scalar accesses byte-wise, so the same substitute+unpack runs
+  // ~2-3x slower than the NOMMU path. Allow the MMU boot job to raise the ceiling
+  // via NIX_MAKE_TIMEOUT_MS (default 180s keeps the NOMMU nix-boot-smoke unchanged).
+  // Offline substitution runs off the local file:///nix-cache the harness primed
+  // into the guest user nix.conf (primeLocalNixCache, above) — the baked guest
+  // config is Cachix-only (#167) with no egress in CI. The software-MMU guest
+  // translates every access (2-level walk) + splits page-crossing scalar accesses
+  // byte-wise, so the same substitute+unpack runs ~2-3x slower than NOMMU; the MMU
+  // boot job raises the ceiling via NIX_MAKE_TIMEOUT_MS (default 180s keeps the
+  // NOMMU nix-boot-smoke unchanged).
+  const makeTimeoutMs = Number(process.env.NIX_MAKE_TIMEOUT_MS) || 180000;
   s.send("nix-env -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
-    await s.waitForOutput(/NIX_MAKE_RC=0/, 180000),
+    await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
     "nix-env -iA make-wasm32 substitutes from the cache",
   );
 } finally {

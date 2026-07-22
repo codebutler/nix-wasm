@@ -64,9 +64,22 @@ function cpioNewc(entries) {
 const initRaw = new Uint8Array(readFileSync(initPath));
 // CHECKED mode: the present-checked translate that demand-pages via the fault
 // syscall — the whole point of A2.
-const initInstr = instrument(initRaw, { checked: true, exportControls: true });
+//
+// inlineLimit: 1 (#164 helper-path real-boot gate) — force EVERY function onto
+// the >6MB helper-call translate (__mmu_translate_ck) instead of the inline
+// walk. nix.wasm's __wasm_apply_data_relocs (fn #2, 10.7MB inline) is the ONLY
+// startup function big enough to take this path, so it is otherwise NEVER
+// boot-exercised: the nix-env Config::set "bina" fault is the first time it
+// runs on a real kernel. inlineLimit:1 makes this tiny init (incl. the 128 MiB
+// fragmented pointer-chase below) drive its ENTIRE execution through the helper
+// translate, so a helper-path mis-encode corrupts here in the ~3-min a2 smoke.
+// The helper path is size-independent (a call is a call at 10B or 10MB), so
+// this is a faithful correctness test of it. If this PASSES, the helper path is
+// exonerated on real hardware; the inline path already passed at the default
+// 6MB limit (run #347), so both translate paths are then boot-proven.
+const initInstr = instrument(initRaw, { checked: true, exportControls: true, inlineLimit: 1 });
 console.log(
-  `[mmu-smoke-a2] instrumented (checked): ${initRaw.length} -> ${initInstr.length} bytes`,
+  `[mmu-smoke-a2] instrumented (checked, inlineLimit=1 -> all-helper): ${initRaw.length} -> ${initInstr.length} bytes`,
 );
 
 // expected mmap checksum: sum over 8MiB / 4KiB pages of ((i>>12) & 0xff)
@@ -102,10 +115,29 @@ try {
   const cowOk = snap.includes("MMU-A2: cow ro-read 0x00000000 wr-read 0x000000ab");
   // mprotect narrow->read->widen->write round-trip returned 1.
   const mprotectOk = snap.includes("MMU-A2: mprotect 0x00000001");
-  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk;
+  // Large fragmented pointer-chase (128 MiB / ~32 pgd entries): every stored
+  // ->next dereferences correctly and every ->tag round-trips (sumok=1). A
+  // multi-pgd translation bug corrupts a node -> "chase CORRUPT" (clean hang,
+  // no OK). This is the fast repro for the nix-env Config::set "bina" fault.
+  const chaseOk =
+    /MMU-A2: chase nodes 0x[0-9a-f]{8} seen 0x[0-9a-f]{8} sumok 0x00000001/.test(snap) &&
+    !snap.includes("chase CORRUPT") &&
+    !snap.includes("chase mmap FAIL");
+  // Low-VA .bss pointer-chase (128 MiB static array, exec-mapped at low VA):
+  // the discriminating control vs the high-VA mmap chase for the nix-env
+  // Config::set fault. A multi-pgd translation bug specific to the exec-time
+  // data-segment mapping / low VA corrupts here -> "bsschase CORRUPT".
+  const bssChaseOk =
+    /MMU-A2: bsschase nodes 0x[0-9a-f]{8} seen 0x[0-9a-f]{8} sumok 0x00000001/.test(snap) &&
+    !snap.includes("bsschase CORRUPT");
+  pass = !!ok && alive && mmapOk && stackOk && cowOk && mprotectOk && chaseOk && bssChaseOk;
+  if (ok && !bssChaseOk)
+    console.log("[mmu-smoke-a2] low-VA .bss pointer-chase FAILED (exec-data/low-VA translation)");
   if (ok && !mmapOk) console.log(`[mmu-smoke-a2] mmap checksum MISMATCH (want ${expHex})`);
   if (ok && !cowOk) console.log("[mmu-smoke-a2] COW write-protect FAULT path FAILED");
   if (ok && !mprotectOk) console.log("[mmu-smoke-a2] mprotect round-trip FAILED");
+  if (!chaseOk)
+    console.log("[mmu-smoke-a2] large fragmented pointer-chase FAILED (see BAD@/CORRUPT)");
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
   s.kill();

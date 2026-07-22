@@ -120,6 +120,141 @@ int main(void)
 	put_hex(fd, mp_ok);
 	put(fd, "\n");
 
+	/* (5) LARGE FRAGMENTED POINTER-CHASE — the nix-env Config::set "bina" repro.
+	 * The full-nix boot faults reading a std::string data-pointer that holds
+	 * CONTENT bytes: a stored VIRTUAL pointer that mistranslates to the wrong
+	 * physical page AT SCALE. The 8 MiB mmap above is only 2 pgd entries
+	 * (PGDIR_SHIFT=22 -> 4 MiB/entry); nix-env's data+heap spans dozens, so a
+	 * multi-pgd page-table bug (pte-table alloc / pgd indexing) never shows in
+	 * the small smoke. Reproduce it here: map several SEPARATE large regions
+	 * (fragmented -> many pgd entries at different bases), thread a per-page
+	 * linked list across ALL of them (each node stores a POINTER to the next,
+	 * exactly like a data-reloc, plus a position-dependent tag; the rest of each
+	 * page is filled with 'b' CONTENT, like a std::string body), then TRAVERSE
+	 * it, dereferencing every ->next (exactly like Config::set walking the
+	 * settings map). A page that mistranslates reads content-as-pointer/tag.
+	 * The traversal reads each node's ->tag BEFORE ever following its ->next, so
+	 * a mistranslated page is caught by the tag mismatch (-> clean hang, a real
+	 * FAIL + transcript) rather than a wild ->next deref (-> SIGSEGV in PID 1 ->
+	 * panic -> "inconclusive", which would hide the signal). 0x62='b', so a
+	 * mistranslated ->next would read 0x62626262 — the direct analogue of the
+	 * nix-env "bina" (0x616e6962) fault. */
+	struct node {
+		struct node *next;
+		unsigned long tag;
+	};
+	enum { NREG = 4 };
+	const unsigned long RSZ = 32UL * 1024 * 1024; /* 32 MiB * 4 = 128 MiB, ~32 pgd entries */
+	struct node *head = 0, *prev = 0;
+	unsigned long nodes = 0, tagsum = 0;
+	for (int r = 0; r < NREG; r++) {
+		unsigned char *rg = mmap(0, RSZ, PROT_READ | PROT_WRITE,
+					 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (rg == MAP_FAILED) {
+			put(fd, "MMU-A2: chase mmap FAIL\n");
+			for (;;)
+				pause();
+		}
+		for (unsigned long off = 0; off + 4096 <= RSZ; off += 4096) {
+			struct node *nd = (struct node *)(rg + off);
+			unsigned long tag = ((unsigned long)nd ^ 0x9e3779b1UL) + nodes;
+			memset((unsigned char *)nd + sizeof(*nd), 'b',
+			       4096 - sizeof(*nd));
+			nd->tag = tag;
+			nd->next = 0;
+			if (prev)
+				prev->next = nd;
+			else
+				head = nd;
+			prev = nd;
+			nodes++;
+			tagsum += tag;
+		}
+	}
+	unsigned long seen = 0, chksum = 0, bad = 0;
+	for (struct node *nd = head; nd; nd = nd->next) {
+		unsigned long want = ((unsigned long)nd ^ 0x9e3779b1UL) + seen;
+		if (nd->tag != want) {
+			bad = (unsigned long)nd;
+			break;
+		}
+		chksum += nd->tag;
+		seen++;
+	}
+	put(fd, "MMU-A2: chase nodes ");
+	put_hex(fd, nodes);
+	put(fd, " seen ");
+	put_hex(fd, seen);
+	put(fd, " sumok ");
+	put_hex(fd, chksum == tagsum);
+	if (bad) {
+		put(fd, " BAD@");
+		put_hex(fd, bad);
+	}
+	put(fd, "\n");
+	if (bad || seen != nodes || chksum != tagsum) {
+		put(fd, "MMU-A2: chase CORRUPT\n");
+		for (;;)
+			pause();
+	}
+
+	/* (6) LOW-VA .bss pointer-chase — the discriminating control for the nix-env
+	 * fault. Section (5) exonerated HIGH-VA (mmap, 0x40000000+) translation. But
+	 * nix::Config::set faults reading a pointer field of a _settings std::map
+	 * node / string, which lives on the brk heap or .data/.bss — all LOW VA
+	 * (contiguous up from data_start), a DIFFERENT VMA and pgd range that the
+	 * mmap chase never touched, and the exec-time large-data-segment mapping path
+	 * (fs/binfmt_wasm.c) the mmap runtime path doesn't model. A large STATIC .bss
+	 * array is exec-mapped at low VA exactly like nix.wasm's data segment; chase
+	 * it identically (one node per page, store ->next, then traverse
+	 * dereferencing). If (6) CORRUPTS while (5) passed, the bug is LOW-VA /
+	 * exec-data translation. If both pass, translation is fully exonerated (high
+	 * AND low VA) and the fault is a store-corruption / memory.init-content /
+	 * __memory_base / nix-latent issue. */
+	static unsigned char bss_region[128u * 1024 * 1024]; /* 128 MiB .bss, LOW VA */
+	struct node *bhead = 0, *bprev = 0;
+	unsigned long bnodes = 0, btagsum = 0;
+	for (unsigned long off = 0; off + 4096 <= sizeof(bss_region); off += 4096) {
+		struct node *nd = (struct node *)(bss_region + off);
+		unsigned long btag = ((unsigned long)nd ^ 0x9e3779b1UL) + bnodes;
+		memset((unsigned char *)nd + sizeof(*nd), 'b', 4096 - sizeof(*nd));
+		nd->tag = btag;
+		nd->next = 0;
+		if (bprev)
+			bprev->next = nd;
+		else
+			bhead = nd;
+		bprev = nd;
+		bnodes++;
+		btagsum += btag;
+	}
+	unsigned long bseen = 0, bchk = 0, bbad = 0;
+	for (struct node *nd = bhead; nd; nd = nd->next) {
+		unsigned long want = ((unsigned long)nd ^ 0x9e3779b1UL) + bseen;
+		if (nd->tag != want) {
+			bbad = (unsigned long)nd;
+			break;
+		}
+		bchk += nd->tag;
+		bseen++;
+	}
+	put(fd, "MMU-A2: bsschase nodes ");
+	put_hex(fd, bnodes);
+	put(fd, " seen ");
+	put_hex(fd, bseen);
+	put(fd, " sumok ");
+	put_hex(fd, bchk == btagsum);
+	if (bbad) {
+		put(fd, " BAD@");
+		put_hex(fd, bbad);
+	}
+	put(fd, "\n");
+	if (bbad || bseen != bnodes || bchk != btagsum) {
+		put(fd, "MMU-A2: bsschase CORRUPT\n");
+		for (;;)
+			pause();
+	}
+
 	put(fd, "MMU-A2: OK\n");
 	for (;;)
 		pause();

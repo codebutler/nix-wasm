@@ -70,6 +70,7 @@ const enc = new TextEncoder();
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
+ *   ninepTrace?: (line: string) => void,  // #151 diagnostic: opt-in host-side 9P RPC tracer (localizes 9P I/O under the software MMU); also enabled via the NINEP_TRACE env in node/CI
  *   snd?: { onReady: (device: import("./virtio/snd-device.js").SndVirtioDevice) => void },  // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
  * }} opts
  * @returns {Promise<{
@@ -132,7 +133,17 @@ export async function bootLinux(opts) {
   // a second export when provided (#141).
   const exports = { "/": vfs };
   if (opts.nixCache) exports.nixcache = opts.nixCache; // read-only Nix binary cache, pc-init mounts at /nix-cache + substituters=file:///nix-cache (#141)
-  const ninepServer = createNinePServer({ exports, msize: NINEP_MSIZE });
+  // #151 diagnostic: opt-in host-side 9P RPC trace to localize file I/O failing
+  // under the software MMU (guest-copy-fault vs transport). Off by default;
+  // enabled via opts.ninepTrace or the NINEP_TRACE env (node/CI only — the
+  // browser has no `process`, so this stays undefined there).
+  const proc = /** @type {any} */ (globalThis).process;
+  const ninepTrace =
+    opts.ninepTrace ||
+    (proc && proc.env && proc.env.NINEP_TRACE
+      ? (/** @type {string} */ line) => console.error(`[9p] ${line}`)
+      : undefined);
+  const ninepServer = createNinePServer({ exports, msize: NINEP_MSIZE, trace: ninepTrace });
 
   // Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB), threaded
   // into every task worker so a queue set up on the boot worker is serviceable

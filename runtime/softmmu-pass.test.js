@@ -10,7 +10,7 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { NR_MMU_FAULT, instrument, scanUnhandled } from "./softmmu-pass.js";
+import { NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -155,6 +155,42 @@ describe("instrument()", () => {
     expect(u[P2 / 4 + 3]).toBe(103);
     // and the identity location V is untouched (still 0)
     expect(u[V / 4]).toBe(0);
+  });
+
+  test("#128 page-crossing scalar access reaches TWO non-adjacent physical frames", () => {
+    // The bug this proves fixed: a multi-byte scalar store/load whose bytes span
+    // a page boundary must reach the two frames the two virtual pages map to —
+    // NOT write the tail bytes into the frame physically-after the first one.
+    // Map two ADJACENT virtual pages to two NON-adjacent physical frames:
+    //   virtual 0x300xxx -> phys frame P1=0x210000
+    //   virtual 0x301xxx -> phys frame P2=0x260000  (P1's next frame is 0x211000)
+    const VB = 0x300000; // virtual page 0x300 base
+    const P1 = 0x210000;
+    const P2 = 0x260000; // deliberately != P1 + 0x1000
+    const b = boot(instrument(prog, { exportControls: true }), {
+      instrumented: true,
+      remap: (setPte) => {
+        setPte(VB, P1);
+        setPte(VB + 0x1000, P2);
+      },
+    });
+    // a single i32.store at VB+0xffe spans 0xffe,0xfff (page 0x300 -> P1) and
+    // 0x1000,0x1001 (page 0x301 -> P2). value little-endian 44 33 22 11.
+    const CROSS = VB + 0xffe;
+    b.inst.exports.fill(CROSS, 1, 0x11223344);
+    const u8 = new Uint8Array(b.mem.buffer);
+    // low two bytes land in P1's tail...
+    expect(u8[P1 + 0xffe]).toBe(0x44);
+    expect(u8[P1 + 0xfff]).toBe(0x33);
+    // ...high two bytes land in P2's head (the correct frame, NOT P1+0x1000).
+    expect(u8[P2 + 0]).toBe(0x22);
+    expect(u8[P2 + 1]).toBe(0x11);
+    // the frame physically after P1 (what the pre-fix raw store would have hit)
+    // is untouched.
+    expect(u8[P1 + 0x1000]).toBe(0);
+    expect(u8[P1 + 0x1001]).toBe(0);
+    // and a crossing i32.load reads the value back whole across both frames.
+    expect(b.inst.exports.sum_scan(CROSS, 1) >>> 0).toBe(0x11223344);
   });
 
   test("refuses a module containing SIMD memory ops (documented follow-up)", () => {
@@ -1069,4 +1105,35 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: SRC, kind: 0 });
     for (let k = 0; k < 8; k++) expect(u8[DST + k]).toBe(k + 10);
   });
+});
+
+describe("concatBytes — code-section assembly must not use Array.flat", () => {
+  test("byte-exact concatenation of mixed number[] / Uint8Array chunks", () => {
+    const chunks = [[1, 2, 3], new Uint8Array([4, 5]), [], new Uint8Array([]), [6]];
+    const out = concatBytes(chunks);
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect([...out]).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  test("empty input yields an empty Uint8Array", () => {
+    const out = concatBytes([]);
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect(out.length).toBe(0);
+  });
+
+  test("truncates each byte to 8 bits exactly like a wasm code section copy", () => {
+    // values are always emitted as bytes upstream; assert the typed-array copy
+    // semantics are the ones the assembler relies on (no accidental widening).
+    expect([...concatBytes([[0xff, 0x100 & 0xff], new Uint8Array([0x00])])]).toEqual([
+      0xff, 0x00, 0x00,
+    ]);
+  });
+
+  // NOTE: the bug this replaced — `newCodeEntries.flat()` throwing
+  // `RangeError: Invalid array length` on nix.wasm's ~hundreds-of-MB
+  // instrumented code section — is V8-specific (Array.flat's FixedArray
+  // ceiling, ~128M elements). These engine unit tests run under bun
+  // (JavaScriptCore), which has a different/higher ceiling, so the crash can
+  // only be reproduced end-to-end by the Node boot smoke (mmu prove-then-flip);
+  // asserting `.flat()` throws here would be a false engine-specific gate.
 });

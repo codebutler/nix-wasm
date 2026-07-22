@@ -40,6 +40,9 @@ import {
   packDirent,
 } from "./protocol.js";
 
+/** Reverse opcode → name map, for the opt-in RPC tracer (createNinePServer). */
+const P9_NAMES = Object.fromEntries(Object.entries(P9).map(([k, v]) => [v, k]));
+
 // Linux V9FS_MAGIC, reported by Tstatfs.
 const V9FS_MAGIC = 0x01021997;
 // Tsetattr.valid bit for "set size" (truncate).
@@ -139,12 +142,15 @@ const enc = new TextEncoder();
  *   vfs?: any, root?: string,
  *   exports?: Record<string, any>,
  *   msize?: number, uid?: number, gid?: number,
+ *   trace?: (line: string) => void,
  * }} opts
  */
 export function createNinePServer(opts) {
   const maxMsize = opts.msize || 65536;
   const uid = opts.uid ?? 0;
   const gid = opts.gid ?? 0;
+  // Opt-in host-side RPC tracer (off unless opts.trace is set). See traceRpc.
+  const trace = opts.trace;
 
   // aname (normalized) → { vfs, root }. Tattach selects by aname.
   const exportsByName = new Map();
@@ -559,6 +565,50 @@ export function createNinePServer(opts) {
     }
   }
 
+  // #151 diagnostic: format one request/reply pair at the host<->guest choke
+  // point. This is the single place that answers "does the guest actually
+  // ISSUE this RPC, and what does the host reply?" — the exact question that
+  // localizes 9P file I/O failing under the software MMU: a write of /Home/x
+  // that produces a host-side Twrite(fid,path,count) → Rwrite means the guest
+  // issued it and the fault is transport/copy-back; NO Twrite reaching the host
+  // (only Twalk/Tlcreate, or an Rlerror) means the guest faulted before issuing
+  // it (user-page pinning under the softmmu). Formatting only — never affects
+  // behavior; the whole path is skipped unless opts.trace is set.
+  function peekFidPath(cid, fid) {
+    const c = conns.get(cid);
+    const f = c && c.fids.get(fid);
+    return f ? f.path : "?";
+  }
+  function traceRpc(cid, m, reply) {
+    const req = P9_NAMES[m.type] || `T#${m.type}`;
+    const rep = P9_NAMES[reply.type] || `R#${reply.type}`;
+    let d = "";
+    switch (m.type) {
+      case P9.Twalk:
+        d = `fid=${m.fid}->${m.newfid} [${(m.wnames || []).join("/")}]`;
+        break;
+      case P9.Tlcreate:
+        d = `dfid=${m.fid} name=${m.name} path=${peekFidPath(cid, m.fid)}`;
+        break;
+      case P9.Tlopen:
+        d = `fid=${m.fid} path=${peekFidPath(cid, m.fid)} flags=0x${(m.flags >>> 0).toString(16)}`;
+        break;
+      case P9.Twrite:
+        d = `fid=${m.fid} path=${peekFidPath(cid, m.fid)} off=${m.offset} count=${m.data ? m.data.length : 0}`;
+        break;
+      case P9.Tread:
+        d = `fid=${m.fid} path=${peekFidPath(cid, m.fid)} off=${m.offset} count=${m.count}`;
+        break;
+      default:
+        if (m.fid !== undefined) d = `fid=${m.fid}`;
+    }
+    let r = "";
+    if (reply.type === P9.Rlerror) r = ` errno=${reply.ecode}`;
+    else if (reply.type === P9.Rwrite) r = ` count=${reply.count}`;
+    else if (reply.type === P9.Rread) r = ` bytes=${reply.data ? reply.data.length : 0}`;
+    trace(`cid=${cid} tag=${m.tag} ${req}(${d}) -> ${rep}${r}`);
+  }
+
   /**
    * Service one request frame → one reply frame. Never throws: VFS / handler
    * errors become Rlerror(errno). `cid` is the connection id (one per guest
@@ -578,9 +628,12 @@ export function createNinePServer(opts) {
     try {
       const reply = await dispatch(cid, m);
       reply.tag = m.tag;
+      if (trace) traceRpc(cid, m, reply);
       return encode(reply);
     } catch (err) {
-      return encode({ type: P9.Rlerror, tag: m.tag, ecode: errnoFromError(err) });
+      const ecode = errnoFromError(err);
+      if (trace) traceRpc(cid, m, { type: P9.Rlerror, ecode });
+      return encode({ type: P9.Rlerror, tag: m.tag, ecode });
     }
   }
 

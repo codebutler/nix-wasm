@@ -108,6 +108,18 @@ export const linux = async ({
   /// Dict of online CPUs.
   const cpus = {};
 
+  /// pc (#128 MMU boot speed): canonical content-keyed cache of compiled
+  /// user-executable Modules (hash -> {module, table_initial}). Under the
+  /// software MMU every exec must softmmu-instrument + compile the binary
+  /// (seconds each), and a shell-heavy boot spawns the same busybox dozens of
+  /// times, each in a fresh worker — so the boot took minutes with zero reuse.
+  /// WebAssembly.Module clones share compiled code, so each new worker gets a
+  /// snapshot of this Map in its init message (kernel-worker.js exec_modules)
+  /// and posts back modules it compiles (exec_module_add). Capped FIFO so a
+  /// long session's many distinct binaries can't grow it unboundedly.
+  const exec_module_cache = new Map();
+  const EXEC_MODULE_CACHE_MAX = 48;
+
   /// Dict of tasks.
   const tasks = {};
 
@@ -414,6 +426,20 @@ export const linux = async ({
       make_task(message.prev_task, message.new_task, message.name, message.user_executable);
     },
 
+    // pc (#128 MMU boot speed): a worker compiled a (softmmu-instrumented)
+    // user executable this cache didn't have — store it for all future workers.
+    exec_module_add: (message) => {
+      if (!exec_module_cache.has(message.hash)) {
+        if (exec_module_cache.size >= EXEC_MODULE_CACHE_MAX) {
+          exec_module_cache.delete(exec_module_cache.keys().next().value);
+        }
+        exec_module_cache.set(message.hash, {
+          module: message.module,
+          table_initial: message.table_initial,
+        });
+      }
+    },
+
     release_task: (message) => {
       kill_task(message.dead_task);
     },
@@ -664,6 +690,10 @@ export const linux = async ({
       runner_name: name,
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX
+      // pc (#128 MMU boot speed): snapshot of the compiled-Module cache (clones
+      // share compiled code — cheap). Workers created before a module was first
+      // compiled miss it and fall back to instrument+compile (then post it back).
+      exec_modules: exec_module_cache,
     };
     worker.postMessage(init_msg);
 
