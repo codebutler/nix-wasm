@@ -231,20 +231,37 @@ let
 
         nix.enable = true;
         nix.settings.experimental-features = [ "nix-command" "flakes" ];
-        nix.settings.substituters = lib.mkForce [ "file:///nix-cache" ];
-        nix.settings.require-sigs = lib.mkForce false;
+        # Exactly like real NixOS: the guest substitutes from a real, signed HTTP
+        # binary cache over its OWN TCP/IP — the virtio-net NIC → pc's vnet bridge
+        # → the wan0 Wisp uplink → the internet. `nix-wasm.cachix.org` is THIS
+        # platform's cache: CI (cachix-action) pushes every wasm32 output to it,
+        # and cache.nixos.org carries no wasm32-NOMMU builds, so it is the only
+        # useful substituter (a real machine on a custom platform is in the same
+        # position — its Cachix IS its cache). The former `file:///nix-cache`
+        # substituter (a 9P-served local cache) was the network-less scaffold;
+        # with real egress it is retired, so the guest behaves exactly like a real
+        # machine — including that installing a package not already in the store
+        # needs the network (no offline substitution — same as real NixOS).
+        #
+        # Requires the wan0 uplink to be up (opt-in in pc's TCP/IP control panel;
+        # DNS for `nix-wasm.cachix.org` is forwarded over the uplink by vnet). With
+        # it down the store still works offline but substitution fails — again,
+        # exactly as a real machine with no network behaves.
+        nix.settings.substituters = lib.mkForce [ "https://nix-wasm.cachix.org" ];
+        # A real signed cache → real signature checking (nixpkgs' default `true`;
+        # the `file://` scaffold turned it off). This is the cache's public key.
+        nix.settings.trusted-public-keys = lib.mkForce [
+          "nix-wasm.cachix.org-1:UlXbCihIfmQnzcyTQuRutvD0IPVVoHHAoIamxBJZUb0="
+        ];
+        nix.settings.require-sigs = lib.mkForce true;
         # Force `substitute` ON explicitly (codebutler/nix-wasm#1). The NEW nix CLI
         # (`nix profile`, `nix build`, …) probes for Internet in src/nix/main.cc and,
-        # finding none on the network-less guest, sets `useSubstitutes = false`
-        # UNLESS it was explicitly overridden — silently disabling ALL substitution.
-        # Our only substituter is `file:///nix-cache`, which needs no network, so that
-        # default is wrong here: it makes `nix profile install` fail with "no
-        # substituter that can build it" (and made `nix profile` look like it was
-        # building derivers — it was actually just unable to substitute the cached
-        # output). `nix-env -iA` is a separate entry point that skips that probe, so
-        # it is not affected by THIS knob (it has its own gap — see
-        # always-allow-substitutes below). Setting it here marks it `overridden`
-        # so the offline path leaves it alone.
+        # if it reads no connectivity, sets `useSubstitutes = false` UNLESS it was
+        # explicitly overridden — which would silently disable ALL substitution.
+        # Pinning it here marks it `overridden` so substitution stays on regardless
+        # of what the probe concludes about the (Wisp-tunnelled) link. `nix-env -iA`
+        # is a separate entry point that skips that probe (it has its own gap — see
+        # always-allow-substitutes below).
         nix.settings.substitute = true;
         # Substitute even derivations marked `allowSubstitutes = false`
         # (codebutler/nix-wasm#1 follow-up). nixpkgs' TRIVIAL builders —

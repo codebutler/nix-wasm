@@ -5,7 +5,7 @@
 // (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
-import { bootNode } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
 import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const vfs = MemVfs.from({
@@ -33,6 +33,9 @@ try {
     throw e;
   }
   check(reached, "shell prompt reached");
+  // Offline CI: substitute from the local /nix-cache (the baked guest config is
+  // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
+  await primeLocalNixCache(s);
   // The 9P-over-virtio transport negotiated a mount (printed per mount when the
   // guest clamps msize to the device max). This gates the #87 regression — if the
   // 9P virtio devices fail to register there is no mount and this line never prints
@@ -86,24 +89,18 @@ try {
   // page-crossing scalar accesses byte-wise, so the same substitute+unpack runs
   // ~2-3x slower than the NOMMU path. Allow the MMU boot job to raise the ceiling
   // via NIX_MAKE_TIMEOUT_MS (default 180s keeps the NOMMU nix-boot-smoke unchanged).
+  // Offline substitution runs off the local file:///nix-cache the harness primed
+  // into the guest user nix.conf (primeLocalNixCache, above) — the baked guest
+  // config is Cachix-only (#167) with no egress in CI. The software-MMU guest
+  // translates every access (2-level walk) + splits page-crossing scalar accesses
+  // byte-wise, so the same substitute+unpack runs ~2-3x slower than NOMMU; the MMU
+  // boot job raises the ceiling via NIX_MAKE_TIMEOUT_MS (default 180s keeps the
+  // NOMMU nix-boot-smoke unchanged).
   const makeTimeoutMs = Number(process.env.NIX_MAKE_TIMEOUT_MS) || 180000;
-  // The offline guest has exactly ONE reachable substituter: the 9P-mounted
-  // file:///nix-cache. The NOMMU nix-boot-smoke installs make-wasm32 reliably;
-  // the MMU prove-job flaked (ba59b94 passed once, failed once) with the guest
-  // reaching out to nix-wasm.cachix.org for make-wasm32.drv → DNS fail. The guest
-  // /etc/nix/nix.conf carried a stray `substituters = https://nix-wasm.cachix.org`
-  // (not from any repo module — the cachix line is nowhere in the guest closure),
-  // so make the substitution SELF-CONTAINED: pass the local cache as a
-  // command-line `--option`, which overrides every nix.conf file (system + user)
-  // for certain — the offline guest can then never reach past its own cache. Also
-  // force `require-sigs false` (the cache is unsigned) so a leaked `require-sigs =
-  // true` can't reject the unsigned narinfos. This is the correct config for a
-  // network-less guest, not a workaround: there is no other substituter to use.
-  const localSubst = "--option substituters file:///nix-cache --option require-sigs false";
-  s.send(`nix-env ${localSubst} -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n`);
+  s.send("nix-env -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n");
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
-    "nix-env -iA make-wasm32 substitutes from the local cache",
+    "nix-env -iA make-wasm32 substitutes from the cache",
   );
 } finally {
   if (!pass) console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));

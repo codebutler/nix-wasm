@@ -75,3 +75,22 @@ export async function bootNode(opts = {}) {
     },
   };
 }
+
+// Test-only: point the booted guest at the LOCAL /nix-cache (9P) for
+// substitution. The SHIPPED guest substitutes from nix-wasm.cachix.org over its
+// own TCP/IP (real-NixOS; js/vnet/wan over the Wisp uplink), which the offline CI
+// harness can't reach. So each nix smoke primes a USER-level nix.conf that
+// overrides the substituter back to the local 9P cache (still mounted at
+// /nix-cache for the catalogs) — the standard "give the offline test a local
+// cache" shape, with NO change to the baked (Cachix-only) system config. Call
+// AFTER waitForPrompt(), before any nix command.
+export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
+  session.send(
+    "mkdir -p ~/.config/nix && " +
+      "printf 'substituters = file:///nix-cache\\n" +
+      "trusted-substituters = file:///nix-cache\\nrequire-sigs = false\\n' " +
+      "> ~/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
+  );
+  const ok = await session.waitForOutput(/LOCAL_NIX_CACHE_READY=0/, timeoutMs);
+  if (!ok) throw new Error("primeLocalNixCache: guest did not confirm the nix.conf write");
+}
