@@ -100,22 +100,6 @@ try {
   // true` can't reject the unsigned narinfos. This is the correct config for a
   // network-less guest, not a workaround: there is no other substituter to use.
   const localSubst = "--option substituters file:///nix-cache --option require-sigs false";
-  // Diagnostic: dump the AMBIENT effective substituters BEFORE forcing the local
-  // one, so a future failure log shows whether the stray cachix substituter is
-  // still in the resolved config. Greedy match to the LAST marker so the captured
-  // block is the command OUTPUT, not the shell's echo of the command (the earlier
-  // non-greedy match stopped inside the echoed command and captured nothing).
-  s.send(
-    "echo MMUDIAG_START; " +
-      "echo SUBST=$(nix show-config 2>/dev/null | sed -n 's/^substituters = //p'); " +
-      "echo REQSIGS=$(nix show-config 2>/dev/null | sed -n 's/^require-sigs = //p'); " +
-      "echo MMUDIAG_END\n",
-  );
-  await s.waitForOutput(/MMUDIAG_END/, 30000);
-  console.log(
-    "\n── MMUDIAG ──\n" +
-      (s.snapshot().match(/MMUDIAG_START[\s\S]*MMUDIAG_END/)?.[0] ?? "(not captured)"),
-  );
   s.send(`nix-env ${localSubst} -iA wasm-tools.make-wasm32 2>&1; echo NIX_MAKE_RC=$?\n`);
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
