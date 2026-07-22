@@ -739,6 +739,16 @@ jobs:
           # 9P transport + `nix-env -iA make` substitution — the same end-to-end
           # exercise as the NOMMU nix-boot-smoke, now on the software-MMU guest.
           run_smoke demo/node/smoke.mjs
+          # #131 prove-then-flip, extending the MMU proof to the HEAVY layers
+          # beyond the core 9P/install smoke: the M2/M3a graphics + FFI selftests
+          # batched into ONE boot (glib gobject + the libffi marshaller + pango
+          # cairo-ft layout + freetype/fontconfig/harfbuzz). These are exactly the
+          # binaries most likely to expose a residual software-MMU bug (the #168
+          # page-crossing corruption was found in nix.wasm; glib/libffi are just as
+          # memory-intensive), so booting them under the per-access translate is a
+          # real MMU-hardening gate. Same binaries the NOMMU nix-boot-smoke runs;
+          # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
+          run_smoke demo/node/selftests-batch.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because
