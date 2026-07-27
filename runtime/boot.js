@@ -66,6 +66,7 @@ const enc = new TextEncoder();
  *   cmdline?: string,                 // kernel command line
  *   onLog?: (text: string) => void,   // host/diagnostic log sink
  *   squashfs?: ArrayBuffer,           // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
+ *   stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void },  // #177: RW state disk (/dev/vdb); saveDisk() packs CBHD dirties
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
  *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
@@ -79,6 +80,8 @@ const enc = new TextEncoder();
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
+ *   saveDisk(): Blob|null,
+ *   hasStateDisk(): boolean,
  *   kill(): void,
  * }>}
  */
@@ -183,6 +186,9 @@ export async function bootLinux(opts) {
     // every task worker (any may service the blk vring) sees the same image.
     // Absent on a --no-nix / busybox-only boot (the blk device mounts empty).
     squashfs: opts.squashfs,
+    // #177: RW state disk (/dev/vdb). Optional; when present, saveDisk() returns
+    // a CBHD Blob of dirty sectors for host persistence.
+    stateDisk: opts.stateDisk,
     wayland,
     // Issue #10 option 3: the virtio-vsock /Ctl bridge hook (passed straight
     // through). The host VsockVirtioDevice runs the vsock protocol; `vsock.onReady`
@@ -264,6 +270,16 @@ export async function bootLinux(opts) {
      *   - `setLinkUp(up)`: flips the reported link-status config bit.
      */
     net: os.net,
+
+    /** #177: pack dirty sectors from the RW state disk (CBHD Blob), or null. */
+    saveDisk() {
+      return os.saveDisk ? os.saveDisk() : null;
+    },
+
+    /** #177: whether a RW state disk was attached at boot. */
+    hasStateDisk() {
+      return os.hasStateDisk ? os.hasStateDisk() : false;
+    },
 
     /** Mark this boot handle dead. The 9P server is passive (driven by the
      *  guest's virtio-9p kicks — no background loop to stop); worker teardown is

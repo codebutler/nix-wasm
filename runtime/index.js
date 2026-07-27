@@ -6,3 +6,9 @@ export { makeConsoleSession } from "./session.js";
 export { createNixCacheExport } from "./nix-cache.js";
 export { createNixStore } from "./nix-store.js";
 export { MemVfs } from "./ninep/mem-vfs.js";
+export {
+  BLK_SECTOR,
+  packDirtySectors,
+  applyDirtyOverlay,
+  dirtyBitmapBytes,
+} from "./virtio/blk-disk.js";

@@ -1,0 +1,84 @@
+From: nix-wasm <eric@codebutler.com>
+Date: Mon, 27 Jul 2026 00:00:00 -0400
+Subject: [PATCH] virtio_wasm: VW_DEV_BLK_STATE=1 (RW state disk, #177)
+
+Reclaim host index 1 from the echo self-test for a second virtio-blk
+device — the RW installed-system state disk (/dev/vdb). Seed squashfs
+stays at VW_DEV_BLK=3 (/dev/vda).
+
+Registration order is load-bearing for /dev/vdX naming: the seed BLK
+registers first (vda), then BLK_STATE (vdb). NET and BLK enum values are
+pinned (2/3) so reclaiming the echo slot cannot shift them.
+
+CONFIG_VIRTIO_WASM_ECHO is disabled in kernel.nix (the echo driver
+code remains in-tree under its ifdef; we simply don't register it).
+
+Part of nix-wasm#177 (installed NixOS persistence). ENGINE_ABI 12.
+---
+ drivers/virtio/virtio_wasm.c | 40 +++++++++++++++++++++++++---------------
+ 1 file changed, 25 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
+index 1111111..2222222 100644
+--- a/drivers/virtio/virtio_wasm.c
++++ b/drivers/virtio/virtio_wasm.c
+@@ -417,18 +417,24 @@
+  * The devices this transport instantiates, in host-index order.
+  *
+  * Host index order (must match runtime/kernel-worker.js get_virtio_device):
+- *   0 = VW_DEV_WL, 1 = VW_DEV_ECHO (if built), 2 = VW_DEV_NET (if built).
++ *   0 = VW_DEV_WL, 1 = VW_DEV_BLK_STATE (RW state, #177), 2 = VW_DEV_NET,
++ *   3 = VW_DEV_BLK (seed squashfs).
+  */
+ enum {
+ 	VW_DEV_WL = 0,		/* virtio_wl: /dev/wl0 */
+-#ifdef CONFIG_VIRTIO_WASM_ECHO
+-	VW_DEV_ECHO,		/* echo self-test */
++#if IS_ENABLED(CONFIG_VIRTIO_BLK)
++	/*
++	 * RW installed-system disk (/dev/vdb). Pinned to 1 so NET=2 / BLK=3
++	 * stay stable when the echo self-test slot is reclaimed (#177 /
++	 * ENGINE_ABI 12). Host: VW_DEV_BLK_STATE in runtime/kernel-worker.js.
++	 */
++	VW_DEV_BLK_STATE = 1,
+ #endif
+ #ifdef CONFIG_VIRTIO_NET
+-	VW_DEV_NET,		/* virtio-net NIC (stock drivers/net/virtio_net.c) */
++	VW_DEV_NET = 2,		/* virtio-net NIC (stock drivers/net/virtio_net.c) */
+ #endif
+ #if IS_ENABLED(CONFIG_VIRTIO_BLK)
+-	VW_DEV_BLK,		/* virtio-blk block device (squashfs /nix image) */
++	VW_DEV_BLK = 3,		/* virtio-blk seed squashfs (/dev/vda) */
+ #endif
+ #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+@@ -470,12 +476,6 @@
+ 	if (IS_ERR(vw))
+ 		return PTR_ERR(vw);
+ 
+-#ifdef CONFIG_VIRTIO_WASM_ECHO
+-	vw = virtio_wasm_register(VW_DEV_ECHO, 0xCB01u);
+-	if (IS_ERR(vw))
+-		return PTR_ERR(vw);
+-#endif
+-
+ #ifdef CONFIG_VIRTIO_NET
+ 	vw = virtio_wasm_register(VW_DEV_NET, VIRTIO_ID_NET);
+ 	if (IS_ERR(vw))
+@@ -483,9 +483,14 @@
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_VIRTIO_BLK)
++	/* Seed first so probe order yields /dev/vda = seed, /dev/vdb = state. */
+ 	vw = virtio_wasm_register(VW_DEV_BLK, VIRTIO_ID_BLOCK);
+ 	if (IS_ERR(vw))
+ 		pr_warn("virtio_wasm: blk register failed: %ld\n", PTR_ERR(vw));
++	vw = virtio_wasm_register(VW_DEV_BLK_STATE, VIRTIO_ID_BLOCK);
++	if (IS_ERR(vw))
++		pr_warn("virtio_wasm: blk-state register failed: %ld\n",
++			PTR_ERR(vw));
+ #endif
+ 
+ #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
+--
+2.53.0

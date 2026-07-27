@@ -74,4 +74,11 @@
 // probes device 6 at boot; an old engine answers "unknown device index 6" (no
 // features/config/queue service), the driver's control requests time out, and
 // probe fails — /dev/snd never appears and ALSA userspace breaks: bump.
-export const ENGINE_ABI = 11;
+//
+// 12 (#177: installed NixOS persistence): second virtio-blk at host index 1
+// (VW_DEV_BLK_STATE — reclaims the echo self-test slot) serving the RW state
+// disk (/dev/vdb), plus RW BlkDevice (T_OUT + dirty-sector journal + saveDisk).
+// Seed squashfs stays RO at VW_DEV_BLK=3 (/dev/vda). An old engine answers
+// "unknown device index 1" (or still serves EchoDevice) and the guest's
+// installer/installed bootstrap can't mount the state disk: bump.
+export const ENGINE_ABI = 12;
