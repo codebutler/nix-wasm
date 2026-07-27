@@ -13,9 +13,13 @@
 # all present in `sw` (system.path); /etc is a per-file symlink tree (activate).
 # nrConsoles=8 is baked into inittab — keep it in lockstep with the count of
 # single-port virtio-console devices (CONSOLE_DEVICES / HVC_CONSOLES, see init.nix).
-{ pkgs, busybox, etc, systemPath, passwd, group, inittab, activate }:
+#
+# #177 G6: $out/boot/{vmlinux.wasm,initramfs.cpio.gz,manifest.json} are generation
+# artifacts the host bootloader mirrors after activate (G5 / pc-bootloader).
+{ pkgs, busybox, etc, systemPath, passwd, group, inittab, activate
+, kernel, initramfs, kernelAbi, pcBootloader }:
 pkgs.runCommand "wasm-system" { } ''
-  mkdir -p $out
+  mkdir -p $out $out/boot
   # Real /etc = module-generated etc + our static passwd/group + profile inittab.
   # Preserve the store symlinks inside etc (resolved in-guest, /nix mounted).
   cp -a ${etc}/etc $out/etc
@@ -25,8 +29,19 @@ pkgs.runCommand "wasm-system" { } ''
   cp ${inittab} $out/etc/inittab
   ln -s ${systemPath} $out/sw
   ln -s ${activate} $out/activate
+  ln -s ${pcBootloader} $out/pc-bootloader
   # init entrypoint: the PATCHED busybox (the thin /init execs $out/init;
   # basename `init` -> busybox init applet). MUST be the clone-spawn busybox —
   # stock busybox's fork/vfork PID1 SIGILLs on the wasm NOMMU model.
   ln -s ${busybox}/bin/busybox $out/init
+  # Bootloader artifacts (G6): copy bytes so the paths stay under $out/boot
+  # even if the kernel/initramfs store paths move across rebuilds.
+  cp ${kernel}/vmlinux.wasm $out/boot/vmlinux.wasm
+  cp ${initramfs}/initramfs.cpio.gz $out/boot/initramfs.cpio.gz
+  # Manifest stamped with this closure's store path + ENGINE_ABI. generation=1
+  # for the seed profile (single system symlink); bump when real system-N-link
+  # generations exist.
+  cat > $out/boot/manifest.json <<EOF
+{"kernelAbi":${toString kernelAbi},"generation":1,"system":"$out"}
+EOF
 ''
