@@ -4,7 +4,7 @@
 > pc companion: codebutler/pc `docs/superpowers/specs/2026-07-27-linux-nixos-persistence-design.md`.
 
 **Date:** 2026-07-27  
-**Status:** Design (locked direction)  
+**Status:** Implementation in progress (G2–G6 landed on `cursor/linux-nixos-persistence-eab8`; G1 smoke pending CI — Node worker/Atomics hang in some agents)  
 **Repos:** `nix-wasm` (guest, seed image, init, engine blk) + `pc` (state disk flush/store, host bootloader)  
 **Supersedes (for persistence):** live-media “squashfs lower + durable overlay upper” brainstorming. That path is rejected.  
 **Builds on:** #43 (squashfs-on-virtio-blk), channel `linux-image` (pc#315), Cachix-over-Wisp substitution, `userspace/bootstrap.nix` system-profile activation.

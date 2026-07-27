@@ -8,3 +8,4 @@ result-*
 # docs/superpowers/notes/mmu-wip-0023-arch-layer.patch; see the milestone note)
 /scratch-mmu-probe/
 .artifacts-pr*/
+.artifacts/

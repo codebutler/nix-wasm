@@ -12,20 +12,20 @@
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic).
 //
 //   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/blk-rw-smoke.mjs
+import { installWebShims, terminateAllWorkers } from "./web-shims.mjs";
 import { bootLinux } from "../../boot.js";
 import { MemVfs } from "../../ninep/mem-vfs.js";
 import { applyDirtyOverlay, BLK_SECTOR } from "../../virtio/blk-disk.js";
 import { makeConsoleSession } from "../../session.js";
 
+installWebShims();
+
 const STATE_BYTES = 16 * 1024 * 1024; // 16 MiB is enough for mkfs + a marker
 const MARKER = "pc-linux-g1-alive";
 
 function artifactsBase() {
-  const raw = process.env.LINUX_WASM_ARTIFACTS;
-  if (!raw) {
-    console.error("LINUX_WASM_ARTIFACTS is required (file:///…/artifacts/)");
-    process.exit(2);
-  }
+  const raw =
+    process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;
   return raw.endsWith("/") ? raw : raw + "/";
 }
 
@@ -145,11 +145,13 @@ async function main() {
     process.exit(1);
   }
   h2.kill();
+  terminateAllWorkers();
   console.log("PASS: RW virtio-blk ext2 persists across saveDisk + reboot (G1/G3)");
   process.exit(0);
 }
 
 main().catch((e) => {
   console.error(e);
+  terminateAllWorkers();
   process.exit(2);
 });
