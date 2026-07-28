@@ -83,11 +83,16 @@ let
   #   (--demangle default); the list carries BOTH demangled and mangled forms
   #   (unmatched entries are a non-fatal binaryen warning; the build gates on the
   #   instrumented-set size below, so a silent total mismatch fails loudly).
-  # - Deliberately NOT listed: std::__2::function/__function machinery and
-  #   coroutine_handle::resume glue — inlined into their (listed) callers at -O2,
-  #   and listing them would propagation-sweep every std::function caller in the
-  #   binary. If a fork trap (asyncify-asserts) fires at such a frame, add the
-  #   specific instantiation here.
+  # - The std::function machinery IS listed (nix::fun<> + libc++'s function/
+  #   __function templates, instantiated into nix's own TUs): the first bring-up
+  #   boot proved -O2 does NOT inline it — the asyncify-asserts trap fired with
+  #   only 9 live frames, i.e. the unwind traversed the WHOLE deep build stack
+  #   (coroutine clones, startBuild, startProcess — all correctly instrumented)
+  #   and died 8 frames from the top, exactly at mainWrapped's legacy
+  #   fun<void(int,char**)> dispatch machinery. The propagation sweep from these
+  #   entries (every direct std::function caller) is bounded by the size gate
+  #   below. coroutine_handle::resume glue stays unlisted — the same boot proved
+  #   it inlines (the goal layer unwound fine).
   forkAddlist = pkgs.writeText "nix-fork-asyncify-addlist.txt" ''
     _Fork
     fork
@@ -132,6 +137,15 @@ let
     *ExternalDerivationBuilder*
     nix::HookInstance::*
     _ZN3nix12HookInstance*
+    nix::fun<*
+    _ZN3nix3funI*
+    _ZNK3nix3funI*
+    std::__2::function<*
+    std::__2::__function::*
+    _ZNSt3__28function*
+    _ZNKSt3__28function*
+    _ZNSt3__210__function*
+    _ZNKSt3__210__function*
   '';
 
   # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
@@ -378,8 +392,13 @@ pkgs.stdenv.mkDerivation {
       echo "[nix-wasm] asyncify decisions: $n (log tail:)"
       tail -20 asyncify-verbose.log
       [ "$n" -ge 100 ] || { echo "ERROR: bounded asyncify matched too little ($n) — addlist/name-section mismatch"; exit 1; }
-      [ "$n" -le 20000 ] || { echo "ERROR: bounded asyncify swept too much ($n) — bound failed"; exit 1; }
+      [ "$n" -le 60000 ] || { echo "ERROR: bounded asyncify swept too much ($n) — bound failed"; exit 1; }
       grep -q '_Fork' asyncify-verbose.log || { echo "ERROR: seed _Fork not in the instrumented set"; exit 1; }
+      # The size gate is the REAL bound (softmmu instrument memory tracks module
+      # size): whole-module asyncify was 59.5MB; the bounded set must stay well
+      # under (default is 20.7MB; asserts add module-wide call checks).
+      sz=$(wc -c < nix.unstripped.wasm.fork)
+      [ "$sz" -le 36700160 ] || { echo "ERROR: asyncified module $sz bytes > 35MB — the bound failed (approaching whole-module)"; exit 1; }
       mv nix.unstripped.wasm.fork nix.unstripped.wasm
       # wasm-opt's `-o` output is 0644 — restore +x (mirrors busybox-fork.nix) so
       # llvm-strip (which preserves the input mode) ships an EXECUTABLE $out/bin/nix.
@@ -393,7 +412,23 @@ pkgs.stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/bin
-    ${bt}/bin/llvm-strip nix.unstripped.wasm -o $out/bin/nix
+    ${
+      if realFork then ''
+        # Fork variant (#175): ship UNSTRIPPED — the name section survives the
+        # engine's softmmu instrumentation (custom sections pass through, no
+        # imports are added, so function indices are stable), which makes every
+        # V8 wasm stack trace in the MMU boot smokes SYMBOLIZED. During the
+        # asyncify-asserts bring-up that turns "unreachable at wasm-function[N]"
+        # into the exact frame name to add to the addlist. A few MB of names in
+        # a CI-only artifact; the shipped NOMMU guest keeps the stripped build.
+        cp nix.unstripped.wasm $out/bin/nix
+        # The instrumented-set log, for offline addlist iteration (which
+        # patterns matched, why each function was swept in).
+        cp asyncify-verbose.log $out/asyncify-verbose.log
+      '' else ''
+        ${bt}/bin/llvm-strip nix.unstripped.wasm -o $out/bin/nix
+      ''
+    }
     # nix is a MULTI-CALL binary (it dispatches on argv[0]); the bootstrap used to
     # create these symlinks on /usr/bin → /opt/bin/nix. With the toolchain folded
     # into the system profile they ship in the package, so the profile bin/ carries
