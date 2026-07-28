@@ -48,6 +48,92 @@ let
       ''
     else allowUndefinedBase;
 
+  # #175: the BOUNDED asyncify addlist — the fork call graph, NOT the whole module.
+  # Whole-module asyncify (the busybox-fork recipe) 2.9x'd nix.wasm (20.7→59.5MB) and
+  # the engine's per-exec softmmu instrumentation of that module needed ~2.4x the
+  # memory (1.36GB spike + an 402MB output + an 816MB V8 compile), OOM-killing the
+  # boot (exit 137) even on a large runner. Bounding the instrumented set to the fork
+  # call graph keeps nix.wasm ~its default size (lab-measured: a ~100-fn set is
+  # byte-equivalent to the un-asyncified baseline through the softmmu pass).
+  #
+  # Mechanics (binaryen v129, verified against Asyncify.cpp):
+  # - `asyncify-imports@env.capture_stack` alone bounds NOTHING: without
+  #   ignore-indirect, any function containing a call_indirect is conservatively
+  #   state-changing -> whole module (nix's C++ virtuals are everywhere).
+  # - `asyncify-ignore-indirect` + this ADDLIST: instrumented = the listed functions
+  #   plus (via asyncify-propagate-addlist) their transitive DIRECT callers.
+  # - THE RULE for what must be listed EXPLICITLY: propagation never crosses an
+  #   indirect edge, and only EXPLICITLY-listed functions get unwind support at
+  #   their INDIRECT call sites (addedFromList). So every frame whose call toward
+  #   capture_stack is indirect — virtual dispatch, std::function, fn pointers,
+  #   coroutine resume, and _Fork itself (its call to the capture_stack IMPORT is
+  #   GOT-indirect in this PIC dylink model) — must appear below. Purely-direct
+  #   segments (fork→_Fork, startProcess→doFork→fork, Worker::run→Goal::work,
+  #   Store::buildPaths→Worker::run) ride propagation.
+  # - The live fork-time stacks (nix 2.34.7): [build] main → handleExceptions
+  #   →(std::function) mainWrapped →(fun<>) main_nix_build →(lambda→virtual)
+  #   Store::buildPaths → Worker::run → Goal::work →(coroutine resume) the
+  #   DerivationBuildingGoal coroutine clones → DerivationBuilderImpl::startBuild
+  #   →(virtual) startChild → startProcess → fork; [nix-env -iA] ... main_nix_env
+  #   →(fn-ptr Operation) opInstall → createUserEnv →(virtual) buildPaths → same;
+  #   [hook] ...tryHookLoop → tryBuildHook → HookInstance ctor → startProcess.
+  #   The goal layer is C++20 coroutines whose CoroSplit clones carry compiler-
+  #   generated names -> matched by CLASS-PREFIX WILDCARDS, not exact names.
+  # - Entries are wasm name-section names. wasm-ld usually emits DEMANGLED names
+  #   (--demangle default); the list carries BOTH demangled and mangled forms
+  #   (unmatched entries are a non-fatal binaryen warning; the build gates on the
+  #   instrumented-set size below, so a silent total mismatch fails loudly).
+  # - Deliberately NOT listed: std::__2::function/__function machinery and
+  #   coroutine_handle::resume glue — inlined into their (listed) callers at -O2,
+  #   and listing them would propagation-sweep every std::function caller in the
+  #   binary. If a fork trap (asyncify-asserts) fires at such a frame, add the
+  #   specific instantiation here.
+  forkAddlist = pkgs.writeText "nix-fork-asyncify-addlist.txt" ''
+    _Fork
+    fork
+    vfork
+    *doFork*
+    _start
+    _start_c
+    __libc_start_main
+    libc_start_main_stage2
+    main
+    __main_argc_argv
+    __main_void
+    nix::startProcess*
+    _ZN3nix12startProcess*
+    nix::runProgram*
+    _ZN3nix10runProgram*
+    _ZN3nix11runProgram2*
+    nix::killUser*
+    _ZN3nix8killUser*
+    nix::RunPager::*
+    _ZN3nix8RunPagerC*
+    nix::handleExceptions*
+    _ZN3nix16handleExceptions*
+    nix::mainWrapped*
+    _ZN3nix11mainWrapped*
+    *main_nix_build*
+    *main_nix_env*
+    nix::createUserEnv*
+    _ZN3nix13createUserEnv*
+    nix::Installable::build2*
+    _ZN3nix11Installable6build2*
+    nix::Store::buildPaths*
+    _ZN3nix5Store10buildPaths*
+    nix::Worker::*
+    _ZN3nix6Worker*
+    nix::Goal::*
+    _ZN3nix4Goal*
+    _ZZN3nix4Goal*
+    *DerivationBuildingGoal*
+    *DerivationBuilderImpl*
+    *ChrootLinuxDerivationBuilder*
+    *ExternalDerivationBuilder*
+    nix::HookInstance::*
+    _ZN3nix12HookInstance*
+  '';
+
   # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
   # builtins from its DEFAULT resource dir, which has no wasm builtins → the final
   # link fails opening .../clang/21/lib/wasm32-unknown-unknown/libclang_rt.builtins.a.
@@ -255,21 +341,45 @@ pkgs.stdenv.mkDerivation {
         -lcurl -lgit2 -lpcre2-8 -lllhttp -lzstd ${builtins_a} \
         -o "$PWD/../nix.unstripped.wasm" )
     ${lib.optionalString realFork ''
-      # Whole-module asyncify for the fork seam (env.capture_stack is the unwind
-      # import). nix.wasm reaches capture_stack through musl's GOT-indirect _Fork,
-      # so asyncify's own reachability can't bound the fork call graph to an
-      # addlist — instrument the whole module (same rationale as busybox-fork.nix /
-      # forkStdenv). The full wasm feature set must be enabled so the pass
-      # preserves the dylink module's threads/bulk-memory/reference-types shape.
-      # Runs BEFORE the strip in installPhase.
-      echo "[nix-wasm] asyncify $(wc -c < nix.unstripped.wasm) bytes ..."
+      # BOUNDED asyncify for the fork seam (#175 — see the forkAddlist comment for
+      # the full design). env.capture_stack is the unwind import; the instrumented
+      # set = the fork call graph (addlist + direct-caller propagation) under
+      # asyncify-ignore-indirect, NOT the whole module (which 2.9x'd the binary and
+      # OOM'd the engine's per-exec softmmu instrumentation). The full wasm feature
+      # set must be enabled so the pass preserves the dylink module's threads/
+      # bulk-memory/reference-types shape. --optimize-level/--shrink-level gate
+      # asyncify's INTERNAL, instrumented-functions-only optimization (no module-
+      # wide passes are scheduled) — without them the flattened instrumented code
+      # is left uncoalesced. -g keeps the name section (llvm-strip in installPhase
+      # still strips the shipped binary). asyncify-asserts is BRING-UP ONLY: it
+      # turns an unwind crossing an uninstrumented frame (= a missing addlist
+      # entry) into a deterministic trap instead of silent rewind corruption —
+      # remove it (and the -lg CI runner) once the fork gates are stably green.
+      # Runs BEFORE the strip in installPhase (list matching needs the names).
+      echo "[nix-wasm] bounded asyncify $(wc -c < nix.unstripped.wasm) bytes ..."
       wasm-opt \
         --enable-threads --enable-bulk-memory --enable-mutable-globals \
         --enable-nontrapping-float-to-int --enable-sign-ext \
         --enable-reference-types --enable-multivalue \
+        --optimize-level=2 --shrink-level=1 -g \
         --asyncify \
         --pass-arg=asyncify-imports@env.capture_stack \
-        nix.unstripped.wasm -o nix.unstripped.wasm.fork
+        --pass-arg=asyncify-ignore-indirect \
+        --pass-arg=asyncify-addlist@@${forkAddlist} \
+        --pass-arg=asyncify-propagate-addlist \
+        --pass-arg=asyncify-asserts \
+        --pass-arg=asyncify-verbose \
+        nix.unstripped.wasm -o nix.unstripped.wasm.fork > asyncify-verbose.log
+      # Gate on the instrumented-set size: too few decisions means the addlist
+      # didn't match the name section (e.g. names absent/differently mangled) and
+      # the fork seam would corrupt at runtime — fail the BUILD instead. Too many
+      # means the bound didn't hold (approaching whole-module again).
+      n=$(grep -c '^\[asyncify\]' asyncify-verbose.log || true)
+      echo "[nix-wasm] asyncify decisions: $n (log tail:)"
+      tail -20 asyncify-verbose.log
+      [ "$n" -ge 100 ] || { echo "ERROR: bounded asyncify matched too little ($n) — addlist/name-section mismatch"; exit 1; }
+      [ "$n" -le 20000 ] || { echo "ERROR: bounded asyncify swept too much ($n) — bound failed"; exit 1; }
+      grep -q '_Fork' asyncify-verbose.log || { echo "ERROR: seed _Fork not in the instrumented set"; exit 1; }
       mv nix.unstripped.wasm.fork nix.unstripped.wasm
       # wasm-opt's `-o` output is 0644 — restore +x (mirrors busybox-fork.nix) so
       # llvm-strip (which preserves the input mode) ships an EXECUTABLE $out/bin/nix.
