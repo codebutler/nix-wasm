@@ -85,13 +85,19 @@ let
   #   instrumented-set size below, so a silent total mismatch fails loudly).
   # - The std::function machinery IS listed (nix::fun<> + libc++'s function/
   #   __function templates, instantiated into nix's own TUs): the first bring-up
-  #   boot proved -O2 does NOT inline it — the asyncify-asserts trap fired with
-  #   only 9 live frames, i.e. the unwind traversed the WHOLE deep build stack
-  #   (coroutine clones, startBuild, startProcess — all correctly instrumented)
-  #   and died 8 frames from the top, exactly at mainWrapped's legacy
-  #   fun<void(int,char**)> dispatch machinery. The propagation sweep from these
-  #   entries (every direct std::function caller) is bounded by the size gate
-  #   below. coroutine_handle::resume glue stays unlisted — the same boot proved
+  #   boot proved -O2 does NOT inline the __func<...>::operator() layer — the
+  #   asyncify-asserts trap fired with only 9 live frames, i.e. the unwind
+  #   traversed the WHOLE deep build stack (coroutine clones, startBuild,
+  #   startProcess — all correctly instrumented) and died 8 frames from the top;
+  #   the round-2 SYMBOLIZED trace named the frame exactly:
+  #   std::__1::__function::__func<int (*)(int, char**), void (int, char**)>::
+  #   operator() — mainWrapped's legacy dispatch, as the frame arithmetic
+  #   predicted. NOTE the ABI namespace: this toolchain's nix-built libc++ is
+  #   std::__1 (the LLVM default), NOT emscripten's std::__2 — round 2 listed
+  #   __2 forms and matched nothing (the same trap persisted; caught by the
+  #   symbolized trace). The propagation sweep from these entries (every direct
+  #   std::function caller) is bounded by the size gate below.
+  #   coroutine_handle::resume glue stays unlisted — the bring-up boots proved
   #   it inlines (the goal layer unwound fine).
   forkAddlist = pkgs.writeText "nix-fork-asyncify-addlist.txt" ''
     _Fork
@@ -140,12 +146,8 @@ let
     nix::fun<*
     _ZN3nix3funI*
     _ZNK3nix3funI*
-    std::__2::function<*
-    std::__2::__function::*
-    _ZNSt3__28function*
-    _ZNKSt3__28function*
-    _ZNSt3__210__function*
-    _ZNKSt3__210__function*
+    std::__1::function<*
+    std::__1::__function::*
   '';
 
   # clang-unwrapped (used raw here, not via the cc-wrapper) resolves compiler-rt
