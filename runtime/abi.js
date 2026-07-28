@@ -74,4 +74,19 @@
 // probes device 6 at boot; an old engine answers "unknown device index 6" (no
 // features/config/queue service), the driver's control requests time out, and
 // probe fails — /dev/snd never appears and ALSA userspace breaks: bump.
+//
+// NOT-A-BUMP (#175 exec-collapse trap): the engine's wasm_user_mode_tail now
+// feature-detects a `wasm_collapse` KERNEL export and, when present, collapses the
+// post-exec user stack via that export's GENUINE wasm trap (uncatchable by user
+// catch_all) instead of a host JS throw (which nix's fork child swallowed → #175
+// SIGSEGV). `wasm_collapse` is added ONLY by patches/kernel/0026 (mmu-fork
+// kernels), so the SHIPPED NOMMU `.#kernel` / `.#linux-image` does NOT export it
+// and keeps the byte-identical JS-throw path — the shipped image's contract is
+// unchanged, so ENGINE_ABI stays 11 (bumping would falsely raise the shipped
+// image's minEngine and strand every deployed pc for a change that never touches
+// the NOMMU guest). The feature-detect is backward-compatible in both directions
+// on the shipped path. DEFERRED OBLIGATION: if the MMU/fork guest ever becomes the
+// published channel image (`.#linux-image` switches to a wasm_collapse kernel),
+// THAT is an incompatible exec-ABI change and MUST bump ENGINE_ABI (a
+// wasm_collapse-requiring image can't run on a pre-#175 engine).
 export const ENGINE_ABI = 11;
