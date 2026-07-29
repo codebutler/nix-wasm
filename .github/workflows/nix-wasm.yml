@@ -771,12 +771,15 @@ jobs:
           # fork (real-fork nix.wasm: upstream fork()+exec over muslFork's asyncify
           # seam) + the wasm_collapse uncatchable-trap exec collapse (patch 0026 +
           # kernel-worker.js), the forked /bin/sh builder fork+execs and RUNS on the
-          # real-COW-fork MMU guest (BUILD1/BUILD2). --no-cc-build runs the deeper
-          # compile-with-guest-cc sub-case (BUILD3) NON-GATING here: the 57MB clang
-          # SIGSEGVs under the softmmu translate — a Track-A follow-up, nix-wasm#179,
-          # orthogonal to the CLONE_VM spawn fix #175 proves. The NOMMU nix-boot-smoke
-          # keeps BUILD3 gating (it works there, #92).
-          run_smoke demo/node/build-from-source-e2e.mjs --no-cc-build
+          # real-COW-fork MMU guest (BUILD1/BUILD2). BUILD3 — the deeper
+          # compile-with-guest-cc sub-case — is GATING here again as of #179: the
+          # 57MB clang's SIGSEGV was never the softmmu translate, it was a missing
+          # startup export (toolchain/guest-clang.nix drops --export-all and its
+          # hand-written list lacked __wasm_early_tp_init, so --gc-sections stripped
+          # the thread-pointer seed and libc++'s ios_base::Init ctor stored `errno`
+          # through a null struct pthread at VA 0x1c — fatal only under CONFIG_MMU).
+          # So this job now compiles C from source in-guest on the MMU fork guest.
+          run_smoke demo/node/build-from-source-e2e.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because

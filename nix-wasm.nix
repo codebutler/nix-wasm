@@ -48,6 +48,12 @@ let
       ''
     else allowUndefinedBase;
 
+  # The shared startup-export contract (#179). `wcxx`'s link below used to spell
+  # this set out by hand; so did toolchain/guest-clang.nix, and the two copies
+  # drifted (guest-clang's never gained __wasm_early_tp_init, which cost clang its
+  # thread pointer before ctors under CONFIG_MMU). Both now read the one list.
+  hostExports = import ./toolchain/wasm-host-exports.nix;
+
   # #175: the BOUNDED asyncify addlist — the fork call graph, NOT the whole module.
   # Whole-module asyncify (the busybox-fork recipe) 2.9x'd nix.wasm (20.7→59.5MB) and
   # the engine's per-exec softmmu instrumentation of that module needed ~2.4x the
@@ -281,11 +287,8 @@ pkgs.stdenv.mkDerivation {
         -nostdlib++ -L${libcxx}/lib -lc++ -lc++abi -lunwind ${depLib} \
         -Wl,-shared -Wl,-Bsymbolic \
         -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \
-        -Wl,--import-table -Wl,--allow-undefined-file=${allowUndefined} -Wl,--export=_start \
-        -Wl,--export-if-defined=__wasm_apply_data_relocs -Wl,--export-if-defined=__wasm_call_ctors \
-        -Wl,--export-if-defined=__wasm_early_tp_init \
-        -Wl,--export-if-defined=__set_tls_base -Wl,--export-if-defined=__libc_clone_callback \
-        -Wl,--export-if-defined=__libc_handle_signal ${cxxWarn}
+        -Wl,--import-table -Wl,--allow-undefined-file=${allowUndefined} \
+        ${hostExports.ldFlagsClang} ${cxxWarn}
     fi
     EOF
 

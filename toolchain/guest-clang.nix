@@ -40,6 +40,15 @@ let
   # import that traps at instantiation (that was the #50 in-guest-cc crash).
   allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
 
+  # The shared startup-export contract (#179): the functions the host bridge
+  # calls on a fresh instance (__wasm_apply_data_relocs, __wasm_early_tp_init,
+  # __wasm_call_ctors, _start, …). This link deliberately drops --export-all (see
+  # exeLinkerFlags), so those exports must be named — and `--export-if-defined`
+  # is also what ROOTS them against --gc-sections. A hand-written copy of the
+  # list here is what broke #179 (it never gained __wasm_early_tp_init), so it
+  # now comes from the one shared file that nix-wasm.nix's wcxx uses too.
+  hostExports = import ./wasm-host-exports.nix;
+
   # clang.cfg / clang++.cfg — the single source of truth for the guest's compile +
   # link flags (#3). Installed next to the clang binary below so bare `clang
   # hello.c -o hello` / `clang++ …` are complete wasm32-NOMMU drivers (clang
@@ -98,12 +107,13 @@ let
   # libcxx (the Unwind-wasm shim is ALSO folded into libc++abi.a) so -lunwind resolves.
   exeLinkerFlags =
     "-nostdlib++ -L${libcxx}/lib -lc++ -lc++abi -lunwind "
-    + "-Wl,-shared -Wl,-Bsymbolic -Wl,--no-entry -Wl,--export=_start "
-    + "-Wl,--export-if-defined=__wasm_apply_data_relocs "
-    + "-Wl,--export-if-defined=__wasm_call_ctors "
-    + "-Wl,--export-if-defined=__set_tls_base "
-    + "-Wl,--export-if-defined=__libc_clone_callback "
-    + "-Wl,--export-if-defined=__libc_handle_signal "
+    + "-Wl,-shared -Wl,-Bsymbolic -Wl,--no-entry "
+    # The engine-called startup exports, from the ONE shared list (#179) — NOT a
+    # hand-written copy. Without --export-all these names are the only thing that
+    # both exports AND roots them against --gc-sections; the copy that used to
+    # live here silently lacked __wasm_early_tp_init, so clang's ctors ran with a
+    # null thread pointer and SIGSEGV'd under CONFIG_MMU.
+    + "${hostExports.ldFlagsClang} "
     + "-Wl,--strip-all -Wl,--import-memory -Wl,--shared-memory "
     + "-Wl,--max-memory=4294967296 -Wl,--import-table "
     + "-Wl,--no-merge-data-segments "
@@ -204,6 +214,22 @@ pkgs.stdenv.mkDerivation ({
     ln -s clang $out/bin/clang++
     cp ${clangConfig}/clang.cfg   $out/bin/clang.cfg
     cp ${clangConfig}/clang++.cfg $out/bin/clang++.cfg
+
+    # #179 REGRESSION GUARD: assert the shipped binaries really export the
+    # startup functions the host bridge calls. The engine's call sites are
+    # permissive (`if (instance.exports.__X) instance.exports.__X()`) so that an
+    # older guest libc still boots — which means a MISSING export is silent there
+    # and only shows up as a crash before _start. That is exactly how #179
+    # happened: this link's hand-written export list lacked
+    # __wasm_early_tp_init, --gc-sections then stripped the function, and clang's
+    # libc++ ios_base::Init ctor stored `errno` through a null `struct pthread`
+    # (a WRITE to VA 0x1c) — unmapped under CONFIG_MMU → SIGSEGV, while NOMMU
+    # tolerated it (page 0 is readable linear memory). So fail HERE, loudly, in
+    # the build that can actually fix it.
+    for f in $out/bin/clang $out/bin/wasm-ld; do
+      python3 ${../scripts/wasm-check-exports.py} "$f" \
+        ${builtins.concatStringsSep " " hostExports.requiredNames}
+    done
     runHook postInstall
   '';
 } // lib.optionalAttrs useCcache {

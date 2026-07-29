@@ -1523,19 +1523,31 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             //
             // pc (#166, MMU flip): the ctors run BEFORE _start -> __libc_start_main -> __init_tp installs the real
             // thread pointer, so __musl_tp is still 0 here. Any TLS-touching ctor (libc++ iostream init ->
-            // __uselocale -> __pthread_self()->locale) then dereferences a null struct pthread — masked on NOMMU
-            // (page 0 is readable linear memory), a SIGSEGV under CONFIG_MMU that took down every exec'd binary in
-            // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
-            // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
-            // export just keeps the pre-fix behaviour (fine on NOMMU).
-            // pc (#166): seed a valid main-thread pointer before ctors (see musl
-            // __set_thread_area.c __wasm_early_tp_init). Ctors run before _start ->
-            // __init_tp, so a TLS-touching ctor (libc++ iostream -> __uselocale)
-            // would otherwise deref a null struct pthread — NOMMU-masked, SIGSEGV
-            // under the software MMU. Guarded so an older guest libc without the
-            // export keeps the pre-fix behaviour.
+            // __uselocale -> __pthread_self()->locale, or plain `errno` at offsetof(struct pthread, errno_val)
+            // == 0x1c) then dereferences a null struct pthread — masked on NOMMU (page 0 is readable linear
+            // memory), a SIGSEGV under CONFIG_MMU that took down every exec'd binary in startup. Seed a valid
+            // main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when present);
+            // __init_tp later installs the real main pthread. Guarded so an older guest libc without the export
+            // just keeps the pre-fix behaviour (fine on NOMMU) — but LOUD on the MMU, see #179 below.
             if (instance.exports.__wasm_early_tp_init) {
               instance.exports.__wasm_early_tp_init();
+            } else if (user_executable_params.pt_base) {
+              // pc (#179): on the software MMU the seed is NOT optional — without
+              // it the first TLS-touching ctor stores through a null `struct
+              // pthread` (libc++ ios_base::Init -> errno at VA 0x1c) and the
+              // process SIGSEGVs before _start. The permissive guard above exists
+              // for older NOMMU libcs, so it silently swallowed the 57MB clang's
+              // missing export (toolchain/guest-clang.nix drops --export-all, and
+              // its hand-written export list had drifted) and #179 read as
+              // "clang fails under the softmmu translate". Say so out loud
+              // instead: a startup crash in the very next ctor is now labelled.
+              // Diagnostic only — behaviour is unchanged, so no ENGINE_ABI bump.
+              console.error(
+                "[user-exec] MMU guest image lacks __wasm_early_tp_init: its ctors will " +
+                  "run with a NULL thread pointer and any TLS/errno touch will SIGSEGV " +
+                  "before _start. Relink it with toolchain/wasm-host-exports.nix " +
+                  "(nix-wasm#179).",
+              );
             }
             if (instance.exports.__wasm_call_ctors) {
               instance.exports.__wasm_call_ctors();
