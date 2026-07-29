@@ -47,7 +47,7 @@
  	struct task_struct *next_task);
 --- a/arch/wasm/include/asm/entry.h
 +++ b/arch/wasm/include/asm/entry.h
-@@ -26,4 +26,14 @@
+@@ -26,4 +26,22 @@
  
  __visible void raise_exception(void);
  
@@ -60,6 +60,14 @@
 + */
 +__visible long wasm_fork_current(unsigned long user_sp, unsigned long user_tls,
 +				 unsigned long fork_ctl);
++
++/*
++ * #175 (MMU fork+exec): host -> kernel export. Collapses the user call stack
++ * after exec()/signal-return via a GENUINE wasm trap (unreachable), which,
++ * unlike a host JS throw, is NOT catchable by user wasm-EH catch/catch_all.
++ * __visible so --export-all keeps it through gc-sections. Never returns.
++ */
++__visible void wasm_collapse(void);
 +
  #endif /* _ASM_WASM_ENTRY_H */
 --- a/arch/wasm/kernel/process.c
@@ -123,7 +131,7 @@
  	}
  
  	if (!p->mm->binfmt) {
-@@ -212,6 +237,41 @@
+@@ -212,6 +237,55 @@
  }
  
  /*
@@ -159,6 +167,20 @@
 +	pid = kernel_clone(&args);
 +	current_switch_stack()->fork_ctl = 0;
 +	return pid;
++}
++
++__visible void wasm_collapse(void)
++{
++	/*
++	 * #175: collapse the user call stack after exec() / signal return. A
++	 * genuine wasm trap (unreachable) is NOT catchable by user wasm-EH
++	 * catch/catch_all, but a host JS throw IS -- and nix's fork child wraps
++	 * execve in catch(...) (-fwasm-exceptions), which SWALLOWED the old
++	 * JS-throw collapse and ran stale nix code on the exec'd address space
++	 * (SIGSEGV). The runtime feature-detects this export (MMU-fork kernels
++	 * only); NOMMU keeps the host-throw collapse (no catch_all across exec).
++	 */
++	__builtin_trap();
 +}
 +
 +/*

@@ -195,6 +195,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// single-task A2 smokes never switch between two user tasks, so never hit it).
   let own_pt_base = 0;
 
+  /// #175 (MMU fork+exec): set true immediately before the kernel's wasm_collapse()
+  /// export is called to abandon the user call stack after exec() (see
+  /// wasm_user_mode_tail below). wasm_collapse() raises a GENUINE wasm trap
+  /// (unreachable), which — unlike the legacy host JS Trap throw — is NOT catchable
+  /// by user wasm-EH catch/catch_all (nix's fork child wraps execve in catch(...),
+  /// which SWALLOWED the JS-throw collapse → old code on the new address space →
+  /// SIGSEGV, #175). The trap surfaces at run_user_entry as a RuntimeError; this flag
+  /// tells user_executable_error it is the deliberate exec collapse, not a crash.
+  /// Only MMU-fork kernels export wasm_collapse; NOMMU keeps the JS-throw path.
+  let reload_pending = false;
+
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
     constructor(kind) {
@@ -774,9 +785,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     /// Handle user mode return (e.g. from syscall) that should not proceed normally. (Not called on normal returns.)
     wasm_user_mode_tail: (flow) => {
       if (flow == -1) {
-        // Exec has been called and we should not return from the syscall. Trap() to collapse the call stack of the user
-        // executable. When swallowed, run the new user executable that was already preloaded by wasm_load_executable().
+        // Exec has been called and we should not return from the syscall. Collapse the call stack of the user
+        // executable. When collapsed, run the new user executable that was already preloaded by wasm_load_executable().
         // This takes precedence of signal handlers or signal return - no reason to run any old user code!
+        if (vmlinux_instance.exports.wasm_collapse) {
+          // #175: MMU-fork kernels export wasm_collapse(), which raises a GENUINE wasm trap
+          // (unreachable). Unlike a host JS throw (below), a real trap is NOT catchable by user
+          // wasm-EH catch/catch_all — so nix's fork child (execve wrapped in catch(...) under
+          // -fwasm-exceptions) can no longer SWALLOW the exec collapse and scribble old code onto
+          // the freshly-exec'd address space (the #175 SIGSEGV). reload_pending tells the run-loop
+          // .catch this RuntimeError is the deliberate collapse. See probes: a trap stays
+          // uncatchable across the __wasm_syscall_N and wasm_user_mode_tail JS import frames.
+          reload_pending = true;
+          vmlinux_instance.exports.wasm_collapse(); // never returns (traps)
+          throw new Error("wasm_collapse() returned (it should trap)!");
+        }
+        // Legacy NOMMU path: no catch_all is ever live across exec (posix_spawn execs from a C
+        // clone-thunk), so the catchable host JS throw propagates cleanly to the run-loop .catch.
         throw new Trap("reload_program");
       } else if (flow >= 1 && flow <= 3) {
         // First, handle any signal (possibly stacked). Then, handle any signal return (happens after stacked signals).
@@ -1526,6 +1551,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       };
 
       const user_executable_error = (error) => {
+        if (reload_pending) {
+          // #175: the deliberate exec stack-collapse arrived as an UNCATCHABLE wasm trap
+          // (RuntimeError from the kernel's wasm_collapse()). Consume the flag and run the new
+          // user code already loaded by wasm_load_executable(). (MMU-fork kernels; NOMMU uses the
+          // catchable "reload_program" Trap below.) A trap re-thrown from the signal-delivery
+          // try/catch — exec() from inside a signal handler — also lands here with this flag set.
+          reload_pending = false;
+          return user_executable_chain();
+        }
         if (error instanceof Trap) {
           if (error.kind == "reload_program") {
             // Someone called exec and the currently executing code should stop. We should run the new user code already

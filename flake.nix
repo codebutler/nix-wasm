@@ -572,7 +572,7 @@
         hash = "sha256-uj5KNW8Vdm60FCUxD2KsrCVH/WwoemvczWmmrb3Gvlo=";
       };
       nixWasm = import ./nix-wasm.nix {
-        inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc;
+        inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc muslFork;
       };
 
       # nix.wasm is statically linked, but the wasm binary embeds dead build-time
@@ -594,6 +594,60 @@
           chmod -R u+w $out/bin
           nuke-refs $out/bin/nix
         '';
+
+      # ---- fork variant: real-fork nix.wasm + squashfs for the software-MMU boot
+      # (#175). nix's own startProcess CLONE_VM|CLONE_VFORK spawn SIGSEGVs under the
+      # software MMU — the CLONE_VM child gets a PRIVATE page table, so the parent-
+      # mmap'd child stack (a nix `startProcess` allocates the child stack in the
+      # parent's mm) is unmapped in the child and the child's first stack write
+      # faults with no VMA. The fork variant compiles nix.wasm with -DWASM_REAL_FORK
+      # (upstream's `else pid = fork();` path) linked against muslFork's asyncify
+      # _Fork seam + a whole-module wasm-opt --asyncify, and bakes it into a PARALLEL
+      # squashfs (real-fork busybox + the fork bootstrap, matching .#wasm-initramfs-
+      # fork). Used ONLY by the nix-boot-smoke-mmu job to prove build-from-source on
+      # the MMU; the shipped NOMMU guest keeps the default clone-vfork build above.
+      nixWasmFork = import ./nix-wasm.nix {
+        inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc muslFork;
+        realFork = true;
+      };
+      nixWasmForkClean = pkgs.runCommand "nix-wasm-fork-2.34.7"
+        {
+          nativeBuildInputs = [ pkgs.nukeReferences ];
+          version = nixWasmFork.version;
+        }
+        ''
+          mkdir -p $out/bin
+          cp -a ${nixWasmFork}/bin/. $out/bin/
+          chmod -R u+w $out/bin
+          nuke-refs $out/bin/nix
+        '';
+      wasmSystemFork = import ./userspace/system.nix {
+        inherit nixpkgs cross;
+        busybox = wasmBusyboxFork;
+        toolchain = [ nixWasmForkClean wasmAsh ];
+        nixPackage = nixWasmForkClean;
+        extraSystemPackages = [ wasmDltest ];
+      };
+      wasmPasswdFork = import ./userspace/passwd.nix {
+        lib = cross.lib;
+        pkgs = cross;
+        config = wasmSystemFork.config;
+      };
+      wasmToplevelFork = import ./userspace/toplevel.nix {
+        pkgs = cross;
+        busybox = wasmBusyboxFork;
+        etc = wasmSystemFork.config.system.build.etc;
+        systemPath = wasmSystemFork.config.system.path;
+        passwd = wasmPasswdFork.passwd;
+        group = wasmPasswdFork.group;
+        inittab = wasmInittab;
+        activate = wasmActivate;
+      };
+      wasmBaseSquashfsFork = import ./userspace/base-squashfs.nix {
+        inherit pkgs;
+        toplevel = wasmToplevelFork;
+        channel = wasmNixpkgsChannel;
+      };
 
       # ---- Wasm binary cache: the on-demand compiler toolchain (#43/#2/#1) -----
       # A standard file:// Nix binary cache (nix-cache-info + narinfo + nar/) for
@@ -866,6 +920,11 @@
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
         nix-wasm = nixWasm;
 
+        # #175: the real-fork nix.wasm (upstream startProcess fork() + muslFork
+        # asyncify seam) for the software-MMU guest — the clone-vfork spawn above
+        # SIGSEGVs under the MMU. Baked into .#wasm-base-squashfs-fork.
+        nix-wasm-fork = nixWasmFork;
+
         # Curated NixOS-module eval -> guest /etc.
         userspace-etc = wasmSystem.config.system.build.etc;
 
@@ -889,6 +948,11 @@
 
         # The base-system store closure as a single squashfs image for virtio-blk.
         wasm-base-squashfs = wasmBaseSquashfs;
+
+        # #175 prove-then-flip: the SAME base squashfs but with the real-fork
+        # nix.wasm (+ real-fork busybox), for the nix-boot-smoke-mmu build-from-
+        # source gate. The shipped guest uses .#wasm-base-squashfs (clone-vfork).
+        wasm-base-squashfs-fork = wasmBaseSquashfsFork;
 
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).

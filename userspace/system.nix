@@ -329,6 +329,22 @@ let
         # wasm has no seccomp; nix's default syscall filter aborts the build
         # without this ("seccomp is not supported on this platform").
         nix.settings.filter-syscalls = false;
+        # No remote build hook (#175). The default buildHook is `nix
+        # __build-remote`, which nix spawns for EVERY plain local build (even
+        # with empty `builders` — DerivationBuildingGoal::tryBuildHook gates
+        # only on a non-empty buildHook setting) just so the hook can decline.
+        # This guest can never build remotely, so that spawn is pure dead
+        # weight: on NOMMU it silently posix_spawn'd a full extra nix exec per
+        # build; on the software-MMU real-fork guest it was the first failure
+        # in build-from-source-e2e ("unexpected EOF reading a line" from the
+        # hook — the fork+exec'd hook child died before speaking the
+        # protocol). An empty setting disables the hook entirely, exactly
+        # like a real single-machine NixOS with no remote builders; builds go
+        # straight to the local derivation goal. (builtin:* builds like
+        # nix-env's buildenv were never affected — preferLocalBuild skips the
+        # hook, which is why the nix-env install smoke passed while the plain
+        # builds failed.)
+        nix.settings.build-hook = "";
       })
     ];
   };
