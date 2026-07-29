@@ -367,11 +367,17 @@ pkgs.stdenv.mkDerivation {
       # asyncify's INTERNAL, instrumented-functions-only optimization (no module-
       # wide passes are scheduled) — without them the flattened instrumented code
       # is left uncoalesced. -g keeps the name section (llvm-strip in installPhase
-      # still strips the shipped binary). asyncify-asserts is BRING-UP ONLY: it
-      # turns an unwind crossing an uninstrumented frame (= a missing addlist
-      # entry) into a deterministic trap instead of silent rewind corruption —
-      # remove it (and the -lg CI runner) once the fork gates are stably green.
-      # Runs BEFORE the strip in installPhase (list matching needs the names).
+      # still strips the shipped binary). asyncify-asserts was BRING-UP ONLY (it
+      # turned an unwind crossing an uninstrumented frame — a missing addlist entry
+      # — into a deterministic trap instead of silent rewind corruption); it is
+      # DROPPED now that the fork gates are stably green (smoke.mjs / selftests /
+      # build-from-source BUILD1+BUILD2 all pass — the addlist has converged over
+      # the real deep-fork stacks). The size + decision-count gates below stay as
+      # the standing guard that the addlist keeps matching. (The -lg CI runner is
+      # KEPT: the softmmu-instrumented + asyncified fork nix.wasm is the heaviest
+      # boot artifact — genuinely larger than the NOMMU nix.wasm the -default jobs
+      # load — not a bring-up crutch.) Runs BEFORE the strip in installPhase (list
+      # matching needs the names).
       echo "[nix-wasm] bounded asyncify $(wc -c < nix.unstripped.wasm) bytes ..."
       wasm-opt \
         --enable-threads --enable-bulk-memory --enable-mutable-globals \
@@ -383,7 +389,6 @@ pkgs.stdenv.mkDerivation {
         --pass-arg=asyncify-ignore-indirect \
         --pass-arg=asyncify-addlist@@${forkAddlist} \
         --pass-arg=asyncify-propagate-addlist \
-        --pass-arg=asyncify-asserts \
         --pass-arg=asyncify-verbose \
         nix.unstripped.wasm -o nix.unstripped.wasm.fork > asyncify-verbose.log
       # Gate on the instrumented-set size: too few decisions means the addlist

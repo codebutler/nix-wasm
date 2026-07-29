@@ -736,10 +736,11 @@ jobs:
         run: |
           run_smoke() {
             local script="$1" attempt rc
+            shift
             for attempt in 1 2 3; do
               echo "::group::$script (attempt $attempt)"
               set +e
-              node "$script"
+              node "$script" "$@"
               rc=$?
               set -e
               echo "::endgroup::"
@@ -768,10 +769,14 @@ jobs:
           # software MMU (a CLONE_VM child gets a private page table, so the parent-
           # mmap'd child stack is unmapped in the child). With .#wasm-base-squashfs-
           # fork (real-fork nix.wasm: upstream fork()+exec over muslFork's asyncify
-          # seam), the whole build path — nix forks → builder /bin/sh (busybox-fork)
-          # forks → in-guest guest-cc compiles → the wasm binary runs → exit 42 —
-          # must complete on the real-COW-fork MMU guest.
-          run_smoke demo/node/build-from-source-e2e.mjs
+          # seam) + the wasm_collapse uncatchable-trap exec collapse (patch 0026 +
+          # kernel-worker.js), the forked /bin/sh builder fork+execs and RUNS on the
+          # real-COW-fork MMU guest (BUILD1/BUILD2). --no-cc-build runs the deeper
+          # compile-with-guest-cc sub-case (BUILD3) NON-GATING here: the 57MB clang
+          # SIGSEGVs under the softmmu translate — a Track-A follow-up, nix-wasm#179,
+          # orthogonal to the CLONE_VM spawn fix #175 proves. The NOMMU nix-boot-smoke
+          # keeps BUILD3 gating (it works there, #92).
+          run_smoke demo/node/build-from-source-e2e.mjs --no-cc-build
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because
