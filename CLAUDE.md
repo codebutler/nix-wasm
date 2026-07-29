@@ -1393,6 +1393,50 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   the cross-built stdenv closure (bash/coreutils/make/cc-wrapper) substituted as
   build INPUTS — a separate effort; and memory ceilings for big builds are
   unmeasured (the toolchain itself stays substitute-only).
+- **#175** — DONE: in-guest **build-from-source works on the software-MMU guest**
+  (it SIGSEGV'd because nix's spawn breaks under the MMU). The shipped default
+  guest is `posix_spawn`-only (nix's builder spawn is fine there — #92); this is
+  about the **MMU fork variant** (`.#nix-wasm-fork` / `.#wasm-base-squashfs-fork`),
+  where nix uses **real `fork()`+`exec`** over muslFork's asyncify seam (Track B).
+  Two parts, both **confined to the fork variant** (shipped NOMMU guest byte-identical,
+  NO `ENGINE_ABI` bump, NO pc sync):
+  1. **`clone(CLONE_VM|CLONE_VFORK)` → real `fork()`.** nix's `startProcess`
+     spawned the builder with a parent-mmap'd child stack; under the software MMU
+     the `CLONE_VM` child gets a **private pgd**, so the parent-mmap'd stack is
+     unmapped in the child → SIGSEGV. Fix = the upstream `else pid = fork();` path,
+     gated `#if defined(__wasm__) && !defined(WASM_REAL_FORK)` in the nix port patch;
+     the fork variant defines `WASM_REAL_FORK`. The fork nix.wasm is **bounded-asyncify'd**
+     over the fork call graph ONLY (whole-module asyncify 2.9×'d it → OOM'd the
+     softmmu load): `asyncify-ignore-indirect` + a demangled-name **addlist** of every
+     indirect-boundary frame (`_Fork` seed, the crt chain, `nix::startProcess`/
+     `handleExceptions`/`mainWrapped`, the C++20-coroutine goal stack, `std::__1::function`
+     machinery — NOTE our libc++ is `std::__1`, not emscripten's `std::__2`) +
+     `propagate-addlist`; size + decision-count **build gates** guard the addlist,
+     and the fork binary ships **unstripped** (symbolized traces; softmmu passes
+     custom sections through). `nix-wasm.nix` (`realFork`), `patches/nix-*.patch`.
+  2. **exec stack-collapse must be an UNCATCHABLE wasm trap** (`wasm_collapse`,
+     `patches/kernel/0026` + `runtime/kernel-worker.js` + `runtime/exec-collapse-trap.test.js`).
+     The engine collapsed the post-`exec()` user stack by having the
+     `wasm_user_mode_tail` host import `throw` a JS `Trap`. A JS throw crossing back
+     into wasm is a **foreign exception**, which wasm-EH `catch_all` CATCHES — and
+     nix's real-fork child wraps `execve` in `catch(...)` (`-fwasm-exceptions`), so
+     the collapse was SWALLOWED → stale nix code ran on the freshly-exec'd (busybox)
+     address space → SIGSEGV inside the fault syscall (silent in CI). Fix: MMU-fork
+     kernels export `wasm_collapse()` (`__builtin_trap` → `unreachable`); the engine
+     **feature-detects** it and, when present, collapses via that GENUINE wasm trap.
+     A real trap is NOT catchable by `catch/catch_all`, and stays uncatchable across
+     the `__wasm_syscall_N` + `wasm_user_mode_tail` JS import frames (pinned by the
+     unit test — verified in V8). NOMMU kernels have no `wasm_collapse` export → the
+     engine keeps the byte-identical JS-throw path, so `ENGINE_ABI` stays 11
+     (documented in `abi.js`, incl. the deferred bump obligation if the MMU/fork
+     guest ever becomes the published image). NO `entry.S`/FOOT surgery.
+  Proven by `build-from-source-e2e` on `.#kernel-mmu-a2` + the fork squashfs:
+  BUILD1/BUILD2 (the forked `/bin/sh` builder fork+execs and runs — the exact
+  SIGSEGV path) both pass, with no NOMMU regression. **BUILD3** (a derivation that
+  execs `guest-cc` — the 57MB clang — to compile C) is split off as **#179**:
+  clang SIGSEGVs under the softmmu per-access translate, a Track-A correctness/memory
+  issue ORTHOGONAL to the spawn fix. The fork-guest gate runs BUILD3 **non-gating**
+  (`--no-cc-build`); the NOMMU `nix-boot-smoke` keeps all three (BUILD3 works there).
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
