@@ -63,11 +63,44 @@ rec {
     "__set_tls_base"
   ];
 
-  # `-Wl,`-prefixed flags, for a clang driver link line. Both consumers
-  # (toolchain/guest-clang.nix, nix-wasm.nix's wcxx) link through the clang
-  # driver; a future consumer that calls wasm-ld directly should map `names`
-  # itself rather than growing an unused second rendering here.
+  # Exports that must additionally be FORCED INTO the link, because a program can
+  # legitimately reference nothing that pulls them in — so neither `--export-all`
+  # nor `--export-if-defined` is enough (both only act on what the link already
+  # contains). `__get_tls_base`/`__set_tls_base` live in musl's
+  # `src/thread/wasm/clone.S`, a LAZY archive member pulled only when something
+  # references `__clone`. Every real guest program (busybox, nix.wasm, clang —
+  # they all spawn) pulls it incidentally; a trivial `int main(){return 42;}`
+  # compiled IN THE GUEST does not, and then the softmmu pass's checked mode
+  # refuses the image at `execve` (its fault call needs musl's `tp` operand, which
+  # it can only source by CALLING `__get_tls_base` — `__tls_base` itself is an
+  # internal global) → the exec-time throw becomes `raise_exception()` →
+  # `make_task_dead` in kernel context → "Aiee, killing interrupt handler!". So
+  # `-u` (`--undefined`) the two accessors: it pulls the member, and
+  # `--export-all`/`--export-if-defined` then exports it. Passing a dummy `tp`
+  # instead would be WRONG, not lenient: the syscall FOOT restores user tls FROM
+  # pt_regs, so a 0 there clobbers the live thread pointer — `__musl_tp` is itself
+  # `_Thread_local`, so even a "no TLS" program has one.
+  forcedNames = [
+    "__get_tls_base"
+    "__set_tls_base"
+  ];
+
+  # `-Wl,`-prefixed flags, for a clang driver link line. All three consumers
+  # (toolchain/wasm-clang-config.nix's in-guest clang.cfg, toolchain/guest-clang.nix,
+  # nix-wasm.nix's wcxx) link through the clang driver; a future consumer that calls
+  # wasm-ld directly should map the lists itself rather than growing an unused second
+  # rendering here.
+  #
+  # NOT applied to the other `--export-all` link sites (wasm-cross.nix,
+  # toolchain/make.nix, toolchain/guest-cc-fork.nix, userspace/asyncify-cc.nix):
+  # every program they build spawns or forks BY CONSTRUCTION, so it references
+  # `__clone` and pulls the accessors in anyway — and wasm-cross.nix in particular
+  # is keyed into the cc-wrapper store path, so touching it costs a full `cross.*`
+  # world rebuild. If one of them ever builds a genuinely minimal program, it needs
+  # `ldFlagsForce` too.
   ldFlagsClang =
     "-Wl,--export=_start "
     + builtins.concatStringsSep " " (map (n: "-Wl,--export-if-defined=${n}") names);
+
+  ldFlagsForce = builtins.concatStringsSep " " (map (n: "-Wl,-u,${n}") forcedNames);
 }

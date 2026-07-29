@@ -645,6 +645,27 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   binaries are `--strip-all`ed (no name section) and a plain `grep` for the symbol
   would also match a data string. The engine additionally logs loudly when an MMU
   image (`pt_base != 0`) lacks the seed.
+  **Second half of the same contract — `-u` FORCES, `--export-all` does not**
+  (`forcedNames`/`ldFlagsForce`; also #179): `--export-all` and
+  `--export-if-defined` only act on what the link ALREADY CONTAINS.
+  `__get_tls_base`/`__set_tls_base` live in musl's `src/thread/wasm/clone.S`, a
+  **lazy archive member** pulled only when something references `__clone`. Every
+  real guest program (busybox, nix.wasm, clang — they all spawn) pulls it
+  incidentally, but a trivial `int main(){return 42;}` compiled **in the guest**
+  does not — and the software-MMU pass HARD-REQUIRES `__get_tls_base` at `execve`
+  (its fault call needs musl's `tp` operand, and `__tls_base` is an internal
+  global it cannot read; passing a dummy 0 would be WRONG, not lenient — the
+  syscall FOOT restores user tls from pt_regs, so it would clobber the live
+  thread pointer, and `__musl_tp` is itself `_Thread_local`). So
+  `toolchain/wasm-clang-config.nix` (the IN-GUEST `clang.cfg`, the one link that
+  produces minimal user programs) passes `-Wl,-u,` for both accessors. Without
+  it, `cc h.c -o h` succeeds and `./h` **panics the guest kernel** on the MMU
+  guest (`Aiee, killing interrupt handler!` — the pass's exec-time throw becomes
+  `raise_exception()` → `make_task_dead` in kernel context). Boot-verified both
+  ways. The remaining hardening gap: an unsupported user binary should fail
+  `execve` with `-ENOEXEC`, not panic — that needs the exec host import to return
+  a status the kernel checks (an ENGINE_ABI change), so it is deliberately NOT
+  done here.
 - **libffi raw wasm backend** (`deps-overlay.nix` / `patches/libffi/`): the
   upstream `src/wasm/ffi.c` is emscripten-only; we drop in `wasm32-raw-ffi.c`
   which dispatches `ffi_call` through a build-time generated trampoline table

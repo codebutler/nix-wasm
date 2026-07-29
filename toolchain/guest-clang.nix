@@ -113,7 +113,7 @@ let
     # both exports AND roots them against --gc-sections; the copy that used to
     # live here silently lacked __wasm_early_tp_init, so clang's ctors ran with a
     # null thread pointer and SIGSEGV'd under CONFIG_MMU.
-    + "${hostExports.ldFlagsClang} "
+    + "${hostExports.ldFlagsClang} ${hostExports.ldFlagsForce} "
     + "-Wl,--strip-all -Wl,--import-memory -Wl,--shared-memory "
     + "-Wl,--max-memory=4294967296 -Wl,--import-table "
     + "-Wl,--no-merge-data-segments "

@@ -288,7 +288,7 @@ pkgs.stdenv.mkDerivation {
         -Wl,-shared -Wl,-Bsymbolic \
         -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \
         -Wl,--import-table -Wl,--allow-undefined-file=${allowUndefined} \
-        ${hostExports.ldFlagsClang} ${cxxWarn}
+        ${hostExports.ldFlagsClang} ${hostExports.ldFlagsForce} ${cxxWarn}
     fi
     EOF
 
