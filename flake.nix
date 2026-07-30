@@ -287,6 +287,10 @@
       # Diagnostic reproducer for issue #35's `timeout 2 sleep 10` hang reduced
       # to standalone C: cross-process kill() waking a syscall-blocked task
       # (no busybox, no networking). See userspace/kill-wake-test.c.
+      # #179: an unsupported guest image (a real program minus the __get_tls_base
+      # export the software-MMU pass requires) + its conforming twin, so the boot
+      # smoke can prove a host-rejected exec kills only that task, not the kernel.
+      execRejectTest = import ./userspace/exec-reject-test.nix { inherit pkgs cross; };
       killWakeTest = import ./userspace/kill-wake-test.nix {
         inherit cross;
       };
@@ -532,7 +536,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -815,6 +819,9 @@
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
         kill-wake-test = killWakeTest;
+        # #179: the host-rejected-image fixture + its conforming twin (see
+        # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
+        exec-reject-test = execRejectTest;
 
         # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-
         # hang): SA_RESTART one-shot handler re-armed in itself → $out/bin/ping-pace-test.

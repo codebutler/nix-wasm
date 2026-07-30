@@ -1517,6 +1517,36 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   `==B3ERR-START==` marker appeared in the ECHOED command line too, so the capture
   returned the command text instead of the builder's stderr (the #96 lesson again —
   match the EXPANSION, never the echo; the markers now come from a shell variable).
+  **Hardening landed with it (the second half of #179):** a host-REJECTED exec
+  image now kills only the execing task instead of PANICKING the guest. The
+  softmmu pass's refusal used to be a THROW out of `wasm_load_executable`, which
+  escaped into the kernel's own wasm frames and only landed later — with no kernel
+  context — in `raise_exception()` → `make_task_dead()` → `panic("Aiee, killing
+  interrupt handler!")`. One unsupported user binary took down the system, and that
+  is how #179 first presented. Fix: `wasm_load_executable` RETURNS a status
+  (0 = loaded) and `start_thread` does `force_fatal_sig(SIGSEGV)` + **skips
+  `_TIF_RELOAD_PROGRAM`** (the load-bearing half — the engine holds no image, so
+  asking it to reload would crash it). We are past `begin_new_exec()` there, so
+  `-ENOEXEC` is unreachable and killing the task is exactly what `bprm_execve()`
+  does for a late `load_binary` failure. **NOT an ENGINE_ABI bump** — no import is
+  added or removed, only an existing import's RESULT type moves, which is
+  compatible BOTH ways (new kernel + old engine: JS `undefined` → i32 `0` =
+  "loaded"; old kernel + new engine: a `() -> ()` import discards the value). Both
+  coercion rules are pinned by `runtime/exec-reject-abi.test.js` — the whole
+  no-bump argument rests on them. The kernel half is wired as **config-independent
+  `substituteInPlace` + asserts in `kernel.nix` postPatch**, NOT a patch hunk:
+  patches 0023/0026 already rewrite that region of `arch/wasm/kernel/process.c`
+  (and only under mmu/a2), which is exactly the silent fuzzy-apply hazard the
+  0017-0020 entry documents. Gate: `exec-reject-smoke.mjs` (in BOTH the NOMMU
+  boot-smoke and the MMU job) boots busybox-only and execs
+  `userspace/exec-reject-test.nix`'s fixture — a real guest program with the
+  `__get_tls_base` export STRIPPED (`scripts/wasm-strip-export.py`; it has to be
+  manufactured that way now, since the toolchain forces those exports into every
+  link) — asserting the conforming twin runs, the stripped one does not, there is
+  NO panic, and **the shell survives**. Still bounded, deliberately: only
+  SYNCHRONOUS rejections are reported (the instrument pass + table probe run
+  inline; `WebAssembly.compile` is a promise, so a malformed-module compile error
+  keeps the old late path) — #179's class is exactly the synchronous one.
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were

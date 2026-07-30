@@ -404,6 +404,17 @@ jobs:
           # 60) kills Cachix substitution. `date +%s` in-guest must be within
           # 15 min of the host clock. Gating.
           run_smoke demo/node/clock-smoke.mjs
+          # #179 hardening: an exec'd image the HOST cannot run must kill only that
+          # task, never panic the kernel. Before the fix the softmmu pass's refusal
+          # threw out of wasm_load_executable, surfaced contextless from the promise
+          # chain via raise_exception() and made_task_dead() PANICKED the guest —
+          # one unsupported user binary took down the system. The fixture is a real
+          # guest program with the __get_tls_base export stripped
+          # (userspace/exec-reject-test.nix). On THIS (NOMMU) kernel there is no
+          # instrumentation, so the stripped binary just runs; the gate here is the
+          # conforming twin + "no panic" + "shell still alive". The MMU job below
+          # runs the same smoke where the rejection actually happens. Gating.
+          run_smoke demo/node/exec-reject-smoke.mjs
 
       # #128 Track A software MMU: boot a softmmu-instrumented init under the
       # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
@@ -603,7 +614,13 @@ jobs:
             # then RUNS the from-source-built binary (exit 42). Proves nix's
             # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
             # posix_spawn. Gating.
-            run_smoke demo/node/build-from-source-e2e.mjs
+            # #179 hardening, the case that matters: on the software MMU the
+          # instrumentation pass REFUSES an image with no __get_tls_base, which used
+          # to panic the guest ("Aiee, killing interrupt handler!"). Assert the task
+          # dies alone and the shell survives. Boots nix:false, so it needs only
+          # this job's vmlinux + initramfs.
+          run_smoke demo/node/exec-reject-smoke.mjs
+          run_smoke demo/node/build-from-source-e2e.mjs
             # M2/M3a graphics + FFI selftests (issue #88), batched into ONE boot
             # (display-free --selftest binaries baked into the image): glib (gobject +
             # libffi double marshaller), libffi (raw wasm backend), pango (cairo-ft

@@ -89,4 +89,19 @@
 // published channel image (`.#linux-image` switches to a wasm_collapse kernel),
 // THAT is an incompatible exec-ABI change and MUST bump ENGINE_ABI (a
 // wasm_collapse-requiring image can't run on a pre-#175 engine).
+// NOT-A-BUMP (#179 exec-reject): wasm_load_executable now RETURNS a status
+// (0 = loaded, nonzero = the host cannot run this image) and the kernel's
+// start_thread kills just the execing task instead of letting the rejection
+// surface contextless from the promise chain and panic the guest. NO import is
+// added or removed — only an existing import's RESULT type moves — so the wire
+// stays compatible in BOTH directions, which is why this does not bump:
+//   • new kernel + old engine: the JS returns undefined, and ToWebAssemblyValue
+//     coerces that to 0 for an i32 result → "loaded" → exactly today's behaviour.
+//   • old kernel + new engine: the import is declared () -> (), so wasm discards
+//     the returned status → also exactly today's behaviour.
+// Bumping would falsely raise the shipped image's minEngine and strand every
+// deployed pc for a change that cannot break either mix (same reasoning as the
+// #175 note above). The kernel half is wired in kernel.nix's postPatch (as
+// config-independent substituteInPlace + asserts, because patches 0023/0026
+// already rewrite that region of arch/wasm/kernel/process.c).
 export const ENGINE_ABI = 11;
