@@ -76,17 +76,33 @@ try {
   );
 
   // 2-3. The rejected image must not run, and must not panic.
+  //
+  // Which path we are on is DERIVED from what the guest printed, never assumed —
+  // an early cut of this smoke sniffed for the ENGINE's stderr message in the
+  // GUEST transcript, which can never match, so it always took the "NOMMU, skip"
+  // branch and passed vacuously on the very kernel it exists to test. The signal
+  // has to be guest-side: the kernel's own pr_err from start_thread's reject path.
   const before = s.snapshot().length;
   const badRc = await run("exec-reject-test", "RC_BAD");
   const after = s.snapshot().slice(before);
-  const mmu = /rejecting exec image|host rejected exec image/.test(s.snapshot());
-  if (mmu) {
-    check(!/EXEC-FIXTURE: ran OK/.test(after), "rejected image does not run", ` [rc=${badRc}]`);
-  } else {
+  const rejected = /host rejected exec image/.test(after);
+  const ran = /EXEC-FIXTURE: ran OK/.test(after);
+  if (rejected) {
+    check(!ran, "rejected image does not run (software MMU refused it)", ` [rc=${badRc}]`);
+    check(badRc !== "0", "rejected exec fails the task", ` [rc=${badRc}]`);
+  } else if (ran) {
     console.log(
-      `  note  no rejection seen (rc=${badRc}) — NOMMU kernel: no instrumentation, so the` +
-        " stripped binary is runnable. Assertions 1/3/4 still gate; use .#kernel-mmu-a2" +
-        " artifacts to exercise the reject path.",
+      `  note  no rejection (rc=${badRc}) — NOMMU kernel: nothing instruments the image, so` +
+        " the stripped binary is runnable. Assertions 1/3/4 still gate here; the MMU job" +
+        " exercises the reject path itself.",
+    );
+  } else {
+    // Neither refused nor ran: a hang, a silent death, or a reject that failed to
+    // report. Never let that read as success.
+    check(
+      false,
+      "rejected image either refuses (with the kernel message) or runs",
+      ` [rc=${badRc}]`,
     );
   }
   check(!/Kernel panic/i.test(s.snapshot()), "no kernel panic (the #179 regression)");

@@ -287,7 +287,7 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
 		 * there is no route back to -ENOEXEC, so kill this task the way
 		 * bprm_execve() does after the point of no return. Deliberately
 		 * do NOT set _TIF_RELOAD_PROGRAM: there is no loaded image. */
-		pr_err("wasm: host rejected exec image for %s[%d]\\n",
+		pr_err("wasm: host rejected exec image for %s[%d]\n",
 			current->comm, task_pid_nr(current));
 		force_fatal_sig(SIGSEGV);
 		return;
