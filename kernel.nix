@@ -222,6 +222,90 @@ pkgs.stdenv.mkDerivation {
     grep -qE 'VW_DEV_CONSOLE_BASE[[:space:]]*=[[:space:]]*8,' "$vw" || {
       echo "ERROR: VW_DEV_CONSOLE_BASE is not pinned to 8 in $vw" >&2; exit 1; }
     echo "virtio_wasm.c device enum + registrations OK (9P/snd/vsock/8-console present, order correct)"
+
+    # ---- #179 hardening: a host-REJECTED exec image kills the task, not the kernel ----
+    #
+    # The engine hands the exec'd image to the host at start_thread() ->
+    # wasm_load_executable(). If the host cannot run it — e.g. the software-MMU
+    # instrumentation pass refuses a binary that does not export __get_tls_base
+    # (nix-wasm#179) — the old contract had no way to say so: the JS threw, the
+    # rejection surfaced LATER from the promise chain via raise_exception() with no
+    # kernel context, and make_task_dead() panicked the whole guest with
+    # "Aiee, killing interrupt handler!". One unsupported user binary took down the
+    # system.
+    #
+    # Fix: wasm_load_executable now RETURNS a status (0 = loaded, nonzero =
+    # rejected) and start_thread checks it. We are past begin_new_exec() here, so
+    # -ENOEXEC is no longer reachable (bprm's point of no return has passed) — the
+    # correct Linux response is to kill THIS task, exactly as bprm_execve() does
+    # for a late load_binary failure. Skipping _TIF_RELOAD_PROGRAM is the
+    # load-bearing half: the engine holds no image, so asking it to reload would
+    # crash it instead.
+    #
+    # WIRE COMPATIBILITY (why this is NOT an ENGINE_ABI bump): only the RETURN TYPE
+    # of an existing import changes, no import is added or removed. New kernel +
+    # old engine: the JS returns undefined, which ToWebAssemblyValue coerces to 0
+    # for an i32 result => "loaded", i.e. exactly today's behaviour. Old kernel +
+    # new engine: the import is declared () -> () so wasm discards the returned
+    # status => also today's behaviour. Compatible in both directions.
+    #
+    # Done as substituteInPlace, NOT a patch hunk: patches 0023/0026 already
+    # rewrite this very region of process.c (and only under mmu/a2), so a stacked
+    # hunk here is exactly the silent fuzzy-apply hazard documented for 0017-0020.
+    # Each --replace-fail below is config-INDEPENDENT (it matches text 0023/0026
+    # leave alone) and fails the build loudly if the upstream text ever drifts.
+    substituteInPlace arch/wasm/include/asm/wasm.h \
+      --replace-fail 'extern void wasm_load_executable(' \
+                     'extern int wasm_load_executable('
+
+    substituteInPlace arch/wasm/kernel/process.c \
+      --replace-fail '#include <linux/printk.h>' \
+                     '#include <linux/printk.h>
+#include <linux/sched/signal.h>'
+
+    # `wasm_exec_status` is file-scope because under CONFIG_MMU patch 0023 wraps
+    # the call in its own `{ … }` block, so a local would not be visible at the
+    # check below. Safe: the store and the load are ADJACENT statements of the same
+    # start_thread() invocation with no scheduling point between them (and the wasm
+    # arch pins user tasks to a single CPU).
+    substituteInPlace arch/wasm/kernel/process.c \
+      --replace-fail 'void start_thread(struct pt_regs *regs, unsigned long stack_pointer)' \
+                     '/* #179: status of the last wasm_load_executable() — see kernel.nix postPatch. */
+static int wasm_exec_status;
+
+void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
+
+    substituteInPlace arch/wasm/kernel/process.c \
+      --replace-fail 'wasm_load_executable(current->mm->start_code' \
+                     'wasm_exec_status = wasm_load_executable(current->mm->start_code'
+
+    substituteInPlace arch/wasm/kernel/process.c \
+      --replace-fail '	/* Reload the program when the current syscall exits. */
+	current_thread_info()->flags |= _TIF_RELOAD_PROGRAM;' \
+                     '	if (wasm_exec_status) {
+		/* #179: the host cannot run this image. Past begin_new_exec()
+		 * there is no route back to -ENOEXEC, so kill this task the way
+		 * bprm_execve() does after the point of no return. Deliberately
+		 * do NOT set _TIF_RELOAD_PROGRAM: there is no loaded image. */
+		pr_err("wasm: host rejected exec image for %s[%d]\n",
+			current->comm, task_pid_nr(current));
+		force_fatal_sig(SIGSEGV);
+		return;
+	}
+
+	/* Reload the program when the current syscall exits. */
+	current_thread_info()->flags |= _TIF_RELOAD_PROGRAM;'
+
+    # Assert all four landed (substituteInPlace --replace-fail already errors on a
+    # miss, but pin the RESULT too: a future refactor must not quietly drop the
+    # check and go back to panicking the guest).
+    grep -q 'wasm_exec_status = wasm_load_executable' arch/wasm/kernel/process.c || {
+      echo "ERROR: #179 exec-reject wiring missing (status capture)" >&2; exit 1; }
+    grep -q 'force_fatal_sig(SIGSEGV)' arch/wasm/kernel/process.c || {
+      echo "ERROR: #179 exec-reject wiring missing (kill on reject)" >&2; exit 1; }
+    grep -q 'extern int wasm_load_executable' arch/wasm/include/asm/wasm.h || {
+      echo "ERROR: #179 exec-reject wiring missing (return type)" >&2; exit 1; }
+    echo "#179 exec-reject wiring OK (wasm_load_executable returns a status; start_thread kills on reject)"
   '';
 
   nativeBuildInputs = [

@@ -622,6 +622,50 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds only
   guest-clang + nix.wasm; the cross.* set is keyed on the byte-identical store path so
   it stays cached.)
+- **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
+  without `--export-all` MUST name every engine-called startup export** (#179; the
+  mirror image of the allow-list entry above). The host bridge calls
+  `__wasm_apply_data_relocs` → `__wasm_early_tp_init` → `__wasm_call_ctors` → `_start`
+  on each fresh instance, each behind a permissive `if (instance.exports.__X)` (so an
+  older guest libc still boots) — which makes a MISSING export **silent in the
+  engine**. Most links get the set for free from `--export-all`; the two that don't —
+  `toolchain/guest-clang.nix` (dropping `--export-all` lets wasm-ld's default
+  `--gc-sections` strip a ~100MB module) and `nix-wasm.nix`'s `wcxx` — used to spell
+  it out by hand, and the copies DRIFTED: guest-clang's never gained
+  `__wasm_early_tp_init`, so `--gc-sections` deleted the (now unreferenced) thread-
+  pointer seed and clang/wasm-ld ran their ctors with `__musl_tp == 0` → `errno` stored
+  through a null `struct pthread` at VA **0x1c** → fine on NOMMU, SIGSEGV before
+  `_start` under CONFIG_MMU. So `--export-if-defined=<name>` here is doing TWO jobs
+  (export AND root-against-gc) — don't "clean up" a name that looks unused. Both
+  non-`--export-all` links now read the ONE list; the `--export-all` ones deliberately
+  do NOT (they satisfy it by construction, and touching `wasm-cross.nix` costs a full
+  `cross.*` world rebuild). Gate: `guest-clang.nix`'s `installPhase` asserts the
+  shipped `clang`/`wasm-ld` really export the required set via
+  `scripts/wasm-check-exports.py` — which parses the **export section**, because these
+  binaries are `--strip-all`ed (no name section) and a plain `grep` for the symbol
+  would also match a data string. The engine additionally logs loudly when an MMU
+  image (`pt_base != 0`) lacks the seed.
+  **Second half of the same contract — `-u` FORCES, `--export-all` does not**
+  (`forcedNames`/`ldFlagsForce`; also #179): `--export-all` and
+  `--export-if-defined` only act on what the link ALREADY CONTAINS.
+  `__get_tls_base`/`__set_tls_base` live in musl's `src/thread/wasm/clone.S`, a
+  **lazy archive member** pulled only when something references `__clone`. Every
+  real guest program (busybox, nix.wasm, clang — they all spawn) pulls it
+  incidentally, but a trivial `int main(){return 42;}` compiled **in the guest**
+  does not — and the software-MMU pass HARD-REQUIRES `__get_tls_base` at `execve`
+  (its fault call needs musl's `tp` operand, and `__tls_base` is an internal
+  global it cannot read; passing a dummy 0 would be WRONG, not lenient — the
+  syscall FOOT restores user tls from pt_regs, so it would clobber the live
+  thread pointer, and `__musl_tp` is itself `_Thread_local`). So
+  `toolchain/wasm-clang-config.nix` (the IN-GUEST `clang.cfg`, the one link that
+  produces minimal user programs) passes `-Wl,-u,` for both accessors. Without
+  it, `cc h.c -o h` succeeds and `./h` **panics the guest kernel** on the MMU
+  guest (`Aiee, killing interrupt handler!` — the pass's exec-time throw becomes
+  `raise_exception()` → `make_task_dead` in kernel context). Boot-verified both
+  ways. The remaining hardening gap: an unsupported user binary should fail
+  `execve` with `-ENOEXEC`, not panic — that needs the exec host import to return
+  a status the kernel checks (an ENGINE_ABI change), so it is deliberately NOT
+  done here.
 - **libffi raw wasm backend** (`deps-overlay.nix` / `patches/libffi/`): the
   upstream `src/wasm/ffi.c` is emscripten-only; we drop in `wasm32-raw-ffi.c`
   which dispatches `ffi_call` through a build-time generated trampoline table
@@ -1433,10 +1477,76 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   Proven by `build-from-source-e2e` on `.#kernel-mmu-a2` + the fork squashfs:
   BUILD1/BUILD2 (the forked `/bin/sh` builder fork+execs and runs — the exact
   SIGSEGV path) both pass, with no NOMMU regression. **BUILD3** (a derivation that
-  execs `guest-cc` — the 57MB clang — to compile C) is split off as **#179**:
-  clang SIGSEGVs under the softmmu per-access translate, a Track-A correctness/memory
-  issue ORTHOGONAL to the spawn fix. The fork-guest gate runs BUILD3 **non-gating**
-  (`--no-cc-build`); the NOMMU `nix-boot-smoke` keeps all three (BUILD3 works there).
+  execs `guest-cc` — the 57MB clang — to compile C) was split off as **#179** and is
+  now FIXED too (see below), so all three are gating on both jobs.
+- **#179** — DONE: the in-guest clang SIGSEGV on the software-MMU guest. It was
+  **NOT** the softmmu translate (the issue's own framing, and mine until the guest
+  was booted): `cc --version` — no derivation, no forked builder, no compile — died
+  the same way, and NO `NR_MMU_FAULT` ever returned a failure. **Root cause: a
+  missing STARTUP EXPORT.** `toolchain/guest-clang.nix` is the one guest link that
+  deliberately drops `--export-all` (so wasm-ld's default `--gc-sections` can strip a
+  ~100MB module), and its hand-written list of engine-called startup exports never
+  gained `__wasm_early_tp_init` when #166 added it. Unexported, the seed is also
+  UNROOTED, so `--gc-sections` deleted it outright; the engine's call site is a
+  permissive `if (instance.exports.__wasm_early_tp_init)` (deliberately, for older
+  NOMMU libcs), so the absence was **silent**. clang's ctors therefore ran with
+  `__musl_tp == 0`: libc++'s `ios_base::Init` `lseek`s stderr, gets ESPIPE, and
+  stores `errno` through the null `struct pthread` — a WRITE to VA **0x1c**
+  (`offsetof(struct pthread, errno_val)`), which page 0 makes harmless on NOMMU and
+  fatal under CONFIG_MMU. Localized by logging every syscall during
+  `__wasm_call_ctors` from the engine: the last two were `lseek(2,…)` then
+  `nr=244 (fault) va=0x1c kind=1`. **Fix** (PRIME DIRECTIVE corollary 1 — fix the
+  shared thing, not the one binary): a single source of truth
+  **`toolchain/wasm-host-exports.nix`** for the engine-called startup exports,
+  consumed by BOTH non-`--export-all` links (`guest-clang.nix` — this is the actual
+  bug fix — and `nix-wasm.nix`'s `wcxx`, which had the right set but a second copy of
+  it). The `--export-all` links (`wasm-cross.nix`, `make.nix`, `guest-cc-fork.nix`,
+  `wasm-clang-config.nix`) deliberately do NOT consume it: they export the set by
+  construction, and touching `wasm-cross.nix` would force a full `cross.*` world
+  rebuild for nothing. Guards, because the engine's guard cannot be one:
+  `guest-clang.nix` `installPhase` now ASSERTS the shipped `clang`/`wasm-ld` export
+  the required set (`scripts/wasm-check-exports.py`, which parses the export section
+  — the binaries are `--strip-all`ed so objdump/name-section tricks and `grep` both
+  lie), and the engine now logs LOUDLY when an MMU guest image (`pt_base != 0`) lacks
+  the seed. Verified by BOOTING, without the ~1–2 h clang rebuild: one C++ program
+  with a `lseek(2)`-in-a-static-ctor probe, linked twice with guest-clang's exact
+  flags differing ONLY in `--export-if-defined=__wasm_early_tp_init`, run on
+  `.#kernel-mmu-a2` — unexported → SIGSEGV/139 (clang's exact signature), exported →
+  `ctor_errno=29` (ESPIPE, i.e. the very store that faulted) and exit 0. Also fixed a
+  harness bug that hid the evidence for a week: `build-from-source-e2e`'s
+  `==B3ERR-START==` marker appeared in the ECHOED command line too, so the capture
+  returned the command text instead of the builder's stderr (the #96 lesson again —
+  match the EXPANSION, never the echo; the markers now come from a shell variable).
+  **Hardening landed with it (the second half of #179):** a host-REJECTED exec
+  image now kills only the execing task instead of PANICKING the guest. The
+  softmmu pass's refusal used to be a THROW out of `wasm_load_executable`, which
+  escaped into the kernel's own wasm frames and only landed later — with no kernel
+  context — in `raise_exception()` → `make_task_dead()` → `panic("Aiee, killing
+  interrupt handler!")`. One unsupported user binary took down the system, and that
+  is how #179 first presented. Fix: `wasm_load_executable` RETURNS a status
+  (0 = loaded) and `start_thread` does `force_fatal_sig(SIGSEGV)` + **skips
+  `_TIF_RELOAD_PROGRAM`** (the load-bearing half — the engine holds no image, so
+  asking it to reload would crash it). We are past `begin_new_exec()` there, so
+  `-ENOEXEC` is unreachable and killing the task is exactly what `bprm_execve()`
+  does for a late `load_binary` failure. **NOT an ENGINE_ABI bump** — no import is
+  added or removed, only an existing import's RESULT type moves, which is
+  compatible BOTH ways (new kernel + old engine: JS `undefined` → i32 `0` =
+  "loaded"; old kernel + new engine: a `() -> ()` import discards the value). Both
+  coercion rules are pinned by `runtime/exec-reject-abi.test.js` — the whole
+  no-bump argument rests on them. The kernel half is wired as **config-independent
+  `substituteInPlace` + asserts in `kernel.nix` postPatch**, NOT a patch hunk:
+  patches 0023/0026 already rewrite that region of `arch/wasm/kernel/process.c`
+  (and only under mmu/a2), which is exactly the silent fuzzy-apply hazard the
+  0017-0020 entry documents. Gate: `exec-reject-smoke.mjs` (in BOTH the NOMMU
+  boot-smoke and the MMU job) boots busybox-only and execs
+  `userspace/exec-reject-test.nix`'s fixture — a real guest program with the
+  `__get_tls_base` export STRIPPED (`scripts/wasm-strip-export.py`; it has to be
+  manufactured that way now, since the toolchain forces those exports into every
+  link) — asserting the conforming twin runs, the stripped one does not, there is
+  NO panic, and **the shell survives**. Still bounded, deliberately: only
+  SYNCHRONOUS rejections are reported (the instrument pass + table probe run
+  inline; `WebAssembly.compile` is a promise, so a malformed-module compile error
+  keeps the old late path) — #179's class is exactly the synchronous one.
 
 (The executed per-task plans — toolchain, userspace, kernel-nixify, guest-shell
 forkshell-ash — the rationale/master-plan docs, and the detailed STATUS log were
