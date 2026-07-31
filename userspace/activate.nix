@@ -40,4 +40,11 @@ pkgs.writeText "activate" ''
   mkdir -p /var/log /var/run /tmp /root
   : > /var/run/utmp
   : > /var/log/wtmp
+
+  # #177 G5: publish this generation's kernel/initrd to the host bootloader
+  # mirror over 9P. Best-effort — missing /mnt/pc (harness boots) must not fail
+  # activation. Script lives at $sys/pc-bootloader (see pc-bootloader.nix).
+  if [ -f "$sys/pc-bootloader" ]; then
+    sh "$sys/pc-bootloader" "$sys" || true
+  fi
 ''

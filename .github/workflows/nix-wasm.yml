@@ -416,6 +416,11 @@ jobs:
           # runs the same smoke where the rejection actually happens. Gating.
           run_smoke demo/node/exec-reject-smoke.mjs
 
+          # #177 G1/G3: RW virtio-blk (/dev/vdb) + ext2 mkfs/mount + saveDisk
+          # CBHD + reboot readback. Gating — a regression (NOMMU block FS or
+          # dirty-journal coherency) fails the job.
+          run_smoke demo/node/blk-rw-smoke.mjs
+
       # #128 Track A software MMU: boot a softmmu-instrumented init under the
       # CONFIG_MMU=y kernel and prove the per-access translate works. A1 (no
       # present check, pages populated at exec) checksums bit-exact; A2 (checked

@@ -12,7 +12,6 @@ import { DynamicLoader } from "./dylink.js";
 import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
 import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
 import { FfiTrampolines } from "./ffi-codegen.js";
-import { EchoDevice } from "./virtio/echo-device.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
 import { BlkDevice } from "./virtio/blk-device.js";
@@ -365,17 +364,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// serviceable from a userspace task worker.
   let virtio_queues = null;
 
-  /// squashfs image bytes for the BlkDevice (VW_DEV_BLK=3); set from the boot
-  /// message in init(). Zero-length when no squashfs was provided (--no-nix).
+  /// squashfs image bytes for the seed BlkDevice (VW_DEV_BLK=3); set from the
+  /// boot message in init(). Zero-length when no squashfs was provided (--no-nix).
   let squashfsImage = new Uint8Array(0);
+  /// #177: RW state-disk image + dirty bitmap (VW_DEV_BLK_STATE=1 → /dev/vdb).
+  /// SharedArrayBuffer views handed in via the boot message; absent → no state
+  /// disk (installer-only / busybox boots).
+  let stateDiskImage = null;
+  let stateDiskDirty = null;
 
   /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
   /// transport, keyed by the host device index `dev` the guest passes in every
   /// import call. Lazily built on first use because they need the guest's
   /// raise_interrupt export (only available once vmlinux_instance exists; the
   /// kick comes from the CPU-0 worker, which holds the same shared `memory`).
-  /// The transport assigns dev=0 to virtio_wl and dev=1 to the echo self-test,
-  /// with irq = VIRTIO_WASM_IRQ_BASE(8) + dev (see drivers/virtio/virtio_wasm.c).
+  /// The transport assigns dev=0 to virtio_wl and (since ABI 12 / #177) dev=1 to
+  /// the RW state blk (reclaiming the echo self-test slot), with
+  /// irq = VIRTIO_WASM_IRQ_BASE(8) + dev (see drivers/virtio/virtio_wasm.c).
   ///
   /// CPU-0 RULE (1a finding, now owned by VirtioWasmDevice): pc boots maxcpus=1,
   /// so CPU 0 is the only online CPU; the kernel's nominal IRQ_CPU=1 idle loop
@@ -385,7 +390,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// memory.atomic.wait64's on raised_irqs[0], and dispatches on wake.
   const VIRTIO_WASM_IRQ_BASE = 8;
   const VW_DEV_WL = 0;
-  const VW_DEV_ECHO = 1;
+  // #177: RW state disk (/dev/vdb). Reclaims host index 1 from VW_DEV_ECHO.
+  const VW_DEV_BLK_STATE = 1;
   const VW_DEV_NET = 2;
   const VW_DEV_BLK = 3;
   // Issue #10 option 3: virtio-vsock — AF_VSOCK socket channel for the /Ctl
@@ -530,8 +536,23 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           forwardNotify: (dev, q) => port.postMessage({ method: "virtioconsole_notify", dev, q }),
         });
         publish_raised_irqs_addr();
-      } else if (id === VW_DEV_ECHO) d = new EchoDevice(common);
-      else if (id === VW_DEV_NET) {
+      } else if (id === VW_DEV_BLK_STATE) {
+        // #177: RW installed-system disk. Image + dirty bitmap are SABs from
+        // the host init message (shared across every worker). Host always
+        // provides at least a 1 MiB stub when the caller omitted stateDisk —
+        // never allocate a private buffer here (mkfs on one worker / mount on
+        // another would see different bytes). Dirty bits use Atomics (blk-disk.js)
+        // so concurrent task-worker kicks cannot lose a mark.
+        const image =
+          stateDiskImage && stateDiskImage.byteLength ? stateDiskImage : new Uint8Array(0);
+        d = new BlkDevice({
+          ...common,
+          image,
+          readOnly: false,
+          dirtyBitmap: stateDiskDirty,
+          onDirty: () => port.postMessage({ method: "blk_dirty", dev: id }),
+        });
+      } else if (id === VW_DEV_NET) {
         // virtio-net: this worker owns the TX queue (guest egress). Each frame
         // the guest transmits is posted FIRE-AND-FORGET to the main thread,
         // which enqueues it on handle.net.readable. RX (host→guest) is driven
@@ -994,6 +1015,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // Absent on --no-nix boots; the 0-capacity device simply mounts empty.
       if (message.squashfs) {
         squashfsImage = new Uint8Array(message.squashfs);
+      }
+      // #177: RW state disk (SAB views — same buffer every worker + main).
+      if (message.stateDisk) {
+        stateDiskImage = new Uint8Array(message.stateDisk);
+      }
+      if (message.stateDiskDirty) {
+        stateDiskDirty = new Uint8Array(message.stateDiskDirty);
       }
 
       if (message.user_executable) {

@@ -33,6 +33,7 @@ import {
 } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SndVirtioDevice } from "./virtio/snd-device.js";
+import { BLK_SECTOR, dirtyBitmapBytes, markDirty, packDirtySectors } from "./virtio/blk-disk.js";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -80,6 +81,11 @@ export const linux = async ({
   // be a SharedArrayBuffer handed to EVERY worker, not a per-worker copy. We
   // copy the caller's ArrayBuffer into a SAB once here. Undefined on --no-nix.
   squashfs,
+  // #177: RW state disk for the installed system (/dev/vdb, VW_DEV_BLK_STATE=1).
+  // `{ image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void }`.
+  // Image is copied into a SAB (+ dirty-bitmap SAB) and shared with every worker;
+  // `saveDisk()` packs dirty sectors as CBHD. Absent → no state device capacity.
+  stateDisk,
   // Wayland Phase 4f: optional host hook for the worker→main Greenfield bridge.
   // `sendOut(clientId, buffer, fds)` is called FIRE-AND-FORGET when a guest
   // VFD_SEND posts wayland bytes out of the worker; the host feeds them into the
@@ -103,6 +109,73 @@ export const linux = async ({
     squashfs_sab = new SharedArrayBuffer(squashfs.byteLength);
     new Uint8Array(squashfs_sab).set(new Uint8Array(squashfs));
     squashfs = null; // copied into the SAB; allow gc of the caller's buffer
+  }
+
+  // #177: RW state disk — full image SAB + dirty-sector bitmap SAB. Writes from
+  // any worker mark bits; saveDisk() on this thread packs CBHD without a
+  // worker round-trip (the image bytes live in shared memory).
+  //
+  // The kernel ALWAYS registers VW_DEV_BLK_STATE, so every worker must see the
+  // SAME backing bytes (same squashfs rule). When the caller omits stateDisk
+  // (CI harness / busybox smokes), we still allocate a tiny shared stub so
+  // multi-worker virtio kicks cannot diverge. Bootstrap treats stub-sized
+  // disks as "no install" (legacy overlay). hasStateDisk/saveDisk stay false
+  // for stubs — only a caller-provided image is persistable.
+  const STATE_STUB_BYTES = 1024 * 1024; // 1 MiB — below bootstrap install threshold
+  let state_sab = null;
+  let state_dirty_sab = null;
+  let state_persistable = false;
+  /** @type {(() => void) | null} */
+  let state_on_dirty = null;
+  {
+    // Prefer the caller's SharedArrayBuffer in place — a 1–2 GiB state disk
+    // must not be duplicated (Uint8Array + SAB copy OOMs the host under the
+    // ~2 GiB guest RAM wasm Memory). Only copy when the buffer isn't already
+    // a sector-aligned SAB (or a full-buffer Uint8Array view over one).
+    const callerImg = stateDisk && stateDisk.image;
+    let sab = null;
+    let persistable = false;
+    if (callerImg instanceof SharedArrayBuffer) {
+      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
+      if (bytes > 0 && bytes === callerImg.byteLength) {
+        sab = callerImg;
+        persistable = true;
+      } else if (bytes > 0) {
+        sab = new SharedArrayBuffer(bytes);
+        new Uint8Array(sab).set(new Uint8Array(callerImg, 0, bytes));
+        persistable = true;
+      }
+    } else if (
+      callerImg instanceof Uint8Array &&
+      callerImg.buffer instanceof SharedArrayBuffer &&
+      callerImg.byteOffset === 0 &&
+      callerImg.byteLength === callerImg.buffer.byteLength
+    ) {
+      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
+      if (bytes > 0 && bytes === callerImg.byteLength) {
+        sab = callerImg.buffer;
+        persistable = true;
+      }
+    }
+    if (!sab) {
+      const src = callerImg
+        ? callerImg instanceof Uint8Array
+          ? callerImg
+          : new Uint8Array(callerImg)
+        : null;
+      const bytes =
+        src && src.byteLength
+          ? Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR
+          : STATE_STUB_BYTES;
+      sab = new SharedArrayBuffer(bytes);
+      if (src && bytes > 0) new Uint8Array(sab).set(src.subarray(0, bytes));
+      persistable = !!(src && bytes > 0);
+    }
+    state_sab = sab;
+    state_dirty_sab = new SharedArrayBuffer(dirtyBitmapBytes(sab.byteLength));
+    state_persistable = persistable;
+    state_on_dirty =
+      state_persistable && typeof stateDisk?.onDirty === "function" ? stateDisk.onDirty : null;
   }
 
   /// Dict of online CPUs.
@@ -372,6 +445,10 @@ export const linux = async ({
 
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
+    // #177: a state-disk T_OUT dirtied sectors — notify the host (autosave debounce).
+    blk_dirty: () => {
+      state_on_dirty?.();
+    },
     // Wayland (idle wake): the worker hands us raised_irqs[0]'s address once,
     // post-boot, so raiseHostWlIrq can wake the parked idle CPU directly.
     wayland_irq_addr: (message) => {
@@ -690,6 +767,9 @@ export const linux = async ({
       runner_name: name,
       virtio_queues: virtio_queues, // Wayland 1b: shared virtio queue layouts (SAB)
       squashfs: squashfs_sab, // #43: read-only base-system squashfs image (SAB), served as /dev/vdX
+      // #177: RW state disk image + dirty bitmap (SABs), served as /dev/vdb
+      stateDisk: state_sab,
+      stateDiskDirty: state_dirty_sab,
       // pc (#128 MMU boot speed): snapshot of the compiled-Module cache (clones
       // share compiled code — cheap). Workers created before a module was first
       // compiled miss it and fall back to instrument+compile (then post it back).
@@ -773,5 +853,35 @@ export const linux = async ({
         hostNet()?.setLinkUp(up);
       },
     },
+
+    // #177: pack dirty sectors from the RW state disk into a CBHD Blob (Machines
+    // contract). Clears the dirty bitmap so the next save is incremental.
+    // Returns null when no persistable state disk was attached (harness stub).
+    //
+    // Belt-and-suspenders against a zero base (fresh/Reset image): also mark
+    // every non-zero sector dirty before packing. Incremental saves still rely
+    // on T_OUT dirty bits for sectors written back to zero.
+    saveDisk: () => {
+      if (!state_persistable || !state_sab || !state_dirty_sab) return null;
+      const image = new Uint8Array(state_sab);
+      const dirty = new Uint8Array(state_dirty_sab);
+      const sectors = Math.floor(image.length / BLK_SECTOR);
+      for (let s = 0; s < sectors; s++) {
+        const off = s * BLK_SECTOR;
+        let nz = false;
+        for (let i = 0; i < BLK_SECTOR; i++) {
+          if (image[off + i] !== 0) {
+            nz = true;
+            break;
+          }
+        }
+        if (nz) markDirty(dirty, s, 1);
+      }
+      const bytes = packDirtySectors(image, dirty, { clear: true });
+      return new Blob([bytes]);
+    },
+
+    /** True when a caller-provided (persistable) RW state disk was attached. */
+    hasStateDisk: () => state_persistable,
   };
 };

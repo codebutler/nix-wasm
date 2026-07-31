@@ -1,11 +1,16 @@
-// blk-device.js — read-only virtio-blk device over the virtio_wasm transport.
-// Serves the base-system squashfs image (an in-memory Uint8Array) to the guest
-// as /dev/vdX; the guest mounts it -t squashfs as the /nix overlay lowerdir.
-// Read-only by construction: VIRTIO_BLK_T_OUT (write) requests fail S_UNSUPP.
+// blk-device.js — virtio-blk over the virtio_wasm transport.
+//
+// Two roles (nix-wasm#177):
+//   • Seed (readOnly:true, default): base.squashfs on /dev/vda — T_OUT → S_UNSUPP.
+//   • State (readOnly:false): installed-system disk on /dev/vdb — T_IN/T_OUT +
+//     dirty-sector journal (CBHD via blk-disk.js) for host saveDisk/apply-on-boot.
+//     Worker instances set forwardNotify so the main thread owns the journal.
 import { VirtioWasmDevice } from "./device.js";
+import { BLK_SECTOR, markDirty } from "./blk-disk.js";
 
-const SECTOR = 512;
-const VIRTIO_BLK_T_IN = 0; // read request type
+const VIRTIO_BLK_T_IN = 0; // read
+const VIRTIO_BLK_T_OUT = 1; // write
+const VIRTIO_BLK_T_FLUSH = 4; // flush (fsync) — no payload
 const VIRTIO_BLK_S_OK = 0;
 const VIRTIO_BLK_S_IOERR = 1;
 const VIRTIO_BLK_S_UNSUPP = 2;
@@ -15,17 +20,25 @@ const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
 export class BlkDevice extends VirtioWasmDevice {
   /**
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { image: Uint8Array }} opts
+   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { image: Uint8Array, readOnly?: boolean, dirtyBitmap?: Uint8Array, onDirty?: () => void, forwardNotify?: (dev: number, q: number) => void }} opts
    */
   constructor(opts) {
     super(opts);
     this.image = opts.image;
+    this.readOnly = opts.readOnly !== false;
+    this.dirtyBitmap = opts.dirtyBitmap || null;
+    this.onDirty = opts.onDirty || null;
+    // WORKER only — forward kicks to the main-thread BlkDevice (coherent dirty
+    // journal). When set, this instance only answers config/features.
+    this.forwardNotify = opts.forwardNotify || null;
     // capacity in 512-byte sectors, rounded down
-    this.capacity = BigInt(Math.floor(this.image.length / SECTOR));
+    this.capacity = BigInt(Math.floor(this.image.length / BLK_SECTOR));
   }
 
   getFeatures() {
-    return (1n << VIRTIO_F_VERSION_1) | (1n << VIRTIO_BLK_F_RO);
+    let f = 1n << VIRTIO_F_VERSION_1;
+    if (this.readOnly) f |= 1n << VIRTIO_BLK_F_RO;
+    return f;
   }
 
   // virtio-blk config space: u64 capacity at offset 0 (little-endian, sectors).
@@ -40,6 +53,10 @@ export class BlkDevice extends VirtioWasmDevice {
   }
 
   onNotify(q) {
+    if (this.forwardNotify) {
+      this.forwardNotify(this.dev, q >>> 0);
+      return;
+    }
     const ring = this.vring(q >>> 0);
     if (!ring) return;
     let serviced = 0;
@@ -55,17 +72,10 @@ export class BlkDevice extends VirtioWasmDevice {
   //
   // virtio-blk descriptor chain layout (per spec §5.2.6):
   //   out[0]: struct virtio_blk_outhdr { le32 type; le32 reserved; le64 sector; }
-  //   in[0..n-1]: data buffers (host writes for T_IN)
-  //   in[n]: 1-byte status (host always writes)
-  //
-  // The Vring.next() API splits descriptors into out (host-readable, no WRITE
-  // flag) and in (host-writable, WRITE flag).  For a read request:
-  //   chain.out = [{ addr, len }]  ← the 16-byte outhdr
-  //   chain.in  = [data..., status]  ← data buffer(s) + 1-byte status last
+  //   data:   T_IN → in segs; T_OUT → out segs after the header
+  //   status: last IN segment, 1 byte
   _service(ring, chain) {
-    // Parse the outhdr from the first OUT segment.
     if (!chain.out.length || !chain.in.length) {
-      // Malformed chain: no header or no writable output.
       this.log("[blk] malformed descriptor chain — skipping");
       ring.pushUsed(chain.head, 0);
       return;
@@ -73,20 +83,15 @@ export class BlkDevice extends VirtioWasmDevice {
     const hdrSeg = chain.out[0];
     const hdr = new DataView(this.memory.buffer, hdrSeg.addr, 16);
     const type = hdr.getUint32(0, true);
-    const sector = hdr.getBigUint64(8, true);
+    const sector = Number(hdr.getBigUint64(8, true));
 
-    // The last IN segment is the 1-byte status; everything before is data.
     const statusSeg = chain.in[chain.in.length - 1];
-    const dataSegs = chain.in.slice(0, chain.in.length - 1);
-
     let status = VIRTIO_BLK_S_OK;
     let written = 0;
 
-    if (type !== VIRTIO_BLK_T_IN) {
-      // This is a read-only device; reject writes and unsupported ops.
-      status = VIRTIO_BLK_S_UNSUPP;
-    } else {
-      let pos = Number(sector) * SECTOR;
+    if (type === VIRTIO_BLK_T_IN) {
+      const dataSegs = chain.in.slice(0, chain.in.length - 1);
+      let pos = sector * BLK_SECTOR;
       for (const seg of dataSegs) {
         if (pos + seg.len > this.image.length) {
           status = VIRTIO_BLK_S_IOERR;
@@ -97,11 +102,39 @@ export class BlkDevice extends VirtioWasmDevice {
         pos += seg.len;
         written += seg.len;
       }
+    } else if (type === VIRTIO_BLK_T_OUT) {
+      if (this.readOnly) {
+        status = VIRTIO_BLK_S_UNSUPP;
+      } else {
+        // Write data follows the outhdr in OUT segments.
+        const dataSegs = chain.out.slice(1);
+        let pos = sector * BLK_SECTOR;
+        let bytes = 0;
+        for (const seg of dataSegs) {
+          if (pos + seg.len > this.image.length) {
+            status = VIRTIO_BLK_S_IOERR;
+            break;
+          }
+          const src = this.memView(seg.addr, seg.len);
+          this.image.set(src, pos);
+          pos += seg.len;
+          bytes += seg.len;
+        }
+        if (status === VIRTIO_BLK_S_OK && bytes > 0) {
+          const nSec = Math.ceil(bytes / BLK_SECTOR);
+          if (this.dirtyBitmap) markDirty(this.dirtyBitmap, sector, nSec);
+          this.onDirty?.();
+        }
+      }
+    } else if (type === VIRTIO_BLK_T_FLUSH) {
+      // Host persistence is journaled out-of-band (saveDisk); FLUSH is a no-op ack.
+      if (this.readOnly) status = VIRTIO_BLK_S_UNSUPP;
+    } else {
+      status = VIRTIO_BLK_S_UNSUPP;
     }
 
-    // Write the status byte into the last IN segment.
     this.memView(statusSeg.addr, 1)[0] = status;
-    written += 1; // count the status byte
+    written += 1;
     ring.pushUsed(chain.head, written);
   }
 }

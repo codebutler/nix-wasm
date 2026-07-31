@@ -511,8 +511,21 @@
       # ---- generated inittab (profile-absolute paths) + activation script ----
       wasmInittab = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
       wasmActivate = import ./userspace/activate.nix { pkgs = cross; };
+      wasmPcBootloader = import ./userspace/pc-bootloader.nix { pkgs = cross; };
+
+      # #177 G6: stamp ENGINE_ABI into the system boot manifest (same parse as
+      # linux-image.nix) so the host refuses a generation whose kernel ABI
+      # does not match the vendored engine.
+      bootAbiPattern = "[[:space:]]*export const ENGINE_ABI = ([0-9]+);[[:space:]]*";
+      bootAbiLine = pkgs.lib.findFirst (l: builtins.match bootAbiPattern l != null) null
+        (pkgs.lib.splitString "\n" (builtins.readFile ./runtime/abi.js));
+      bootAbiMatch = if bootAbiLine == null then null else builtins.match bootAbiPattern bootAbiLine;
+      bootKernelAbi = pkgs.lib.toInt (builtins.head (pkgs.lib.throwIf (bootAbiMatch == null)
+        "flake.nix: could not parse ENGINE_ABI from runtime/abi.js" bootAbiMatch));
 
       # ---- assembled guest system closure (boot layout) ---------------------
+      # Defined after wasmInitramfs below (Nix `let` is recursive) so G6 can
+      # embed the bootable kernel+initramfs into the system closure.
       wasmToplevel = import ./userspace/toplevel.nix {
         pkgs = cross;
         busybox = wasmBusybox;
@@ -522,6 +535,12 @@
         group = wasmPasswd.group;
         inittab = wasmInittab;
         activate = wasmActivate;
+        # G6: kernel + initramfs must be in the system closure so installed
+        # boots can export them without the ISO (pc-bootloader / G5).
+        kernel = kernel;
+        initramfs = wasmInitramfs;
+        kernelAbi = bootKernelAbi;
+        pcBootloader = wasmPcBootloader;
       };
 
       # ---- thin initramfs /init (generated) + the initramfs cpio ------------
@@ -646,6 +665,13 @@
         group = wasmPasswdFork.group;
         inittab = wasmInittab;
         activate = wasmActivate;
+        # G6: same bootloader artifacts as wasmToplevel. The MMU prove-then-flip
+        # guest boots kernel-mmu-a2 + wasmInitramfsFork; embed those so activate
+        # can export a coherent mirror (and toplevel.nix's required args are met).
+        kernel = kernelMmuA2;
+        initramfs = wasmInitramfsFork;
+        kernelAbi = bootKernelAbi;
+        pcBootloader = wasmPcBootloader;
       };
       wasmBaseSquashfsFork = import ./userspace/base-squashfs.nix {
         inherit pkgs;

@@ -82,26 +82,19 @@
 // SIGSEGV). `wasm_collapse` is added ONLY by patches/kernel/0026 (mmu-fork
 // kernels), so the SHIPPED NOMMU `.#kernel` / `.#linux-image` does NOT export it
 // and keeps the byte-identical JS-throw path — the shipped image's contract is
-// unchanged, so ENGINE_ABI stays 11 (bumping would falsely raise the shipped
-// image's minEngine and strand every deployed pc for a change that never touches
-// the NOMMU guest). The feature-detect is backward-compatible in both directions
-// on the shipped path. DEFERRED OBLIGATION: if the MMU/fork guest ever becomes the
+// unchanged. DEFERRED OBLIGATION: if the MMU/fork guest ever becomes the
 // published channel image (`.#linux-image` switches to a wasm_collapse kernel),
-// THAT is an incompatible exec-ABI change and MUST bump ENGINE_ABI (a
-// wasm_collapse-requiring image can't run on a pre-#175 engine).
+// THAT is an incompatible exec-ABI change and MUST bump ENGINE_ABI.
 // NOT-A-BUMP (#179 exec-reject): wasm_load_executable now RETURNS a status
 // (0 = loaded, nonzero = the host cannot run this image) and the kernel's
-// start_thread kills just the execing task instead of letting the rejection
-// surface contextless from the promise chain and panic the guest. NO import is
-// added or removed — only an existing import's RESULT type moves — so the wire
-// stays compatible in BOTH directions, which is why this does not bump:
-//   • new kernel + old engine: the JS returns undefined, and ToWebAssemblyValue
-//     coerces that to 0 for an i32 result → "loaded" → exactly today's behaviour.
-//   • old kernel + new engine: the import is declared () -> (), so wasm discards
-//     the returned status → also exactly today's behaviour.
-// Bumping would falsely raise the shipped image's minEngine and strand every
-// deployed pc for a change that cannot break either mix (same reasoning as the
-// #175 note above). The kernel half is wired in kernel.nix's postPatch (as
-// config-independent substituteInPlace + asserts, because patches 0023/0026
-// already rewrite that region of arch/wasm/kernel/process.c).
-export const ENGINE_ABI = 11;
+// start_thread kills just the execing task. NO import is added or removed —
+// only an existing import's RESULT type moves — so the wire stays compatible
+// in BOTH directions (see kernel.nix postPatch).
+//
+// 12 (#177: installed NixOS persistence): second virtio-blk at host index 1
+// (VW_DEV_BLK_STATE — reclaims the echo self-test slot) serving the RW state
+// disk (/dev/vdb), plus RW BlkDevice (T_OUT + dirty-sector journal + saveDisk).
+// Seed squashfs stays RO at VW_DEV_BLK=3 (/dev/vda). An old engine answers
+// "unknown device index 1" (or still serves EchoDevice) and the guest's
+// installer/installed bootstrap can't mount the state disk: bump.
+export const ENGINE_ABI = 12;

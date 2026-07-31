@@ -135,6 +135,11 @@ pkgs.stdenv.mkDerivation {
     # the patch + at the formula in runtime/kernel-worker.js). Gated by
     # clock-smoke.mjs.
     ./patches/kernel/0028-wasm-persistent-clock.patch
+    # #177 (installed NixOS persistence): second virtio-blk at host index 1
+    # (VW_DEV_BLK_STATE — reclaims the echo self-test slot) for the RW state
+    # disk (/dev/vdb). Seed squashfs stays at VW_DEV_BLK=3 (/dev/vda).
+    # ENGINE_ABI 12.
+    ./patches/kernel/0029-wasm-virtio-blk-state-device.patch
   ] ++ pkgs.lib.optionals mmu [
     # #128 Track A: the CONFIG_MMU=y software-MMU arch layer (applied last).
     ./patches/kernel/0023-wasm-software-mmu.patch
@@ -160,11 +165,12 @@ pkgs.stdenv.mkDerivation {
   # source is correct; runs in patchPhase (minutes), so a re-fuzz fails fast and
   # loud instead of producing a subtly-broken kernel.
   #
-  # Layout (issue #83 single-port console pivot): WL=0..9P_NIXCACHE=5, VSOCK=7,
-  # then 8 single-port virtio-console devices at VW_DEV_CONSOLE_BASE=8..15 (index 6
-  # unused). The console registrations are a `for (i<8) virtio_wasm_register(
-  # VW_DEV_CONSOLE_BASE + i, …)` loop, so the assertion checks VW_DEV_CONSOLE_BASE
-  # (the enum + the loop), not a per-device VW_DEV_CONSOLE call.
+  # Layout (issue #83 + #177): WL=0, BLK_STATE=1 (RW state disk), NET=2,
+  # BLK=3 (seed), 9P_ROOT=4, 9P_NIXCACHE=5, SND=6, VSOCK=7, then 8 single-port
+  # virtio-console devices at VW_DEV_CONSOLE_BASE=8..15. The console
+  # registrations are a `for (i<8) virtio_wasm_register_cfg(VW_DEV_CONSOLE_BASE
+  # + i, …)` loop, so the assertion checks VW_DEV_CONSOLE_BASE (the enum + the
+  # loop), not a per-device VW_DEV_CONSOLE call.
   postPatch = ''
     vw=drivers/virtio/virtio_wasm.c
     echo "== virtio_wasm.c device enum (post-patch) =="
@@ -173,13 +179,19 @@ pkgs.stdenv.mkDerivation {
     grep -nE 'virtio_wasm_register(_cfg)?\(VW_DEV_' "$vw" || true
 
     # 1) Every non-console device the host serves MUST keep its registration call.
-    for d in VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_SND VW_DEV_VSOCK; do
+    for d in VW_DEV_BLK VW_DEV_BLK_STATE VW_DEV_9P_ROOT VW_DEV_9P_NIXCACHE VW_DEV_SND VW_DEV_VSOCK; do
       grep -q "virtio_wasm_register($d," "$vw" || {
         echo "ERROR: $vw is missing virtio_wasm_register($d, …) — a kernel patch" \
-             "(0017-0020, 0027) applied with fuzz and dropped a device registration." >&2
+             "(0017-0020, 0027, 0029) applied with fuzz and dropped a device registration." >&2
         exit 1
       }
     done
+    # Echo self-test MUST be gone from the registration path (slot reclaimed).
+    if grep -q 'virtio_wasm_register(VW_DEV_ECHO,' "$vw"; then
+      echo "ERROR: VW_DEV_ECHO is still registered — patch 0029 should reclaim it" \
+           "for VW_DEV_BLK_STATE." >&2
+      exit 1
+    fi
     # The 8 single-port consoles register via a VW_DEV_CONSOLE_BASE + i loop,
     # using the config-irq-aware variant (terminal resize).
     grep -qE 'virtio_wasm_register_cfg\(VW_DEV_CONSOLE_BASE \+ i,' "$vw" || {
@@ -212,7 +224,15 @@ pkgs.stdenv.mkDerivation {
            "(fuzzy patch apply). VSOCK must be index 7, CONSOLE_BASE index 8." >&2
       exit 1
     fi
-    # 3) The explicit pinned indices must be exactly SND=6, VSOCK=7, CONSOLE_BASE=8.
+    # 3) The explicit pinned indices must match the host engine constants.
+    grep -qE 'VW_DEV_BLK_STATE[[:space:]]*=[[:space:]]*1,' "$vw" || {
+      echo "ERROR: VW_DEV_BLK_STATE is not pinned to 1 in $vw (must match" \
+           "VW_DEV_BLK_STATE in runtime/kernel-worker.js — patch 0029?)" >&2
+      exit 1; }
+    grep -qE 'VW_DEV_NET[[:space:]]*=[[:space:]]*2,' "$vw" || {
+      echo "ERROR: VW_DEV_NET is not pinned to 2 in $vw" >&2; exit 1; }
+    grep -qE 'VW_DEV_BLK[[:space:]]*=[[:space:]]*3,' "$vw" || {
+      echo "ERROR: VW_DEV_BLK is not pinned to 3 in $vw" >&2; exit 1; }
     grep -qE 'VW_DEV_SND[[:space:]]*=[[:space:]]*6,' "$vw" || {
       echo "ERROR: VW_DEV_SND is not pinned to 6 in $vw (must match VW_DEV_SND in" \
            "runtime/kernel-worker.js / kernel-host.js — patch 0027 applied with fuzz?)" >&2
@@ -221,7 +241,7 @@ pkgs.stdenv.mkDerivation {
       echo "ERROR: VW_DEV_VSOCK is not pinned to 7 in $vw" >&2; exit 1; }
     grep -qE 'VW_DEV_CONSOLE_BASE[[:space:]]*=[[:space:]]*8,' "$vw" || {
       echo "ERROR: VW_DEV_CONSOLE_BASE is not pinned to 8 in $vw" >&2; exit 1; }
-    echo "virtio_wasm.c device enum + registrations OK (9P/snd/vsock/8-console present, order correct)"
+    echo "virtio_wasm.c device enum + registrations OK (blk/blk-state/9P/snd/vsock/8-console present, order correct)"
 
     # ---- #179 hardening: a host-REJECTED exec image kills the task, not the kernel ----
     #
@@ -358,14 +378,14 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
 
     make $makeFlags wasm32_nommu_defconfig
 
-    # build.sh configure_kernel() toggle set + overlayfs (Plan 2): the Nix-built
-    # /nix store is served READ-ONLY over 9P (overlay lowerdir); unioning it with
-    # a writable upper lets nix-env install without a writable backing store.
+    # build.sh configure_kernel() toggle set + overlayfs (installer fallback) +
+    # EXT2/EXT4 for the RW state disk (#177 G1). After install, /nix mounts
+    # directly from /dev/vdb (ext2); the ramfs-overlay path remains only for
+    # seed-only / recovery boots without a state disk.
     # NOMMU caveat: CONFIG_TMPFS depends on CONFIG_SHMEM and mainline gates SHMEM
     # behind MMU, so olddefconfig SILENTLY DROPS both here — we request them
-    # anyway (harmless; auto-enables if a future MMU/EXPERT change allows tmpfs),
-    # but the working overlay upper is RAMFS (always built in, backs the
-    # initramfs). CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
+    # anyway (harmless; auto-enables if a future MMU/EXPERT change allows tmpfs).
+    # CONFIG_OVERLAY_FS itself compiles cleanly on this NOMMU kernel.
     bash ./scripts/config --file build/.config \
       `# 9P rides the stock mainline 9P-over-virtio transport (NET_9P_VIRTIO) on` \
       `# the virtio_wasm transport (patch 0018) — the guest looks like a standard` \
@@ -382,7 +402,8 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
       `# drivers. No DMA layer is needed — the transport withholds` \
       `# VIRTIO_F_ACCESS_PLATFORM so vring uses identity nommu offsets.` \
       --enable CONFIG_VIRTIO --enable CONFIG_VIRTIO_MENU --enable CONFIG_VIRTIO_WASM \
-      --enable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
+      `# #177: echo self-test slot (host index 1) is reclaimed for VW_DEV_BLK_STATE.` \
+      --disable CONFIG_VIRTIO_WASM_ECHO --enable CONFIG_VIRTIO_WL \
       `# Issue #10 (option 2) / #83: stock mainline virtio-console driver` \
       `# (drivers/char/virtio_console.c) over the virtio_wasm transport` \
       `# (patch 0019) is the guest's SOLE console. The transport registers 8` \
@@ -444,6 +465,12 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
       --enable CONFIG_SQUASHFS \
       --enable CONFIG_SQUASHFS_ZSTD \
       --enable CONFIG_ZSTD_DECOMPRESS \
+      `# #177 G1: writable block-backed FS for the installed /nix on /dev/vdb.` \
+      `# EXT2 is the format busybox mkfs.ext2 writes; EXT4 mounts it (and is` \
+      `# the upgrade path). JBD2 comes along with EXT4.` \
+      --enable CONFIG_EXT2_FS \
+      --enable CONFIG_EXT4_FS \
+      --enable CONFIG_JBD2 \
       `# Issue #10 option 3: AF_VSOCK + the stock virtio-vsock transport` \
       `# (net/vmw_vsock/virtio_transport.c) on the virtio_wasm transport (patch` \
       `# 0020, VW_DEV_VSOCK=7, VIRTIO_ID_VSOCK=19) — a standard socket channel` \
@@ -483,6 +510,15 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
     grep -qE "^CONFIG_SND_VIRTIO=y" build/.config \
       || { echo "ERROR: CONFIG_SND_VIRTIO did not stick (olddefconfig dropped it" \
                 "— check the CONFIG_SOUND/CONFIG_SND gates)" >&2; exit 1; }
+
+    # #177 G1: writable FS on virtio-blk — EXT2 (mkfs.ext2) + EXT4 must stick.
+    grep -qE "^CONFIG_EXT2_FS=y" build/.config \
+      || { echo "ERROR: CONFIG_EXT2_FS did not stick (olddefconfig dropped it)" >&2; exit 1; }
+    grep -qE "^CONFIG_EXT4_FS=y" build/.config \
+      || { echo "ERROR: CONFIG_EXT4_FS did not stick (olddefconfig dropped it)" >&2; exit 1; }
+    # Echo slot must stay disabled (reclaimed for VW_DEV_BLK_STATE).
+    grep -qE "^# CONFIG_VIRTIO_WASM_ECHO is not set|^CONFIG_VIRTIO_WASM_ECHO=n" build/.config \
+      || { echo "ERROR: CONFIG_VIRTIO_WASM_ECHO must stay disabled (#177)" >&2; exit 1; }
 
     ${pkgs.lib.optionalString mmu ''
       grep -qE "^CONFIG_MMU=y" build/.config \
