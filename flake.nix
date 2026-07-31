@@ -665,6 +665,13 @@
         group = wasmPasswdFork.group;
         inittab = wasmInittab;
         activate = wasmActivate;
+        # G6: same bootloader artifacts as wasmToplevel. The MMU prove-then-flip
+        # guest boots kernel-mmu-a2 + wasmInitramfsFork; embed those so activate
+        # can export a coherent mirror (and toplevel.nix's required args are met).
+        kernel = kernelMmuA2;
+        initramfs = wasmInitramfsFork;
+        kernelAbi = bootKernelAbi;
+        pcBootloader = wasmPcBootloader;
       };
       wasmBaseSquashfsFork = import ./userspace/base-squashfs.nix {
         inherit pkgs;
