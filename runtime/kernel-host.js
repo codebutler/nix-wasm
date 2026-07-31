@@ -33,8 +33,7 @@ import {
 } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SndVirtioDevice } from "./virtio/snd-device.js";
-import { BlkDevice } from "./virtio/blk-device.js";
-import { BLK_SECTOR, dirtyBitmapBytes, packDirtySectors } from "./virtio/blk-disk.js";
+import { BLK_SECTOR, dirtyBitmapBytes, markDirty, packDirtySectors } from "./virtio/blk-disk.js";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -395,33 +394,6 @@ export const linux = async ({
     return hostSndDevice;
   };
 
-  // #177: RW state disk (/dev/vdb) — MAIN-thread BlkDevice. Workers forward
-  // kicks as virtioblk_state_notify so T_OUT + dirty-bitmap updates are
-  // single-threaded (no lost dirty bits across task workers). Uses the same
-  // raised_irqs self-wake as 9p/console. Built lazily once the wake addr is
-  // published.
-  const VW_DEV_BLK_STATE = 1;
-  let hostStateBlkDevice = null;
-  const hostStateBlk = () => {
-    if (!state_sab || !state_dirty_sab || wlRaisedIrqsAddr == null) return null;
-    if (!hostStateBlkDevice) {
-      hostStateBlkDevice = new BlkDevice({
-        dev: VW_DEV_BLK_STATE,
-        irq: VIRTIO_WASM_IRQ_BASE + VW_DEV_BLK_STATE,
-        memory,
-        raiseInterrupt: raiseHostWlIrq,
-        onlineCpus: [0],
-        sharedQueues: hostWlQueues,
-        log,
-        image: new Uint8Array(state_sab),
-        readOnly: false,
-        dirtyBitmap: new Uint8Array(state_dirty_sab),
-        onDirty: () => state_on_dirty?.(),
-      });
-    }
-    return hostStateBlkDevice;
-  };
-
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
   let netController = null;
@@ -441,10 +413,9 @@ export const linux = async ({
 
   /// Callbacks from Web Workers (each one representing one task).
   const message_callbacks = {
-    // #177: a guest virtio-blk state-disk kick the task worker forwarded. The
-    // RW image + dirty journal live on this thread so saveDisk() is coherent.
-    virtioblk_state_notify: (message) => {
-      hostStateBlk()?.onNotify(message.q >>> 0);
+    // #177: a state-disk T_OUT dirtied sectors — notify the host (autosave debounce).
+    blk_dirty: () => {
+      state_on_dirty?.();
     },
     // Wayland (idle wake): the worker hands us raised_irqs[0]'s address once,
     // post-boot, so raiseHostWlIrq can wake the parked idle CPU directly.
@@ -854,10 +825,26 @@ export const linux = async ({
     // #177: pack dirty sectors from the RW state disk into a CBHD Blob (Machines
     // contract). Clears the dirty bitmap so the next save is incremental.
     // Returns null when no persistable state disk was attached (harness stub).
+    //
+    // Belt-and-suspenders against a zero base (fresh/Reset image): also mark
+    // every non-zero sector dirty before packing. Incremental saves still rely
+    // on T_OUT dirty bits for sectors written back to zero.
     saveDisk: () => {
       if (!state_persistable || !state_sab || !state_dirty_sab) return null;
       const image = new Uint8Array(state_sab);
       const dirty = new Uint8Array(state_dirty_sab);
+      const sectors = Math.floor(image.length / BLK_SECTOR);
+      for (let s = 0; s < sectors; s++) {
+        const off = s * BLK_SECTOR;
+        let nz = false;
+        for (let i = 0; i < BLK_SECTOR; i++) {
+          if (image[off + i] !== 0) {
+            nz = true;
+            break;
+          }
+        }
+        if (nz) markDirty(dirty, s, 1);
+      }
       const bytes = packDirtySectors(image, dirty, { clear: true });
       return new Blob([bytes]);
     },
