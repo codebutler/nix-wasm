@@ -13,7 +13,10 @@ pkgs.writeText "pc-bootloader" ''
   set -e
   sys="$1"
   [ -n "$sys" ] || exit 0
-  [ -d /mnt/pc/Home ] || exit 0
+  # Require the host-prepared Linux library tree (pc ensureLinuxTree). Harness
+  # MemVfs boots expose /mnt/pc/Home for 9P tests only — copying multi-MB
+  # vmlinux.wasm there during activate blocks the shell past CI prompt budgets.
+  [ -d /mnt/pc/Home/Library/Linux ] || exit 0
   [ -f "$sys/boot/vmlinux.wasm" ] || exit 0
   [ -f "$sys/boot/initramfs.cpio.gz" ] || exit 0
   [ -f "$sys/boot/manifest.json" ] || exit 0
