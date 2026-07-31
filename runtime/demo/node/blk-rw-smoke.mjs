@@ -34,10 +34,7 @@ async function runGuest(session, script, expectRe, ms = 120_000) {
   session.send(script + "\n");
   if (!(await session.waitForOutput(expectRe, ms))) {
     throw new Error(
-      "timeout waiting for " +
-        expectRe +
-        "\n---\n" +
-        session.snapshot().slice(-2000),
+      "timeout waiting for " + expectRe + "\n---\n" + session.snapshot().slice(-2000),
     );
   }
   return session.snapshot();
@@ -94,10 +91,7 @@ async function main() {
   }
   const blob = s1.handle.saveDisk();
   if (!blob || blob.size < 16) {
-    console.error(
-      "FAIL: saveDisk() returned empty overlay (dirties=%d)",
-      dirtyN,
-    );
+    console.error("FAIL: saveDisk() returned empty overlay (dirties=%d)", dirtyN);
     s1.kill();
     process.exit(1);
   }
@@ -151,9 +145,7 @@ async function main() {
     process.exit(1);
   }
   s2.kill();
-  console.log(
-    "PASS: RW virtio-blk ext2 persists across saveDisk + reboot (G1/G3)",
-  );
+  console.log("PASS: RW virtio-blk ext2 persists across saveDisk + reboot (G1/G3)");
   process.exit(0);
 }
 
