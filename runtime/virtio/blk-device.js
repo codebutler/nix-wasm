@@ -4,6 +4,7 @@
 //   • Seed (readOnly:true, default): base.squashfs on /dev/vda — T_OUT → S_UNSUPP.
 //   • State (readOnly:false): installed-system disk on /dev/vdb — T_IN/T_OUT +
 //     dirty-sector journal (CBHD via blk-disk.js) for host saveDisk/apply-on-boot.
+//     Worker instances set forwardNotify so the main thread owns the journal.
 import { VirtioWasmDevice } from "./device.js";
 import { BLK_SECTOR, markDirty } from "./blk-disk.js";
 
@@ -19,12 +20,7 @@ const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
 export class BlkDevice extends VirtioWasmDevice {
   /**
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & {
-   *   image: Uint8Array,
-   *   readOnly?: boolean,
-   *   dirtyBitmap?: Uint8Array,
-   *   onDirty?: () => void,
-   * }} opts
+   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { image: Uint8Array, readOnly?: boolean, dirtyBitmap?: Uint8Array, onDirty?: () => void, forwardNotify?: (dev: number, q: number) => void }} opts
    */
   constructor(opts) {
     super(opts);
@@ -32,6 +28,9 @@ export class BlkDevice extends VirtioWasmDevice {
     this.readOnly = opts.readOnly !== false;
     this.dirtyBitmap = opts.dirtyBitmap || null;
     this.onDirty = opts.onDirty || null;
+    // WORKER only — forward kicks to the main-thread BlkDevice (coherent dirty
+    // journal). When set, this instance only answers config/features.
+    this.forwardNotify = opts.forwardNotify || null;
     // capacity in 512-byte sectors, rounded down
     this.capacity = BigInt(Math.floor(this.image.length / BLK_SECTOR));
   }
@@ -54,6 +53,10 @@ export class BlkDevice extends VirtioWasmDevice {
   }
 
   onNotify(q) {
+    if (this.forwardNotify) {
+      this.forwardNotify(this.dev, q >>> 0);
+      return;
+    }
     const ring = this.vring(q >>> 0);
     if (!ring) return;
     let serviced = 0;

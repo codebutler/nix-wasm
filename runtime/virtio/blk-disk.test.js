@@ -32,4 +32,21 @@ describe("blk-disk journal", () => {
     const image = new Uint8Array(BLK_SECTOR);
     expect(() => applyDirtyOverlay(image, new Uint8Array(16))).toThrow(/bad magic/);
   });
+
+  it("pack clear is bit-wise (sibling dirty bits in the same byte survive)", () => {
+    const image = new Uint8Array(BLK_SECTOR * 16);
+    image[0] = 1;
+    image[BLK_SECTOR] = 2;
+    const bitmap = new Uint8Array(dirtyBitmapBytes(image.length));
+    markDirty(bitmap, 0, 1);
+    // Simulate mid-pack: sector 0 already sampled+cleared, sector 1 marked after.
+    bitmap[0] &= ~1;
+    markDirty(bitmap, 1, 1);
+    const overlay = packDirtySectors(image, bitmap, { clear: true });
+    expect(new DataView(overlay.buffer).getUint32(12, true)).toBe(1);
+    expect(dirtySectorCount(bitmap)).toBe(0);
+    const restored = new Uint8Array(image.length);
+    applyDirtyOverlay(restored, overlay);
+    expect(restored[BLK_SECTOR]).toBe(2);
+  });
 });

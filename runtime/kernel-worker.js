@@ -538,19 +538,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         publish_raised_irqs_addr();
       } else if (id === VW_DEV_BLK_STATE) {
         // #177: RW installed-system disk. Image + dirty bitmap are SABs from
-        // the host init message (shared across every worker). Host always
-        // provides at least a 1 MiB stub when the caller omitted stateDisk —
-        // never allocate a private buffer here (mkfs on one worker / mount on
-        // another would see different bytes).
+        // the host; the MAIN thread owns T_IN/T_OUT + the dirty journal so
+        // concurrent task-worker kicks cannot lose dirty bits. This worker
+        // instance only answers config/features (capacity) and forwards the
+        // kick — same pattern as virtio-9p/console. Host always provides at
+        // least a 1 MiB stub when the caller omitted stateDisk.
         const image =
           stateDiskImage && stateDiskImage.byteLength ? stateDiskImage : new Uint8Array(0);
         d = new BlkDevice({
           ...common,
           image,
           readOnly: false,
-          dirtyBitmap: stateDiskDirty,
-          onDirty: () => port.postMessage({ method: "blk_dirty", dev: id }),
+          forwardNotify: (dev, q) => port.postMessage({ method: "virtioblk_state_notify", dev, q }),
         });
+        publish_raised_irqs_addr();
       } else if (id === VW_DEV_NET) {
         // virtio-net: this worker owns the TX queue (guest egress). Each frame
         // the guest transmits is posted FIRE-AND-FORGET to the main thread,

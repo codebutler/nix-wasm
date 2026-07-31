@@ -63,7 +63,7 @@ async function main() {
     }
     if (!reached) throw new Error("no prompt");
 
-    await runGuest(
+    const phase1 = await runGuest(
       s1,
       [
         "mkdir -p /mnt/state",
@@ -72,12 +72,18 @@ async function main() {
         "mount -t ext2 /dev/vdb /mnt/state && echo MOUNT_OK || echo MOUNT_FAIL",
         `echo ${MARKER} > /mnt/state/marker`,
         "sync",
-        "cat /mnt/state/marker",
-        "umount /mnt/state",
+        `cat /mnt/state/marker; echo MARKER_READ_DONE`,
+        "umount /mnt/state && echo UMOUNT_OK || echo UMOUNT_FAIL",
         "echo PHASE1_DONE",
       ].join("; "),
       /PHASE1_DONE/,
     );
+    if (!phase1.includes("VDB_OK") || !phase1.includes("MKFS_OK") || !phase1.includes("MOUNT_OK")) {
+      throw new Error("phase1 mkfs/mount markers missing\n" + phase1.slice(-1500));
+    }
+    if (!phase1.includes(MARKER) || !phase1.includes("UMOUNT_OK")) {
+      throw new Error("phase1 marker/umount failed\n" + phase1.slice(-1500));
+    }
   } catch (e) {
     console.error("phase1 failed:", e.message || e);
     s1.kill();
@@ -106,6 +112,25 @@ async function main() {
   for (let i = 0; i < image2.length; i++) if (image2[i]) nonzero++;
   if (nonzero < BLK_SECTOR) {
     console.error("FAIL: applied overlay left image essentially empty");
+    process.exit(1);
+  }
+  // Marker payload must appear in the restored image (dirty journal completeness).
+  const markerBytes = new TextEncoder().encode(MARKER);
+  let markerAt = -1;
+  outer: for (let i = 0; i <= image2.length - markerBytes.length; i++) {
+    for (let j = 0; j < markerBytes.length; j++) {
+      if (image2[i + j] !== markerBytes[j]) continue outer;
+    }
+    markerAt = i;
+    break;
+  }
+  if (markerAt < 0) {
+    console.error(
+      "FAIL: marker bytes missing from restored image (overlay=%dB dirties=%d nonzero=%d)",
+      overlay.byteLength,
+      dirtyN,
+      nonzero,
+    );
     process.exit(1);
   }
 

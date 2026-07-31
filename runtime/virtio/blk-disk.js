@@ -5,9 +5,32 @@
 //   entries { u32 blockIndex; u8[blockSize] data } × count
 //
 // Sector size is always 512 (virtio-blk). Pure + bun-testable.
+//
+// Dirty bits live in a SharedArrayBuffer shared across task workers: mark and
+// clear with Atomics so concurrent virtio kicks cannot lose a dirty bit via
+// non-atomic read/modify/write (which previously produced mountable-but-corrupt
+// ext2 images after saveDisk → apply → reboot).
 export const BLK_SECTOR = 512;
 export const DISK_OVERLAY_MAGIC = "CBHD";
 export const DISK_OVERLAY_VERSION = 1;
+
+function isShared(bitmap) {
+  return typeof SharedArrayBuffer !== "undefined" && bitmap.buffer instanceof SharedArrayBuffer;
+}
+
+function loadByte(bitmap, i) {
+  return isShared(bitmap) ? Atomics.load(bitmap, i) : bitmap[i];
+}
+
+function orByte(bitmap, i, mask) {
+  if (isShared(bitmap)) Atomics.or(bitmap, i, mask);
+  else bitmap[i] |= mask;
+}
+
+function andByte(bitmap, i, mask) {
+  if (isShared(bitmap)) Atomics.and(bitmap, i, mask);
+  else bitmap[i] &= mask;
+}
 
 /**
  * @param {Uint8Array} image
@@ -20,7 +43,14 @@ export function packDirtySectors(image, dirtyBitmap, opts = {}) {
   /** @type {number[]} */
   const dirty = [];
   for (let s = 0; s < sectors; s++) {
-    if (dirtyBitmap[s >> 3] & (1 << (s & 7))) dirty.push(s);
+    const bi = s >> 3;
+    const bit = 1 << (s & 7);
+    if (loadByte(dirtyBitmap, bi) & bit) {
+      dirty.push(s);
+      // Clear bit-by-bit (not fill(0)) so a concurrent markDirty of another
+      // sector in the same byte is not wiped after we sampled it.
+      if (opts.clear) andByte(dirtyBitmap, bi, ~bit & 0xff);
+    }
   }
   const header = 16;
   const out = new Uint8Array(header + dirty.length * (4 + BLK_SECTOR));
@@ -38,7 +68,6 @@ export function packDirtySectors(image, dirtyBitmap, opts = {}) {
     out.set(image.subarray(s * BLK_SECTOR, s * BLK_SECTOR + BLK_SECTOR), off + 4);
     off += 4 + BLK_SECTOR;
   }
-  if (opts.clear) dirtyBitmap.fill(0);
   return out;
 }
 
@@ -91,7 +120,7 @@ export function dirtyBitmapBytes(capacityBytes) {
 export function markDirty(dirtyBitmap, sector, count) {
   for (let i = 0; i < count; i++) {
     const s = sector + i;
-    dirtyBitmap[s >> 3] |= 1 << (s & 7);
+    orByte(dirtyBitmap, s >> 3, 1 << (s & 7));
   }
 }
 
@@ -99,7 +128,7 @@ export function markDirty(dirtyBitmap, sector, count) {
 export function dirtySectorCount(dirtyBitmap) {
   let n = 0;
   for (let i = 0; i < dirtyBitmap.length; i++) {
-    let b = dirtyBitmap[i];
+    let b = loadByte(dirtyBitmap, i);
     while (b) {
       n += b & 1;
       b >>= 1;

@@ -49,6 +49,7 @@ function makeBlk(image, opts = {}) {
     readOnly: opts.readOnly,
     dirtyBitmap: opts.dirtyBitmap,
     onDirty: () => dirtyCalls.push(1),
+    forwardNotify: opts.forwardNotify,
   });
   return { dev, memory, shared, irqs, dirtyCalls };
 }
@@ -168,5 +169,20 @@ describe("BlkDevice", () => {
 
     const { data } = readSector(1);
     expect(data[0]).toBe(0xef);
+  });
+
+  it("forwards the kick instead of servicing when forwardNotify is set", () => {
+    const image = new Uint8Array(BLK_SECTOR);
+    const forwarded = [];
+    const { writeSector, statusOf } = makeBlkWithRing(image, {
+      readOnly: false,
+      forwardNotify: (d, q) => forwarded.push([d, q]),
+    });
+    const payload = new Uint8Array(BLK_SECTOR);
+    payload[0] = 0x42;
+    const { status } = writeSector(0, payload);
+    expect(forwarded).toEqual([[3, 0]]);
+    expect(image[0]).toBe(0);
+    expect(statusOf(status)).toBe(0xff); // status slot untouched — not serviced here
   });
 });
