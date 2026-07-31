@@ -12,70 +12,57 @@
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic).
 //
 //   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/blk-rw-smoke.mjs
-import { installWebShims, terminateAllWorkers } from "./web-shims.mjs";
-import { bootLinux } from "../../boot.js";
-import { MemVfs } from "../../ninep/mem-vfs.js";
+import { bootNode } from "./boot-node.mjs";
 import { applyDirtyOverlay, BLK_SECTOR } from "../../virtio/blk-disk.js";
-import { makeConsoleSession } from "../../session.js";
-
-installWebShims();
 
 const STATE_BYTES = 16 * 1024 * 1024; // 16 MiB is enough for mkfs + a marker
 const MARKER = "pc-linux-g1-alive";
 
-function artifactsBase() {
-  const raw =
-    process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;
-  return raw.endsWith("/") ? raw : raw + "/";
-}
-
 async function bootWithState(image, { onDirty } = {}) {
-  const base = artifactsBase();
-  const vfs = new MemVfs();
-  const handle = await bootLinux({
-    vfs,
-    vmlinuxUrl: new URL("vmlinux.wasm", base).href,
-    initrdUrl: new URL("initramfs.cpio.gz", base).href,
+  return bootNode({
+    nix: false,
     // No squashfs — busybox-only; we only need /dev/vdb for this gate.
     stateDisk: { image, onDirty },
     onLog: (t) => {
       if (process.env.BLK_RW_SMOKE_LOG) process.stderr.write(t + "\n");
     },
   });
-  const session = makeConsoleSession(handle.console(0));
-  return { handle, session };
 }
 
-async function runGuest(session, script, expectRe) {
-  const out = [];
-  const unsub = session.onData((b) => {
-    out.push(typeof b === "string" ? b : new TextDecoder().decode(b));
-  });
-  session.write(script + "\n");
-  const deadline = Date.now() + 120_000;
-  let buf = "";
-  while (Date.now() < deadline) {
-    buf = out.join("");
-    if (expectRe.test(buf)) {
-      unsub();
-      return buf;
-    }
-    await new Promise((r) => setTimeout(r, 100));
+async function runGuest(session, script, expectRe, ms = 120_000) {
+  // Marker must not be a substring of the echoed command line.
+  session.send(script + "\n");
+  if (!(await session.waitForOutput(expectRe, ms))) {
+    throw new Error(
+      "timeout waiting for " + expectRe + "\n---\n" + session.snapshot().slice(-2000),
+    );
   }
-  unsub();
-  throw new Error("timeout waiting for " + expectRe + "\n---\n" + buf.slice(-2000));
+  return session.snapshot();
 }
 
 async function main() {
   const image1 = new Uint8Array(STATE_BYTES);
   let dirtyN = 0;
-  const { handle: h1, session: s1 } = await bootWithState(image1, {
+  const s1 = await bootWithState(image1, {
     onDirty: () => {
       dirtyN++;
     },
   });
 
   try {
+    let reached;
+    try {
+      reached = await s1.waitForPrompt(90_000);
+    } catch (e) {
+      if (e.message === "KERNEL_PANIC") {
+        console.error("INCONCLUSIVE — kernel panic on boot; re-run");
+        s1.kill();
+        process.exit(2);
+      }
+      throw e;
+    }
+    if (!reached) throw new Error("no prompt");
+
     await runGuest(
       s1,
       [
@@ -93,23 +80,23 @@ async function main() {
     );
   } catch (e) {
     console.error("phase1 failed:", e.message || e);
-    h1.kill();
+    s1.kill();
     process.exit(1);
   }
 
-  if (!h1.hasStateDisk()) {
+  if (!s1.handle.hasStateDisk()) {
     console.error("FAIL: hasStateDisk() false");
-    h1.kill();
+    s1.kill();
     process.exit(1);
   }
-  const blob = h1.saveDisk();
+  const blob = s1.handle.saveDisk();
   if (!blob || blob.size < 16) {
     console.error("FAIL: saveDisk() returned empty overlay (dirties=%d)", dirtyN);
-    h1.kill();
+    s1.kill();
     process.exit(1);
   }
   const overlay = new Uint8Array(await blob.arrayBuffer());
-  h1.kill();
+  s1.kill();
 
   // Reboot with dirties applied onto a fresh zero image.
   const image2 = new Uint8Array(STATE_BYTES);
@@ -122,8 +109,21 @@ async function main() {
     process.exit(1);
   }
 
-  const { handle: h2, session: s2 } = await bootWithState(image2);
+  const s2 = await bootWithState(image2);
   try {
+    let reached;
+    try {
+      reached = await s2.waitForPrompt(90_000);
+    } catch (e) {
+      if (e.message === "KERNEL_PANIC") {
+        console.error("INCONCLUSIVE — kernel panic on reboot; re-run");
+        s2.kill();
+        process.exit(2);
+      }
+      throw e;
+    }
+    if (!reached) throw new Error("no prompt on reboot");
+
     const out = await runGuest(
       s2,
       [
@@ -136,22 +136,20 @@ async function main() {
     );
     if (!out.includes(MARKER)) {
       console.error("FAIL: marker not found after reboot\n", out.slice(-1500));
-      h2.kill();
+      s2.kill();
       process.exit(1);
     }
   } catch (e) {
     console.error("phase2 failed:", e.message || e);
-    h2.kill();
+    s2.kill();
     process.exit(1);
   }
-  h2.kill();
-  terminateAllWorkers();
+  s2.kill();
   console.log("PASS: RW virtio-blk ext2 persists across saveDisk + reboot (G1/G3)");
   process.exit(0);
 }
 
 main().catch((e) => {
   console.error(e);
-  terminateAllWorkers();
   process.exit(2);
 });
