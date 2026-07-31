@@ -7,7 +7,8 @@ import { MemVfs } from "../../ninep/mem-vfs.js";
 // Artifacts: default to the env var, else the repo-relative web/artifacts dir.
 // CI sets LINUX_WASM_ARTIFACTS to the `nix build` output dir.
 const ARTIFACTS =
-  process.env.LINUX_WASM_ARTIFACTS || new URL("../web/artifacts/", import.meta.url).href;
+  process.env.LINUX_WASM_ARTIFACTS ||
+  new URL("../web/artifacts/", import.meta.url).href;
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,7 +37,11 @@ export async function bootNode(opts = {}) {
   const tap = (n) => {
     if (tapped.has(n)) return;
     transcripts.set(n, "");
-    handle.console(n).onData((bytes) => transcripts.set(n, transcripts.get(n) + dec.decode(bytes)));
+    handle
+      .console(n)
+      .onData((bytes) =>
+        transcripts.set(n, transcripts.get(n) + dec.decode(bytes)),
+      );
     tapped.add(n);
   };
 
@@ -101,5 +106,8 @@ export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
       "> $HOME/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
   );
   const ok = await session.waitForOutput(/LOCAL_NIX_CACHE_READY=0/, timeoutMs);
-  if (!ok) throw new Error("primeLocalNixCache: guest did not confirm the nix.conf write");
+  if (!ok)
+    throw new Error(
+      "primeLocalNixCache: guest did not confirm the nix.conf write",
+    );
 }
