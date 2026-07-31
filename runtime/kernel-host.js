@@ -114,21 +114,36 @@ export const linux = async ({
   // #177: RW state disk — full image SAB + dirty-sector bitmap SAB. Writes from
   // any worker mark bits; saveDisk() on this thread packs CBHD without a
   // worker round-trip (the image bytes live in shared memory).
+  //
+  // The kernel ALWAYS registers VW_DEV_BLK_STATE, so every worker must see the
+  // SAME backing bytes (same squashfs rule). When the caller omits stateDisk
+  // (CI harness / busybox smokes), we still allocate a tiny shared stub so
+  // multi-worker virtio kicks cannot diverge. Bootstrap treats stub-sized
+  // disks as "no install" (legacy overlay). hasStateDisk/saveDisk stay false
+  // for stubs — only a caller-provided image is persistable.
+  const STATE_STUB_BYTES = 1024 * 1024; // 1 MiB — below bootstrap install threshold
   let state_sab = null;
   let state_dirty_sab = null;
+  let state_persistable = false;
   /** @type {(() => void) | null} */
   let state_on_dirty = null;
-  if (stateDisk && stateDisk.image && stateDisk.image.byteLength) {
-    const src =
-      stateDisk.image instanceof Uint8Array
-        ? stateDisk.image
-        : new Uint8Array(stateDisk.image);
-    // Round capacity down to a whole sector so virtio-blk capacity matches.
-    const bytes = Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR;
+  {
+    const callerImg = stateDisk && stateDisk.image;
+    const src = callerImg
+      ? callerImg instanceof Uint8Array
+        ? callerImg
+        : new Uint8Array(callerImg)
+      : null;
+    const bytes =
+      src && src.byteLength
+        ? Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR
+        : STATE_STUB_BYTES;
     state_sab = new SharedArrayBuffer(bytes);
-    new Uint8Array(state_sab).set(src.subarray(0, bytes));
+    if (src && bytes > 0) new Uint8Array(state_sab).set(src.subarray(0, bytes));
     state_dirty_sab = new SharedArrayBuffer(dirtyBitmapBytes(bytes));
-    state_on_dirty = typeof stateDisk.onDirty === "function" ? stateDisk.onDirty : null;
+    state_persistable = !!(src && bytes > 0);
+    state_on_dirty =
+      state_persistable && typeof stateDisk?.onDirty === "function" ? stateDisk.onDirty : null;
   }
 
   /// Dict of online CPUs.
@@ -809,16 +824,16 @@ export const linux = async ({
 
     // #177: pack dirty sectors from the RW state disk into a CBHD Blob (Machines
     // contract). Clears the dirty bitmap so the next save is incremental.
-    // Returns null when no state disk was attached.
+    // Returns null when no persistable state disk was attached (harness stub).
     saveDisk: () => {
-      if (!state_sab || !state_dirty_sab) return null;
+      if (!state_persistable || !state_sab || !state_dirty_sab) return null;
       const image = new Uint8Array(state_sab);
       const dirty = new Uint8Array(state_dirty_sab);
       const bytes = packDirtySectors(image, dirty, { clear: true });
       return new Blob([bytes]);
     },
 
-    /** True when a RW state disk was attached at boot. */
-    hasStateDisk: () => !!state_sab,
+    /** True when a caller-provided (persistable) RW state disk was attached. */
+    hasStateDisk: () => state_persistable,
   };
 };

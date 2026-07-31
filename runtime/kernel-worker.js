@@ -526,15 +526,13 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         });
         publish_raised_irqs_addr();
       } else if (id === VW_DEV_BLK_STATE) {
-        // #177: RW installed-system disk. Image + dirty bitmap are SABs shared
-        // with every worker (any may service the vring) and with the main
-        // thread (saveDisk packs the journal). When the host omitted stateDisk
-        // (busybox-only smoke / legacy boot), serve a tiny zero stub — a
-        // 0-capacity virtio-blk can hang the guest probe before consoles come up.
+        // #177: RW installed-system disk. Image + dirty bitmap are SABs from
+        // the host init message (shared across every worker). Host always
+        // provides at least a 1 MiB stub when the caller omitted stateDisk —
+        // never allocate a private buffer here (mkfs on one worker / mount on
+        // another would see different bytes).
         const image =
-          stateDiskImage && stateDiskImage.byteLength
-            ? stateDiskImage
-            : new Uint8Array(1024 * 1024);
+          stateDiskImage && stateDiskImage.byteLength ? stateDiskImage : new Uint8Array(0);
         d = new BlkDevice({
           ...common,
           image,

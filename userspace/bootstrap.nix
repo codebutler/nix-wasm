@@ -86,65 +86,77 @@ pkgs.writeText "init" ''
   }
 
   if [ -b /dev/vdb ]; then
-    # Try to mount an already-installed state disk.
-    if mount -t ext4 -o rw /dev/vdb /mnt/state 2>/dev/null \
-       || mount -t ext2 -o rw /dev/vdb /mnt/state 2>/dev/null; then
-      if [ -f "/mnt/state$STAMP" ] && [ -d /mnt/state/nix/store ]; then
-        echo "pc: installed system on /dev/vdb — mounting /nix directly"
-        # Bind the store tree to /nix (state disk root holds /nix + /home + stamp).
-        mount --bind /mnt/state/nix /nix \
-          || { echo "pc: bind /nix from state disk failed"; mount_seed_overlay; }
-      else
-        # Mounted but unstamped / incomplete — treat as needs (re)install.
-        umount /mnt/state 2>/dev/null || true
-        NEED_INSTALL=1
-      fi
+    # /sys/block/vdb/size is capacity in 512-byte sectors. The host attaches a
+    # 1 MiB shared stub when no real stateDisk was passed (CI harness); that is
+    # far too small to hold the seed store. Treat anything under 64 MiB as
+    # "not an install disk" and keep the legacy squashfs overlay so existing
+    # smokes keep working. pc's real state disk is 512 MiB.
+    vdb_sectors=$(cat /sys/block/vdb/size 2>/dev/null || echo 0)
+    # 64 MiB = 131072 * 512-byte sectors
+    if [ "$vdb_sectors" -lt 131072 ]; then
+      echo "pc: /dev/vdb harness stub (${vdb_sectors} sectors) — legacy overlay"
+      mount_seed_overlay
     else
-      NEED_INSTALL=1
-    fi
-
-    if [ -n "$NEED_INSTALL" ]; then
-      echo "pc: installing seed /nix onto /dev/vdb (first boot / reset)"
-      # busybox mkfs.ext2 (CONFIG_MKFS_EXT2=y). EXT4 driver mounts the result.
-      mkfs.ext2 -F -q /dev/vdb \
-        || { echo "pc: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
-    fi
-
-    if [ -n "$NEED_INSTALL" ]; then
+      # Try to mount an already-installed state disk.
       if mount -t ext4 -o rw /dev/vdb /mnt/state 2>/dev/null \
          || mount -t ext2 -o rw /dev/vdb /mnt/state 2>/dev/null; then
-        mkdir -p /mnt/state/nix /mnt/state/home /mnt/state/var
-        if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
-          # Copy seed store + nix db/profiles onto the state disk. This is the
-          # install step — after this, squashfs is irrelevant until Reset.
-          echo "pc: copying seed store (this may take a while)…"
-          cp -a /mnt/nix-ro/. /mnt/state/nix/ \
-            || { echo "pc: seed copy failed"; umount /mnt/nix-ro 2>/dev/null; umount /mnt/state 2>/dev/null; mount_seed_overlay; NEED_INSTALL=; }
-          umount /mnt/nix-ro 2>/dev/null || true
+        if [ -f "/mnt/state$STAMP" ] && [ -d /mnt/state/nix/store ]; then
+          echo "pc: installed system on /dev/vdb — mounting /nix directly"
+          # Bind the store tree to /nix (state disk root holds /nix + /home + stamp).
+          mount --bind /mnt/state/nix /nix \
+            || { echo "pc: bind /nix from state disk failed"; mount_seed_overlay; }
         else
-          echo "pc: seed squashfs missing — cannot install"
+          # Mounted but unstamped / incomplete — treat as needs (re)install.
           umount /mnt/state 2>/dev/null || true
+          NEED_INSTALL=1
+        fi
+      else
+        NEED_INSTALL=1
+      fi
+
+      if [ -n "$NEED_INSTALL" ]; then
+        echo "pc: installing seed /nix onto /dev/vdb (first boot / reset)"
+        # busybox mkfs.ext2 (CONFIG_MKFS_EXT2=y). EXT4 driver mounts the result.
+        mkfs.ext2 -F -q /dev/vdb \
+          || { echo "pc: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
+      fi
+
+      if [ -n "$NEED_INSTALL" ]; then
+        if mount -t ext4 -o rw /dev/vdb /mnt/state 2>/dev/null \
+           || mount -t ext2 -o rw /dev/vdb /mnt/state 2>/dev/null; then
+          mkdir -p /mnt/state/nix /mnt/state/home /mnt/state/var
+          if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
+            # Copy seed store + nix db/profiles onto the state disk. This is the
+            # install step — after this, squashfs is irrelevant until Reset.
+            echo "pc: copying seed store (this may take a while)…"
+            cp -a /mnt/nix-ro/. /mnt/state/nix/ \
+              || { echo "pc: seed copy failed"; umount /mnt/nix-ro 2>/dev/null; umount /mnt/state 2>/dev/null; mount_seed_overlay; NEED_INSTALL=; }
+            umount /mnt/nix-ro 2>/dev/null || true
+          else
+            echo "pc: seed squashfs missing — cannot install"
+            umount /mnt/state 2>/dev/null || true
+            mount_seed_overlay
+            NEED_INSTALL=
+          fi
+        else
+          echo "pc: cannot mount freshly formatted /dev/vdb"
           mount_seed_overlay
           NEED_INSTALL=
         fi
-      else
-        echo "pc: cannot mount freshly formatted /dev/vdb"
-        mount_seed_overlay
-        NEED_INSTALL=
+      fi
+
+      if [ -n "$NEED_INSTALL" ]; then
+        # Stamp + bind /nix from the new install.
+        date -u +"installed=%Y-%m-%dT%H:%M:%SZ" > "/mnt/state$STAMP" 2>/dev/null \
+          || echo "installed=1" > "/mnt/state$STAMP"
+        sync
+        mount --bind /mnt/state/nix /nix \
+          || { echo "pc: post-install bind /nix failed"; mount_seed_overlay; }
+        echo "pc: install complete — /nix is on /dev/vdb"
       fi
     fi
-
-    if [ -n "$NEED_INSTALL" ]; then
-      # Stamp + bind /nix from the new install.
-      date -u +"installed=%Y-%m-%dT%H:%M:%SZ" > "/mnt/state$STAMP" 2>/dev/null \
-        || echo "installed=1" > "/mnt/state$STAMP"
-      sync
-      mount --bind /mnt/state/nix /nix \
-        || { echo "pc: post-install bind /nix failed"; mount_seed_overlay; }
-      echo "pc: install complete — /nix is on /dev/vdb"
-    fi
   else
-    # No state disk (busybox harness / pre-ABI-12 engine): legacy overlay.
+    # No state disk (pre-ABI-12 engine): legacy overlay.
     mount_seed_overlay
   fi
 
