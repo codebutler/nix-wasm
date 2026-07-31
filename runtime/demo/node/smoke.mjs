@@ -33,6 +33,11 @@ try {
     throw e;
   }
   check(reached, "shell prompt reached");
+  if (!reached) {
+    console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));
+    s.kill();
+    process.exit(1);
+  }
   // Offline CI: substitute from the local /nix-cache (the baked guest config is
   // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
   await primeLocalNixCache(s);
