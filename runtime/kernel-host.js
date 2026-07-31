@@ -128,20 +128,52 @@ export const linux = async ({
   /** @type {(() => void) | null} */
   let state_on_dirty = null;
   {
+    // Prefer the caller's SharedArrayBuffer in place — a 1–2 GiB state disk
+    // must not be duplicated (Uint8Array + SAB copy OOMs the host under the
+    // ~2 GiB guest RAM wasm Memory). Only copy when the buffer isn't already
+    // a sector-aligned SAB (or a full-buffer Uint8Array view over one).
     const callerImg = stateDisk && stateDisk.image;
-    const src = callerImg
-      ? callerImg instanceof Uint8Array
-        ? callerImg
-        : new Uint8Array(callerImg)
-      : null;
-    const bytes =
-      src && src.byteLength
-        ? Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR
-        : STATE_STUB_BYTES;
-    state_sab = new SharedArrayBuffer(bytes);
-    if (src && bytes > 0) new Uint8Array(state_sab).set(src.subarray(0, bytes));
-    state_dirty_sab = new SharedArrayBuffer(dirtyBitmapBytes(bytes));
-    state_persistable = !!(src && bytes > 0);
+    let sab = null;
+    let persistable = false;
+    if (callerImg instanceof SharedArrayBuffer) {
+      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
+      if (bytes > 0 && bytes === callerImg.byteLength) {
+        sab = callerImg;
+        persistable = true;
+      } else if (bytes > 0) {
+        sab = new SharedArrayBuffer(bytes);
+        new Uint8Array(sab).set(new Uint8Array(callerImg, 0, bytes));
+        persistable = true;
+      }
+    } else if (
+      callerImg instanceof Uint8Array &&
+      callerImg.buffer instanceof SharedArrayBuffer &&
+      callerImg.byteOffset === 0 &&
+      callerImg.byteLength === callerImg.buffer.byteLength
+    ) {
+      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
+      if (bytes > 0 && bytes === callerImg.byteLength) {
+        sab = callerImg.buffer;
+        persistable = true;
+      }
+    }
+    if (!sab) {
+      const src = callerImg
+        ? callerImg instanceof Uint8Array
+          ? callerImg
+          : new Uint8Array(callerImg)
+        : null;
+      const bytes =
+        src && src.byteLength
+          ? Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR
+          : STATE_STUB_BYTES;
+      sab = new SharedArrayBuffer(bytes);
+      if (src && bytes > 0) new Uint8Array(sab).set(src.subarray(0, bytes));
+      persistable = !!(src && bytes > 0);
+    }
+    state_sab = sab;
+    state_dirty_sab = new SharedArrayBuffer(dirtyBitmapBytes(sab.byteLength));
+    state_persistable = persistable;
     state_on_dirty =
       state_persistable && typeof stateDisk?.onDirty === "function" ? stateDisk.onDirty : null;
   }

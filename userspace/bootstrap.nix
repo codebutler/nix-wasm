@@ -90,7 +90,7 @@ pkgs.writeText "init" ''
     # 1 MiB shared stub when no real stateDisk was passed (CI harness); that is
     # far too small to hold the seed store. Treat anything under 64 MiB as
     # "not an install disk" and keep the legacy squashfs overlay so existing
-    # smokes keep working. pc's real state disk is 512 MiB.
+    # smokes keep working. pc's real state disk is ≥1 GiB (see DEFAULT_STATE_DISK_BYTES).
     vdb_sectors=$(cat /sys/block/vdb/size 2>/dev/null || echo 0)
     # 64 MiB = 131072 * 512-byte sectors
     if [ "$vdb_sectors" -lt 131072 ]; then
@@ -117,7 +117,12 @@ pkgs.writeText "init" ''
       if [ -n "$NEED_INSTALL" ]; then
         echo "pc: installing seed /nix onto /dev/vdb (first boot / reset)"
         # busybox mkfs.ext2 (CONFIG_MKFS_EXT2=y). EXT4 driver mounts the result.
-        mkfs.ext2 -F -q /dev/vdb \
+        # Seed squashfs carries ~100k+ inodes (one per store path). Default
+        # bytes-per-inode for ≥512 MiB disks is 16384 → only ~32k inodes on a
+        # 512 MiB vdb, and cp then dies with ENOSPC (inode exhaustion). Force
+        # -i 4096 (minimum for 4k blocks) so a 512 MiB disk gets ~131k inodes.
+        # -m 1 keeps a small reserved pool without eating install headroom.
+        mkfs.ext2 -F -q -i 4096 -m 1 /dev/vdb \
           || { echo "pc: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
       fi
 
@@ -128,9 +133,37 @@ pkgs.writeText "init" ''
           if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
             # Copy seed store + nix db/profiles onto the state disk. This is the
             # install step — after this, squashfs is irrelevant until Reset.
+            #
+            # Path-at-a-time + drop_caches: a single `cp -a` of the multi-hundred-MB
+            # seed fills the guest page cache and OOMs (stack alloc errno -12 /
+            # kill init) before the disk fills. Sync + drop_caches between store
+            # paths keeps the buddy allocator breathing under CONFIG_BOOT_MEM_PAGES.
             echo "pc: copying seed store (this may take a while)…"
-            cp -a /mnt/nix-ro/. /mnt/state/nix/ \
-              || { echo "pc: seed copy failed"; umount /mnt/nix-ro 2>/dev/null; umount /mnt/state 2>/dev/null; mount_seed_overlay; NEED_INSTALL=; }
+            mkdir -p /mnt/state/nix/store
+            COPY_FAIL=
+            for p in /mnt/nix-ro/store/*; do
+              [ -e "$p" ] || continue
+              cp -a "$p" /mnt/state/nix/store/ || { COPY_FAIL=1; break; }
+              # Drop page cache after every store path. A single `cp -a` of the
+              # multi-hundred-MB seed (or even every-16th drops) fills ~1.5 GiB
+              # of file cache and OOMs PID 1 (stack alloc errno -12). Avoid
+              # `sync` here — sync itself needs contiguous RAM under pressure.
+              echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+            done
+            if [ -z "$COPY_FAIL" ]; then
+              for p in /mnt/nix-ro/*; do
+                base=$(basename "$p")
+                [ "$base" = store ] && continue
+                cp -a "$p" /mnt/state/nix/ || { COPY_FAIL=1; break; }
+              done
+            fi
+            if [ -n "$COPY_FAIL" ]; then
+              echo "pc: seed copy failed"
+              umount /mnt/nix-ro 2>/dev/null
+              umount /mnt/state 2>/dev/null
+              mount_seed_overlay
+              NEED_INSTALL=
+            fi
             umount /mnt/nix-ro 2>/dev/null || true
           else
             echo "pc: seed squashfs missing — cannot install"
