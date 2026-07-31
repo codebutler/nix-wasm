@@ -194,6 +194,17 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// single-task A2 smokes never switch between two user tasks, so never hit it).
   let own_pt_base = 0;
 
+  /// #175 (MMU fork+exec): set true immediately before the kernel's wasm_collapse()
+  /// export is called to abandon the user call stack after exec() (see
+  /// wasm_user_mode_tail below). wasm_collapse() raises a GENUINE wasm trap
+  /// (unreachable), which — unlike the legacy host JS Trap throw — is NOT catchable
+  /// by user wasm-EH catch/catch_all (nix's fork child wraps execve in catch(...),
+  /// which SWALLOWED the JS-throw collapse → old code on the new address space →
+  /// SIGSEGV, #175). The trap surfaces at run_user_entry as a RuntimeError; this flag
+  /// tells user_executable_error it is the deliberate exec collapse, not a crash.
+  /// Only MMU-fork kernels export wasm_collapse; NOMMU keeps the JS-throw path.
+  let reload_pending = false;
+
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
     constructor(kind) {
@@ -720,6 +731,24 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     /// pc (new exec ABI): `bin_start`/`bin_end` are now a byte range in the
     /// SHARED kernel memory (binfmt_wasm places the user binary there); compile
     /// it straight from that range. No host Module cache / key resolution.
+    ///
+    /// RETURNS 0 when the image is loaded, nonzero when the host REJECTS it —
+    /// #179 hardening. A binary the host cannot run (e.g. the software-MMU
+    /// instrumentation pass refuses one that does not export __get_tls_base) used
+    /// to throw here; the rejection then surfaced from the promise chain with no
+    /// kernel context, and raise_exception() -> make_task_dead() PANICKED the
+    /// guest ("Aiee, killing interrupt handler!") — one bad user binary killed the
+    /// system. Now start_thread() sees the status and kills just that task (see
+    /// kernel.nix postPatch). NOT an ENGINE_ABI change: only an existing import's
+    /// return type moves, so an old kernel discards the value and a new kernel on
+    /// an old engine reads undefined-coerced-to-0 = "loaded" — i.e. both mixes keep
+    /// the previous behaviour. See abi.js's NOT-A-BUMP note.
+    ///
+    /// Only SYNCHRONOUSLY detectable rejections are reported: the instrument pass
+    /// and the table-size probe run inline here, whereas WebAssembly.compile is a
+    /// promise, so a malformed-module compile error still takes the old late path.
+    /// That is the bound of this fix, not an oversight — #179's class (a missing
+    /// required import/export) is exactly the synchronous one.
     wasm_load_executable: (bin_start, bin_end, data_start, table_start, pt_base) => {
       reset_syscall_trace(); // pc (#139): re-arm the per-exec syscall-trace budget
       // pc (#130): a fresh program image — drop the old image's dynamic-linking
@@ -743,35 +772,57 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // declaration for the design). NOMMU (pt_base 0) keeps its original
       // byte-identical path.
       let table_initial;
-      if (Number(pt_base || 0) !== 0) {
-        const key = exec_hash(bytes);
-        const hit = exec_modules.get(key);
-        if (hit) {
-          user_executable = Promise.resolve(hit.module);
-          table_initial = hit.table_initial;
-        } else {
-          if (!isInstrumented(bytes)) {
-            bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+      try {
+        if (Number(pt_base || 0) !== 0) {
+          const key = exec_hash(bytes);
+          const hit = exec_modules.get(key);
+          if (hit) {
+            user_executable = Promise.resolve(hit.module);
+            table_initial = hit.table_initial;
+          } else {
+            if (!isInstrumented(bytes)) {
+              bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+            }
+            table_initial = table_import_initial(bytes);
+            user_executable = WebAssembly.compile(bytes);
+            const ti = table_initial;
+            user_executable.then(
+              (m) => {
+                exec_modules.set(key, { module: m, table_initial: ti });
+                port.postMessage({
+                  method: "exec_module_add",
+                  hash: key,
+                  module: m,
+                  table_initial: ti,
+                });
+              },
+              () => {}, // compile errors surface via the normal await path
+            );
           }
-          table_initial = table_import_initial(bytes);
+        } else {
           user_executable = WebAssembly.compile(bytes);
-          const ti = table_initial;
-          user_executable.then(
-            (m) => {
-              exec_modules.set(key, { module: m, table_initial: ti });
-              port.postMessage({
-                method: "exec_module_add",
-                hash: key,
-                module: m,
-                table_initial: ti,
-              });
-            },
-            () => {}, // compile errors surface via the normal await path
-          );
+          table_initial = table_import_initial(bytes);
         }
-      } else {
-        user_executable = WebAssembly.compile(bytes);
-        table_initial = table_import_initial(bytes);
+      } catch (e) {
+        // #179: the host cannot run this image. Report it to start_thread instead
+        // of throwing — a throw from here escapes into the kernel's own wasm
+        // frames and only lands later, contextless, in raise_exception() ->
+        // make_task_dead() -> panic("Aiee, killing interrupt handler!"). Leave NO
+        // half-loaded image behind (the kernel will not set _TIF_RELOAD_PROGRAM,
+        // but be explicit) and let the kernel kill just the execing task.
+        console.error(
+          `[user-exec ${runner_name}] rejecting exec image (${bytes.length} bytes): ${e}`,
+        );
+        // A WebAssembly.compile() may already be in flight (the throw can come
+        // from the table probe that runs after it). Nobody will await it now, so
+        // swallow its rejection or the runtime reports an unhandled rejection on
+        // top of the real, already-logged cause.
+        if (user_executable) user_executable.catch(() => {});
+        user_executable = null;
+        user_executable_params = null;
+        user_executable_instance = null;
+        user_executable_imports = null;
+        return 1;
       }
       user_executable_params = {
         data_start: data_start,
@@ -789,14 +840,29 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       // kernel exits back to userland, which will termintate the user executable with a Trap.
       user_executable_instance = null;
       user_executable_imports = null;
+      return 0; // #179: image loaded (see the doc comment above)
     },
 
     /// Handle user mode return (e.g. from syscall) that should not proceed normally. (Not called on normal returns.)
     wasm_user_mode_tail: (flow) => {
       if (flow == -1) {
-        // Exec has been called and we should not return from the syscall. Trap() to collapse the call stack of the user
-        // executable. When swallowed, run the new user executable that was already preloaded by wasm_load_executable().
+        // Exec has been called and we should not return from the syscall. Collapse the call stack of the user
+        // executable. When collapsed, run the new user executable that was already preloaded by wasm_load_executable().
         // This takes precedence of signal handlers or signal return - no reason to run any old user code!
+        if (vmlinux_instance.exports.wasm_collapse) {
+          // #175: MMU-fork kernels export wasm_collapse(), which raises a GENUINE wasm trap
+          // (unreachable). Unlike a host JS throw (below), a real trap is NOT catchable by user
+          // wasm-EH catch/catch_all — so nix's fork child (execve wrapped in catch(...) under
+          // -fwasm-exceptions) can no longer SWALLOW the exec collapse and scribble old code onto
+          // the freshly-exec'd address space (the #175 SIGSEGV). reload_pending tells the run-loop
+          // .catch this RuntimeError is the deliberate collapse. See probes: a trap stays
+          // uncatchable across the __wasm_syscall_N and wasm_user_mode_tail JS import frames.
+          reload_pending = true;
+          vmlinux_instance.exports.wasm_collapse(); // never returns (traps)
+          throw new Error("wasm_collapse() returned (it should trap)!");
+        }
+        // Legacy NOMMU path: no catch_all is ever live across exec (posix_spawn execs from a C
+        // clone-thunk), so the catchable host JS throw propagates cleanly to the run-loop .catch.
         throw new Trap("reload_program");
       } else if (flow >= 1 && flow <= 3) {
         // First, handle any signal (possibly stacked). Then, handle any signal return (happens after stacked signals).
@@ -961,13 +1027,24 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // We are in a new runner that should duplicate the user executable. Happens when someone calls clone().
         // pc (new exec ABI): the binary lives as a byte range in the SHARED
         // kernel memory; compile it straight from there (no host Module cache).
-        host_callbacks.wasm_load_executable(
+        const rejected = host_callbacks.wasm_load_executable(
           message.user_executable.bin_start,
           message.user_executable.bin_end,
           message.user_executable.data_start,
           message.user_executable.table_start,
           message.user_executable.pt_base,
         );
+        // #179: unreachable in practice — a clone re-loads the image the PARENT
+        // already loaded successfully, and the pass is deterministic. There is no
+        // kernel context here to reject into (this is a worker message, not the
+        // execve syscall), so just say so loudly; the setup below then fails on the
+        // absent module through the existing user_executable_error path.
+        if (rejected) {
+          console.error(
+            `[user-exec ${runner_name}] clone re-load REJECTED the parent's image — ` +
+              "this should be impossible (the parent loaded it and the pass is deterministic)",
+          );
+        }
         // pc (#130): a cloning parent's dynamic-linking snapshot — replayed
         // after the user instance is created (wasm_load_executable above just
         // reset it, so set it after).
@@ -1525,19 +1602,31 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             //
             // pc (#166, MMU flip): the ctors run BEFORE _start -> __libc_start_main -> __init_tp installs the real
             // thread pointer, so __musl_tp is still 0 here. Any TLS-touching ctor (libc++ iostream init ->
-            // __uselocale -> __pthread_self()->locale) then dereferences a null struct pthread — masked on NOMMU
-            // (page 0 is readable linear memory), a SIGSEGV under CONFIG_MMU that took down every exec'd binary in
-            // startup. Seed a valid main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when
-            // present); __init_tp later installs the real main pthread. Guarded so an older guest libc without the
-            // export just keeps the pre-fix behaviour (fine on NOMMU).
-            // pc (#166): seed a valid main-thread pointer before ctors (see musl
-            // __set_thread_area.c __wasm_early_tp_init). Ctors run before _start ->
-            // __init_tp, so a TLS-touching ctor (libc++ iostream -> __uselocale)
-            // would otherwise deref a null struct pthread — NOMMU-masked, SIGSEGV
-            // under the software MMU. Guarded so an older guest libc without the
-            // export keeps the pre-fix behaviour.
+            // __uselocale -> __pthread_self()->locale, or plain `errno` at offsetof(struct pthread, errno_val)
+            // == 0x1c) then dereferences a null struct pthread — masked on NOMMU (page 0 is readable linear
+            // memory), a SIGSEGV under CONFIG_MMU that took down every exec'd binary in startup. Seed a valid
+            // main-thread pointer first (musl __set_thread_area.c __wasm_early_tp_init, when present);
+            // __init_tp later installs the real main pthread. Guarded so an older guest libc without the export
+            // just keeps the pre-fix behaviour (fine on NOMMU) — but LOUD on the MMU, see #179 below.
             if (instance.exports.__wasm_early_tp_init) {
               instance.exports.__wasm_early_tp_init();
+            } else if (user_executable_params.pt_base) {
+              // pc (#179): on the software MMU the seed is NOT optional — without
+              // it the first TLS-touching ctor stores through a null `struct
+              // pthread` (libc++ ios_base::Init -> errno at VA 0x1c) and the
+              // process SIGSEGVs before _start. The permissive guard above exists
+              // for older NOMMU libcs, so it silently swallowed the 57MB clang's
+              // missing export (toolchain/guest-clang.nix drops --export-all, and
+              // its hand-written export list had drifted) and #179 read as
+              // "clang fails under the softmmu translate". Say so out loud
+              // instead: a startup crash in the very next ctor is now labelled.
+              // Diagnostic only — behaviour is unchanged, so no ENGINE_ABI bump.
+              console.error(
+                "[user-exec] MMU guest image lacks __wasm_early_tp_init: its ctors will " +
+                  "run with a NULL thread pointer and any TLS/errno touch will SIGSEGV " +
+                  "before _start. Relink it with toolchain/wasm-host-exports.nix " +
+                  "(nix-wasm#179).",
+              );
             }
             if (instance.exports.__wasm_call_ctors) {
               instance.exports.__wasm_call_ctors();
@@ -1553,6 +1642,15 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       };
 
       const user_executable_error = (error) => {
+        if (reload_pending) {
+          // #175: the deliberate exec stack-collapse arrived as an UNCATCHABLE wasm trap
+          // (RuntimeError from the kernel's wasm_collapse()). Consume the flag and run the new
+          // user code already loaded by wasm_load_executable(). (MMU-fork kernels; NOMMU uses the
+          // catchable "reload_program" Trap below.) A trap re-thrown from the signal-delivery
+          // try/catch — exec() from inside a signal handler — also lands here with this flag set.
+          reload_pending = false;
+          return user_executable_chain();
+        }
         if (error instanceof Trap) {
           if (error.kind == "reload_program") {
             // Someone called exec and the currently executing code should stop. We should run the new user code already

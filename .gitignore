@@ -7,5 +7,7 @@ result-*
 # CONFIG_MMU=y kernel probe tree (reproducible: kernelSrc + patches/kernel/* +
 # docs/superpowers/notes/mmu-wip-0023-arch-layer.patch; see the milestone note)
 /scratch-mmu-probe/
-.artifacts-pr*/
-.artifacts/
+# Boot-artifact staging dirs (symlink farms into /nix/store): the CI jobs use
+# .artifacts / .artifacts-nix / .artifacts-nix-mmu, PR previews use .artifacts-pr*,
+# and a local repro run makes whichever it needs.
+.artifacts-*/

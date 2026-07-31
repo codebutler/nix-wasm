@@ -94,7 +94,7 @@ pkgs.writeText "init" ''
     vdb_sectors=$(cat /sys/block/vdb/size 2>/dev/null || echo 0)
     # 64 MiB = 131072 * 512-byte sectors
     if [ "$vdb_sectors" -lt 131072 ]; then
-      echo "pc: /dev/vdb harness stub (${vdb_sectors} sectors) — legacy overlay"
+      echo "pc: /dev/vdb harness stub (''${vdb_sectors} sectors) — legacy overlay"
       mount_seed_overlay
     else
       # Try to mount an already-installed state disk.

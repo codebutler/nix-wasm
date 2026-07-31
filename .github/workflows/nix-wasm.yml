@@ -169,6 +169,7 @@ jobs:
             '.#nix-wasm' \
             '.#wasm-binary-cache' \
             '.#wasm-base-squashfs' \
+            '.#wasm-base-squashfs-fork' \
             '.#wasm-initramfs' \
             '.#wasm-initramfs-fork' \
             '.#linux-image' \
@@ -403,6 +404,17 @@ jobs:
           # 60) kills Cachix substitution. `date +%s` in-guest must be within
           # 15 min of the host clock. Gating.
           run_smoke demo/node/clock-smoke.mjs
+          # #179 hardening: an exec'd image the HOST cannot run must kill only that
+          # task, never panic the kernel. Before the fix the softmmu pass's refusal
+          # threw out of wasm_load_executable, surfaced contextless from the promise
+          # chain via raise_exception() and made_task_dead() PANICKED the guest —
+          # one unsupported user binary took down the system. The fixture is a real
+          # guest program with the __get_tls_base export stripped
+          # (userspace/exec-reject-test.nix). On THIS (NOMMU) kernel there is no
+          # instrumentation, so the stripped binary just runs; the gate here is the
+          # conforming twin + "no panic" + "shell still alive". The MMU job below
+          # runs the same smoke where the rejection actually happens. Gating.
+          run_smoke demo/node/exec-reject-smoke.mjs
 
           # #177 G1/G3: RW virtio-blk (/dev/vdb) + ext2 mkfs/mount + saveDisk
           # CBHD + reboot readback. Gating — a regression (NOMMU block FS or
@@ -607,7 +619,13 @@ jobs:
             # then RUNS the from-source-built binary (exit 42). Proves nix's
             # local-derivation-goal (fork/exec a builder) works on NOMMU wasm via
             # posix_spawn. Gating.
-            run_smoke demo/node/build-from-source-e2e.mjs
+            # #179 hardening, the case that matters: on the software MMU the
+          # instrumentation pass REFUSES an image with no __get_tls_base, which used
+          # to panic the guest ("Aiee, killing interrupt handler!"). Assert the task
+          # dies alone and the shell survives. Boots nix:false, so it needs only
+          # this job's vmlinux + initramfs.
+          run_smoke demo/node/exec-reject-smoke.mjs
+          run_smoke demo/node/build-from-source-e2e.mjs
             # M2/M3a graphics + FFI selftests (issue #88), batched into ONE boot
             # (display-free --selftest binaries baked into the image): glib (gobject +
             # libffi double marshaller), libffi (raw wasm backend), pango (cairo-ft
@@ -656,19 +674,32 @@ jobs:
   #   • vmlinux    ← .#kernel-mmu-a2 (CONFIG_MMU + patch 0026 fork + A2 demand-page)
   #   • initramfs  ← .#wasm-initramfs-fork (busybox-fork PID 1 + a fork bootstrap
   #                  that keeps hush as /bin/sh — no NOMMU forkshell-ash promotion)
-  #   • squashfs + nix-cache ← the SAME .#wasm-base-squashfs / .#wasm-binary-cache
-  #     (built against the no-fork musl; nix spawns builders via posix_spawn). The
-  #     engine software-MMU-instruments EVERY exec'd binary at load (kernel-worker
-  #     wasm_load_executable, gated on the MMU kernel's nonzero pt_base), so no
-  #     rebuild of the userspace is needed for this first proof.
-  # Scope: smoke.mjs ONLY (9P mount of /mnt/pc + `nix-env -iA make` substitution
-  # over the nixcache 9P channel) — the smallest "full system boots + 9P + nix
-  # works on MMU" signal. The heavier layers (build-from-source posix_spawn,
-  # GTK graphics, autoconf real-fork ash) come in follow-ups once this is green.
+  #   • squashfs   ← .#wasm-base-squashfs-fork (#175): the base system with the
+  #                  REAL-FORK nix.wasm + real-fork busybox. nix's OWN startProcess
+  #                  spawns a builder via clone(CLONE_VM|CLONE_VFORK) on the default
+  #                  build — that SIGSEGVs under the software MMU (the CLONE_VM child
+  #                  gets a private page table, so the parent-mmap'd child stack is
+  #                  unmapped in the child). The fork squashfs builds nix with
+  #                  -DWASM_REAL_FORK so startProcess uses upstream fork()+exec over
+  #                  muslFork's asyncify seam — real COW fork works here.
+  #   • nix-cache  ← the SAME .#wasm-binary-cache (guest-cc is substituted, not
+  #                  forked; unchanged). The engine software-MMU-instruments EVERY
+  #                  exec'd binary at load (kernel-worker wasm_load_executable, gated
+  #                  on the MMU kernel's nonzero pt_base).
+  # Scope: smoke.mjs (9P mount of /mnt/pc + `nix-env -iA make` substitution) +
+  # selftests-batch.mjs (M2/M3a graphics + FFI under the per-access translate) +
+  # build-from-source-e2e.mjs (#175: nix FORKS a builder in-guest — the path that
+  # SIGSEGV'd on the clone-vfork nix under the MMU, now the real-fork proof). The
+  # remaining heavy layers (GTK graphics, autoconf real-fork ash) follow.
   nix-boot-smoke-mmu:
     name: boot full nix system on software MMU (#131 prove-then-flip)
     needs: [toolchain, artifacts]
-    runs-on: namespace-profile-default
+    # -lg (the LLVM-build profile) for RAM headroom: the real-fork nix.wasm is
+    # whole-module-asyncified, and the software-MMU pass instrumenting it at load
+    # produces multi-MB functions (helper-call-translated over V8's 6MB fn cap) —
+    # loading it OOM-killed the -default runner (#175, exit 137). If it still OOMs
+    # here, the whole-module asyncify doesn't scale to nix.wasm and needs bounding.
+    runs-on: namespace-profile-lg
     timeout-minutes: 120 # MMU load-time instrumentation + per-access translate is slower than NOMMU
     steps:
       - uses: actions/checkout@v4
@@ -701,7 +732,7 @@ jobs:
             .artifacts-nix-mmu/vmlinux.wasm
           ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz
-          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs-fork' --no-link --print-out-paths)/base.squashfs" \
             .artifacts-nix-mmu/base.squashfs
           ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
             .artifacts-nix-mmu/nix-cache
@@ -727,10 +758,11 @@ jobs:
         run: |
           run_smoke() {
             local script="$1" attempt rc
+            shift
             for attempt in 1 2 3; do
               echo "::group::$script (attempt $attempt)"
               set +e
-              node "$script"
+              node "$script" "$@"
               rc=$?
               set -e
               echo "::endgroup::"
@@ -754,6 +786,22 @@ jobs:
           # real MMU-hardening gate. Same binaries the NOMMU nix-boot-smoke runs;
           # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
           run_smoke demo/node/selftests-batch.mjs
+          # #175: the headline gate. nix's local-derivation-goal FORKS a builder
+          # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm under the
+          # software MMU (a CLONE_VM child gets a private page table, so the parent-
+          # mmap'd child stack is unmapped in the child). With .#wasm-base-squashfs-
+          # fork (real-fork nix.wasm: upstream fork()+exec over muslFork's asyncify
+          # seam) + the wasm_collapse uncatchable-trap exec collapse (patch 0026 +
+          # kernel-worker.js), the forked /bin/sh builder fork+execs and RUNS on the
+          # real-COW-fork MMU guest (BUILD1/BUILD2). BUILD3 — the deeper
+          # compile-with-guest-cc sub-case — is GATING here again as of #179: the
+          # 57MB clang's SIGSEGV was never the softmmu translate, it was a missing
+          # startup export (toolchain/guest-clang.nix drops --export-all and its
+          # hand-written list lacked __wasm_early_tp_init, so --gc-sections stripped
+          # the thread-pointer seed and libc++'s ios_base::Init ctor stored `errno`
+          # through a null struct pthread at VA 0x1c — fatal only under CONFIG_MMU).
+          # So this job now compiles C from source in-guest on the MMU fork guest.
+          run_smoke demo/node/build-from-source-e2e.mjs
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because

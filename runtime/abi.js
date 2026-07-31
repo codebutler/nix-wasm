@@ -75,6 +75,22 @@
 // features/config/queue service), the driver's control requests time out, and
 // probe fails — /dev/snd never appears and ALSA userspace breaks: bump.
 //
+// NOT-A-BUMP (#175 exec-collapse trap): the engine's wasm_user_mode_tail now
+// feature-detects a `wasm_collapse` KERNEL export and, when present, collapses the
+// post-exec user stack via that export's GENUINE wasm trap (uncatchable by user
+// catch_all) instead of a host JS throw (which nix's fork child swallowed → #175
+// SIGSEGV). `wasm_collapse` is added ONLY by patches/kernel/0026 (mmu-fork
+// kernels), so the SHIPPED NOMMU `.#kernel` / `.#linux-image` does NOT export it
+// and keeps the byte-identical JS-throw path — the shipped image's contract is
+// unchanged. DEFERRED OBLIGATION: if the MMU/fork guest ever becomes the
+// published channel image (`.#linux-image` switches to a wasm_collapse kernel),
+// THAT is an incompatible exec-ABI change and MUST bump ENGINE_ABI.
+// NOT-A-BUMP (#179 exec-reject): wasm_load_executable now RETURNS a status
+// (0 = loaded, nonzero = the host cannot run this image) and the kernel's
+// start_thread kills just the execing task. NO import is added or removed —
+// only an existing import's RESULT type moves — so the wire stays compatible
+// in BOTH directions (see kernel.nix postPatch).
+//
 // 12 (#177: installed NixOS persistence): second virtio-blk at host index 1
 // (VW_DEV_BLK_STATE — reclaims the echo self-test slot) serving the RW state
 // disk (/dev/vdb), plus RW BlkDevice (T_OUT + dirty-sector journal + saveDisk).

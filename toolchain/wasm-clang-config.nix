@@ -25,6 +25,17 @@
 let
   sr = "${ccSysroot}/sys";
 
+  # The shared startup/ABI export contract (#179). `--export-all` below already
+  # exports everything the link CONTAINS, so this is only needed for the FORCED
+  # set: `__get_tls_base`/`__set_tls_base` live in musl's lazy
+  # src/thread/wasm/clone.S member, which a trivial in-guest program never pulls
+  # — and the software-MMU pass hard-requires `__get_tls_base` at exec (its fault
+  # call needs musl's `tp` operand). Without this, `cc h.c -o h && ./h` compiles
+  # fine and then PANICS the guest kernel at exec on the MMU guest. Programs
+  # compiled in the guest are exactly the minimal ones, so this link is the one
+  # that needs the force. See toolchain/wasm-host-exports.nix.
+  hostExports = import ./wasm-host-exports.nix;
+
   # Flags shared by C and C++ compile + the dylink link. clang's wasm driver
   # adds crt1.o / -L / -lc / builtins from --sysroot + -resource-dir; we add the
   # target features, the macros, and the dylink link model. --export-all roots
@@ -51,6 +62,7 @@ let
     -Wl,--import-table
     -Wl,--no-merge-data-segments
     -Wl,--gc-sections
+    ${hostExports.ldFlagsForce}
     -Wl,--allow-undefined-file=${allowUndefined}
   '';
 

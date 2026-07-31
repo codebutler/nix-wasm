@@ -419,19 +419,19 @@ index 95ff7e7..8f8688f 100644
      pid_t pid = -1;
  
 -    if (options.cloneFlags) {
-+    /* pc #139: the wasm/NOMMU kernel cannot do a copy-fork. Every task shares
-+       one linear memory but gets its OWN data base (__memory_base) and its OWN
-+       function table (__indirect_function_table); a child created without
-+       CLONE_VM is instantiated fresh — the parent's heap/stack are NOT copied
-+       and stored function pointers (table indices) resolve against a different
-+       table → a signature-mismatch trap when the clone child calls its entry
-+       fn. The only working spawn is vfork-style: CLONE_VM | CLONE_VFORK shares
-+       the parent's address space + table (so fn pointers stay valid) and
-+       suspends the parent until the child execs/exits (so the borrowed stack
-+       is safe to free afterwards). Route every spawn through clone(childEntry,
-+       …) with those flags; childEntry only sets up fds/env and execs, which is
-+       vfork-safe. */
-+#ifdef __wasm__
++    /* wasm spawn model. NOMMU DEFAULT (WASM_REAL_FORK undefined): the NOMMU
++       kernel cannot copy-fork — a child created without CLONE_VM is a fresh
++       wasm instance (own __memory_base + __indirect_function_table), so the
++       parent's heap/stack are NOT copied and stored fn pointers trap against a
++       different table. The only working spawn there is vfork-style: CLONE_VM |
++       CLONE_VFORK shares the address space + table and suspends the parent
++       until the child execs/exits (safe to free the borrowed stack after).
++       SOFTWARE-MMU BUILD (WASM_REAL_FORK defined, .#nix-wasm-fork, #175): real
++       COW fork() works, so take upstream's `else pid = fork();` path — the
++       CLONE_VM child would otherwise get its OWN page table and SIGSEGV on the
++       parent-mmap'd child stack (unmapped in the child). wasmVforkFlags=0 makes
++       the `||` fall through to fork() when the caller passes no cloneFlags. */
++#if defined(__wasm__) && !defined(WASM_REAL_FORK)
 +    const int wasmVforkFlags = CLONE_VM | CLONE_VFORK;
 +#else
 +    const int wasmVforkFlags = 0;
