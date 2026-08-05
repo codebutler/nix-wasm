@@ -359,6 +359,15 @@ jobs:
           }
           run_smoke demo/node/sigalrm-smoke.mjs
           run_smoke demo/node/kill-wake-smoke.mjs
+          # Reduced reproducer (worker #6, xchat-irc-setup epic) for the
+          # posix_spawn() parent-static-memory corruption found debugging Xvfb's
+          # xkbcomp spawn: a large patterned static array + a same-size heap
+          # buffer must survive several posix_spawn() shapes (self-exec,
+          # cross-binary exec, Popen()-style file-actions pipe spawn, and
+          # repeated spawns against a fragmented heap). See
+          # userspace/spawn-canary-test.c. Gating — a regression here is exactly
+          # the class of corruption that made real Xvfb unreliable.
+          run_smoke demo/node/spawn-canary-smoke.mjs
           # #35 regression: `timeout 2 sleep 10` must terminate sleep (now fixed
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
