@@ -45,6 +45,14 @@
  * bug, but a SCHEDULING one, not the ProcVector-style memory corruption Xvfb
  * exhibits (Xvfb's own InputThread should mostly block on I/O, not spin).
  *
+ * Round 6 (worker #7, third shift; coordinator-directed CONFIRM 1; runs by
+ * DEFAULT, not opt-in — see g_init_canary's doc comment below): a REAL
+ * static-initializer (.data) canary, closing the gap rounds 1-4 left (their
+ * g_canary is .bss — no data segment exists there to misfire). This is
+ * expected to turn this reproducer's gating boot-smoke red until the real
+ * fix lands (that's the point: round 6 reproduces the actual bug in the
+ * reduced fixture for the first time).
+ *
  * Usage: `spawn-canary-test` (harness role) or `spawn-canary-test child`
  * (trivial child role, used internally via posix_spawn's argv).
  *
@@ -364,6 +372,118 @@ static int run_threaded_round(unsigned char *heap) {
   return ok;
 }
 
+/* Round 6 (worker #7, third shift; coordinator-directed CONFIRM 1): a REAL
+ * static-initializer (.data) FUNCTION-POINTER canary — ProcVector[]-shaped.
+ *
+ * FIRST CUT (superseded, kept as a lesson): a plain `uint32_t[]` with a GNU
+ * range-designated nonzero static initializer ran 16 spawns completely
+ * clean — no reversion. That is NOT a refutation of the xkbdbg finding; it
+ * is a design bug in the canary. Every guest executable here links as a
+ * `-shared` dylink module (PIC), and `__wasm_apply_data_relocs()` only has
+ * anything to *reapply* where the compiler emitted an actual RELOCATION
+ * entry into the data segment — which only happens for POINTER-valued
+ * initializers (an embedded address, fixed up relative to `__memory_base`
+ * at instantiation). A segment of plain integers has zero relocations, so
+ * calling that function again is a genuine no-op for it. `ProcVector[]` is
+ * exactly the pointer-valued case: `dix/tables.c` statically initializes it
+ * to an array of FUNCTION POINTERS (`ProcBadRequest` repeated), and
+ * `AddExtension()` mutates individual slots to other function pointers
+ * (`ProcXkbDispatch`) at runtime — so g_init_canary below mirrors that
+ * shape precisely: a static array of `canary_fn_t` (function pointers),
+ * default-initialized to `canary_func_a`, mutated to `canary_func_b` right
+ * before each spawn, rescanned after. Reverting to `canary_func_a` is the
+ * exact Xvfb mechanism, reproduced here for the first time. */
+typedef void (*canary_fn_t)(void);
+static void canary_func_a(void) {}
+static void canary_func_b(void) {}
+
+#define INIT_CANARY_COUNT (64u * 1024u) /* 64K fn ptrs = 256KB on wasm32 (4-byte ptrs) */
+static canary_fn_t g_init_canary[INIT_CANARY_COUNT] = {
+    [0 ... INIT_CANARY_COUNT - 1] = canary_func_a};
+
+static int run_init_canary_round(void) {
+  if (access("/bin/sh", X_OK) != 0) {
+    printf("SPAWN-CANARY: init-canary round SKIPPED (no /bin/sh)\n");
+    return 1;
+  }
+  printf(
+      "SPAWN-CANARY: init-canary round: g_init_canary=[%p..%p] "
+      "canary_func_a=%p canary_func_b=%p (0x%x bytes)\n",
+      (void *)g_init_canary, (void *)(g_init_canary + INIT_CANARY_COUNT - 1),
+      (void *)canary_func_a, (void *)canary_func_b,
+      (unsigned)(INIT_CANARY_COUNT * sizeof(canary_fn_t)));
+
+  const int NSPAWN = 16; /* matches Xvfb's observed xkbcomp Popen() retry count */
+  int ok = 1;
+  for (int i = 0; i < NSPAWN && ok; i++) {
+    /* Mutate away from the static default — the "AddExtension() mutates
+     * ProcVector[] away from ProcBadRequest" step. */
+    for (size_t j = 0; j < INIT_CANARY_COUNT; j++) g_init_canary[j] = canary_func_b;
+
+    int pdes[2];
+    if (pipe(pdes) != 0) {
+      fprintf(stderr, "spawn-canary-test[init-canary/iter%d]: pipe failed: %s\n", i,
+              strerror(errno));
+      ok = 0;
+      break;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    if (pdes[1] != 1) posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
+    posix_spawn_file_actions_addclose(&fa, pdes[0]);
+    if (pdes[1] != 1) posix_spawn_file_actions_addclose(&fa, pdes[1]);
+
+    char *sh_argv[] = {(char *)"sh", (char *)"-c", (char *)"true", NULL};
+    pid_t pid;
+    int rv = posix_spawn(&pid, "/bin/sh", &fa, NULL, sh_argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pdes[1]);
+    if (rv != 0) {
+      fprintf(stderr, "spawn-canary-test[init-canary/iter%d]: posix_spawn failed: %s\n", i,
+              strerror(rv));
+      close(pdes[0]);
+      ok = 0;
+      break;
+    }
+    char buf[256];
+    while (read(pdes[0], buf, sizeof(buf)) > 0) {
+    }
+    close(pdes[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+
+    size_t n_reverted = 0, n_other_wrong = 0;
+    size_t first_reverted = (size_t)-1, first_other_wrong = (size_t)-1;
+    for (size_t j = 0; j < INIT_CANARY_COUNT; j++) {
+      canary_fn_t got = g_init_canary[j];
+      if (got != canary_func_b) {
+        if (got == canary_func_a) {
+          n_reverted++;
+          if (first_reverted == (size_t)-1) first_reverted = j;
+        } else {
+          n_other_wrong++;
+          if (first_other_wrong == (size_t)-1) first_other_wrong = j;
+        }
+      }
+    }
+    if (n_reverted || n_other_wrong) {
+      printf(
+          "SPAWN-CANARY-FAIL: init-canary/iter%d REVERTED-TO-STATIC-INIT=%zu "
+          "other-wrong=%zu first_reverted_index=%zd (addr=%p) "
+          "first_other_wrong_index=%zd (addr=%p)\n",
+          i, n_reverted, n_other_wrong, (ssize_t)first_reverted,
+          first_reverted == (size_t)-1 ? NULL : (void *)&g_init_canary[first_reverted],
+          (ssize_t)first_other_wrong,
+          first_other_wrong == (size_t)-1 ? NULL : (void *)&g_init_canary[first_other_wrong]);
+      ok = 0;
+    }
+  }
+  if (ok) {
+    printf("SPAWN-CANARY: init-canary (%d spawns) clean\n", NSPAWN);
+  }
+  return ok;
+}
+
 /* Run one spawn/waitpid/rescan round. `label` tags the report lines;
  * `path`/child_argv describe what to posix_spawn(). Returns 1 pass, 0 fail. */
 static int run_round(const char *label, const char *path, char *const child_argv[],
@@ -605,8 +725,14 @@ int main(int argc, char **argv) {
            "reproducer's target)\n");
   }
 
+  /* Round 6: static-initializer canary — runs by DEFAULT (see its doc
+   * comment above run_init_canary_round and the round-6 file-header note:
+   * this is expected to turn the gating boot-smoke red until the real fix
+   * lands — that's the point). */
+  int r6 = run_init_canary_round();
+
   fflush(stdout);
-  if (r1 && r2 && r3 && r4 && r5) {
+  if (r1 && r2 && r3 && r4 && r5 && r6) {
     printf("SPAWN-CANARY: clean OK\n");
     fflush(stdout);
     return 0;
