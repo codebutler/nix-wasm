@@ -1528,7 +1528,47 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           // pointers) has none, so the export is absent. Calling it unconditionally
           // would throw and kill the process at startup. Guard it exactly like the
           // __wasm_call_ctors call below (an optional dylink-module startup export).
+          //
+          // pc (worker #7, xchat-irc-setup spawn-corruption investigation, CONFIRM 2):
+          // THIS CALL IS THE BUG. Unlike WebAssembly.instantiate()'s implicit
+          // __wasm_init_memory (atomic-flag-gated, so a CLONE_VM child sharing the
+          // parent's data_start correctly finds the flag already set and skips
+          // re-copying data segments / re-clearing bss — see the doc comment on
+          // `let woken = …` above), this explicit call is UNCONDITIONAL: it re-runs
+          // for every instantiation, exec OR clone, with no gate at all.
+          // __wasm_apply_data_relocs blindly rewrites every relocatable (pointer-
+          // valued) global to its LINK-TIME computed value — it has no notion of "was
+          // this already relocated" or "did runtime code subsequently mutate this
+          // slot on purpose" (e.g. AddExtension() writing ProcVector[135] =
+          // ProcXkbDispatch over its dix/tables.c static default of ProcBadRequest).
+          // For a FRESH EXEC (should_call_clone_callback == false) this is correct
+          // and necessary — a new program image's own pointer-valued globals must be
+          // relocated to ITS instance's __memory_base. For a CLONE_VM|CLONE_VFORK
+          // child that has NOT yet exec'd (should_call_clone_callback == true) it
+          // shares the PARENT's data_start/memory verbatim — the relocations are
+          // already applied and (as here) may have been legitimately mutated by the
+          // running program since. Re-running it here stomps that live state back to
+          // the link-time default. sdbg (SPAWN_DEBUG=1) below catches it firing in
+          // the clone case — the actual smoking gun (see the round-6 init-canary
+          // reproduction, userspace/spawn-canary-test.c, for the 100%-of-array
+          // confirmation in a reduced fixture).
+          sdbg(
+            `__wasm_apply_data_relocs check: present=${!!instance.exports.__wasm_apply_data_relocs} ` +
+              `should_call_clone_callback(=CLONE_VM child, NOT a fresh exec)=${should_call_clone_callback} ` +
+              `data_start=0x${Number(user_executable_params.data_start).toString(16)} ` +
+              `bin=[0x${user_executable_range ? Number(user_executable_range.bin_start).toString(16) : "?"}..` +
+              `0x${user_executable_range ? Number(user_executable_range.bin_end).toString(16) : "?"}]`,
+          );
           if (instance.exports.__wasm_apply_data_relocs) {
+            if (should_call_clone_callback) {
+              sdbg(
+                `__wasm_apply_data_relocs FIRING for a CLONE_VM child sharing the ` +
+                  `parent's data_start=0x${Number(user_executable_params.data_start).toString(16)} ` +
+                  `— this re-stamps link-time pointer-relocation defaults over the ` +
+                  `PARENT's live, possibly-runtime-mutated globals at that address. ` +
+                  `THIS IS THE BUG (see the comment above).`,
+              );
+            }
             instance.exports.__wasm_apply_data_relocs();
           }
           if (should_call_clone_callback) {
