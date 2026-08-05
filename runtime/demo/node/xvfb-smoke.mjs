@@ -59,9 +59,7 @@ try {
   // keymap compile), which can take longer than a fixed sleep, so retry
   // the probe in-guest rather than betting on one timing window.
   s.send("Xvfb :9 -nolisten tcp -screen 0 1280x1024x24 > /tmp/xvfb.log 2>&1 &\n");
-  s.send(
-    "for i in $(seq 15); do DISPLAY=:9 x11-probe && break; sleep 2; done\n",
-  );
+  s.send("for i in $(seq 15); do DISPLAY=:9 x11-probe && break; sleep 2; done\n");
   pass = await s.waitForOutput(/X11-PROBE: vendor=.* screen=\d+x\d+ OK/, 60000);
   if (!pass) {
     s.send("cat /tmp/xvfb.log\n");
