@@ -66,20 +66,26 @@ try {
     console.log("\n── xdpyinfo transcript tail ──\n" + s.snapshot().slice(-3000));
   }
 
-  // xeyes, backgrounded — capture its PID in a shell var for the liveness
-  // check below (the ECHOED "$XEYES_PID" has no digit until expanded).
-  s.send("DISPLAY=:9 xeyes > /tmp/xeyes.log 2>&1 & XEYES_PID=$!\n");
-  s.send("echo XEYES_PID_IS:$XEYES_PID\n");
-  const gotPid = await s.waitForOutput(/XEYES_PID_IS:\d+/, 15000);
-  check(gotPid, "xeyes launched (got a PID)");
+  // xeyes, backgrounded. NOTE: do NOT use `$!` here — this runs in the
+  // nix-system login shell, whose /bin/sh is stock busybox-1.36.1 ash (from
+  // the squashfs), NOT the guest's patched forkshell ash; stock ash leaves
+  // `$!` empty for a backgrounded job, so `XEYES_PID=$!` yields nothing (a
+  // pre-existing squashfs-shell gap, unrelated to X). Probe liveness with
+  // `ps` + a bracketed pattern instead (the `[x]eyes` trick keeps the grep
+  // process itself from matching), which needs no PID capture.
+  s.send("DISPLAY=:9 xeyes > /tmp/xeyes.log 2>&1 &\n");
+  s.send("echo XEYES_LAUNCHED\n");
+  const gotLaunch = await s.waitForOutput(/XEYES_LAUNCHED/, 15000);
+  check(gotLaunch, "xeyes launched");
 
-  // Give it a few seconds to run its event loop, then prove it's still
-  // alive (kill -0 sends no signal, just checks existence + permission).
-  s.send("sleep 3; kill -0 $XEYES_PID; echo XEYES_KILL0_RC:$?\n");
-  const aliveOut = await s.waitForOutput(/XEYES_KILL0_RC:\d+/, 15000);
-  const aliveMatch = /XEYES_KILL0_RC:(\d+)/.exec(s.snapshot());
+  // Give it a few seconds to run its event loop, then prove it's still alive
+  // by finding it in the process table — if xeyes crashed/exited on the XKB
+  // BadRequest (the M-X2 bug), it would not appear.
+  s.send("sleep 3; ps | grep '[x]eyes' > /dev/null; echo XEYES_PS_RC:$?\n");
+  const aliveOut = await s.waitForOutput(/XEYES_PS_RC:\d+/, 15000);
+  const aliveMatch = /XEYES_PS_RC:(\d+)/.exec(s.snapshot());
   const xeyesAlive = aliveOut && aliveMatch && aliveMatch[1] === "0";
-  check(xeyesAlive, "xeyes is still running 3s later (kill -0 == 0)");
+  check(xeyesAlive, "xeyes is still running 3s later (found in ps)");
   if (!xeyesAlive) {
     s.send("cat /tmp/xeyes.log\n");
     await new Promise((r) => setTimeout(r, 1500));
