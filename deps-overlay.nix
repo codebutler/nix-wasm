@@ -1561,6 +1561,24 @@ in
     (p: p.overrideAttrs (o: {
       outputs = [ "out" ]; # no "dev": nothing in this closure links against Xvfb
       doCheck = false;
+      # fpcast-emu (the shared gobject/GTK seam, userspace/fpcast-emu.nix):
+      # boot-verified against a real guest (M-X1 session record, xvfb-smoke.mjs)
+      # that Xvfb FAULTS during device init —
+      # "RuntimeError: null function or function signature mismatch" in
+      # InitPtrFeedbackClassDeviceStruct → InitPointerDeviceStruct →
+      # CorePointerProc → ActivateDevice → InitCoreDevices → dix_main. DIX's
+      # device-feedback tables (dix/devices.c) store/call ctrl procs
+      # (PtrCtrlProcPtr et al.) through a canonical prototype that individual
+      # feedback implementations don't all match byte-for-byte — the same
+      # wasm strict-call_indirect arity-mismatch class glib's gobject
+      # class_init cast hits (CLAUDE.md's M3a/M3b entries), just via plain C
+      # function-pointer tables instead of gobject vtables. xorg-server isn't
+      # a gtk3 consumer, so it doesn't ride gtk3's propagated auto-fpcast
+      # hook — apply the pass explicitly, same shape as librsvg's explicit
+      # non-gtk3-gobject line. No dynsym-inject: Xvfb resolves nothing by
+      # name (unlike galculator's GtkBuilder .ui signal lookup), so the raw
+      # canonicalizing pass alone is the fix.
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.binaryen ];
       # Keep the native (buildPackages) meson/ninja/pkg-config from upstream —
       # they're already correctly split via strictDeps; only the buildInputs
       # (target-side, cross-built) and mesonFlags need trimming.
@@ -1620,6 +1638,18 @@ in
       ];
       postInstall = (o.postInstall or "") + ''
         rm -rf $out/share/man
+      '';
+      postFixup = (o.postFixup or "") + ''
+        if [ -f "$out/bin/Xvfb" ]; then
+          ${fpcast.binaryen}/bin/wasm-opt \
+            --enable-threads --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue \
+            -pa max-func-params@128 --fpcast-emu \
+            "$out/bin/Xvfb" -o "$out/bin/Xvfb.fpcast"
+          mv "$out/bin/Xvfb.fpcast" "$out/bin/Xvfb"
+          chmod +x "$out/bin/Xvfb"
+        fi
       '';
     }))
     prev.xorg-server;
