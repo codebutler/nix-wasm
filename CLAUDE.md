@@ -1364,6 +1364,77 @@ CI / the linux box, per the design's "ship what works" scope):
   (each box + exact edit + verify gate): `docs/superpowers/specs/
   2026-07-01-cleanup-131-audit.md`. NOT executed blind — the glib/gtk3 overrides
   need a boot to verify (PRIME DIRECTIVE).
+- **MMU ship plan, Phase 1 (parity-proof CI wiring) landed** (2026-08-05):
+  `nix-wasm.yml` gained a `nix-boot-smoke-mmu` `gtk` shard that boots the same
+  one-per-boot GTK app set (gtk-hello/galculator/widget-factory/gtk3-demo/
+  gcalctool/l3afpad) NOMMU's own `nix-boot-smoke` runs, on `.#kernel-mmu-a2` +
+  the fork initramfs/squashfs — and `boot-smoke` gained a third `mmu-devices`
+  shard re-booting the async-signal + virtio-device regression set
+  (vsock/resize/snd/blk-rw/…) on the same pair. **These are first-ever boots
+  against this kernel+initramfs pair, so almost all of the smokes in both
+  shards run NON-GATING** — each affected job splits into a "hard gates" step
+  (`run_smoke`, fails the job on a real error) and a SEPARATE
+  `continue-on-error: true` "soak" step whose `check()` wrapper records a real
+  failure, prints an `::error::` annotation, and still lets the step's own
+  exit code go nonzero — so a soak failure shows up as a genuinely red (but
+  non-blocking) step in the Checks UI, not a silently-swallowed `return 0`. An
+  earlier draft used exactly that — a `run_smoke_soft` bash helper whose every
+  path ended `return 0` — and it was caught in review: the step's own exit code
+  was always 0 regardless of what ran inside it, indistinguishable from every
+  smoke actually passing, so the step could never go non-green no matter what
+  broke. `continue-on-error` fixes that at the STEP level instead, preserving
+  the script's real exit code while still keeping the JOB green (the soak
+  period). Full rationale: the SOAK NOTE comments on both jobs in
+  `nix-wasm.yml`. In `mmu-devices` NO smoke is hard-gating yet — all ten
+  (`sigalrm-smoke`, `kill-wake-smoke`, `timeout-repro-smoke`,
+  `ping-pace-smoke`, `vsock-ctl-smoke`, `resize-smoke`, `snd-smoke`,
+  `clock-smoke`, `exec-reject-smoke`, `blk-rw-smoke`) run as `check` calls in
+  the shard's single soak step; none of them has a recorded CI green on this
+  kernel+initramfs pair (a local Node-harness boot greened sigalrm/clock
+  during development, but that is not an in-tree CI record — the shard's SOAK
+  NOTE documents the correction from an earlier two-smoke-gating draft)
+  (`ping-pace-probe-smoke` stays the always-non-gating diagnostic it already
+  is on NOMMU — it isn't wrapped in `check` at all). In `nix-boot-smoke-mmu`'s
+  `core` shard only `smoke.mjs`, `build-from-source-e2e.mjs`, and
+  `selftests-batch.mjs` are hard-gated (they already had a recorded green MMU
+  boot from this job's core-only predecessor); `profile-install-e2e.mjs`,
+  `wrapperless-cc-e2e.mjs`, and `rsvg-smoke.mjs` are `check` calls in that
+  shard's soak step. Every `gtk`-shard smoke (all six) is a soak `check` call
+  — none is hard-gated yet. **A green job is NOT evidence the soak smokes
+  pass** — look for the soak step's own red (non-blocking) status and read its
+  `::error::` annotations — and each moves from the soak step's `check` call
+  to the hard-gates step's `run_smoke` call only once it has an actual green
+  run on record (see the SOAK NOTE in `nix-wasm.yml` and the Remaining
+  checklist in the parity-plan doc below). That shard verifies issue #11 item
+  1 ONLY — device models still work
+  when USER pages are translated (the kernel's soft uaccess walk + the
+  instrumented user binary's own buffer accesses); the vring/pfn addressing
+  itself runs in kernel/driver context, identity-mapped under CONFIG_MMU=y, so
+  it was never actually "under translation" — NOT the Wayland/`wl_shm` half of
+  #11: every gtk-shard smoke is a display-free `--selftest` (no compositor in
+  the node harness → `wl_shm` is never allocated), so #11 items 2/3/5 (the
+  virtio_wl per-vfd/shm-fd/proxy accommodations) stay unverified on MMU — and
+  items 4 (the dropped upstream `vmalloc`/`find_vm_area` large-buffer-send
+  branch) and 6 (waylandproxyd's single-process/no-fork design) aren't
+  addressed by this shard set at all (a restore-or-keep call and a
+  Track-B-fork follow-on, respectively — full six-item disposition in the
+  parity-plan doc's close-out map). Every same-repo PR preview also now
+  publishes a SECOND artifact set (`pr-preview.yml` + `runtime/demo/web/
+  main.js`'s `?variant=mmu`), so a human CAN boot the MMU/fork guest in a real
+  browser from any PR — the closest thing to a wl_shm-on-MMU check today, and
+  it's a manual one, not a CI gate. **First green CI run of the `mmu-devices` +
+  `gtk` shards is still pending** (uncommitted working-tree edits at the time
+  of writing) — read the shard descriptions above as what they're built to
+  prove, not a result already obtained. None of this touches
+  `.#linux-image`/`.#kernel`/`ENGINE_ABI` — it is additive coverage on the
+  existing `-mmu`/`-fork`-suffixed attrs only. Full 4-phase plan (this parity
+  proof → #131 slice-1 default-flip, a batched world rebuild → the ship flip
+  with its MANDATORY `ENGINE_ABI` bump + ordered `sync-to-pc.sh`→pc-deploy
+  →`publish-linux-channel` rollout → #131 slices 2/3 cleanup), the #11/#131/#126
+  ticket close-out map, and the two open risks (browser instrument-at-load
+  memory for `nix.wasm` — the `-lg`-runner OOM lesson from #175 — and the
+  permanent ~2-3× per-access-walk cost): `docs/superpowers/notes/
+  2026-08-05-mmu-phase1-parity-plan.md`.
 
 The new `runtime/*.js` modules (`dylink.js`, `ffi-codegen.js`, `softmmu-pass.js`,
 `asyncify.js`) are pure + unit-tested (`bun test`); like all `kernel-worker.js`
