@@ -455,11 +455,11 @@
       # buildInputs/patches rationale. `nix build .#xserver` → $out/bin/Xvfb.
       xserver = cross.xorg-server;
 
-      # M-X2 (XChat/X11 epic): x11-probe — the minimal libxcb client proof
-      # against the Xvfb built above. See userspace/x11-probe.*.
+      # M-X1's probe (XChat/X11 epic): x11-probe — the minimal libxcb client
+      # proof against the Xvfb built above. See userspace/x11-probe.*. (M-X2
+      # proper — xeyes + xwd against a real running Xvfb — is still open.)
       x11Probe = import ./userspace/x11-probe.nix {
         inherit cross;
-        libxcb = cross.libxcb;
       };
 
       # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
@@ -514,7 +514,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        # M-X1/M-X2 (XChat/X11 epic): xorg-server (Xvfb) + the x11-probe client
+        # M-X1 (XChat/X11 epic): xorg-server (Xvfb) + its x11-probe client
         # proof. systemPackages, not initramfs extraBins — Xvfb's mesonFlags
         # bake in absolute store paths for xkbcomp (spawned at runtime to
         # compile the XKB keymap) and xkeyboard-config's XKB data tree; those
@@ -1126,9 +1126,10 @@
         };
 
         # M-X1: cross-built Xvfb. See deps-overlay.nix's "xorg-server (Xvfb)".
-        xserver = xserver;
+        inherit xserver;
 
-        # M-X2: the libxcb client proof against it.
+        # M-X1's probe: the libxcb client proof against it. (M-X2 proper —
+        # xeyes + xwd — is still open.)
         x11-probe = x11Probe;
       };
         };

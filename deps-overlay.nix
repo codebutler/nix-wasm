@@ -1469,6 +1469,22 @@ in
     }))
     prev.libxft;
 
+  # xkbcomp: Xvfb Popen()-spawns this at runtime to compile the XKB keymap
+  # (M-X1), so it rides the served closure via xorg-server's
+  # -Dxkb_bin_dir=${xkbcomp}/bin store-path reference. Like galculator's
+  # nix-support lesson (CLAUDE.md): xkbcomp is a LEAF binary here (nothing
+  # builds against it), so its propagated-build-inputs metadata
+  # (libx11-dev/libxkbfile-dev, ~5.5MB) is pure served-closure bloat.
+  xkbcomp = whenWasm
+    (p: p.overrideAttrs (o: {
+      # nix-support/propagated-build-inputs is written during fixupPhase (see
+      # galculator's postFixup above) — postInstall runs too early to catch it.
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xkbcomp;
+
   # --- xorg-server (Xvfb) — M-X1, XChat/X11 epic ----------------------------
   # Cross-build xorg-server 21.1.23, configured DOWN to Xvfb only. PRIME
   # DIRECTIVE corollary 1: override nixpkgs' own `xorg-server` recipe (the
@@ -1600,8 +1616,11 @@ in
         "-Ddefault_font_path="
         "-Dxkb_bin_dir=${final.xkbcomp}/bin"
         "-Dxkb_dir=${final.xkeyboard-config}/share/X11/xkb"
-        "-Dxkb_output_dir=/tmp/xkb-compiled"
+        "-Dxkb_output_dir=/tmp"
       ];
+      postInstall = (o.postInstall or "") + ''
+        rm -rf $out/share/man
+      '';
     }))
     prev.xorg-server;
 }
