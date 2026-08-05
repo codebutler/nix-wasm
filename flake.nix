@@ -456,11 +456,18 @@
       xserver = cross.xorg-server;
 
       # M-X1's probe (XChat/X11 epic): x11-probe — the minimal libxcb client
-      # proof against the Xvfb built above. See userspace/x11-probe.*. (M-X2
-      # proper — xeyes + xwd against a real running Xvfb — is still open.)
+      # proof against the Xvfb built above. See userspace/x11-probe.*.
       x11Probe = import ./userspace/x11-probe.nix {
         inherit cross;
       };
+
+      # M-X2 (XChat/X11 epic): the first real X clients against Xvfb —
+      # xeyes (Xlib/Xt/Xmu toolkit client), xwd (root-window dump — the
+      # pixel-proof source for x11-apps-smoke.mjs), xdpyinfo (server-info
+      # query). See deps-overlay.nix's "xeyes / xwd / xdpyinfo" section.
+      xeyesApp = cross.xeyes;
+      xwdApp = cross.xwd;
+      xdpyinfoApp = cross.xdpyinfo;
 
       # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
       # headers + compiler-rt builtins + libc++) — the runtime sysroot the guest
@@ -521,7 +528,10 @@
         # derivations only enter the served squashfs closure if something in
         # environment.systemPackages' closure references them, exactly like
         # galculator/l3afpad's baked share-dir paths above.
-        extraSystemPackages = [ wasmDltest xserver x11Probe ];
+        # M-X2: the first real X clients — xeyes/xwd/xdpyinfo — same
+        # systemPackages-not-extraBins reasoning (they're PATH-looked-up by
+        # x11-apps-smoke.mjs from /run/current-system/sw/bin).
+        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -1103,6 +1113,17 @@
         "libxi"
         "libxft"
       ])
+      # M-X2 (XChat/X11 epic): the new runtime libs xeyes/xdpyinfo pull in
+      # beyond M-X0's ten — see deps-overlay.nix's "xeyes / xwd / xdpyinfo"
+      # section for why each is needed (libice/libsm/libxt/libxmu for xeyes'
+      # Xt/Xmu toolkit chain, libxtst for xdpyinfo's one required extra dep).
+      // builtins.listToAttrs (map (n: { name = "dep-${n}"; value = cross.${n}; }) [
+        "libice"
+        "libsm"
+        "libxt"
+        "libxmu"
+        "libxtst"
+      ])
       // {
         # M-X0 gate: symlinkJoin of the ten X11 client libs above (+ libxcb,
         # already cross-built) into one derivation. `nix build .#x11-libs` is the
@@ -1128,9 +1149,19 @@
         # M-X1: cross-built Xvfb. See deps-overlay.nix's "xorg-server (Xvfb)".
         inherit xserver;
 
-        # M-X1's probe: the libxcb client proof against it. (M-X2 proper —
-        # xeyes + xwd — is still open.)
+        # M-X1's probe: the libxcb client proof against it.
         x11-probe = x11Probe;
+
+        # M-X2: the first real X clients — see deps-overlay.nix's
+        # "xeyes / xwd / xdpyinfo" section. `nix build .#x11-apps` is the
+        # milestone's single pass/fail signal for all three at once.
+        xeyes = xeyesApp;
+        xwd = xwdApp;
+        xdpyinfo = xdpyinfoApp;
+        x11-apps = pkgs.symlinkJoin {
+          name = "wasm-x11-apps";
+          paths = [ xeyesApp xwdApp xdpyinfoApp ];
+        };
       };
         };
       # Phase 5 (#2): expose the package set for every supported build host.

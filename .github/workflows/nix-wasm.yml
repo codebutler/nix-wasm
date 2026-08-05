@@ -665,6 +665,11 @@ jobs:
             # posix_spawn Popen port (xkbcomp spawn) + the fpcast-emu pass on
             # the DIX device vtables, end to end. Gating.
             run_smoke demo/node/xvfb-smoke.mjs
+            # xeyes/xwd/xdpyinfo (M-X2 of the XChat/X11 epic): the first real
+            # X clients against Xvfb — a live xeyes window, xdpyinfo's server
+            # query, and a `xwd -root` pixel dump verified host-side (XWD
+            # header parse + non-flat pixel sampling). Gating.
+            run_smoke demo/node/x11-apps-smoke.mjs
           fi
 
   # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --

@@ -1653,4 +1653,182 @@ in
       '';
     }))
     prev.xorg-server;
+
+  # --- xeyes / xwd / xdpyinfo client apps (M-X2, XChat/X11 epic) ------------
+  # First real X11 clients against the cross-built Xvfb (M-X1): xeyes (Xlib +
+  # Xt/Xmu — a real toolkit consumer, not just libxcb like x11-probe), xwd
+  # (root-window dump — the pixel-proof source for the smoke), and xdpyinfo
+  # (server-info query). All three are plain autotools/meson C over libs that
+  # already cross; none forks/popens/systems (checked against upstream source
+  # before writing this) so none needs a process-model accommodation.
+  #
+  # New runtime libs this pulls in (beyond M-X0's ten): xeyes needs the
+  # classic Xt/Xmu toolkit pair, which drags libSM + libICE (Xt's
+  # PKG_CHECK_MODULES(XT, sm ice x11 xproto kbproto) is unconditional — Xt
+  # links ICE/SM support whether or not a session manager is ever present at
+  # runtime; the guest never sets SESSION_MANAGER so that code path is simply
+  # unreached, but it still has to LINK). xdpyinfo needs libXtst (its one
+  # *required* extra dep beyond the M-X0 closure — see the buildInputs
+  # trimming note below for the ones it does NOT need).
+
+  # libice: pure autotools C, no tests, no libuuid/system deps of its own.
+  libice = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libice;
+
+  # libsm: `--without-libuuid` + DROP libuuid from buildInputs — upstream's
+  # uuid support (AC_ARG_WITH(libuuid, …)) is a client-ID *generation
+  # strategy*, not a hard functional need: with it off, sm_genid.c falls
+  # through to its TCPCONN fallback (gethostname + getaddrinfo + a static
+  # counter — plain libc, no fork/system; verified against the vendored
+  # sm_genid.c before writing this override). nixpkgs' package.nix lists
+  # `libuuid` (= util-linux-minimal's output) in buildInputs unconditionally,
+  # and Nix realizes every buildInput regardless of whether configure ends up
+  # using it — so the configure flag ALONE is not enough, util-linux-minimal
+  # still gets built as an input and it does NOT cross (confirmed by
+  # attempting it: `sys-utils/switch_root.o: undefined symbol: fork` — a real
+  # fork() call site in an unrelated CLI bundled in the same derivation,
+  # exactly the "don't build an unused CLI" process-model rule,
+  # docs/process-model.md). Drop libuuid from buildInputs entirely so it's
+  # never realized; this is the SAME "don't cross something we don't
+  # actually need" call this milestone made for libXaw/xinerama/xpresent/
+  # xxf86dga/xxf86vm, not a workaround for a build failure we're trying to
+  # route around.
+  libsm = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      buildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "util-linux-minimal")
+        (o.buildInputs or [ ]);
+      # `overrideAttrs` merges onto the ALREADY-PROCESSED final attrs of
+      # `prev.libsm` — so `propagatedBuildInputs` here already carries
+      # nixpkgs' multiple-outputs `_multioutPropagateDev` auto-propagation
+      # (it adds every "dev"-output-having buildInput, baked in when
+      # `prev.libsm` was first built with libuuid still present). Filtering
+      # `buildInputs` alone does NOT retroactively re-run that hook, so
+      # util-linux-minimal-dev survives in propagatedBuildInputs unless
+      # filtered here too (confirmed by attempting the build with only the
+      # buildInputs filter: util-linux-minimal was still realized as a
+      # propagated dep and failed the same `undefined symbol: fork`).
+      propagatedBuildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "util-linux-minimal")
+        (o.propagatedBuildInputs or [ ]);
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--without-libuuid" ];
+      doCheck = false;
+    }))
+    prev.libsm;
+
+  # libxt: the X Toolkit Intrinsics library. Already conditions
+  # `--enable-malloc0returnsnull` on cross (same AC_RUN_IFELSE dodge as
+  # libx11/libxext/libxi), so no configure-flag work needed here — purely the
+  # output-trimming class of fix. "devdoc" needs the xorg doc toolchain
+  # (xmlto/docbook), never built here.
+  libxt = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "devdoc") (o.outputs or [ "out" "dev" "devdoc" ]);
+      doCheck = false;
+    }))
+    prev.libxt;
+
+  # libxmu: X miscellaneous utility routines (Xt-based helpers xeyes' Eyes.c
+  # uses). "doc" dropped for the same reason as libxt's "devdoc".
+  libxmu = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxmu;
+
+  # libxtst: XTEST + RECORD extension client lib — xdpyinfo's one *required*
+  # extra dependency (its meson.build: `dependency('xtst', required: true)`).
+  # Already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxtst = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxtst;
+
+  # xeyes: pure Xlib/Xt client (the spiritual sibling of vendored wl-eyes) —
+  # nothing here it forks/popens/systems (checked upstream Eyes.c/xeyes.c/
+  # transform.c before writing this override). Leaf binary (nothing builds
+  # against it) shipped via environment.systemPackages, so its
+  # nix-support/propagated-build-inputs metadata (libxt-dev/libxmu-dev/…) is
+  # pure served-closure bloat — the galculator/xkbcomp lesson (CLAUDE.md).
+  # No fpcast-emu here: unlike Xvfb's DIX device-feedback tables (heterogeneous
+  # C function-pointer arities aliased through one slot), Xt's dispatch
+  # surfaces (XtCallbackProc, XtActionProc, widget class procs) are each
+  # called through ONE consistently-typed typedef throughout the toolkit — a
+  # different shape from the class of bug fpcast-emu exists for. Not
+  # boot-verified yet (M-X2 build-only per this session's scope); if the
+  # guest ever traps with "null function or function signature mismatch"
+  # inside Xt/Xmu, that is the seam to revisit — see xorg-server's fpcast
+  # entry above for the fix shape.
+  xeyes = whenWasm
+    (p: p.overrideAttrs (o: {
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xeyes;
+
+  # xwd: root-window dump utility — plain autotools over libx11 + libxkbfile
+  # (both already crossed). Leaf binary; same nix-support trim as xeyes.
+  xwd = whenWasm
+    (p: p.overrideAttrs (o: {
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xwd;
+
+  # xdpyinfo: server-info query utility, meson-built. Upstream's
+  # nixpkgs package.nix lists ELEVEN buildInputs, but its own meson.build
+  # marks all but six of them `required: false, disabler: true` (xtst/x11-xcb/
+  # xcb/xext/x11/xproto are the only `required: true` deps — verified by
+  # reading the vendored meson.build source before writing this override).
+  # Trim buildInputs down to those six PLUS the M-X0 optional extensions we
+  # already cross for free (libxi/libxrender/libxcomposite/libxrandr) —
+  # dropping libxinerama/libxpresent/libxxf86dga/libxxf86vm, which meson
+  # gracefully disables (`.found() == false`) rather than failing on. This is
+  # the same "question whether it's really needed before crossing it" call
+  # this milestone made for libXaw (xeyes/xwd/xdpyinfo need none of it): four
+  # more small X extension libs would cross fine, but nothing in this
+  # milestone's proof (xeyes rendering + xdpyinfo's PASS line) needs their
+  # info, so they're left uncrossed.
+  xdpyinfo = whenWasm
+    (p: p.overrideAttrs (o: let
+      trimmedInputs = [
+        final.libx11
+        final.libxcb
+        final.libxext
+        final.libxtst
+        final.libxi
+        final.libxrender
+        final.libxcomposite
+        final.libxrandr
+        final.xorgproto
+      ];
+    in {
+      buildInputs = trimmedInputs;
+      # isStatic packages default propagatedBuildInputs to mirror the FULL
+      # (pre-override) buildInputs list — confirmed by attempting the trim
+      # with only `buildInputs` overridden: meson's `dependency('xxf86dga',
+      # required: false)` still FOUND + linked libXxf86dga because its .pc
+      # was still reachable through propagatedBuildInputs' PKG_CONFIG_PATH
+      # contribution, and the link failed the same `undefined symbol: fork`
+      # (libXxf86dga wraps XF86DGA, an old server-extension client lib that
+      # forks internally). Overriding propagatedBuildInputs too closes that
+      # back door.
+      propagatedBuildInputs = trimmedInputs;
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xdpyinfo;
 }
