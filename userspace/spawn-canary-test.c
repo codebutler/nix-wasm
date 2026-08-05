@@ -21,6 +21,30 @@
  * staging buffer? a thread block?) — along with buffer addresses so the
  * overlap with whatever wrote there can be reasoned about numerically.
  *
+ * Round 5 (worker #7, third shift; OPT-IN via SPAWN_CANARY_THREADED=1, see
+ * main()) — a THREADED variant: a background pthread spins on its own large
+ * canary array while the main thread posix_spawn()s the popen shape 16x,
+ * isolating whether a second LIVE thread's stack/TLS sharing the arena
+ * during __clone(CLONE_VM|CLONE_VFORK) is the hazard (Xvfb runs an input
+ * thread; every prior round here is single-threaded).
+ *
+ * RESULT (this is a SEPARATE finding from the corruption bug above, not a
+ * confirmation of it): a busy-compute loop (touch-and-verify + sched_yield()
+ * per sweep) in the live thread HANGS THE WHOLE PROCESS INDEFINITELY the
+ * instant it starts running concurrently with posix_spawn() — no corruption,
+ * just starvation (the main thread/spawn children never get scheduled again).
+ * A plain pthread_create()+join() with no ongoing loop, run right after the
+ * same prior spawns, is unaffected (rc=0) — it's specifically a still-running
+ * compute-bound thread that starves the rest of the process. Swapping the
+ * busy loop for a usleep()-based one (same thread lifetime, same "16
+ * concurrent spawns" shape, same canary-array touching — DIAG_SLEEP_LOOP,
+ * used by scripts/no committed nix package; see git history for the ad hoc
+ * build used to prove it) runs completely clean. This says `sched_yield()`
+ * does not actually hand control to another runnable task on this engine's
+ * cooperative scheduler, while a blocking syscall does — a real, reproducible
+ * bug, but a SCHEDULING one, not the ProcVector-style memory corruption Xvfb
+ * exhibits (Xvfb's own InputThread should mostly block on I/O, not spin).
+ *
  * Usage: `spawn-canary-test` (harness role) or `spawn-canary-test child`
  * (trivial child role, used internally via posix_spawn's argv).
  *
@@ -32,7 +56,10 @@
  *   SPAWN-CANARY-FAIL: FAIL
  */
 #include <errno.h>
+#include <pthread.h>
+#include <sched.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +131,237 @@ static void report_region(const char *name, const unsigned char *buf, size_t n) 
         name, first_bad, (const void *)(buf + first_bad), first_bad, last_bad,
         last_bad - first_bad + 1, n_bad, exp, got);
   }
+}
+
+/* Round 5 (worker #7, xchat-irc-setup epic, third shift): a THREADED canary —
+ * the one structural difference left between this reproducer and the real
+ * Xvfb. Every prior round is single-threaded; Xvfb runs a live input thread
+ * (xorg's InputThread) that is touching the shared arena AT THE SAME TIME its
+ * main thread calls posix_spawn() for xkbcomp. On this no-fork/CLONE_VM NOMMU
+ * guest, posix_spawn's underlying __clone(CLONE_VM|CLONE_VFORK) shares the
+ * WHOLE address space (and thus the whole wasm linear memory) with the
+ * spawning process — including any OTHER live thread's stack/TLS — while the
+ * clone-with-fn child is mid-flight. That is exactly the class of hazard
+ * patches/busybox/0008 hit one level down (a shared-argv mutation racing a
+ * concurrent clone), one level up: does a second thread's stack, TLS, or its
+ * own static data end up sharing/colliding with whatever the spawn/exec path
+ * allocates for the child?
+ *
+ * A second, independent large static (.bss) array — g_thread_canary — is
+ * owned by a background pthread that spins verifying + re-dirtying it in a
+ * tight loop (so it's provably mid-execution, not idle, across every spawn).
+ * The main thread then posix_spawn()s the EXACT Popen()/xkbcomp shape
+ * (round 3's dup2'd-pipe + "/bin/sh -c ...") repeatedly (NSPAWN times,
+ * matching Xvfb's observed ~16 xkbcomp retries in the real bug) while the
+ * thread keeps running. Both the main canary (g_canary) AND the thread's own
+ * canary (g_thread_canary) are rechecked after every spawn. */
+#define THREAD_CANARY_SIZE CANARY_SIZE
+static unsigned char g_thread_canary[THREAD_CANARY_SIZE];
+static atomic_int g_thread_stop = 0;
+static atomic_int g_thread_corrupted = 0;
+static atomic_long g_thread_first_bad_offset = -1;
+static unsigned long g_thread_iterations = 0; /* only read after pthread_join */
+static atomic_ulong g_thread_iterations_live = 0;
+static void *g_thread_stack_probe = NULL;
+
+static void *canary_thread_fn(void *arg) {
+  (void)arg;
+  printf("SPAWN-CANARY: canary_thread_fn: entered\n");
+  fflush(stdout);
+  int local_probe;
+  g_thread_stack_probe = (void *)&local_probe;
+  fill_pattern(g_thread_canary, THREAD_CANARY_SIZE);
+  printf("SPAWN-CANARY: canary_thread_fn: fill_pattern done, entering loop "
+         "(DIAG_SLEEP_LOOP=%d)\n",
+#ifdef DIAG_SLEEP_LOOP
+         1
+#else
+         0
+#endif
+  );
+  fflush(stdout);
+#ifdef DIAG_SLEEP_LOOP
+  /* Diagnostic build (worker #7): a sleep-based loop instead of a tight
+   * compute+sched_yield() loop, to isolate whether it's SPECIFICALLY a busy
+   * compute loop that starves the rest of the process, vs ANY long-lived
+   * joinable secondary thread doing so. */
+  while (!atomic_load(&g_thread_stop)) {
+    unsigned char want = pattern_byte(0);
+    if (g_thread_canary[0] != want && atomic_load(&g_thread_corrupted) == 0) {
+      atomic_store(&g_thread_first_bad_offset, 0);
+      atomic_store(&g_thread_corrupted, 1);
+    }
+    g_thread_canary[0] = want;
+    atomic_fetch_add(&g_thread_iterations_live, 1);
+    usleep(2000);
+  }
+#else
+  while (!atomic_load(&g_thread_stop)) {
+    /* Touch every page (not every byte — this loop must spin fast enough to
+     * overlap many spawns), verify-then-redirty so the array is provably
+     * live/dirty, not merely allocated. */
+    for (size_t i = 0; i < THREAD_CANARY_SIZE; i += 4096) {
+      unsigned char want = pattern_byte(i);
+      if (g_thread_canary[i] != want && atomic_load(&g_thread_corrupted) == 0) {
+        atomic_store(&g_thread_first_bad_offset, (long)i);
+        atomic_store(&g_thread_corrupted, 1);
+      }
+      g_thread_canary[i] = want;
+    }
+    atomic_fetch_add(&g_thread_iterations_live, 1);
+    /* Yield after each full sweep. A real Xvfb InputThread spends most of
+     * its time blocked (not spinning uncontested on the single wasm CPU) —
+     * without this, an initial version of this test HUNG indefinitely the
+     * instant round 5 started (pthread_create() + spin, standalone
+     * pthread-exit-test still passed cleanly beforehand — see the commit
+     * message / session notes), consistent with a purely cooperative
+     * scheduler that never preempts a tight compute loop to run the
+     * clone()d spawn child or wake the waitpid()ing main thread. Keep the
+     * yield: it's what makes "a thread is genuinely live across the spawn"
+     * observable without starving the very mechanism under test. */
+    sched_yield();
+  }
+#endif
+  return NULL;
+}
+
+/* Run round 5: NSPAWN popen-shaped spawns with canary_thread_fn live. Returns
+ * 1 pass, 0 fail. `heap` is the same scratch heap buffer the other rounds
+ * use (rescanned here too, for a 4-way simultaneous check). */
+static void *trivial_thread_fn(void *arg) {
+  (void)arg;
+  return NULL;
+}
+
+static int run_threaded_round(unsigned char *heap) {
+  if (access("/bin/sh", X_OK) != 0) {
+    printf("SPAWN-CANARY: threaded round SKIPPED (no /bin/sh)\n");
+    return 1;
+  }
+
+  /* Probe: after rounds 1-4's several posix_spawn()s, does even a TRIVIAL
+   * joinable pthread_create()+join() (no spin, no shared array) still work?
+   * Isolates "any thread creation after prior spawns" from "this specific
+   * spinning/atomic canary thread". */
+  printf("SPAWN-CANARY: threaded round: probing trivial pthread_create+join post-spawns...\n");
+  fflush(stdout);
+  pthread_t probe_th;
+  int prc0 = pthread_create(&probe_th, NULL, trivial_thread_fn, NULL);
+  if (prc0 != 0) {
+    printf("SPAWN-CANARY-FAIL: threaded round: trivial pthread_create failed rc=%d\n", prc0);
+    return 0;
+  }
+  int jrc0 = pthread_join(probe_th, NULL);
+  printf("SPAWN-CANARY: threaded round: trivial pthread_create+join post-spawns "
+         "OK (join rc=%d)\n",
+         jrc0);
+  fflush(stdout);
+
+  pthread_t th;
+  int prc = pthread_create(&th, NULL, canary_thread_fn, NULL);
+  if (prc != 0) {
+    printf("SPAWN-CANARY: threaded round SKIPPED (pthread_create failed rc=%d)\n", prc);
+    return 1;
+  }
+  /* Give the thread a moment to actually start spinning before the first
+   * spawn, so it's genuinely mid-execution, not still in pthread_create(). */
+  usleep(50000);
+  printf("SPAWN-CANARY: threaded round: g_thread_canary=[%p..%p] thread_stack_probe=%p\n",
+         (void *)g_thread_canary, (void *)(g_thread_canary + THREAD_CANARY_SIZE - 1),
+         g_thread_stack_probe);
+
+  /* Probe 2: does the SPINNING thread alone (no concurrent posix_spawn) join
+   * back down cleanly? Isolates "a live spinning thread, full stop" from "a
+   * live spinning thread AT THE SAME TIME AS a posix_spawn call". */
+  printf("SPAWN-CANARY: threaded round: probing spin-thread stop+join with NO "
+         "concurrent spawn...\n");
+  fflush(stdout);
+  atomic_store(&g_thread_stop, 1);
+  int jrc1 = pthread_join(th, NULL);
+  printf("SPAWN-CANARY: threaded round: spin-thread stop+join with no spawn OK "
+         "(join rc=%d, iters=%lu)\n",
+         jrc1, (unsigned long)atomic_load(&g_thread_iterations_live));
+  fflush(stdout);
+
+  /* Re-launch a fresh spin thread for the actual concurrent-with-spawn test
+   * below. */
+  atomic_store(&g_thread_stop, 0);
+  atomic_store(&g_thread_iterations_live, 0);
+  prc = pthread_create(&th, NULL, canary_thread_fn, NULL);
+  if (prc != 0) {
+    printf("SPAWN-CANARY: threaded round SKIPPED (2nd pthread_create failed rc=%d)\n", prc);
+    return 1;
+  }
+  usleep(50000);
+  printf("SPAWN-CANARY: threaded round: relaunched spin thread; starting %d "
+         "concurrent spawns...\n",
+         16);
+  fflush(stdout);
+
+  const int NSPAWN = 16; /* matches Xvfb's observed xkbcomp Popen() retry count */
+  int ok = 1;
+  for (int i = 0; i < NSPAWN && ok; i++) {
+    fill_pattern(g_canary, CANARY_SIZE);
+    fill_pattern(heap, CANARY_SIZE);
+
+    int pdes[2];
+    if (pipe(pdes) != 0) {
+      fprintf(stderr, "spawn-canary-test[threaded/iter%d]: pipe failed: %s\n", i,
+              strerror(errno));
+      ok = 0;
+      break;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    if (pdes[1] != 1) posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
+    posix_spawn_file_actions_addclose(&fa, pdes[0]);
+    if (pdes[1] != 1) posix_spawn_file_actions_addclose(&fa, pdes[1]);
+
+    char *sh_argv[] = {(char *)"sh", (char *)"-c", (char *)"true", NULL};
+    pid_t pid;
+    int rv = posix_spawn(&pid, "/bin/sh", &fa, NULL, sh_argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pdes[1]);
+    if (rv != 0) {
+      fprintf(stderr, "spawn-canary-test[threaded/iter%d]: posix_spawn failed: %s\n", i,
+              strerror(rv));
+      close(pdes[0]);
+      ok = 0;
+      break;
+    }
+    char buf[256];
+    while (read(pdes[0], buf, sizeof(buf)) > 0) {
+    }
+    close(pdes[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+
+    size_t fb = 0, lb = 0, nb = 0;
+    unsigned char e = 0, g = 0;
+    int sc = scan_region(g_canary, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+    int hc = scan_region(heap, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+    int tc = !atomic_load(&g_thread_corrupted);
+    if (!sc || !hc || !tc) {
+      printf("SPAWN-CANARY-FAIL: threaded/iter%d main_static=%d main_heap=%d "
+             "thread_canary=%d thread_first_bad=0x%lx main_first_bad=0x%zx "
+             "thread_iters_so_far=%lu\n",
+             i, sc, hc, tc, (long)atomic_load(&g_thread_first_bad_offset), fb,
+             (unsigned long)atomic_load(&g_thread_iterations_live));
+      report_region("threaded/main-static", g_canary, CANARY_SIZE);
+      report_region("threaded/main-heap", heap, CANARY_SIZE);
+      report_region("threaded/thread-canary", g_thread_canary, THREAD_CANARY_SIZE);
+      ok = 0;
+    }
+  }
+
+  atomic_store(&g_thread_stop, 1);
+  pthread_join(th, NULL);
+  g_thread_iterations = atomic_load(&g_thread_iterations_live);
+  if (ok) {
+    printf("SPAWN-CANARY: threaded (%d spawns, %lu thread iters) clean\n", NSPAWN,
+           g_thread_iterations);
+  }
+  return ok;
 }
 
 /* Run one spawn/waitpid/rescan round. `label` tags the report lines;
@@ -328,8 +586,27 @@ int main(int argc, char **argv) {
     printf("SPAWN-CANARY: fragmented round SKIPPED (no /bin/sh)\n");
   }
 
+  /* Round 5: threaded canary — see run_threaded_round's doc comment. OPT-IN
+   * via SPAWN_CANARY_THREADED=1: this round found a REAL, separate bug (a
+   * busy-compute+sched_yield() loop in a live secondary thread starves the
+   * rest of the process — scheduler starvation, not memory corruption; see
+   * the doc comment). That hang is NOT the Xvfb corruption bug this
+   * reproducer targets, and spawn-canary-test's plain invocation is a GATING
+   * regression test (nix-wasm.yml boot-smoke) — a hang here would turn an
+   * unrelated finding into a false CI failure. Default: skipped (rounds 1-4
+   * only, unchanged behavior). */
+  int r5 = 1;
+  if (getenv("SPAWN_CANARY_THREADED")) {
+    r5 = run_threaded_round(heap);
+  } else {
+    printf("SPAWN-CANARY: threaded round SKIPPED (set SPAWN_CANARY_THREADED=1 "
+           "to run it — see spawn-canary-test.c's round-5 doc comment; it can "
+           "HANG, it's a separate scheduler-starvation finding, not this "
+           "reproducer's target)\n");
+  }
+
   fflush(stdout);
-  if (r1 && r2 && r3 && r4) {
+  if (r1 && r2 && r3 && r4 && r5) {
     printf("SPAWN-CANARY: clean OK\n");
     fflush(stdout);
     return 0;

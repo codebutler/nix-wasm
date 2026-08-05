@@ -309,6 +309,33 @@
         inherit cross;
       };
 
+      # Diagnostic-only variant (worker #7, third shift) of round 5's threaded
+      # canary (spawn-canary-test.c): swaps the busy-compute+sched_yield()
+      # loop for a usleep()-based one, everything else identical. Isolates
+      # "a busy-compute loop starves the scheduler" (round 5's actual finding
+      # — see spawn-canary-test.c's round-5 doc comment) from "any live
+      # secondary thread breaks posix_spawn" (ruled out: this variant runs
+      # completely clean). Not wired into initramfsExtraBins — a standalone
+      # regression/repro tool for the scheduler-starvation finding, not part
+      # of the gating boot-smoke.
+      spawnCanaryTestDiagSleep = cross.stdenv.mkDerivation {
+        pname = "spawn-canary-test-diag-sleep";
+        version = "0.1.0";
+        dontUnpack = true;
+        dontConfigure = true;
+        buildPhase = ''
+          runHook preBuild
+          $CC -O2 -pthread -DSPAWN_CANARY_MB=16 -DDIAG_SLEEP_LOOP=1 \
+            ${./userspace/spawn-canary-test.c} -o spawn-canary-test-diag-sleep
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          install -Dm755 spawn-canary-test-diag-sleep $out/bin/spawn-canary-test-diag-sleep
+          runHook postInstall
+        '';
+      };
+
       # Faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends
       # one packet then hangs): a one-shot SIGALRM handler (installed via signal()
       # = SA_RESTART) re-armed from inside itself, with an async echo-host thread —
@@ -893,6 +920,7 @@
         # corruption found debugging Xvfb's xkbcomp spawn (worker #6) →
         # $out/bin/spawn-canary-test.
         spawn-canary-test = spawnCanaryTest;
+        spawn-canary-test-diag-sleep = spawnCanaryTestDiagSleep;
         # #179: the host-rejected-image fixture + its conforming twin (see
         # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
         exec-reject-test = execRejectTest;

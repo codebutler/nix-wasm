@@ -4,6 +4,8 @@
 # (SPAWN_CANARY_MB, default 8) + a same-size heap buffer are filled, a
 # trivial self-exec'd child is posix_spawn()ed, and both buffers are
 # rescanned for corruption after waitpid — see userspace/spawn-canary-test.c.
+# Round 5 (worker #7, third shift) adds a background pthread spinning on its
+# own canary array concurrently with 16 popen-shaped spawns (-pthread).
 { cross, canaryMb ? 16 }:
 cross.stdenv.mkDerivation {
   pname = "spawn-canary-test";
@@ -12,7 +14,7 @@ cross.stdenv.mkDerivation {
   dontConfigure = true;
   buildPhase = ''
     runHook preBuild
-    $CC -O2 -DSPAWN_CANARY_MB=${toString canaryMb} ${./spawn-canary-test.c} -o spawn-canary-test
+    $CC -O2 -pthread -DSPAWN_CANARY_MB=${toString canaryMb} ${./spawn-canary-test.c} -o spawn-canary-test
     runHook postBuild
   '';
   installPhase = ''
