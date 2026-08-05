@@ -57,6 +57,34 @@
 //   `-displayfd`'s write-side and Sommelier's `sl_handle_display_ready_event`
 //   read-side — rather than iterating on this harness further).
 //
+// BROWSER-CHECK ATTEMPT #1 (2026-08-05) — INCONCLUSIVE, and why:
+//   Ran the above against a REAL Greenfield compositor by serving
+//   runtime/demo/web/ locally (127.0.0.1 — a locally served page is the only
+//   way to drive a browser from a sandbox whose Chromium has no working
+//   proxy) and driving Chromium with the SwiftShader flags. Result: the
+//   RENDERER PROCESS CRASHES 28-48s after page load, every run (~10), in both
+//   headless and headed-under-xvfb-run modes. Crashpad minidumps confirm
+//   `--type=renderer` + ANGLE/SwiftShader-Vulkan; NO JS-visible signal
+//   precedes it (no console error, no window.onerror, no webglcontextlost).
+//   The boot itself is fine — the guest reaches a shell in ~16-21s and the
+//   terminal renders correctly; in one run `ps` confirmed Xwayland alive at
+//   t≈28.5s and `DISPLAY=:1 xdpyinfo` was launched, but the tab died ~10s
+//   later before its result could be read. xdpyinfo has therefore NEVER been
+//   observed to either succeed OR hang against a real compositor.
+//   DECISIVE CONTROL: the identical page/harness with nix:false (busybox-only
+//   — no squashfs, so Xwayland is unreachable, but the same
+//   `sommelier --parent` still talks to the same real compositor) survived
+//   111+s across two runs with zero crashes. So the crash correlates with the
+//   nix:true boot, NOT with Xwayland's Wayland traffic specifically (it also
+//   occurs in runs where Xwayland never came up at all).
+//   Most likely a RESOURCE ceiling of that sandbox rather than a product bug:
+//   a nix:true guest allocates ~2 GiB of WebAssembly.Memory
+//   (CONFIG_BOOT_MEM_PAGES 0x7FFF) plus a ~240 MB squashfs SharedArrayBuffer
+//   in one renderer, on top of software SwiftShader GL. A real desktop
+//   browser (where the GTK apps already render — see CLAUDE.md's
+//   widget-factory/gtk-hello entries) is the right place to run this check;
+//   it is NOT a headless-CI check and must not be wired as one.
+//
 // What THIS script proves, all over the real X11 wire, as far as it goes:
 //   - `ps` shows both `sommelier` (the -X instance) and `Xwayland` running.
 //   - `DISPLAY=:1 xdpyinfo` is ATTEMPTED against Xwayland specifically (NOT
