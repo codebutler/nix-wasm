@@ -1730,6 +1730,13 @@ in
     (p: p.overrideAttrs (o: {
       outputs = builtins.filter (x: x != "devdoc") (o.outputs or [ "out" "dev" "devdoc" ]);
       doCheck = false;
+      # Dropping the doc output leaves libXt's specs/ install with an EMPTY
+      # docdir -> `mkdir -p '/share/doc/libXt'`. That "worked" in a sandboxed
+      # local build (the mkdir lands in the sandbox's private tmpfs /) and
+      # only failed loudly on CI's sandbox-less unprivileged builder — so
+      # disable the docs/specs install outright instead of relying on where
+      # the stray mkdir happens to land.
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-docs" "--disable-specs" ];
     }))
     prev.libxt;
 
@@ -1739,6 +1746,9 @@ in
     (p: p.overrideAttrs (o: {
       outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
       doCheck = false;
+      # Same empty-docdir trap as libxt above (libXmu also ships a specs/
+      # tree): keep the docs install off rather than pointed at "/share".
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-docs" "--disable-specs" ];
     }))
     prev.libxmu;
 
