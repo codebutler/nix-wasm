@@ -659,6 +659,12 @@ jobs:
             # fires a GtkTextBuffer signal, display-free. One-per-boot like its
             # GTK siblings. Gating.
             run_smoke demo/node/l3afpad-smoke.mjs
+            # Xvfb (xorg-server 21.1.23, M-X1 of the XChat/X11 epic): boots the
+            # cross X server headless (the vfb DDX needs no compositor), then
+            # x11-probe (libxcb) reads back the connection setup. Proves the
+            # posix_spawn Popen port (xkbcomp spawn) + the fpcast-emu pass on
+            # the DIX device vtables, end to end. Gating.
+            run_smoke demo/node/xvfb-smoke.mjs
           fi
 
   # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --

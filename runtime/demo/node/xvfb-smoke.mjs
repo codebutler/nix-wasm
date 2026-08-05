@@ -13,22 +13,16 @@
 // something in the served squashfs closure references them. See
 // deps-overlay.nix's "xorg-server (Xvfb)" section + userspace/x11-probe.nix.
 //
-// NOTE (session record, M-X1): boot-run to completion against a PR-preview
-// guest build (commit aee0cf6). The boot itself is clean (full 9P/virtio
-// device enumeration, nix userspace, ash prompt); Xvfb starts and Popen()s
-// xkbcomp successfully, but then FAULTS during device init:
-// "RuntimeError: null function or function signature mismatch" in
-// InitPtrFeedbackClassDeviceStruct → InitPointerDeviceStruct →
-// CorePointerProc → ActivateDevice → InitCoreDevices → dix_main. This is the
-// same wasm strict-call_indirect function-pointer-cast class CLAUDE.md's
-// gobject/fpcast-emu entry documents (the DIX device-feedback vtables are
-// almost certainly stored/called through a differently-typed function
-// pointer, same shape as glib's class_init cast) — xorg-server's build in
-// deps-overlay.nix does NOT yet run the shared `--fpcast-emu` post-link pass
-// that glib/gtk3/pango/galculator/l3afpad all need for the identical reason.
-// Not diagnosed further / not patched here — the candidate fix needs a
-// squashfs rebuild to boot-verify, out of scope for this pass. Re-run once
-// xorg-server gets the fpcast-emu treatment.
+// SESSION RECORD (M-X1, resolved): the first boot-run (PR-preview build of
+// aee0cf6) faulted during device init — "null function or function signature
+// mismatch" in InitPtrFeedbackClassDeviceStruct → … → InitCoreDevices →
+// dix_main: the DIX device-feedback vtables are called through
+// differently-typed function pointers, the same wasm strict-call_indirect
+// cast class as glib's class_init (CLAUDE.md's fpcast-emu entry). Fixed in
+// deps-overlay.nix by running the shared `--fpcast-emu` post-link pass on
+// bin/Xvfb (commit 3e3d699). Boot-verified PASS against the b065a19 preview
+// build: Xvfb completes device init, binds :9, and x11-probe reads back
+// "vendor=The X.Org Foundation screen=1280x1024" on the first attempt.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";
