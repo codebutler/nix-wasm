@@ -1064,7 +1064,48 @@
         # cairo: image-surface-only build (pixman+zlib) for the toolkit path —
         # backs stock cairo+wl_shm clients like weston-flowers. See deps-overlay.nix.
         "cairo"
-      ]);
+      ])
+      # M-X0 (XChat/X11 epic): the X11 client runtime closure, each cross-built to
+      # wasm as a REAL runtime lib (not link-only) — see deps-overlay.nix's "X11
+      # client runtime closure" section. Exposed as `dep-<name>` (same convention
+      # as Nix's C dep closure above) so `nix build -k .#dep-libx11 …` surfaces
+      # every cross failure at once. libxcb/libxau/libxdmcp already cross today
+      # (the pre-existing libxcb closure, above); xtrans/xorgproto are header-only
+      # and need no override.
+      // builtins.listToAttrs (map (n: { name = "dep-${n}"; value = cross.${n}; }) [
+        "libx11"
+        "libxext"
+        "libxrender"
+        "libxrandr"
+        "libxcursor"
+        "libxfixes"
+        "libxdamage"
+        "libxcomposite"
+        "libxi"
+        "libxft"
+      ])
+      // {
+        # M-X0 gate: symlinkJoin of the ten X11 client libs above (+ libxcb,
+        # already cross-built) into one derivation. `nix build .#x11-libs` is the
+        # milestone's single pass/fail signal — no boot needed yet (M-X1 is the
+        # first one that runs anything against a real X server).
+        x11-libs = pkgs.symlinkJoin {
+          name = "wasm-x11-libs";
+          paths = [
+            cross.libxcb
+            cross.libx11
+            cross.libxext
+            cross.libxrender
+            cross.libxrandr
+            cross.libxcursor
+            cross.libxfixes
+            cross.libxdamage
+            cross.libxcomposite
+            cross.libxi
+            cross.libxft
+          ];
+        };
+      };
         };
       # Phase 5 (#2): expose the package set for every supported build host.
       # x86_64-linux is the CI/cache host (fully-cached nixpkgs + Cachix);

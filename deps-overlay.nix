@@ -1369,4 +1369,103 @@ in
       doCheck = false;
     }))
     prev.libxcb;
+
+  # --- X11 client runtime closure (M-X0, XChat/X11 epic) --------------------------
+  # Promoting libxcb from "link-only for Sommelier" to a REAL runtime dependency:
+  # the ten client-side X libraries XChat/GTK2/Xlib apps need at runtime, not just
+  # to satisfy a linker. All are plain autotools C over libxcb/libx11 and already
+  # cross-build cleanly in nixpkgs — each `package.nix` already conditions its
+  # `--enable-malloc0returnsnull` / `xorg_cv_malloc0_returns_null` autoconf hint on
+  # `stdenv.hostPlatform != stdenv.buildPlatform` (the AC_RUN_IFELSE check that
+  # can't run under cross), so no configure-flag work is needed here — this is
+  # PURELY the output-trimming + doCheck class of fix, same shape as the libxcb
+  # closure above. None of these run a test suite (no doCheck ever set true
+  # upstream); `doCheck = false` is added defensively for symmetry with the rest
+  # of this file, not because a suite was observed to run.
+  #
+  # libX11 is the one exception to "trim outputs": its `share/X11/locale` i18n
+  # tables (XLC_LOCALE / Compose data) are loaded from `$out` at RUNTIME by every
+  # Xlib client (the exact "galculator ICONDIR" lesson — CLAUDE.md's M4 entry) and
+  # must ride the served /nix closure untouched, so `$out` is left completely
+  # alone; only the "man" output (needs the xorg doc toolchain, never built here)
+  # is dropped.
+
+  # libX11: the big one. Only the "man" output needs dropping — "out" (incl. the
+  # runtime-loaded share/X11/locale tree) and "dev" build and install cleanly.
+  # Native `makekeys`/`mkks`-class codegen tools are already covered by upstream's
+  # own `depsBuildBuild = [ buildPackages.stdenv.cc ]` — no override needed there.
+  libx11 = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man") (o.outputs or [ "out" "dev" "man" ]);
+      doCheck = false;
+    }))
+    prev.libx11;
+
+  # libxext: drop "man"+"doc" (xorg doc toolchain, not in the cross closure).
+  libxext = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man" && x != "doc") (o.outputs or [ "out" "dev" "man" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxext;
+
+  # libxrender: drop "doc".
+  libxrender = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxrender;
+
+  # libxrandr: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxrandr = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxrandr;
+
+  # libxcursor: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxcursor = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxcursor;
+
+  # libxfixes: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxfixes = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxfixes;
+
+  # libxdamage: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxdamage = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxdamage;
+
+  # libxcomposite: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxcomposite = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxcomposite;
+
+  # libxi: drop "man"+"doc". Upstream already sets `xorg_cv_malloc0_returns_null=no`
+  # on cross (a different spelling of the same AC_RUN_IFELSE dodge libx11/libxext use).
+  libxi = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man" && x != "doc") (o.outputs or [ "out" "dev" "man" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxi;
+
+  # libxft: already "out"+"dev" only upstream; doCheck guard for symmetry. Its
+  # fontconfig/freetype deps already cross-build (M2 text stack).
+  libxft = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxft;
 }
