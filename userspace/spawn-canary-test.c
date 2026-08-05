@@ -1,0 +1,340 @@
+/* spawn-canary-test — reduced reproducer for the posix_spawn() static-memory
+ * corruption found while debugging Xvfb's xkbcomp spawn on the NOMMU wasm
+ * guest (worker #6, xchat-irc-setup epic).
+ *
+ * Evidence that led here: instrumenting a real Xvfb (~12MB .data/.bss, the
+ * LARGEST parent binary to ever call posix_spawn() on this guest — busybox/
+ * ash/make/sommelier are all small) showed a .data array (ProcVector[135])
+ * correct immediately before Popen()'s posix_spawn() call and corrupted
+ * (a broad overwrite of adjacent slots too) immediately AFTER posix_spawn()
+ * returns, BEFORE the child (xkbcomp) produced any output. So the corruption
+ * happens on the spawn/return path itself, not from anything the child does.
+ *
+ * This program isolates that: a parent with a LARGE PATTERNED static (.bss)
+ * array (size is a compile-time knob, -DSPAWN_CANARY_MB=N, default 8) plus a
+ * same-size heap buffer for contrast, posix_spawn()s a trivial child (itself,
+ * re-invoked with argv[1]="child", which just _exit(0)s immediately — no
+ * busybox/exec-of-another-binary dependency, and it isolates the spawn
+ * mechanics from anything the child's own body does), waits for it, then
+ * scans both buffers for pattern breakage and reports the exact corrupted
+ * byte RANGE — the fingerprint of WHAT wrote there (a stack frame? an argv
+ * staging buffer? a thread block?) — along with buffer addresses so the
+ * overlap with whatever wrote there can be reasoned about numerically.
+ *
+ * Usage: `spawn-canary-test` (harness role) or `spawn-canary-test child`
+ * (trivial child role, used internally via posix_spawn's argv).
+ *
+ * Prints:
+ *   SPAWN-CANARY: static_base=0x.. static_end=0x.. heap_base=0x.. heap_end=0x.. stack_probe=0x..
+ *   SPAWN-CANARY: clean OK
+ * or, on corruption:
+ *   SPAWN-CANARY-FAIL: <region> overwrite at offset 0x.., len 0x.., first_bad=0x.., expected=0x.., got=0x..
+ *   SPAWN-CANARY-FAIL: FAIL
+ */
+#include <errno.h>
+#include <spawn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
+
+#ifndef SPAWN_CANARY_MB
+#define SPAWN_CANARY_MB 8
+#endif
+
+#define CANARY_SIZE ((size_t)SPAWN_CANARY_MB * 1024u * 1024u)
+
+/* Large static (.bss) canary — this is the region Xvfb's ProcVector[] lives
+ * in the shape of (a big statically-allocated array in a huge-.data/.bss
+ * binary). Deliberately NOT const-initialized in the source (that would put
+ * the whole pattern literally in .data, ballooning the binary); it is filled
+ * at runtime instead, so it lives in .bss but is populated before the spawn. */
+static unsigned char g_canary[CANARY_SIZE];
+
+static unsigned char pattern_byte(size_t i) {
+  /* Deterministic, cheap to recompute — doesn't need to be unique per index,
+   * just needs "does byte i still hold what we put there". */
+  return (unsigned char)(((i * 31u) + 7u) ^ 0x5au);
+}
+
+static void fill_pattern(unsigned char *buf, size_t n) {
+  for (size_t i = 0; i < n; i++) buf[i] = pattern_byte(i);
+}
+
+/* Scan for corruption; returns 1 if clean, 0 if corrupted (and fills out
+ * first_bad/last_bad/first_bad_expected/first_bad_got). */
+static int scan_region(const unsigned char *buf, size_t n, size_t *first_bad,
+                        size_t *last_bad, size_t *n_bad,
+                        unsigned char *first_bad_expected,
+                        unsigned char *first_bad_got) {
+  size_t fb = (size_t)-1, lb = 0, count = 0;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char want = pattern_byte(i);
+    if (buf[i] != want) {
+      if (fb == (size_t)-1) {
+        fb = i;
+        *first_bad_expected = want;
+        *first_bad_got = buf[i];
+      }
+      lb = i;
+      count++;
+    }
+  }
+  if (count == 0) return 1;
+  *first_bad = fb;
+  *last_bad = lb;
+  *n_bad = count;
+  return 0;
+}
+
+static void report_region(const char *name, const unsigned char *buf, size_t n) {
+  size_t first_bad = 0, last_bad = 0, n_bad = 0;
+  unsigned char exp = 0, got = 0;
+  if (scan_region(buf, n, &first_bad, &last_bad, &n_bad, &exp, &got)) {
+    printf("SPAWN-CANARY: %s clean (0x%zx bytes checked)\n", name, n);
+  } else {
+    printf(
+        "SPAWN-CANARY-FAIL: %s overwrite at offset 0x%zx (addr=%p), "
+        "extent 0x%zx..0x%zx (len 0x%zx, %zu bytes differ), "
+        "first_bad_expected=0x%02x first_bad_got=0x%02x\n",
+        name, first_bad, (const void *)(buf + first_bad), first_bad, last_bad,
+        last_bad - first_bad + 1, n_bad, exp, got);
+  }
+}
+
+/* Run one spawn/waitpid/rescan round. `label` tags the report lines;
+ * `path`/child_argv describe what to posix_spawn(). Returns 1 pass, 0 fail. */
+static int run_round(const char *label, const char *path, char *const child_argv[],
+                      unsigned char *heap) {
+  fill_pattern(g_canary, CANARY_SIZE);
+  fill_pattern(heap, CANARY_SIZE);
+
+  pid_t pid;
+  int rc = posix_spawn(&pid, path, NULL, NULL, child_argv, environ);
+  if (rc != 0) {
+    fprintf(stderr, "spawn-canary-test[%s]: posix_spawn failed: %s\n", label,
+            strerror(rc));
+    return 0;
+  }
+
+  int st = 0;
+  if (waitpid(pid, &st, 0) != pid) {
+    fprintf(stderr, "spawn-canary-test[%s]: waitpid failed: %s\n", label,
+            strerror(errno));
+    return 0;
+  }
+  if (!(WIFEXITED(st))) {
+    printf("SPAWN-CANARY[%s]: child did not exit cleanly (status=0x%x)\n", label, st);
+  }
+
+  char sname[64], hname[64];
+  snprintf(sname, sizeof(sname), "%s/static", label);
+  snprintf(hname, sizeof(hname), "%s/heap", label);
+  report_region(sname, g_canary, CANARY_SIZE);
+  report_region(hname, heap, CANARY_SIZE);
+
+  size_t sfb = 0, slb = 0, snb = 0, hfb = 0, hlb = 0, hnb = 0;
+  unsigned char se = 0, sg = 0, he = 0, hg = 0;
+  int static_clean = scan_region(g_canary, CANARY_SIZE, &sfb, &slb, &snb, &se, &sg);
+  int heap_clean = scan_region(heap, CANARY_SIZE, &hfb, &hlb, &hnb, &he, &hg);
+  return static_clean && heap_clean;
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "child") == 0) {
+    /* Trivial child — deliberately does almost nothing, so any corruption
+     * observed by the parent is attributable to the spawn/return mechanics,
+     * not to anything the child computes. */
+    _exit(0);
+  }
+
+  unsigned char *heap = malloc(CANARY_SIZE);
+  if (!heap) {
+    fprintf(stderr, "spawn-canary-test: malloc failed\n");
+    return 2;
+  }
+
+  int stack_probe_local;
+  printf(
+      "SPAWN-CANARY: static_base=%p static_end=%p heap_base=%p heap_end=%p "
+      "stack_probe=%p size=0x%zx\n",
+      (void *)g_canary, (void *)(g_canary + CANARY_SIZE - 1), (void *)heap,
+      (void *)(heap + CANARY_SIZE - 1), (void *)&stack_probe_local, CANARY_SIZE);
+  fflush(stdout);
+
+  /* Round 1: self-exec — the child execve()s a fresh copy of THIS binary
+   * (same size static image), then _exit(0)s immediately via the "child"
+   * argv[1] role. Isolates the clone()/posix_spawn() child-stack-setup
+   * mechanics from cross-binary exec. */
+  char *self_argv[] = {argv[0], (char *)"child", NULL};
+  int r1 = run_round("self", argv[0], self_argv, heap);
+
+  /* Round 2: cross-binary exec — the child execve()s into /bin/busybox
+   * (a real, differently-sized binary, argv[0]="busybox" argv[1]="true"),
+   * matching Xvfb's real xkbcomp shape more closely: the child's exec()
+   * replaces its image with a DIFFERENT program, which is exactly where
+   * the Xvfb corruption was observed to already have happened by the time
+   * posix_spawn() returned. Skipped if busybox isn't present (e.g. a
+   * standalone build without it). */
+  int r2 = 1;
+  if (access("/bin/busybox", X_OK) == 0) {
+    char *bb_argv[] = {(char *)"busybox", (char *)"true", NULL};
+    r2 = run_round("busybox-exec", "/bin/busybox", bb_argv, heap);
+  } else {
+    printf("SPAWN-CANARY: busybox-exec round SKIPPED (no /bin/busybox)\n");
+  }
+
+  /* Round 3: the EXACT shape of Xvfb's Popen() (patches/xserver/0001-popen-
+   * posix-spawn.patch, os/utils.c): posix_spawn_file_actions dup2'ing a pipe
+   * fd onto stdout, spawning "/bin/sh -c <command>" — which, since /bin/sh is
+   * busybox's forkshell ash (NOT a plain exec target), itself clone-with-fns
+   * a grandchild to run <command>. Two levels of clone/exec plus file-action
+   * fd surgery, unlike rounds 1/2's plain single-level spawn. This is where
+   * the real Xvfb bug (xkbcomp via Popen) actually lives. */
+  int r3 = 1;
+  if (access("/bin/sh", X_OK) == 0) {
+    fill_pattern(g_canary, CANARY_SIZE);
+    fill_pattern(heap, CANARY_SIZE);
+
+    int pdes[2];
+    if (pipe(pdes) != 0) {
+      fprintf(stderr, "spawn-canary-test[popen]: pipe failed: %s\n", strerror(errno));
+      r3 = 0;
+    } else {
+      posix_spawn_file_actions_t fa;
+      posix_spawn_file_actions_init(&fa);
+      if (pdes[1] != 1) posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
+      posix_spawn_file_actions_addclose(&fa, pdes[0]);
+      if (pdes[1] != 1) posix_spawn_file_actions_addclose(&fa, pdes[1]);
+
+      char *sh_argv[] = {(char *)"sh", (char *)"-c",
+                          (char *)"echo spawn-canary-popen-child; true", NULL};
+      pid_t pid;
+      int rv = posix_spawn(&pid, "/bin/sh", &fa, NULL, sh_argv, environ);
+      posix_spawn_file_actions_destroy(&fa);
+      close(pdes[1]);
+
+      if (rv != 0) {
+        fprintf(stderr, "spawn-canary-test[popen]: posix_spawn failed: %s\n",
+                strerror(rv));
+        close(pdes[0]);
+        r3 = 0;
+      } else {
+        char buf[256];
+        ssize_t n;
+        while ((n = read(pdes[0], buf, sizeof(buf))) > 0) {
+          fwrite(buf, 1, (size_t)n, stdout);
+        }
+        close(pdes[0]);
+        int st = 0;
+        waitpid(pid, &st, 0);
+
+        report_region("popen/static", g_canary, CANARY_SIZE);
+        report_region("popen/heap", heap, CANARY_SIZE);
+        size_t fb = 0, lb = 0, nb = 0;
+        unsigned char e = 0, g = 0;
+        int sc = scan_region(g_canary, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+        int hc = scan_region(heap, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+        r3 = sc && hc;
+      }
+    }
+  } else {
+    printf("SPAWN-CANARY: popen round SKIPPED (no /bin/sh)\n");
+  }
+
+  /* Round 4: fragment the heap/VMA space first (many varied mallocs, half
+   * freed in an interleaved pattern — approximating the allocator state a
+   * long-running, heavily-mmap'ing process like Xvfb has built up by the
+   * time it reaches Popen(), unlike this program's otherwise-pristine
+   * address space), then repeat the popen-shaped spawn several times: if
+   * the bug depends on allocator/VMA state rather than sheer .data size, a
+   * single clean pristine-heap run (rounds 1-3) would miss it. */
+  int r4 = 1;
+  if (access("/bin/sh", X_OK) == 0) {
+#define NFRAG 256
+    void *frag[NFRAG];
+    for (int i = 0; i < NFRAG; i++) {
+      size_t sz = (size_t)((i * 4177 + 131) % 65536) + 16;
+      frag[i] = malloc(sz);
+      if (frag[i]) memset(frag[i], 0x33, sz);
+    }
+    for (int i = 0; i < NFRAG; i += 2) {
+      free(frag[i]);
+      frag[i] = NULL;
+    }
+    for (int i = 1; i < NFRAG; i += 4) {
+      free(frag[i]);
+      frag[i] = NULL;
+    }
+
+    for (int iter = 0; iter < 20 && r4; iter++) {
+      fill_pattern(g_canary, CANARY_SIZE);
+      fill_pattern(heap, CANARY_SIZE);
+
+      int pdes[2];
+      if (pipe(pdes) != 0) {
+        r4 = 0;
+        break;
+      }
+      posix_spawn_file_actions_t fa;
+      posix_spawn_file_actions_init(&fa);
+      if (pdes[1] != 1) posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
+      posix_spawn_file_actions_addclose(&fa, pdes[0]);
+      if (pdes[1] != 1) posix_spawn_file_actions_addclose(&fa, pdes[1]);
+
+      char *sh_argv[] = {(char *)"sh", (char *)"-c", (char *)"true", NULL};
+      pid_t pid;
+      int rv = posix_spawn(&pid, "/bin/sh", &fa, NULL, sh_argv, environ);
+      posix_spawn_file_actions_destroy(&fa);
+      close(pdes[1]);
+      if (rv != 0) {
+        close(pdes[0]);
+        r4 = 0;
+        break;
+      }
+      char buf[256];
+      while (read(pdes[0], buf, sizeof(buf)) > 0) {
+      }
+      close(pdes[0]);
+      int st = 0;
+      waitpid(pid, &st, 0);
+
+      /* Also churn the fragmented allocations between iterations, so the
+       * allocator's free-list/VMA layout keeps shifting run to run. */
+      int idx = (iter * 7 + 3) % NFRAG;
+      free(frag[idx]);
+      frag[idx] = malloc((size_t)((iter * 9973 + 17) % 131072) + 16);
+
+      size_t fb = 0, lb = 0, nb = 0;
+      unsigned char e = 0, g = 0;
+      int sc = scan_region(g_canary, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+      int hc = scan_region(heap, CANARY_SIZE, &fb, &lb, &nb, &e, &g);
+      if (!sc || !hc) {
+        printf("SPAWN-CANARY-FAIL: fragmented/iter%d static=%d heap=%d "
+               "first_bad_static=0x%zx\n",
+               iter, sc, hc, fb);
+        report_region("fragmented/static", g_canary, CANARY_SIZE);
+        report_region("fragmented/heap", heap, CANARY_SIZE);
+        r4 = 0;
+      }
+    }
+    if (r4) printf("SPAWN-CANARY: fragmented (20 iters) clean\n");
+#undef NFRAG
+  } else {
+    printf("SPAWN-CANARY: fragmented round SKIPPED (no /bin/sh)\n");
+  }
+
+  fflush(stdout);
+  if (r1 && r2 && r3 && r4) {
+    printf("SPAWN-CANARY: clean OK\n");
+    fflush(stdout);
+    return 0;
+  }
+  printf("SPAWN-CANARY-FAIL: FAIL\n");
+  fflush(stdout);
+  return 1;
+}

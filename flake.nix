@@ -295,6 +295,15 @@
         inherit cross;
       };
 
+      # Reduced reproducer for the posix_spawn() parent-static-memory
+      # corruption found while debugging Xvfb's xkbcomp spawn (worker #6,
+      # xchat-irc-setup epic): a large patterned static array + a same-size
+      # heap buffer, posix_spawn() a trivial self-exec'd child, rescan both
+      # after waitpid. See userspace/spawn-canary-test.c.
+      spawnCanaryTest = import ./userspace/spawn-canary-test.nix {
+        inherit cross;
+      };
+
       # Faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends
       # one packet then hangs): a one-shot SIGALRM handler (installed via signal()
       # = SA_RESTART) re-armed from inside itself, with an async echo-host thread —
@@ -584,7 +593,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -874,6 +883,10 @@
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
         kill-wake-test = killWakeTest;
+        # Reduced reproducer for the posix_spawn() parent-static-memory
+        # corruption found debugging Xvfb's xkbcomp spawn (worker #6) →
+        # $out/bin/spawn-canary-test.
+        spawn-canary-test = spawnCanaryTest;
         # #179: the host-rejected-image fixture + its conforming twin (see
         # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
         exec-reject-test = execRejectTest;
