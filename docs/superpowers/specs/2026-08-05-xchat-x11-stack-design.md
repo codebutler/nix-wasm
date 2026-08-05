@@ -55,6 +55,18 @@ even capture a real pixel dump of XChat's window headless.
 - *Host-side X server (X in pc/JS)* — duplicates what Xwayland already is,
   and violates the "guest is a real Linux system" posture. The guest running
   its own X server is exactly what a real machine does.
+- *Greenfield's own in-browser XWM* — upstream Greenfield (and the fork)
+  carries a full browser-side X window manager for its remote-apps mode
+  (`packages/compositor/src/remote/xwayland/`, ~5.1k lines TS, a Weston-XWM
+  port over `libs/xtsb` — X11 protocol in TypeScript over any byte channel),
+  and pc's vendored `greenfield.mjs` already bundles it. Bare
+  `Xwayland -rootless` in the guest + the wm fd piped to the browser XWM
+  (vsock, pcctl-style) would work and was seriously considered — rejected
+  because it adds new guest↔host channel plumbing across pc and adapts a
+  code path built for compositor-proxy's channels, while `sommelier -X` is
+  entirely guest-side, already vendored, already spawn-patched, and keeps
+  the guest a self-contained Linux system. If sommelier's XWM proves
+  painful in practice, this is the documented fallback.
 - *VNC/Xvnc into a pc window* — a second remoting layer over the one we
   already have; input latency and clipboard would be worse than XWM.
 
