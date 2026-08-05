@@ -64,6 +64,11 @@
       kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
       # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
       kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
+      # Worker #7 spawn-corruption investigation: the shipped-default NOMMU
+      # kernel + CONFIG_DEBUG_NOMMU_REGIONS/CONFIG_DEBUG_VM. Byte-identical to
+      # `kernel` except for kernel .config debug options — no ABI/behavior
+      # change, so it can boot the SAME initramfs/squashfs as a stock preview.
+      kernelDebugNommu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; debugNommu = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
@@ -808,6 +813,7 @@
         kernel-mmu = kernelMmu;
         kernel-mmu-a2 = kernelMmuA2;
         kernel-mmu-a2-dbg = kernelMmuA2Dbg;
+        kernel-debug-nommu = kernelDebugNommu;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;

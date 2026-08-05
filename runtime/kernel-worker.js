@@ -108,6 +108,25 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// A string denoting the runner name (same as Worker name), useful for debugging.
   let runner_name = "[Unknown]";
 
+  // pc (worker #7, xchat-irc-setup spawn-corruption investigation): gated debug
+  // logging for the exec/task-creation path, OFF BY DEFAULT (same posture as
+  // trace_syscalls above — this is a diagnostic aid, not a permanent trace).
+  // Enable with SPAWN_DEBUG=1 in the environment of the Node harness (worker_
+  // threads inherit process.env, so no init-message plumbing is needed for the
+  // Node smokes this was built to drive; a browser session has no process.env
+  // and this stays silent there). Logs, per exec/task-create: the binary's
+  // data_start/table_start/pt_base + byte range, and every memory.grow() call
+  // (old/new page count) — the exact facts needed to tell whether a NEW task's
+  // data segment lands inside the byte range still occupied by another live
+  // task's .data (the hypothesis behind the real Xvfb Popen()->posix_spawn()
+  // .data corruption: ProcVector[] correct before the spawn, corrupted right
+  // after, before the child produced any output — see userspace/spawn-canary-
+  // test.c's file comment for the full case history).
+  const SPAWN_DEBUG = typeof process !== "undefined" && !!(process.env && process.env.SPAWN_DEBUG);
+  const sdbg = (...args) => {
+    if (SPAWN_DEBUG) console.error(`[spawn-dbg ${runner_name}]`, ...args);
+  };
+
   /// pc (#128 MMU boot speed): content-keyed cache of compiled user-executable
   /// Modules, seeded from the host at worker creation (init message). Under the
   /// software MMU EVERY exec must instrument the binary (softmmu-pass over a
@@ -836,6 +855,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // section (a table smaller than declared fails instantiate).
         table_initial: table_initial,
       };
+      sdbg(
+        `wasm_load_executable: bin=[0x${Number(bin_start).toString(16)}..0x${Number(bin_end).toString(16)}]` +
+          ` (0x${(Number(bin_end) - Number(bin_start)).toString(16)} bytes)` +
+          ` data_start=0x${Number(data_start).toString(16)} table_start=0x${Number(table_start).toString(16)}` +
+          ` pt_base=0x${Number(pt_base || 0).toString(16)} table_initial=0x${Number(table_initial).toString(16)}`,
+      );
 
       // We release our reference already, just to be sure. The promise chain will still have a reference until the
       // kernel exits back to userland, which will termintate the user executable with a Trap.
