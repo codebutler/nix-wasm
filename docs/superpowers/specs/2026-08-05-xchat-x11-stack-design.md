@@ -100,9 +100,15 @@ native-codegen moves, `isWasm`-guarded in `deps-overlay.nix`.
 
 ### M-X1 — xorg-server crosses; **Xvfb boots headless** (the risk keystone)
 
-Build xorg-server (the `xwayland` 24.1.x source tree builds both DDXes; if
-the xwayland-only tarball won't emit Xvfb, use the full `xorg-server` tarball
-at the same version) with everything optional stripped:
+Two derivations from two release series — since 21.1, Xwayland ships as its
+own standalone series and the full-server tarball stayed on 21.1.x (there is
+no `xorg-server-24.1.x`): **Xvfb from `xorg-server` 21.1.23** (the pinned
+nixpkgs `pkgs/by-name/xo/xorg-server`, `-Dxvfb=true` with the Xorg/Xnest
+DDXes off) and **Xwayland from the `xwayland` 24.1.12 package** (M-X3). Both
+share the same `os/` layer, so the NOMMU work below lands as patches in
+`patches/xserver/` applied to both (kept as two copies only if the trees
+have drifted — verify with `--fuzz=0`, the 0017-0020 lesson). M-X1 builds
+the Xvfb one, with everything optional stripped:
 
 - **Off:** glamor/GL (`-Dglamor=false` — drops libGL/gbm/epoxy/egl-wayland/
   libdrm/mesa entirely), libei, libdecor, systemd notify, secure-rpc
