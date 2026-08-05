@@ -18,11 +18,34 @@
 #   buildPackages.
 # - The posix-spawn patch replaces fork()/execvp() with posix_spawnp() — the
 #   only spawn mechanism available on the NOMMU wasm guest (fork/vfork absent
-#   from our nix-built musl).
+#   from our nix-built musl). It ALSO already covers sl_spawn_xwayland (the -X
+#   Xwayland launch site, M-X3) — the patch fully rewrote that function to use
+#   the same sl_spawn() posix_spawn wrapper with a proper
+#   posix_spawn_file_actions_t for the display-ready/wm socketpair fds, so no
+#   further extension was needed to enable -X (verified by reading the applied
+#   patch before writing this comment — see patches/sommelier/0001's
+#   sl_spawn_xwayland hunk).
 # - No --fpcast-emu: Sommelier uses no GLib/GObject indirect-call dispatch.
 # - The dylink/-shared link + --allow-undefined-file come from the cross
 #   cc-wrapper (wasm-cross.nix) automatically — same as every other cross binary.
 #   Do NOT add --allow-undefined (forbidden, #52).
+# - M-X3 (XChat/X11 epic): `-Dxwayland_path=`/`-Dxwayland_gl_driver_path=` bake
+#   the cross-built Xwayland's absolute store path in as sommelier.cc's
+#   XWAYLAND_PATH/XWAYLAND_GL_DRIVER_PATH compile-time defaults (meson_options.txt:
+#   "path to Xwayland" — a full executable path, not a directory, despite the
+#   option name; verified against sommelier.cc's `xwayland_path ?: XWAYLAND_PATH`
+#   use before choosing the value). This is the SAME reference-into-served-
+#   closure trick Xvfb's `-Dxkb_bin_dir=${xkbcomp}/bin` already relies on
+#   (deps-overlay.nix) — EXCEPT it does NOT apply here, because sommelier ships
+#   via initramfs extraBins (a flat file copy, no Nix closure walk), not
+#   environment.systemPackages. Xwayland's own store path only reaches the
+#   served /nix squashfs because `xwaylandApp` is ALSO listed directly in
+#   extraSystemPackages (flake.nix) — baking the path into sommelier's binary
+#   only fixes WHAT it execs, not WHETHER that path exists on the guest.
+#   GL driver path is left empty: this build is glamor=false (no GPU), so
+#   Xwayland never reads LIBGL_DRIVERS_PATH, but an honest empty default is
+#   clearer than leaving Sommelier's own upstream ChromeOS-container default
+#   (a path that doesn't exist on this guest either way) baked in.
 { pkgs, cross }:
 let
   # All cross-built deps come directly from the `cross` package set, where
@@ -37,6 +60,7 @@ let
   libxdmcp     = cross.libxdmcp;
   wayland      = cross.wayland;
   libffi       = cross.libffi;
+  xwayland     = cross.xwayland; # M-X3: the Xwayland binary this instance spawns
 in
 cross.stdenv.mkDerivation {
   pname = "sommelier-wasm32-nommu";
@@ -97,6 +121,9 @@ cross.stdenv.mkDerivation {
     "-Dcommit_loop_fix=false"
     # wasm-ld doesn't support PIE relocations
     "-Db_pie=false"
+    # M-X3: default -X target — see the file-header comment above.
+    "-Dxwayland_path=${xwayland}/bin/Xwayland"
+    "-Dxwayland_gl_driver_path="
   ];
 
   # meson's find_program('wayland-scanner') in a cross build walks the cross
