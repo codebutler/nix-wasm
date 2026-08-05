@@ -510,6 +510,18 @@
       xwdApp = cross.xwd;
       xdpyinfoApp = cross.xdpyinfo;
 
+      # M-X3 (XChat/X11 epic): Xwayland 24.1.12 — a SEPARATE upstream release
+      # from the xorg-server 21.1.23 tarball above (see deps-overlay.nix's
+      # "Xwayland" section for the full mesonFlags/buildInputs/patches
+      # rationale). `nix build .#xwayland` → $out/bin/Xwayland. Ships via
+      # environment.systemPackages (extraSystemPackages below), NOT initramfs
+      # extraBins — Sommelier's own mesonFlags bake in the absolute
+      # `${xwayland}/bin/Xwayland` store path it posix_spawns (see
+      # userspace/sommelier.nix), so that path only resolves on the guest if
+      # something in systemPackages' closure references it — same
+      # store-path-reference reasoning as xserver/xkbcomp above.
+      xwaylandApp = cross.xwayland;
+
       # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
       # headers + compiler-rt builtins + libc++) — the runtime sysroot the guest
       # clang/clang++ config files reference (#3), served read-only over 9P in the
@@ -572,7 +584,12 @@
         # M-X2: the first real X clients — xeyes/xwd/xdpyinfo — same
         # systemPackages-not-extraBins reasoning (they're PATH-looked-up by
         # x11-apps-smoke.mjs from /run/current-system/sw/bin).
-        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp ];
+        # M-X3: Xwayland — systemPackages so its store path (and xkbcomp/
+        # xkeyboard-config/etc closure) actually rides the served squashfs;
+        # see xwaylandApp's comment above and userspace/sommelier.nix's
+        # `-Dxwayland_path=` mesonFlag, which bakes the exact matching path
+        # into Sommelier's own binary.
+        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -1209,6 +1226,10 @@
           name = "wasm-x11-apps";
           paths = [ xeyesApp xwdApp xdpyinfoApp ];
         };
+
+        # M-X3: cross-built Xwayland. See deps-overlay.nix's "Xwayland"
+        # section. `nix build .#xwayland` → $out/bin/Xwayland.
+        xwayland = xwaylandApp;
       };
         };
       # Phase 5 (#2): expose the package set for every supported build host.
