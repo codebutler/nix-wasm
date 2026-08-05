@@ -1468,4 +1468,140 @@ in
       doCheck = false;
     }))
     prev.libxft;
+
+  # --- xorg-server (Xvfb) — M-X1, XChat/X11 epic ----------------------------
+  # Cross-build xorg-server 21.1.23, configured DOWN to Xvfb only. PRIME
+  # DIRECTIVE corollary 1: override nixpkgs' own `xorg-server` recipe (the
+  # galculator/l3afpad posture) rather than a from-scratch userspace/xserver.nix
+  # derivation — the meson build cross-compiles cleanly once mesonFlags and
+  # buildInputs are trimmed to what an Xvfb-only, no-GL, no-DRI, no-udev/dbus/
+  # systemd, no secure-rpc build actually needs; nothing here is xorg-server-
+  # specific integration a from-scratch recipe would do any differently.
+  #
+  # Off (per the design plan, M-X1): the Xorg/Xnest/XWin/XQuartz DDXes (and
+  # Xwayland, which isn't even this source package — see xwayland.nix, M-X3),
+  # glamor/GL/GLX, DRI1/2/3 (+ libdrm/libgbm — dropped from buildInputs
+  # entirely: `dependency('libdrm', required: false)` means the DRI logic
+  # degrades to "not available" with no build-time requirement at all once
+  # dri1/2/3 are individually forced false), udev/hal/systemd-logind (+ the
+  # dbus it would otherwise require), XDMCP + secure-rpc (libtirpc), libunwind,
+  # XSELinux (avoids libselinux/libaudit), docs (avoids the xmlto/xsltproc/
+  # xorg-sgml-doctools doc toolchain, uncrossed and unneeded).
+  # On: Xvfb, XKB (xkbcomp + xkeyboard-config — both already cross-build with
+  # NO override, verified directly). MIT-SHM stays COMPILED: musl links
+  # shmget()/shmat() fine (it's libc API, not a kernel feature check at build
+  # time), and the guest kernel has no SysV IPC — shmget() returns ENOSYS at
+  # RUNTIME and MIT-SHM clients fall back to core-protocol PutImage per the
+  # X11 protocol spec (correct, just slower). Not worth fighting at build
+  # time; revisit via memfd/ramfs if paint speed ever matters (per the plan).
+  # xcsecurity is left at meson's own default (false) — plan calls it
+  # optional either way, so there's no reason to grow the surface.
+  #
+  # sha1 is forced to `libcrypto` (our cross openssl, already built for the
+  # Cachix-over-uplink HTTPS trust-anchors work — see CLAUDE.md): musl has
+  # none of meson's other SHA1 providers (no BSD libmd SHA1Init, no
+  # CommonCrypto/CryptoAPI, no libsha1/libnettle/libgcrypt in the cross
+  # closure), so leaving it on "auto" would fail the probe loop outright.
+  #
+  # patches/xserver/0001: os/utils.c's System()/Popen()/Fopen() fork()+exec —
+  # ported to posix_spawn (docs/process-model.md handling rule 2: "a real
+  # spawn API in a library we need → port it to posix_spawn"; same shape as
+  # patches/sommelier/0001-posix-spawn.patch's pipe + posix_spawn_file_actions
+  # approach). This is load-bearing, not cosmetic: Xvfb spawns `xkbcomp`
+  # through Popen() to compile the XKB keymap on every startup.
+  # patches/xserver/0002: test/meson.build's `simple-xinit` helper (used only
+  # by `meson test`/piglit, never by `ninja`/`ninja install`) also calls
+  # fork() and — unlike the real per-DDX unit-test block further down the same
+  # file, which is correctly gated `if build_xorg` — is built UNCONDITIONALLY
+  # by meson's default target on every non-Windows host. Handling rule 1
+  # ("it's an unused CLI/tool → don't build it"), applied as a small patch
+  # since upstream gives no configure knob for it (unlike the ncurses/openssl/
+  # pcre2 cases, which already had one).
+  # patches/xserver/0003: dix/stubmain.c's `int main(int, char**, char**)` —
+  # a REAL wasm-ABI bug, found only by attempting the link. clang's wasm
+  # target canonicalizes exactly two `main` signatures to the symbol names
+  # our musl crt1.o actually calls — `main(void)` → `__main_void`,
+  # `main(int, char**)` → `__main_argc_argv` (crt1.o's own `main` is a WEAK
+  # stub forwarding to `__main_argc_argv`). The xserver's default DDX-main
+  # uses the POSIX/glibc 3-arg extension `main(int, char**, char**)` for
+  # envp, which clang does NOT canonicalize — it stays compiled under the
+  # literal name `main`, so crt1.o's `__main_argc_argv` reference is left
+  # dangling and the link fails ("undefined symbol: main"). Fix: drop to the
+  # canonical 2-arg form and read envp off the POSIX-mandated `environ`
+  # global (musl always maintains it) — a portable substitute for the 3-arg
+  # extension, not a wasm-only workaround. Confirmed by isolating a single
+  # extracted .o + a minimal repro before touching the patch (see the M-X1
+  # session notes) — worth a fork-first check should XWayland (M-X3) ever
+  # need its own DDX main with the same 3-arg shape.
+  #
+  # xkb_output_dir: nixpkgs points this at $out/share/X11/xkb/compiled, which
+  # is WRONG on this guest — the server WRITES freshly-compiled keymaps there
+  # at RUNTIME (not build time), and $out is a read-only store path served
+  # off the squashfs. Point it at a guest-writable path instead: /tmp, the
+  # same ramfs CLAUDE.md's "/dev/shm MUST be mounted" entry already documents
+  # as mandatory for NOMMU MAP_SHARED (ramfs, not tmpfs/shmem — CONFIG_SHMEM
+  # is gated off behind MMU on this kernel).
+  xorg-server = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" ]; # no "dev": nothing in this closure links against Xvfb
+      doCheck = false;
+      # Keep the native (buildPackages) meson/ninja/pkg-config from upstream —
+      # they're already correctly split via strictDeps; only the buildInputs
+      # (target-side, cross-built) and mesonFlags need trimming.
+      buildInputs = [
+        final.xorgproto
+        final.xtrans
+        final.libxau
+        final.libxdmcp
+        final.libxcb
+        final.libx11
+        final.libxext
+        final.libxfixes
+        final.libxkbfile
+        final.libxfont_2
+        final.font-util
+        final.pixman
+        final.zlib
+        final.openssl
+      ];
+      propagatedBuildInputs = [ ];
+      patches = (o.patches or [ ]) ++ [
+        ./patches/xserver/0001-popen-posix-spawn.patch
+        ./patches/xserver/0002-skip-simple-xinit-fork.patch
+        ./patches/xserver/0003-stubmain-wasm-abi.patch
+      ];
+      mesonFlags = [
+        "-Dxorg=false"
+        "-Dxephyr=false"
+        "-Dxnest=false"
+        "-Dxwin=false"
+        "-Dxquartz=false"
+        "-Dxvfb=true"
+        "-Dglamor=false"
+        "-Dglx=false"
+        "-Ddri1=false"
+        "-Ddri2=false"
+        "-Ddri3=false"
+        "-Ddrm=false"
+        "-Dudev=false"
+        "-Dudev_kms=false"
+        "-Dhal=false"
+        "-Dsystemd_logind=false"
+        "-Dxselinux=false"
+        "-Ddocs=false"
+        "-Ddevel-docs=false"
+        "-Dxdmcp=false"
+        "-Dxdm-auth-1=false"
+        "-Dsecure-rpc=false"
+        "-Dlibunwind=false"
+        "-Ddtrace=false"
+        "-Dsha1=libcrypto"
+        "-Dlog_dir=/var/log"
+        "-Ddefault_font_path="
+        "-Dxkb_bin_dir=${final.xkbcomp}/bin"
+        "-Dxkb_dir=${final.xkeyboard-config}/share/X11/xkb"
+        "-Dxkb_output_dir=/tmp/xkb-compiled"
+      ];
+    }))
+    prev.xorg-server;
 }

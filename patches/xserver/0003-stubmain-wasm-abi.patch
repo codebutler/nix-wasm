@@ -1,0 +1,32 @@
+--- a/dix/stubmain.c	2026-08-05 06:40:39.481705324 +0000
++++ b/dix/stubmain.c	2026-08-05 06:40:52.375593909 +0000
+@@ -25,11 +25,27 @@
+ 
+ int dix_main(int argc, char *argv[], char *envp[]);
+ 
++/* wasm/NOMMU (nix-wasm): clang's wasm target only canonicalizes the two
++ * WASI-blessed `main` signatures — `main(void)` to `__main_void` and
++ * `main(int, char**)` to `__main_argc_argv` — which is what our musl crt1.o
++ * (a weak `main` that forwards to `__main_argc_argv`) actually calls. The
++ * 3-arg `main(int, char**, char**)` below is NOT one of those two forms, so
++ * clang leaves it compiled under the literal name `main` instead of
++ * `__main_argc_argv` — a *different*, unrelated symbol from crt1.o's point
++ * of view — so crt1.o's `__main_argc_argv` reference is never satisfied and
++ * the link fails ("undefined symbol: main", crt1's own literal-name stub).
++ * Fix: use the canonical 2-arg form and fetch envp from the POSIX-mandated
++ * `environ` global instead (musl always defines and maintains it) — this is
++ * the standard portable substitute for the 3-arg extension, not a wasm-only
++ * workaround.
++ */
++extern char **environ;
++
+ /*
+   A default implementation of main, which can be overridden by the DDX
+  */
+ int
+-main(int argc, char *argv[], char *envp[])
++main(int argc, char *argv[])
+ {
+-    return dix_main(argc, argv, envp);
++    return dix_main(argc, argv, environ);
+ }

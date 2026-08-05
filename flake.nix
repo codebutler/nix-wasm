@@ -450,6 +450,18 @@
         src = weston;
       };
 
+      # M-X1 (XChat/X11 epic): xorg-server, configured down to Xvfb only. See
+      # deps-overlay.nix's "xorg-server (Xvfb)" section for the full mesonFlags/
+      # buildInputs/patches rationale. `nix build .#xserver` → $out/bin/Xvfb.
+      xserver = cross.xorg-server;
+
+      # M-X2 (XChat/X11 epic): x11-probe — the minimal libxcb client proof
+      # against the Xvfb built above. See userspace/x11-probe.*.
+      x11Probe = import ./userspace/x11-probe.nix {
+        inherit cross;
+        libxcb = cross.libxcb;
+      };
+
       # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
       # headers + compiler-rt builtins + libc++) — the runtime sysroot the guest
       # clang/clang++ config files reference (#3), served read-only over 9P in the
@@ -502,7 +514,14 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = [ wasmDltest ];
+        # M-X1/M-X2 (XChat/X11 epic): xorg-server (Xvfb) + the x11-probe client
+        # proof. systemPackages, not initramfs extraBins — Xvfb's mesonFlags
+        # bake in absolute store paths for xkbcomp (spawned at runtime to
+        # compile the XKB keymap) and xkeyboard-config's XKB data tree; those
+        # derivations only enter the served squashfs closure if something in
+        # environment.systemPackages' closure references them, exactly like
+        # galculator/l3afpad's baked share-dir paths above.
+        extraSystemPackages = [ wasmDltest xserver x11Probe ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -1105,6 +1124,12 @@
             cross.libxft
           ];
         };
+
+        # M-X1: cross-built Xvfb. See deps-overlay.nix's "xorg-server (Xvfb)".
+        xserver = xserver;
+
+        # M-X2: the libxcb client proof against it.
+        x11-probe = x11Probe;
       };
         };
       # Phase 5 (#2): expose the package set for every supported build host.

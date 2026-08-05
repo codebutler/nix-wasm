@@ -1,0 +1,204 @@
+--- a/os/utils.c	2026-08-05 06:19:46.613924418 +0000
++++ b/os/utils.c	2026-08-05 06:20:40.783521888 +0000
+@@ -86,6 +86,7 @@
+ #include <signal.h>
+ #ifndef WIN32
+ #include <sys/wait.h>
++#include <spawn.h>              /* wasm/NOMMU: posix_spawn (no fork), see below */
+ #endif
+ #if !defined(SYSV) && !defined(WIN32)
+ #include <sys/resource.h>
+@@ -1370,6 +1371,16 @@
+  *
+  * XXX It'd be good to redirect stderr so that it ends up in the log file
+  * as well.  As it is now, xkbcomp messages don't end up in the log file.
++ *
++ * wasm/NOMMU (nix-wasm): musl has no fork()/vfork() (docs/process-model.md) —
++ * spawn via posix_spawn instead, mirroring the pattern used for Sommelier
++ * (patches/sommelier/0001-posix-spawn.patch). The original code forked and
++ * then setgid(getgid())/setuid(getuid()) in the child to drop privileges
++ * before exec — posix_spawn has no pre-exec callback to do that, but the
++ * nix-wasm guest is single-user (no root/non-root separation; see
++ * userspace/system.nix's `build-users-group = ""`), so there are no
++ * privileges to drop here: getuid()==geteuid() and getgid()==getegid()
++ * always hold, making the drop a no-op even on a real system.
+  */
+ 
+ int
+@@ -1378,6 +1389,9 @@
+     int pid, p;
+     void (*csig) (int);
+     int status;
++    int rv;
++    char *argv[] = { "sh", "-c", (char *) command, NULL };
++    extern char **environ;
+ 
+     if (!command)
+         return 1;
+@@ -1389,22 +1403,15 @@
+     }
+     DebugF("System: `%s'\n", command);
+ 
+-    switch (pid = fork()) {
+-    case -1:                   /* error */
++    rv = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ);
++    if (rv != 0) {
++        errno = rv;
+         p = -1;
+-        break;
+-    case 0:                    /* child */
+-        if (setgid(getgid()) == -1)
+-            _exit(127);
+-        if (setuid(getuid()) == -1)
+-            _exit(127);
+-        execl("/bin/sh", "sh", "-c", command, (char *) NULL);
+-        _exit(127);
+-    default:                   /* parent */
++    }
++    else {
+         do {
+             p = waitpid(pid, &status, 0);
+         } while (p == -1 && errno == EINTR);
+-
+     }
+ 
+     if (OsSignal(SIGCHLD, csig) == SIG_ERR) {
+@@ -1453,39 +1460,47 @@
+     }
+ #endif
+ 
+-    switch (pid = fork()) {
+-    case -1:                   /* error */
+-        close(pdes[0]);
+-        close(pdes[1]);
+-        free(cur);
+-#ifdef HAVE_SETITIMER
+-        if (SmartScheduleEnable() < 0)
+-            perror("signal");
+-#endif
+-        return NULL;
+-    case 0:                    /* child */
+-        if (setgid(getgid()) == -1)
+-            _exit(127);
+-        if (setuid(getuid()) == -1)
+-            _exit(127);
++    /* wasm/NOMMU (nix-wasm): posix_spawn in place of fork()+exec — see the
++     * System() comment above. The child's fd juggling (dup2 stdin/stdout
++     * onto the pipe end, close the other) becomes posix_spawn_file_actions,
++     * evaluated by the kernel/libc IN THE CHILD before exec — same effect,
++     * no fork needed. The setgid/setuid privilege drop is dropped for the
++     * same single-user-guest reason as System(). */
++    {
++        posix_spawn_file_actions_t fa;
++        char *argv[] = { "sh", "-c", (char *) command, NULL };
++        extern char **environ;
++        int rv;
++
++        posix_spawn_file_actions_init(&fa);
+         if (*type == 'r') {
+-            if (pdes[1] != 1) {
+-                /* stdout */
+-                dup2(pdes[1], 1);
+-                close(pdes[1]);
+-            }
+-            close(pdes[0]);
++            if (pdes[1] != 1)
++                posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
++            posix_spawn_file_actions_addclose(&fa, pdes[0]);
++            if (pdes[1] != 1)
++                posix_spawn_file_actions_addclose(&fa, pdes[1]);
+         }
+         else {
+-            if (pdes[0] != 0) {
+-                /* stdin */
+-                dup2(pdes[0], 0);
+-                close(pdes[0]);
+-            }
++            if (pdes[0] != 0)
++                posix_spawn_file_actions_adddup2(&fa, pdes[0], 0);
++            posix_spawn_file_actions_addclose(&fa, pdes[1]);
++            if (pdes[0] != 0)
++                posix_spawn_file_actions_addclose(&fa, pdes[0]);
++        }
++
++        rv = posix_spawn(&pid, "/bin/sh", &fa, NULL, argv, environ);
++        posix_spawn_file_actions_destroy(&fa);
++        if (rv != 0) {
++            close(pdes[0]);
+             close(pdes[1]);
++            free(cur);
++#ifdef HAVE_SETITIMER
++            if (SmartScheduleEnable() < 0)
++                perror("signal");
++#endif
++            errno = rv;
++            return NULL;
+         }
+-        execl("/bin/sh", "sh", "-c", command, (char *) NULL);
+-        _exit(127);
+     }
+ 
+     /* Avoid EINTR during stdio calls */
+@@ -1535,35 +1550,38 @@
+         return NULL;
+     }
+ 
+-    switch (pid = fork()) {
+-    case -1:                   /* error */
+-        close(pdes[0]);
+-        close(pdes[1]);
+-        free(cur);
+-        return NULL;
+-    case 0:                    /* child */
+-        if (setgid(getgid()) == -1)
+-            _exit(127);
+-        if (setuid(getuid()) == -1)
+-            _exit(127);
++    /* wasm/NOMMU (nix-wasm): posix_spawn in place of fork()+exec — see the
++     * System()/Popen() comments above. */
++    {
++        posix_spawn_file_actions_t fa;
++        char *argv[] = { "cat", (char *) file, NULL };
++        extern char **environ;
++        int rv;
++
++        posix_spawn_file_actions_init(&fa);
+         if (*type == 'r') {
+-            if (pdes[1] != 1) {
+-                /* stdout */
+-                dup2(pdes[1], 1);
+-                close(pdes[1]);
+-            }
+-            close(pdes[0]);
++            if (pdes[1] != 1)
++                posix_spawn_file_actions_adddup2(&fa, pdes[1], 1);
++            posix_spawn_file_actions_addclose(&fa, pdes[0]);
++            if (pdes[1] != 1)
++                posix_spawn_file_actions_addclose(&fa, pdes[1]);
+         }
+         else {
+-            if (pdes[0] != 0) {
+-                /* stdin */
+-                dup2(pdes[0], 0);
+-                close(pdes[0]);
+-            }
++            if (pdes[0] != 0)
++                posix_spawn_file_actions_adddup2(&fa, pdes[0], 0);
++            posix_spawn_file_actions_addclose(&fa, pdes[1]);
++            if (pdes[0] != 0)
++                posix_spawn_file_actions_addclose(&fa, pdes[0]);
++        }
++
++        rv = posix_spawn(&pid, "/bin/cat", &fa, NULL, argv, environ);
++        posix_spawn_file_actions_destroy(&fa);
++        if (rv != 0) {
++            close(pdes[0]);
+             close(pdes[1]);
++            free(cur);
++            return NULL;
+         }
+-        execl("/bin/cat", "cat", file, (char *) NULL);
+-        _exit(127);
+     }
+ 
+     /* Avoid EINTR during stdio calls */
