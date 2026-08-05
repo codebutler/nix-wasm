@@ -1841,4 +1841,23 @@ in
       '';
     }))
     prev.xdpyinfo;
+
+  # libxcvt (M-X3, XChat/X11 epic): Xwayland's ONE new required dep beyond the
+  # M-X1/M-X2 X11 closure (`dependency('libxcvt', required: true)`, unconditional
+  # in its meson.build). nixpkgs marks it `badPlatforms = [ isStatic ]` — its
+  # lib/meson.build hardcodes `shared_library()` regardless of meson's
+  # `default_library` option, so on our all-static crossSystem the standalone
+  # `cvt` tool tried to link against a wasm .so and hit the general-dynamic-TLS
+  # `__musl_tp` problem (CLAUDE.md's "Static is a PLATFORM flag" entry) —
+  # confirmed by attempting the plain cross-build before writing this patch.
+  # Fix: `library()` is meson's generic helper that DOES respect
+  # `default_library`; one-line source patch, not a per-package static flag
+  # (none exists — this isn't a configure option, meson picked a literal type).
+  libxcvt = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/libxcvt/0001-static-library.patch ];
+      doCheck = false;
+    }))
+    prev.libxcvt;
+
 }
