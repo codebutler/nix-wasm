@@ -1860,4 +1860,164 @@ in
     }))
     prev.libxcvt;
 
+  # --- Xwayland (M-X3, XChat/X11 epic) --------------------------------------
+  # Cross-build Xwayland 24.1.12 — a SEPARATE upstream release from the
+  # xorg-server 21.1.23 tarball that builds Xvfb (M-X1): since the freedesktop
+  # xserver/Xwayland split, "xwayland" ships its own tarball containing only
+  # the Xwayland + (a second, unused-here) Xvfb DDX, not the full xserver
+  # monorepo (no Xorg/Xnest/XWin/XQuartz code at all in this tree — confirmed
+  # by reading its meson_options.txt/meson.build before writing this override,
+  # not assumed from the M-X1 xorg-server shape). PRIME DIRECTIVE corollary 1:
+  # override nixpkgs' own `xwayland` recipe (the galculator/l3afpad/xorg-server
+  # posture) rather than a from-scratch userspace/xwayland.nix derivation.
+  #
+  # Off: glamor/GL/GLX/DRI3/libdrm-accel (no GPU on the guest — libepoxy is
+  # built no-GL and minigbm is an abort-stub per the sommelier learnings
+  # entry; `-Dglamor=false` alone drops the gbm/epoxy/libdrm(accel)/xshmfence
+  # requirement — verified via the tree's meson.build `if build_glamor` gates
+  # before writing this), libei/emulated-input, libdecor, XDMCP, secure-rpc,
+  # systemd-notify, XSELinux, docs/devel-docs, libunwind (already off under
+  # useLLVM), this tree's OWN Xvfb (`-Dxvfb=false` — we already have one from
+  # M-X1; building a second here would be pure duplication).
+  # On: rootless wl_shm Xwayland (sommelier always passes `-shm -rootless`),
+  # XKB (xkbcomp + xkeyboard-config — the SAME cross-built paths Xvfb already
+  # uses), MIT-SHM left at its build default (matches Xvfb: compiles fine,
+  # ENOSYS's at runtime with no guest SysV IPC, clients fall back to
+  # core-protocol PutImage — not worth fighting per the M-X1 plan).
+  #
+  # sha1=libcrypto: same reasoning as Xvfb — musl has none of meson's other
+  # SHA1 providers in this cross closure.
+  #
+  # patches/xwayland/0001: os/utils.c's Popen() fork()+exec, ported to
+  # posix_spawn — this tree's Popen has DRIFTED far enough from 21.1.23's
+  # (verified: `patch --fuzz=0` of xserver's 0001 fails 4/6 hunks against this
+  # tree) that it needs its own patch rather than reuse; the actual C change
+  # is the same posix_spawn shape (docs/process-model.md handling rule 2).
+  # Note this tree's Popen is the ONLY fork site that matters here — unlike
+  # 21.1.23, this tree's non-Windows build has no separate System() function
+  # at all (xkb/ddxLoad.c's System() call is inside `#ifdef WIN32`; verified
+  # by reading ddxLoad.c before writing this comment), so no analogous System
+  # patch is needed.
+  # patches/xwayland/0002: test/meson.build's `simple-xinit` helper — same
+  # "unused CLI, unconditionally built by `ninja`" issue as xserver's 0002,
+  # but this tree's file has an extra `dependencies:` line so the context
+  # drifted too; same fix (`build_by_default: false`), separate patch.
+  # patches/xwayland/0003: dix/stubmain.c's 3-arg `main` — BYTE-IDENTICAL file
+  # to xserver's copy (diffed before writing this comment), so the same
+  # clang-wasm-ABI fix (patches/xserver/0003) applies verbatim; kept as its
+  # own file per vendor-tree-owns-its-patches convention rather than shared.
+  #
+  # postPatch: nixpkgs' own package.nix rewrites the os/utils.c Popen() exec
+  # target from the literal "/bin/sh" to `${bash}/bin/sh` — but this overlay
+  # ALREADY redirects `bash` to `buildPackages.bash` (the native x86_64 build
+  # tool) for wasm cross builds, for build-time helper scripts (see the `bash`
+  # entry near the top of this file) — baking THAT path into Xwayland would
+  # embed a native x86_64 ELF path into the wasm guest binary, unusable at
+  # guest runtime. Drop nixpkgs' postPatch entirely: the guest DOES have a
+  # real `/bin/sh` (busybox's forkshell ash, promoted to /bin/sh in
+  # bootstrap.nix per CLAUDE.md's "In-guest autotools" note), so the tree's
+  # original literal is already correct for this target and needs no rewrite.
+  #
+  # buildInputs: fully replaced (not appended — nixpkgs' own list pulls in
+  # dri-pkgconfig-stub/egl-wayland/libdecor/libgbm/libepoxy/libei/libGL/libGLU/
+  # libxres/libtirpc/systemd, none of which a glamor-less wl_shm-only build
+  # needs) with the minimal set this tree's meson.build actually requires with
+  # every optional feature off: the same X11/XKB/font stack Xvfb already
+  # cross-builds, PLUS libxcvt (unconditionally `required: true` in this
+  # tree — cross-builds with no override needed, confirmed standalone) and
+  # wayland/wayland-protocols (Xwayland is fundamentally a Wayland client).
+  #
+  # No dynsym-inject: like Xvfb, Xwayland resolves nothing by name (unlike
+  # galculator's GtkBuilder .ui lookup) — the raw fpcast-emu canonicalizing
+  # pass alone is the fix for its DIX device-feedback vtable casts (SAME
+  # dix/devices.c code Xvfb hit — see xorg-server's fpcast-emu comment above;
+  # both trees share this file nearly verbatim).
+  xwayland = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" ]; # no "dev": nothing in this closure links against Xwayland
+      doCheck = false;
+      postPatch = ""; # see the postPatch note above — do NOT inherit o.postPatch
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.binaryen ];
+      buildInputs = [
+        final.xorgproto
+        final.xtrans
+        final.libxau
+        final.libxdmcp
+        final.libxcb
+        final.libx11
+        final.libxext
+        final.libxfixes
+        final.libxkbfile
+        final.libxfont_2
+        final.font-util
+        final.libxcvt
+        # miext/sync/misyncshm.c unconditionally #includes <X11/xshmfence.h>
+        # (the SYNC extension's shm-fence support — not gated behind glamor/
+        # dri3/mitshm at all; found by attempting the build before adding
+        # this). Link-only in practice (glamor=false means nothing calls the
+        # fence-wait path at runtime), but the header + .a must be present.
+        final.libxshmfence
+        # hw/xwayland/xwayland-window.h unconditionally #includes <xf86drm.h>
+        # (found by attempting the build): header-only need here — glamor is
+        # off, so the DRM-lease/dmabuf code paths this guards never execute.
+        # Reuse the SAME link-only libdrm stub Sommelier already established
+        # (see the "Sommelier link-only cross closure" entry in CLAUDE.md) —
+        # not a new dependency class.
+        final.libdrm
+        final.pixman
+        final.wayland
+        final.wayland-protocols
+        final.zlib
+        final.openssl
+      ];
+      propagatedBuildInputs = [ ];
+      patches = [
+        ./patches/xwayland/0001-popen-posix-spawn.patch
+        ./patches/xwayland/0002-skip-simple-xinit-fork.patch
+        ./patches/xwayland/0003-stubmain-wasm-abi.patch
+      ];
+      mesonFlags = [
+        "-Dxvfb=false"
+        "-Dglamor=false"
+        "-Dglx=false"
+        "-Ddri3=false"
+        "-Dxwayland_ei=false"
+        "-Dlibdecor=false"
+        "-Dxdmcp=false"
+        "-Dxdm-auth-1=false"
+        "-Dsecure-rpc=false"
+        "-Dsystemd_notify=false"
+        "-Dxselinux=false"
+        "-Ddocs=false"
+        "-Ddevel-docs=false"
+        "-Ddocs-pdf=false"
+        "-Dlibunwind=false"
+        "-Ddtrace=false"
+        "-Dsha1=libcrypto"
+        "-Ddefault_font_path="
+        "-Dxkb_bin_dir=${final.xkbcomp}/bin"
+        "-Dxkb_dir=${final.xkeyboard-config}/share/X11/xkb"
+        "-Dxkb_output_dir=/tmp"
+      ];
+      postInstall = (o.postInstall or "") + ''
+        rm -rf $out/share/man
+      '';
+      postFixup = (o.postFixup or "") + ''
+        # Leaf binary shipped via environment.systemPackages (nothing builds
+        # against it) — same nix-support bloat trim as galculator/xkbcomp/
+        # xeyes/xwd/xdpyinfo above (CLAUDE.md's galculator lesson).
+        rm -rf $out/nix-support
+        if [ -f "$out/bin/Xwayland" ]; then
+          ${fpcast.binaryen}/bin/wasm-opt \
+            --enable-threads --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue \
+            -pa max-func-params@128 --fpcast-emu \
+            "$out/bin/Xwayland" -o "$out/bin/Xwayland.fpcast"
+          mv "$out/bin/Xwayland.fpcast" "$out/bin/Xwayland"
+          chmod +x "$out/bin/Xwayland"
+        fi
+      '';
+    }))
+    prev.xwayland;
 }

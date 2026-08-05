@@ -1,0 +1,18 @@
+--- a/test/meson.build	2026-06-02 00:09:01.000000000 +0000
++++ b/test/meson.build	2026-08-05 20:49:57.818399482 +0000
+@@ -2,6 +2,15 @@
+     'simple-xinit',
+     'simple-xinit.c',
+     include_directories: inc,
++    # wasm/NOMMU (nix-wasm): simple-xinit.c calls fork() (test harness only,
++    # exercised via `meson test`/piglit, never `ninja`/`ninja install`) and
++    # musl has no fork() (docs/process-model.md) — it would otherwise fail to
++    # LINK on every build, even though nothing outside `meson test` needs it.
++    # `build_by_default: false` keeps it out of the default `ninja` target;
++    # we never invoke `meson test`, so it is simply never built. Same fix as
++    # patches/xserver/0002-skip-simple-xinit-fork.patch (a different, drifted
++    # copy of this file in the 21.1.23 xorg-server tree).
++    build_by_default: false,
+     dependencies: [ xproto_dep ],
+ )
+ 
