@@ -268,6 +268,31 @@ jobs:
   # A nix:false boot needs only the kernel + initramfs (no squashfs/nix-cache),
   # so this stays a light substitute-and-run job. Each smoke exits 2 on a boot
   # panic (inconclusive) and is retried; 0 pass / 1 fail are terminal.
+  #
+  # `mmu-devices` (#131 prove-then-flip) re-boots the SAME device/async-signal
+  # smokes above against .#kernel-mmu-a2 + .#wasm-initramfs-fork instead of the
+  # NOMMU .#kernel the `signals` shard boots. Every one of those smokes was
+  # diagnosed and fixed against NOMMU only, and this really is a different
+  # kernel build to re-run them on — but NOT because the KERNEL itself gets
+  # translated. Patch 0023 is explicit that it does not: "the kernel runs in
+  # physical/identity space (it is NOT instrumented); only instrumented USER
+  # code translates". Virtio rings are host-side raw WebAssembly.Memory byte
+  # offsets either way (runtime/virtio/vring.js), walked by that same
+  # uninstrumented kernel code on both the NOMMU and MMU kernels — no ring
+  # descriptor ever goes through a "checked walk". What actually differs here:
+  # every exec'd USER binary driving these smokes (busybox, the shell) is now
+  # softmmu-instrumented at load (kernel-worker.js wasm_load_executable, gated
+  # on nonzero pt_base), and every kernel<->user copy for a device's
+  # read()/write() payload crosses the kernel's SOFTWARE uaccess table-walk
+  # (patch 0023 mm/uaccess.c raw_copy_{to,from}_user + fixup_user_fault)
+  # instead of NOMMU's flat linear-memory copy — real new surface, and #168's
+  # page-crossing corruption class is the proof that surface CAN silently
+  # break, not a hypothetical. That's a SUBSET of issue #11's "virtio under
+  # translation" concern, not the whole of it — #11's identity-vring-
+  # addressing question is precisely what this software MMU sidesteps by
+  # keeping the kernel identity-mapped. See that shard's own step comments for
+  # the per-smoke breakdown; none of them have a recorded green boot on this
+  # guest yet, so every one of them runs non-gating for a first soak cycle.
   boot-smoke:
     name: boot guest + ${{ matrix.shard }} smokes
     needs: [changes, toolchain]
@@ -276,14 +301,37 @@ jobs:
     # was SKIPPED (runtime-only change) instead of being blocked by the needs edge.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
     runs-on: namespace-profile-md
-    timeout-minutes: 60
-    # Two independent smoke groups on different artifacts (busybox-only signal
-    # boots vs the software-MMU kernels) — run them on parallel runners instead of
-    # ~9 boots serially in one job, halving this job's wall-clock.
+    # 180, up from the 90 this job used with only the `signals`/`mmu` shards:
+    # `mmu-devices` re-runs the `signals` shard's ~11-smoke sequence (same
+    # panic-retry budget, same per-smoke waitForOutput timeouts) on top of the
+    # software-MMU kernel's own load-time softmmu instrumentation and
+    # per-access translate (documented ~2-3x slower in-guest — see
+    # nix-boot-smoke-mmu's NIX_MAKE_TIMEOUT_MS), plus its own kernel/initramfs
+    # substitution step `signals` doesn't pay. At that 2-3x factor, the
+    # `signals` shard's own proven budget (60 min, before this job merged the
+    # two `boot-smoke`/`nix-boot-smoke` predecessors) implies ~120-180 min for
+    # `mmu-devices` alone — 90 doesn't cover the top of that range. This
+    # matters because `timeout-minutes` applies PER matrix job, not shared
+    # across shards (see nix-boot-smoke-mmu's own comment on this), so an
+    # `mmu-devices` overrun hits a JOB-level timeout that cancels the entire
+    # job — including the soak step below — regardless of that step's own
+    # `continue-on-error` (same argument pr-preview.yml's MMU-preview step
+    # comment makes for why continue-on-error alone never bounds wall clock).
+    # 180 covers the documented worst case with headroom for the 3x
+    # panic-retry loop each smoke already runs; the lighter `signals`/`mmu`
+    # shards just finish early. A future `timeout-minutes: ${{ matrix.timeout
+    # }}` could size each shard individually (nix-boot-smoke-mmu's comment
+    # already flags this as supported) rather than the one flat conservative
+    # value used here.
+    timeout-minutes: 180
+    # Three independent smoke groups on different artifacts (busybox-only signal
+    # boots on NOMMU, the tiny software-MMU fixture-init boots, and the same
+    # signal/device boots re-run on the software-MMU kernel) — run them on
+    # parallel runners instead of ~20 boots serially in one job.
     strategy:
       fail-fast: false
       matrix:
-        shard: [signals, mmu]
+        shard: [signals, mmu, mmu-devices]
     steps:
       - uses: actions/checkout@v4
 
@@ -412,8 +460,9 @@ jobs:
           # guest program with the __get_tls_base export stripped
           # (userspace/exec-reject-test.nix). On THIS (NOMMU) kernel there is no
           # instrumentation, so the stripped binary just runs; the gate here is the
-          # conforming twin + "no panic" + "shell still alive". The MMU job below
-          # runs the same smoke where the rejection actually happens. Gating.
+          # conforming twin + "no panic" + "shell still alive". `boot-smoke`'s
+          # `mmu-devices` shard runs this same smoke on .#kernel-mmu-a2, where
+          # the rejection actually happens. Gating.
           run_smoke demo/node/exec-reject-smoke.mjs
 
           # #177 G1/G3: RW virtio-blk (/dev/vdb) + ext2 mkfs/mount + saveDisk
@@ -501,6 +550,155 @@ jobs:
           BBF="$(cd .. && nix build -L '.#userspace-busybox-fork' --no-link --print-out-paths)"
           run_smoke demo/node/busybox-fork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin"
+
+      # mmu-devices shard: substitute the software-MMU kernel + fork initramfs
+      # (same pair nix-boot-smoke-mmu boots, but busybox-only — no squashfs/
+      # nix-cache needed for any smoke in this shard).
+      - name: Build MMU kernel + fork initramfs (substitute from Cachix)
+        if: matrix.shard == 'mmu-devices'
+        run: |
+          mkdir -p .artifacts-mmu-devices
+          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
+            .artifacts-mmu-devices/vmlinux.wasm
+          ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
+            .artifacts-mmu-devices/initramfs.cpio.gz
+          ls -lL .artifacts-mmu-devices
+
+      # #131 prove-then-flip: the SAME regression/diagnostic smokes the `signals`
+      # shard runs on NOMMU, re-booted here on .#kernel-mmu-a2 + the fork
+      # initramfs. Nothing about a NOMMU-only pass proves these hold under the
+      # software MMU (see the job-header comment above for what "different
+      # kernel build" actually means — instrumented USER code + the kernel's
+      # software uaccess walk, NOT translated vrings), and there's specific
+      # reason to re-check each group:
+      #   • sigalrm / kill-wake / timeout-repro / ping-pace(+probe) all exercise
+      #     the #75 fix, an entry.S asm FOOT-loop that re-establishes the kernel
+      #     C-frame SP and re-invokes the syscall around signal delivery
+      #     (patches/kernel/0021). The loop itself is kernel-side (identity,
+      #     uninstrumented, same as NOMMU); what's new is the SCHEDULING context
+      #     around it — per-task page tables switched on every context switch
+      #     (switch_mm → __mmu_set_pt_base, the exact mechanism Track B's fork
+      #     work found a real cross-worker pt_base bug in) — and that the
+      #     signalled process's OWN memory accesses are now instrumented;
+      #     #168's page-crossing corruption class is the proof that "looks
+      #     translate-agnostic" isn't something to assume for that side.
+      #   • vsock-ctl / resize / snd / blk-rw each drive a different virtio
+      #     device model (vsock, console config-change, snd, blk). The ring
+      #     descriptors stay raw host-side offsets on this kernel too (see the
+      #     job header); what these newly exercise is the kernel's software
+      #     uaccess table-walk on every device<->user buffer transfer (patch
+      #     0023 mm/uaccess.c) plus the instrumented user binary's own accesses
+      #     to those buffers — a SUBSET of issue #11's "virtio under
+      #     translation" concern (#60/#83/#145/#177 each fixed their device
+      #     against NOMMU only).
+      #   • clock-smoke covers read_persistent_clock64 (patch 0028) unmodified —
+      #     no MMU-specific mechanism, but cheap insurance in the same boot.
+      #   • exec-reject-smoke is the one smoke here whose OUTCOME differs by
+      #     design: this IS the kernel that instruments (and can refuse) an exec
+      #     image, so this is where its reject path is exercised for real — the
+      #     `signals`-shard run of this same smoke, on NOMMU, only ever proves
+      #     assertions 1/3/4 (see the smoke's own header comment). It runs ONLY
+      #     here, not in nix-boot-smoke-mmu's `core` shard too — that would be a
+      #     pure duplicate boot of the identical kernel+initramfs pair on a far
+      #     more expensive runner for zero extra coverage.
+      # ping-pace-probe stays the one non-gating diagnostic, same as `signals`.
+      #
+      # SOAK NOTE: unlike `signals` (an established shard), every smoke below
+      # is running against .#kernel-mmu-a2 + .#wasm-initramfs-fork for the
+      # FIRST time in CI — NONE of them, including sigalrm-smoke/clock-smoke,
+      # has an actual recorded green boot behind it as of this change (an
+      # earlier draft of this note claimed those two did; there is no such
+      # record anywhere in the tree — CLAUDE.md is explicit that "first green
+      # CI run of the `mmu-devices` + `gtk` shards is still pending" — so
+      # corrected: this shard has ZERO hard-gating smokes for now, not two).
+      # Gating 11 never-before-run boots (with a 3x retry each on a panic)
+      # would turn any one systemic break into a red PR check with no soak
+      # period, so every smoke below runs through the single step further
+      # down instead of a `run_smoke` hard gate. That step needs BOTH of the
+      # same two things pr-preview.yml's MMU-preview step comment spells out
+      # for this exact idiom — one bounds FAILURE, the other bounds WALL
+      # CLOCK, and neither substitutes for the other:
+      #   - `continue-on-error: true` (bounds failure) rather than a helper
+      #     that swallows a real failure into `return 0` — a prior version of
+      #     this step did exactly that (a `run_smoke_soft` bash function
+      #     whose every path ended `return 0`), which made the step's own
+      #     exit code always 0 regardless of what ran inside it:
+      #     indistinguishable from every smoke actually passing, not just
+      #     "allowed to fail for now" (caught in review — the step could
+      #     never turn the job red, silently, no matter what broke).
+      #     `continue-on-error` fixes that at the STEP level instead: the
+      #     script's real exit code is preserved, so a genuine failure shows
+      #     as this step's own distinct (non-blocking) failure indicator in
+      #     the Checks UI, not a `::warning::` buried in the log — while the
+      #     JOB still stays green, so the soak period is preserved.
+      #   - `timeout-minutes` (bounds wall clock) — `continue-on-error` does
+      #     NOT save you from a hang: 11 boots at 3 panic-retries each, on a
+      #     guest documented ~2-3x slower in-guest than `signals`, can run
+      #     long enough to hit the JOB-level `timeout-minutes` above, which
+      #     CANCELS the whole job regardless of any step's continue-on-error
+      #     (pr-preview.yml's own comment makes this exact argument for its
+      #     sibling MMU step). A step-level timeout instead fails just this
+      #     step at a bounded point, which continue-on-error then does catch.
+      # Move a smoke's `check` call into its own `run_smoke` hard gate once it
+      # has an actual green run recorded.
+      - name: MMU device + async-signal smokes — soak (non-gating, #131)
+        if: matrix.shard == 'mmu-devices'
+        continue-on-error: true
+        timeout-minutes: 150
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-mmu-devices/
+        run: |
+          run_smoke() {
+            local script="$1" attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt, soak — #131)"
+              set +e
+              node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then
+                echo "$script inconclusive (boot panic) — retrying"
+                continue
+              fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"
+            return 2
+          }
+          failed=()
+          check() {
+            if ! run_smoke "$1"; then
+              echo "::error::$1 failed on its first-ever mmu-devices soak boot (#131) — this step is continue-on-error so the JOB stays green, but the step itself now genuinely fails; investigate before giving it its own hard run_smoke() gate."
+              failed+=("$1")
+            fi
+          }
+          check demo/node/sigalrm-smoke.mjs
+          check demo/node/kill-wake-smoke.mjs
+          check demo/node/timeout-repro-smoke.mjs
+          check demo/node/ping-pace-smoke.mjs
+
+          echo "::group::ping-pace-probe matrix (#75 localizer, non-gating)"
+          set +e
+          node demo/node/ping-pace-probe-smoke.mjs
+          set -e
+          echo "::endgroup::"
+
+          check demo/node/vsock-ctl-smoke.mjs
+          check demo/node/resize-smoke.mjs
+          check demo/node/snd-smoke.mjs
+          check demo/node/clock-smoke.mjs
+          # #179: this is the kernel where a rejected exec image actually gets
+          # rejected — see the job header comment above.
+          check demo/node/exec-reject-smoke.mjs
+          check demo/node/blk-rw-smoke.mjs
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::mmu-devices soak (#131): ${#failed[@]} smoke(s) failed: ${failed[*]}"
+            exit 1
+          fi
 
   # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
   # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
@@ -686,21 +884,99 @@ jobs:
   #                  forked; unchanged). The engine software-MMU-instruments EVERY
   #                  exec'd binary at load (kernel-worker wasm_load_executable, gated
   #                  on the MMU kernel's nonzero pt_base).
-  # Scope: smoke.mjs (9P mount of /mnt/pc + `nix-env -iA make` substitution) +
-  # selftests-batch.mjs (M2/M3a graphics + FFI under the per-access translate) +
-  # build-from-source-e2e.mjs (#175: nix FORKS a builder in-guest — the path that
-  # SIGSEGV'd on the clone-vfork nix under the MMU, now the real-fork proof). The
-  # remaining heavy layers (GTK graphics, autoconf real-fork ash) follow.
+  #
+  # [core, gtk] mirrors nix-boot-smoke's own split verbatim (same shard
+  # boundary, same job "shape" — a shell if/else for shard dispatch inside
+  # each step, not per-step `if: matrix.shard == …`), just on the fork/MMU
+  # artifact set instead of NOMMU. `core` now runs every non-GTK
+  # nix-boot-smoke smoke EXCEPT exec-reject-smoke — including the two nix-CLI
+  # install paths (profile-install-e2e/wrapperless-cc-e2e) and rsvg-smoke.
+  # exec-reject-smoke stays OUT of `core` on purpose: it boots nix:false
+  # internally (no squashfs/nix-cache dependency), and `boot-smoke`'s
+  # `mmu-devices` shard above already boots it on the IDENTICAL kernel+
+  # initramfs pair (.#kernel-mmu-a2 + .#wasm-initramfs-fork) on a far cheaper
+  # runner — running it again here would be a pure duplicate boot on this job's
+  # -lg profile for zero extra coverage. `mmu-devices` is where "the rejection
+  # actually happens" (the stale comment that used to sit on the NOMMU job's
+  # exec-reject-smoke line — "the MMU job below runs the same smoke" — now
+  # names that shard directly). `gtk` is new: the heavy one-per-fresh-boot GTK
+  # apps, unexercised on the MMU/fork guest until now. Extending coverage here
+  # is genuinely load-bearing, not just parity for its own sake — these are
+  # exactly the memory-intensive binaries (#168's page-crossing corruption
+  # class) most likely to expose a residual software-MMU bug that a
+  # NOMMU-only pass can't see.
+  #
+  # SOAK NOTE (#131): of everything this job runs, only smoke.mjs,
+  # selftests-batch.mjs, and build-from-source-e2e.mjs previously booted
+  # against this guest (this job's single core-only predecessor already ran
+  # them) — those three run in the "hard gates" step below (`run_smoke`, a
+  # real job-failing exit code). profile-install-e2e, wrapperless-cc-e2e, and
+  # rsvg-smoke are new to `core`, and the entire `gtk` shard is new outright:
+  # none of those six have a recorded green MMU/fork boot yet, so they run in
+  # the SEPARATE "soak" step below instead, same split boot-smoke's
+  # mmu-devices shard uses and for the same reason: a bash helper that ends
+  # every path in `return 0` (an earlier version of this job had one, named
+  # `run_smoke_soft`) makes the step's own exit code always 0 no matter what
+  # ran inside it — indistinguishable from every smoke passing, not merely
+  # "allowed to fail for now" (a review caught this: the step could never go
+  # non-green, silently, regardless of what broke). The soak step instead uses
+  # the SAME two-part idiom pr-preview.yml's MMU-preview step comment spells
+  # out for exactly this situation, and needs both halves — neither
+  # substitutes for the other:
+  #   - `continue-on-error: true` bounds FAILURE, so the script's REAL exit
+  #     code survives — a genuine failure shows as that step's own distinct,
+  #     visible failure indicator in the Checks UI, while the JOB itself
+  #     still stays green, preserving the soak.
+  #   - `timeout-minutes` bounds WALL CLOCK — `continue-on-error` does NOT
+  #     save you from a hang or a slow-but-eventually-panicking boot: up to
+  #     three panic-retries per smoke, times up to six smokes in the `gtk`
+  #     shard, on a guest documented ~2-3x slower in-guest than NOMMU, can run
+  #     long enough to hit this job's own `timeout-minutes` above, which
+  #     CANCELS the whole job (including the hard-gates step's real gates)
+  #     regardless of any step's continue-on-error. A step-level timeout
+  #     instead fails just this step at a bounded point, which
+  #     continue-on-error then does catch.
+  # Move a smoke's `check` call to a `run_smoke` call in the hard-gates step
+  # once it has an actual green run recorded.
   nix-boot-smoke-mmu:
-    name: boot full nix system on software MMU (#131 prove-then-flip)
-    needs: [toolchain, artifacts]
+    name: boot full nix system on software MMU (${{ matrix.shard }}, #131 prove-then-flip)
+    needs: [changes, toolchain, artifacts]
+    # Same changes-filter gating every sibling boot job uses (nix-boot-smoke,
+    # boot-smoke, browser-smoke): run on a world OR engine change, and don't
+    # block on toolchain/artifacts having been SKIPPED (a runtime-only change
+    # substitutes the unchanged MMU artifacts from Cachix instead of rebuilding).
+    # This job previously keyed off `needs: [toolchain, artifacts]` alone with no
+    # `if:`, so a runtime/**-only push silently skipped it while every sibling
+    # boot job still ran and substituted — drift the CI recon flagged. Fixed here
+    # while splitting the job into shards, matching every other boot job.
+    if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
     # -lg (the LLVM-build profile) for RAM headroom: the real-fork nix.wasm is
     # whole-module-asyncified, and the software-MMU pass instrumenting it at load
     # produces multi-MB functions (helper-call-translated over V8's 6MB fn cap) —
     # loading it OOM-killed the -default runner (#175, exit 137). If it still OOMs
     # here, the whole-module asyncify doesn't scale to nix.wasm and needs bounding.
+    # The `gtk` shard doesn't load nix.wasm at all (its smokes never invoke `nix`),
+    # but it DOES softmmu-instrument-at-load the same ~14 MB GTK binaries the
+    # NOMMU gtk shard's own comment says fragment a much smaller heap — kept on
+    # the same -lg profile rather than assuming a smaller one is safe untested.
     runs-on: namespace-profile-lg
-    timeout-minutes: 120 # MMU load-time instrumentation + per-access translate is slower than NOMMU
+    # `timeout-minutes` applies PER matrix job, not shared across shards: NOMMU's
+    # nix-boot-smoke's `core` and `gtk` each independently get their own 90-min
+    # budget (180 min of possible runner time between them), not 90 total. Here,
+    # each of `core`/`gtk` gets its own 240. This job's single (core-only)
+    # predecessor already used 120 for a lighter smoke set than the new `core`
+    # shard now runs, and the software-MMU guest is documented ~2-3x slower
+    # in-guest (see NIX_MAKE_TIMEOUT_MS below) on top of load-time softmmu
+    # instrumentation every exec here pays — so both shards get their own larger
+    # budget rather than reusing NOMMU's 90 as-is. (`gtk` won't come close to
+    # 240 in practice; a future `timeout-minutes: ${{ matrix.timeout }}` could
+    # size each shard individually — the matrix context does support that — but
+    # one flat conservative value is fine while both shards are new.)
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, gtk]
     steps:
       - uses: actions/checkout@v4
 
@@ -742,27 +1018,31 @@ jobs:
         working-directory: runtime
         run: bun install --frozen-lockfile
 
-      # The MMU kernel is auto-detected by the engine (nonzero pt_base) — smoke.mjs
-      # boots unmodified and the userspace is instrumented at load. Retry a boot
-      # panic (exit 2); 0 pass / 1 fail are terminal.
-      - name: Boot full nix system on MMU + 9P/install smoke
+      # The MMU kernel is auto-detected by the engine (nonzero pt_base) — every
+      # smoke below boots unmodified and the userspace is instrumented at load.
+      # Retry a boot panic (exit 2); 0 pass / 1 fail are terminal. Shard
+      # dispatch via a shell if/else inside each step, matching nix-boot-smoke's
+      # own style (not nix-boot-smoke-mmu's smaller sibling boot-smoke, which
+      # uses per-step `if: matrix.shard == …`). Split into a hard-gates step and
+      # a soak step — see the SOAK NOTE in this job's header comment for why.
+      - name: Boot full nix system on MMU + ${{ matrix.shard }} smokes — hard gates
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
           # The software-MMU guest runs the substitute+unpack ~2-3x slower than
           # NOMMU (every access is a 2-level walk; page-crossing accesses split
-          # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
-          # budget than the shared 180s default so the (correct, slower) install
-          # can finish. NOMMU nix-boot-smoke keeps the 180s default.
+          # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step (`core`
+          # shard only) a longer budget than the shared 180s default so the
+          # (correct, slower) install can finish. NOMMU nix-boot-smoke keeps the
+          # 180s default.
           NIX_MAKE_TIMEOUT_MS: "600000"
         run: |
           run_smoke() {
             local script="$1" attempt rc
-            shift
             for attempt in 1 2 3; do
               echo "::group::$script (attempt $attempt)"
               set +e
-              node "$script" "$@"
+              node "$script"
               rc=$?
               set -e
               echo "::endgroup::"
@@ -773,35 +1053,149 @@ jobs:
             echo "$script still inconclusive after 3 attempts"
             return 2
           }
-          # 9P transport + `nix-env -iA make` substitution — the same end-to-end
-          # exercise as the NOMMU nix-boot-smoke, now on the software-MMU guest.
-          run_smoke demo/node/smoke.mjs
-          # #131 prove-then-flip, extending the MMU proof to the HEAVY layers
-          # beyond the core 9P/install smoke: the M2/M3a graphics + FFI selftests
-          # batched into ONE boot (glib gobject + the libffi marshaller + pango
-          # cairo-ft layout + freetype/fontconfig/harfbuzz). These are exactly the
-          # binaries most likely to expose a residual software-MMU bug (the #168
-          # page-crossing corruption was found in nix.wasm; glib/libffi are just as
-          # memory-intensive), so booting them under the per-access translate is a
-          # real MMU-hardening gate. Same binaries the NOMMU nix-boot-smoke runs;
-          # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
-          run_smoke demo/node/selftests-batch.mjs
-          # #175: the headline gate. nix's local-derivation-goal FORKS a builder
-          # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm under the
-          # software MMU (a CLONE_VM child gets a private page table, so the parent-
-          # mmap'd child stack is unmapped in the child). With .#wasm-base-squashfs-
-          # fork (real-fork nix.wasm: upstream fork()+exec over muslFork's asyncify
-          # seam) + the wasm_collapse uncatchable-trap exec collapse (patch 0026 +
-          # kernel-worker.js), the forked /bin/sh builder fork+execs and RUNS on the
-          # real-COW-fork MMU guest (BUILD1/BUILD2). BUILD3 — the deeper
-          # compile-with-guest-cc sub-case — is GATING here again as of #179: the
-          # 57MB clang's SIGSEGV was never the softmmu translate, it was a missing
-          # startup export (toolchain/guest-clang.nix drops --export-all and its
-          # hand-written list lacked __wasm_early_tp_init, so --gc-sections stripped
-          # the thread-pointer seed and libc++'s ios_base::Init ctor stored `errno`
-          # through a null struct pthread at VA 0x1c — fatal only under CONFIG_MMU).
-          # So this job now compiles C from source in-guest on the MMU fork guest.
-          run_smoke demo/node/build-from-source-e2e.mjs
+          if [ "${{ matrix.shard }}" = "core" ]; then
+            # 9P transport + `nix-env -iA make` substitution — the same
+            # end-to-end exercise as the NOMMU nix-boot-smoke, now on the
+            # software-MMU guest. Previously the only smoke this job ran
+            # (its core-only predecessor) — keeps hard-gating.
+            run_smoke demo/node/smoke.mjs
+            # #175 headline: nix's local-derivation-goal FORKS a builder
+            # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm
+            # under the software MMU (a CLONE_VM child gets a private page
+            # table, so the parent-mmap'd child stack is unmapped in the
+            # child). With .#wasm-base-squashfs-fork (real-fork nix.wasm:
+            # upstream fork()+exec over muslFork's asyncify seam) + the
+            # wasm_collapse uncatchable-trap exec collapse (patch 0026 +
+            # kernel-worker.js), the forked /bin/sh builder fork+execs and RUNS
+            # on the real-COW-fork MMU guest (BUILD1/BUILD2). BUILD3 — the
+            # deeper compile-with-guest-cc sub-case — is GATING here again as of
+            # #179: the 57MB clang's SIGSEGV was never the softmmu translate, it
+            # was a missing startup export (toolchain/guest-clang.nix drops
+            # --export-all and its hand-written list lacked
+            # __wasm_early_tp_init, so --gc-sections stripped the thread-pointer
+            # seed and libc++'s ios_base::Init ctor stored `errno` through a
+            # null struct pthread at VA 0x1c — fatal only under CONFIG_MMU).
+            # Ran on this job's core-only predecessor — keeps hard-gating.
+            run_smoke demo/node/build-from-source-e2e.mjs
+            # #131 prove-then-flip, extending the MMU proof to the HEAVY layers
+            # beyond the core 9P/install smoke: the M2/M3a graphics + FFI
+            # selftests batched into ONE boot (glib gobject + the libffi
+            # marshaller + pango cairo-ft layout + freetype/fontconfig/
+            # harfbuzz). These are exactly the binaries most likely to expose a
+            # residual software-MMU bug (the #168 page-crossing corruption was
+            # found in nix.wasm; glib/libffi are just as memory-intensive), so
+            # booting them under the per-access translate is a real
+            # MMU-hardening gate. Same binaries the NOMMU nix-boot-smoke runs;
+            # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
+            # Ran on this job's core-only predecessor — keeps hard-gating.
+            run_smoke demo/node/selftests-batch.mjs
+            # exec-reject-smoke is deliberately NOT run here — see this job's
+            # header comment ("exec-reject-smoke stays OUT of `core`"):
+            # boot-smoke's mmu-devices shard already boots it on the identical
+            # kernel+initramfs pair for far less cost, and it boots nix:false
+            # internally so this job's squashfs/nix-cache add nothing for it.
+          else
+            # No hard gate in `gtk` yet: the entire shard is new to this guest
+            # (never booted against .#kernel-mmu-a2/.#wasm-initramfs-fork
+            # before this change) — every smoke in it runs in the soak step
+            # below instead. See that step for the six GTK smokes.
+            :
+          fi
+
+      # Non-gating soak (#131) — see the SOAK NOTE in this job's header comment
+      # for why this is a SEPARATE continue-on-error step rather than a helper
+      # that returns 0 on every path. Every smoke here still runs regardless of
+      # an earlier failure in the same boot (`check` records it and moves on,
+      # same coverage per run as before), and a real failure is now a genuine
+      # nonzero exit from this step — caught by `continue-on-error`, not
+      # manufactured away. `timeout-minutes` pairs with `continue-on-error`
+      # the same way the SOAK NOTE above and pr-preview.yml's MMU-preview step
+      # comment both spell out: continue-on-error bounds FAILURE but not WALL
+      # CLOCK, and a job-level timeout-minutes cancellation (this job's own
+      # 240, above) tears down the whole job — including this step's
+      # continue-on-error handling — regardless of it. 180 leaves 60 min of
+      # this job's 240-min budget for checkout/setup/substitution plus the
+      # hard-gates step above (real work for `core`: smoke.mjs,
+      # build-from-source-e2e.mjs, selftests-batch.mjs).
+      - name: Boot full nix system on MMU + ${{ matrix.shard }} smokes — soak (non-gating, #131)
+        continue-on-error: true
+        timeout-minutes: 180
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
+        run: |
+          run_smoke() {
+            local script="$1" attempt rc
+            for attempt in 1 2 3; do
+              echo "::group::$script (attempt $attempt, soak — #131)"
+              set +e
+              node "$script"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then return 0; fi
+              if [ "$rc" -eq 2 ]; then echo "$script inconclusive (boot panic) — retrying"; continue; fi
+              return "$rc"
+            done
+            echo "$script still inconclusive after 3 attempts"
+            return 2
+          }
+          failed=()
+          check() {
+            if ! run_smoke "$1"; then
+              echo "::error::$1 failed on its first-ever nix-boot-smoke-mmu soak boot (#131) — this step is continue-on-error so the JOB stays green, but the step itself now genuinely fails; investigate before moving it to a run_smoke() call in the hard-gates step above."
+              failed+=("$1")
+            fi
+          }
+          if [ "${{ matrix.shard }}" = "core" ]; then
+            # The new CLI (`nix profile install`, issue #1): substitute=true +
+            # the .drv-aware cache, then compile+run a C program. Uses
+            # primeLocalNixCache like smoke.mjs; that helper is explicitly
+            # shell-neutral BECAUSE of this guest — the fork boot's /bin/sh is
+            # busybox hush (no `~` expansion), unlike NOMMU's forkshell ash.
+            # New to this job — non-gating soak (#131).
+            check demo/node/profile-install-e2e.mjs
+            # `nix-env -iA` of the full toolchain, then bare clang/clang++/cc/c++
+            # compile+run → exit 42/7. The one gate here that substitutes AND
+            # EXECS the 57 MB guest-clang under this kernel — softmmu-
+            # instrumented at load (kernel-worker.js wasm_load_executable) and
+            # exercising the #179 startup-export contract
+            # (toolchain/wasm-host-exports.nix's __wasm_early_tp_init seed,
+            # without which clang's ctors SIGSEGV under CONFIG_MMU) — then runs
+            # four freshly-compiled binaries. (The #75 SA_RESTART entry.S
+            # FOOT-loop is ping-pace-smoke's gate, in boot-smoke's mmu-devices
+            # shard, not this one — there's no shell pipeline here.) New to
+            # this job — non-gating soak (#131).
+            check demo/node/wrapperless-cc-e2e.mjs
+            # GNOME games tier, mirroring the NOMMU core shard: rsvg-convert
+            # renders mahjongg's real tileset SVG to PNG in-guest — libcroco →
+            # librsvg → pango/cairo → cairo-png headless, zero source patches.
+            # New to this job — non-gating soak (#131).
+            check demo/node/rsvg-smoke.mjs
+          else
+            # The HEAVY GTK selftests (issue #88), extended to the MMU/fork
+            # guest for the first time — mirrors the NOMMU nix-boot-smoke gtk
+            # shard verbatim (same one-per-fresh-boot rationale: batching
+            # several ~14 MB GTK inits fragments the heap and wedges a later
+            # one). Every one of these is exactly the class of memory-intensive,
+            # gobject-fpcast-heavy binary the #168 page-crossing corruption
+            # class was found in — booting them here under the checked
+            # per-access translate is real MMU-hardening coverage, not just
+            # parity for its own sake. The entire `gtk` shard is new (never
+            # booted against this guest before this change) — non-gating soak
+            # (#131) for all six until each has a green run on record.
+            check demo/node/gtk-smoke.mjs
+            check demo/node/galculator-smoke.mjs
+            check demo/node/widget-factory-smoke.mjs
+            check demo/node/gtk-demo-smoke.mjs
+            check demo/node/gcalctool-smoke.mjs
+            check demo/node/l3afpad-smoke.mjs
+          fi
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::nix-boot-smoke-mmu ${{ matrix.shard }} soak (#131): ${#failed[@]} smoke(s) failed: ${failed[*]}"
+            exit 1
+          fi
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
   # just under Node. Two engine bugs shipped through green Node smokes because

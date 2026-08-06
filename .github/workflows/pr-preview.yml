@@ -5,6 +5,17 @@ name: Deploy PR preview
 # content-addresses them into cas/<buildhash>/, syncs the runtime/ frontend into
 # pr-<N>/, and comments the URL. Teardown purges pr-<N>/ on close.
 #
+# It also builds + publishes a SECOND artifact set — the software-MMU / real-fork
+# guest (kernel-mmu-a2 + wasm-initramfs-fork + wasm-base-squashfs-fork) — into its
+# own cas/<hash>/ prefix, pointed at by preview.json's "variants.mmu" entry. Open
+# it at `…/demo/web/?variant=mmu` (main.js reads the query param); the PR comment
+# links it whenever that build succeeds. This is best-effort: a step-level
+# timeout-minutes bounds its WALL CLOCK (a job-level timeout would cancel the
+# whole job — including the "Comment preview link" step below — so
+# continue-on-error alone is not enough; see the step's own comment) and
+# continue-on-error bounds its FAILURE, so it never blocks the default preview
+# above or the comment that announces it.
+#
 # pull_request_target (not pull_request) so the workflow runs from master's copy
 # with secrets available. Unlike pc, this job EXECUTES PR build code (nix build),
 # so the deploy job is fork-guarded to same-repo PRs (the repo is single-owner).
@@ -65,7 +76,13 @@ jobs:
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: namespace-profile-md
-    timeout-minutes: 180
+    # 180 min covers the default (NOMMU) preview's steps alone (checkout through
+    # "Comment preview link"), same as before the MMU variant was added; the extra
+    # 60 is earmarked ENTIRELY for the "Build + publish MMU preview" step below and
+    # matches that step's own `timeout-minutes: 60` — so the MMU step can burn its
+    # whole allotment and still leave the original 180 min budget intact for
+    # everything else, incl. the comment step that must always get to run.
+    timeout-minutes: 240
     steps:
       - name: Check provisioning
         id: cfg
@@ -99,12 +116,106 @@ jobs:
           PR_COMMIT: ${{ github.event.pull_request.head.sha }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         run: bash scripts/preview-publish.sh "${PR}"
+
+      # MMU/fork preview: Phase 1 of shipping the software-MMU guest (the "does
+      # instrument-at-load fit in a browser tab?" ship-risk from the #126 epic).
+      # Same artifact SHAPE as the default set — just kernel-mmu-a2 (CONFIG_MMU +
+      # patch 0026 fork + A2 demand paging), wasm-initramfs-fork (busybox-fork PID
+      # 1, real fork()+exec over the muslFork asyncify seam), and
+      # wasm-base-squashfs-fork (the matching base system + nix.wasm built with
+      # -DWASM_REAL_FORK) under the SAME three file names — the engine
+      # autodetects the MMU kernel by its nonzero pt_base (nix-wasm.yml's
+      # nix-boot-smoke-mmu job boots it unmodified), so baseUrl is the only thing
+      # that differs; see main.js's `?variant=` handling. The nix-cache/ catalog
+      # tree is intentionally NOT duplicated here — it's shared with (and outside
+      # the scope of) the default preview per infra/preview-worker/README.md.
+      #
+      # This must not take down the already-working default-guest preview + its
+      # PR comment below — it's an additive, still-experimental variant, not the
+      # headline preview — which needs BOTH of:
+      #   - continue-on-error: bounds FAILURE. An MMU-specific build break fails
+      #     only this step; steps.mmu-preview.outcome (the pre-continue-on-error
+      #     result) drives whether the comment links it.
+      #   - timeout-minutes: bounds WALL CLOCK. continue-on-error does NOT save
+      #     you from a cold Cachix cache forcing a from-source LLVM/kernel
+      #     rebuild that runs long — that's a job-level timeout-minutes
+      #     cancellation (the job budget above carries a +60 min allowance sized
+      #     to exactly match this), which tears down the WHOLE job including the
+      #     "Comment preview link" step below, continue-on-error or not. A
+      #     step-level timeout instead fails just this step at a bounded point,
+      #     which continue-on-error then does catch.
+      - name: Build + publish MMU preview
+        id: mmu-preview
+        if: steps.cfg.outputs.configured == 'true'
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+
+          # jq merges the mmu variant into preview.json below; cheap no-op if the
+          # runner image already has it (standard on GH-hosted Ubuntu images, but
+          # not guaranteed on every self-hosted profile).
+          command -v jq >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
+
+          echo "==> Building .#kernel-mmu-a2 …"
+          KERNEL_OUT=$(nix build .#kernel-mmu-a2 --no-link --print-out-paths)
+          echo "==> Building .#wasm-initramfs-fork …"
+          INITRD_OUT=$(nix build .#wasm-initramfs-fork --no-link --print-out-paths)
+          echo "==> Building .#wasm-base-squashfs-fork …"
+          SQUASH_OUT=$(nix build .#wasm-base-squashfs-fork --no-link --print-out-paths)
+
+          KERNEL="$KERNEL_OUT/vmlinux.wasm"
+          INITRD="$INITRD_OUT/initramfs.cpio.gz"
+          SQUASH="$SQUASH_OUT/base.squashfs"
+          for f in "$KERNEL" "$INITRD" "$SQUASH"; do
+            [ -f "$f" ] || { echo "ERROR: expected MMU artifact missing: $f" >&2; exit 1; }
+          done
+
+          # Same buildhash formula as scripts/preview-publish.sh, over the MMU
+          # trio's own store-path basenames — a SEPARATE cas/ prefix from the
+          # default set (different derivations ⇒ different basenames), so the
+          # two never collide and --ignore-existing dedup still applies
+          # build-to-build for each independently.
+          BUILDHASH_MMU=$(printf '%s' "$(basename "$KERNEL_OUT")$(basename "$INITRD_OUT")$(basename "$SQUASH_OUT")" \
+            | sha256sum | cut -c1-32)
+
+          STAGE="$(mktemp -d)"
+          cp "$KERNEL" "$STAGE/vmlinux.wasm"
+          cp "$INITRD" "$STAGE/initramfs.cpio.gz"
+          cp "$SQUASH" "$STAGE/base.squashfs"
+
+          echo "==> rclone copy → cas/$BUILDHASH_MMU (skip-existing) …"
+          rclone copy "$STAGE" "r2:${PREVIEW_BUCKET}/cas/$BUILDHASH_MMU" --ignore-existing \
+            --s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeout 15s --transfers 8 -v
+          rm -rf "$STAGE"
+
+          # Extend (never replace) the preview.json the step above just wrote:
+          # read it back and merge in the mmu variant pointer. Deliberately does
+          # NOT recompute the default artifactsBase's buildhash independently —
+          # that formula belongs to scripts/preview-publish.sh alone; reading its
+          # freshly-written answer avoids a second hand-kept copy of it drifting
+          # out of sync (the CLAUDE.md startup-export-contract lesson: don't
+          # duplicate a formula two places must agree on when one can just read
+          # the other's output).
+          CURRENT_JSON=$(rclone cat "r2:${PREVIEW_BUCKET}/pr-${PR}/demo/web/preview.json" \
+            --s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeout 15s)
+          MERGED_JSON=$(printf '%s' "$CURRENT_JSON" | jq -c --arg base "/cas/$BUILDHASH_MMU/" \
+            '.variants.mmu.artifactsBase = $base')
+
+          echo "==> writing pr-${PR}/demo/web/preview.json (+ variants.mmu) …"
+          printf '%s' "$MERGED_JSON" | rclone rcat "r2:${PREVIEW_BUCKET}/pr-${PR}/demo/web/preview.json" \
+            --s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeout 15s
+
+          echo "mmu_buildhash=$BUILDHASH_MMU" >> "$GITHUB_OUTPUT"
+          echo "==> PUBLISHED MMU preview pr-$PR  buildhash=$BUILDHASH_MMU"
+
       - name: Comment preview link
         if: steps.cfg.outputs.configured == 'true'
         uses: actions/github-script@v7.0.1
         env:
           PREVIEW_BASE_URL: ${{ vars.PREVIEW_BASE_URL }}
           PR_COMMIT: ${{ github.event.pull_request.head.sha }}
+          MMU_OUTCOME: ${{ steps.mmu-preview.outcome }}
         with:
           script: |
             const base = process.env.PREVIEW_BASE_URL;
@@ -112,7 +223,20 @@ jobs:
             const url = `${base.replace(/\/+$/,'')}/pr-${process.env.PR}/demo/web/`;
             const marker = '<!-- nix-wasm-preview -->';
             const sha = (process.env.PR_COMMIT || '').slice(0, 8);
-            const body = `${marker}\n🚀 **Preview ready:** ${url}\n\n<sub>Boots this PR's guest (commit \`${sha}\`) in the browser · updated on every push.</sub>`;
+            // The software-MMU variant (real fork(), kernel-mmu-a2) publishes to
+            // the SAME preview URL space via preview.json's "variants" map — see
+            // main.js's `?variant=` handling. Link it here only when its build
+            // step actually succeeded (the step's continue-on-error + its own
+            // timeout-minutes above mean an MMU-specific break OR a run that
+            // outran its wall-clock budget never blocks this comment or the
+            // default link).
+            const mmuLine =
+              process.env.MMU_OUTCOME === 'success'
+                ? `\n<sub>Software-MMU variant (real \`fork()\`, kernel-mmu-a2): ${url}?variant=mmu</sub>`
+                : process.env.MMU_OUTCOME === 'failure'
+                  ? `\n<sub>Software-MMU variant: not published for this build (build failed or timed out).</sub>`
+                  : '';
+            const body = `${marker}\n🚀 **Preview ready:** ${url}\n\n<sub>Boots this PR's guest (commit \`${sha}\`) in the browser · updated on every push.</sub>${mmuLine}`;
             const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: process.env.PR });
             const existing = comments.find(c => c.body.includes(marker));
             if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });

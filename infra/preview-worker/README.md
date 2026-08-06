@@ -6,16 +6,35 @@ A PR preview boots **this PR's** freshly-built guest in the browser. The
 
 ```
 nix-wasm-previews
-├── pr-<N>/<path>        the PR's frontend (runtime/ tree, rclone-synced)
-└── cas/<buildhash>/…    content-addressed boot artifacts shared across PRs:
-                           vmlinux.wasm, initramfs.cpio.gz, base.squashfs
+├── pr-<N>/<path>            the PR's frontend (runtime/ tree, rclone-synced),
+│                            incl. pr-<N>/demo/web/preview.json (below)
+└── cas/<buildhash>/…        content-addressed boot artifacts shared across PRs:
+                               vmlinux.wasm, initramfs.cpio.gz, base.squashfs
 ```
+
+Each same-repo PR publishes TWO artifact sets under `cas/`, one per guest
+variant — the default NOMMU set and the software-MMU / real-`fork()` set
+(`kernel-mmu-a2` + `wasm-initramfs-fork` + `wasm-base-squashfs-fork`; see
+`pr-preview.yml`'s "Build + publish MMU preview" step and CLAUDE.md's #126
+epic) — each under its OWN `buildhash` (different derivations ⇒ different
+store-path basenames ⇒ different hash), so the two never collide and
+`--ignore-existing` dedup still applies build-to-build for each
+independently. `pr-<N>/demo/web/preview.json` is what ties a PR to its
+artifact sets, and is the only place its shape is documented:
+```json
+{ "artifactsBase": "/cas/<default-hash>/",
+  "variants": { "mmu": { "artifactsBase": "/cas/<mmu-hash>/" } } }
+```
+`demo/web/main.js` reads `artifactsBase` by default and `variants.<name>
+.artifactsBase` when the page is opened with `?variant=<name>` (currently
+just `mmu`).
 
 - The Worker stamps `COOP/COEP/CORP` on every response → cross-origin isolated
   (SharedArrayBuffer, which the wasm kernel needs); a bare R2 URL can't.
 - Boot artifacts are content-addressed (`buildhash` = sha256 of the three nix
   store-path basenames), uploaded with `--ignore-existing`, so a guest-unchanged
-  push uploads ~zero artifact bytes and many PRs share one `cas/` prefix.
+  push uploads ~zero artifact bytes and many PRs share one `cas/` prefix — per
+  variant, since each variant's trio hashes independently (above).
 - The guest binary cache (`nix-cache/`, in-guest `nix-env -iA`) is **not** part
   of previews — that is issue #2's substituter.
 
@@ -56,5 +75,9 @@ NIX_CMD="echo <pw> | sudo -S nix" bash ../../scripts/preview-publish.sh 999
 
 R2 free tier: 10 GB storage, 1M Class-A ops/mo. One guest build's artifacts
 (~base.squashfs 127 MB + vmlinux + initramfs) live once per distinct build in
-`cas/`; `pr-<N>/` frontends are ~9 MB and purged on close. `cas/` can be GC'd
-periodically; it is bounded by the number of distinct guest builds.
+`cas/`; `pr-<N>/` frontends are ~9 MB and purged on close. Since the MMU
+variant publishes its own independent trio (above), the real footprint per
+same-repo PR is up to TWO distinct-build entries under `cas/` (default +
+`variants.mmu`) rather than one — budget the bucket accordingly. `cas/` can
+be GC'd periodically; it is bounded by the number of distinct guest builds
+across BOTH variants, not just the default.

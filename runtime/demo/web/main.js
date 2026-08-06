@@ -7,9 +7,20 @@
 // nix-wasm build output, e.g.:
 //   ln -sfn /path/to/nix-wasm/.artifacts runtime/web/artifacts
 // The required files: vmlinux.wasm, initramfs.cpio.gz, base.squashfs, nix-cache/
+//
+// A `?variant=<name>` query param boots an alternate artifact set from the SAME
+// preview URL — currently just `mmu` (kernel-mmu-a2 + wasm-initramfs-fork +
+// wasm-base-squashfs-fork: the software-MMU guest with real fork(), same file
+// names, engine-autodetected by its nonzero pt_base — see CLAUDE.md's #126
+// epic). PR previews publish the variant's artifacts to their own cas/<hash>/
+// prefix and record it in preview.json's "variants" map (pr-preview.yml); local
+// dev mirrors the ./artifacts symlink convention per variant, e.g.:
+//   ln -sfn /path/to/nix-wasm/.artifacts-nix-mmu runtime/demo/web/artifacts-mmu
+// No param → today's default NOMMU behavior, byte-identical.
 import { init, Terminal, FitAddon } from "./vendor/ghostty/ghostty.mjs";
 import { bootNixSystem, MemVfs } from "../../index.js";
 import { getWaylandCompositor } from "./wayland-compositor.js";
+import { resolveArtifactsBase } from "../../preview-variant.js";
 
 const status = document.getElementById("status");
 const dec = new TextDecoder();
@@ -37,17 +48,23 @@ async function boot() {
   const vfs = MemVfs.from({ Home: {} });
   // Artifacts served from the same origin as this page. A PR preview ships a
   // ./preview.json that points at its content-addressed cas/<buildhash>/ prefix;
-  // local dev has no preview.json and uses the ./artifacts/ symlink.
-  let baseUrl = new URL("./artifacts/", document.baseURI).href;
+  // local dev has no preview.json and uses the ./artifacts/ symlink. A
+  // `?variant=` query param (see the file-header comment) selects an alternate
+  // artifact set via preview.json's "variants" map instead of the default
+  // "artifactsBase" — the Worker's redirects preserve the query string, so this
+  // survives the trailing-slash 308s untouched (infra/preview-worker/src/index.js).
+  // Resolution itself is the pure resolveArtifactsBase (preview-variant.js) —
+  // pulled out of here and unit-tested so the pr-preview.yml jq write path
+  // (`.variants.<name>.artifactsBase`) and this read path can't silently drift.
+  const variant = new URLSearchParams(location.search).get("variant");
+  let preview = null;
   try {
     const r = await fetch("./preview.json", { cache: "no-store" });
-    if (r.ok) {
-      const { artifactsBase } = await r.json();
-      if (artifactsBase) baseUrl = new URL(artifactsBase, document.baseURI).href;
-    }
+    if (r.ok) preview = await r.json();
   } catch {
-    // no preview.json (local dev) — keep ./artifacts/
+    // no preview.json (local dev) — preview stays null, resolveArtifactsBase falls through.
   }
+  const baseUrl = resolveArtifactsBase(preview, variant, document.baseURI);
   const handle = await bootNixSystem({
     vfs,
     baseUrl,

@@ -1,3 +1,7 @@
 node_modules/
 *.log
 demo/web/artifacts
+# Per-variant symlink convention (main.js's `?variant=` local-dev fallback,
+# e.g. demo/web/artifacts-mmu) — same machine-local symlink-into-/nix/store
+# hazard as the bare demo/web/artifacts entry above; keep it covered too.
+demo/web/artifacts-*
