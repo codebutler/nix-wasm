@@ -68,11 +68,11 @@ surface already exist; Phase 1 only widens what boots on top of it).
   initramfs pair for far less cost — that shard is what the stale "the MMU
   job below runs this" comment on the NOMMU job's own `exec-reject-smoke` line
   now names directly, closing it out without adding a duplicate boot here.
-  **Gating split — PROMOTED except one (#131 soak-flip):** `core` hard-gates
+  **Gating split — FULLY PROMOTED (#131 soak-flip):** `core` hard-gates
   all six of its smokes (`smoke.mjs`/`build-from-source-e2e`/`selftests-batch`
   since the core-only predecessor; `profile-install-e2e`/`wrapperless-cc-e2e`/
   `rsvg-smoke` promoted on PR #184's recorded greens), and `gtk` hard-gates
-  five of six. The exception is `widget-factory-smoke` — the first soak
+  all six. The last to promote was `widget-factory-smoke` — the first soak
   cycle's one REAL finding: GModule autoconnect resolves `.ui` handlers BY
   NAME via dlsym, and the ABI-8 dl host surface read its user pointers RAW
   (untranslated) under the MMU — garbage name, "Could not find signal
@@ -285,15 +285,11 @@ attrs"; Phase 3 is "pc downloads this by default."
 
 ### Validation
 
-**Precondition, not part of this phase's own edit set:** the Phase-1 Remaining
-checklist's soak-flip checkbox must be FULLY closed before this section's
-re-point happens — 18 of 19 are promoted already (PR #184's recorded greens);
-the one outstanding promotion is `widget-factory-smoke`, pending its
-post-mmu-uaccess-fix CI green (see that checkbox). By the time Phase 2
-re-points these shards at the rebuilt world they must be hard-gating end to
-end, or a Phase-2 regression on the one still-soaking path would report a
-green JOB (its red, non-blocking soak step is easy to miss next to that green
-job status).
+**Precondition — SATISFIED:** the Phase-1 Remaining checklist's soak-flip
+checkbox is fully closed (19/19 promoted: 18 on PR #184's recorded greens,
+`widget-factory-smoke` on PR #186's post-mmu-uaccess-fix green). Every MMU
+shard is hard-gating end to end — a Phase-2 regression on any of these paths
+fails the JOB, no soak step remains to hide behind.
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
