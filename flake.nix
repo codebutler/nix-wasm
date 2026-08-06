@@ -428,6 +428,22 @@
         libffi = cross.libffi; zlib = cross.zlib;
       };
 
+      # M-X4 (XChat/X11 epic): gtk2-hello — the GTK2 hello-window proof, the
+      # last structural layer before XChat itself (M-X5). gtk_init + GtkWindow
+      # + GtkLabel via GTK2's X11 backend. --selftest is the headless CI gate
+      # (display-free, mirroring gtk-hello's posture); the visual check is a
+      # real Xvfb+xwd headless screenshot (runtime/demo/node/gtk2-x11-smoke.mjs)
+      # — something GTK3's wayland-only build never had, since Xvfb needs no
+      # compositor. See userspace/gtk2-hello.* + deps-overlay.nix's "GTK2
+      # cross-build" section.
+      gtk2Hello = import ./userspace/gtk2-hello.nix {
+        inherit cross;
+        gtk2 = cross.gtk2; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; fontconfig = cross.fontconfig;
+        freetype = cross.freetype; fribidi = cross.fribidi; pixman = cross.pixman;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
       # #33: gtk3-widget-factory — the headline GTK3 app. GTK's own widget showcase,
       # built standalone against the cross gtk3. Proves GtkBuilder signal autoconnect
       # on the static guest via gtk_builder_add_callback_symbol (no GModule). --selftest
@@ -642,7 +658,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello gtk2Hello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -980,6 +996,20 @@
         # M3b (galculator): gtk-hello — the GTK3 hello-window proof. --selftest is the
         # headless CI gate (gtk_init + GtkWindow + GtkLabel widget tree) → $out/bin/gtk-hello.
         gtk-hello = gtkHello;
+
+        # M-X4 (XChat/X11 epic): the cross-built GTK2 library itself, exposed
+        # standalone so `nix build .#gtk2` isolates a GTK2 cross-build failure
+        # from gtk2-hello's own build (same posture as `dep-*` for the M-X0
+        # X11 client libs). See deps-overlay.nix's "GTK2 cross-build" section.
+        gtk2 = cross.gtk2;
+
+        # M-X4: gtk2-hello — the GTK2 hello-window proof, over GTK2's X11
+        # backend. --selftest is the headless CI gate (display-free, gtk_init
+        # + GtkWindow + GtkLabel class registration) → $out/bin/gtk2-hello;
+        # the live-window proof is runtime/demo/node/gtk2-x11-smoke.mjs
+        # (Xvfb + xwd — headless-screenshottable, unlike gtk-hello's wayland
+        # backend which needs a real compositor the node harness lacks).
+        gtk2-hello = gtk2Hello;
 
         # M4: galculator — the headline GTK3 calculator. fpcast-emu post-link seam
         # applied (same gobject indirect-call fix as gtkHello/pangoText). Baked into

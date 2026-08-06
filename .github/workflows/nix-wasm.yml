@@ -679,6 +679,16 @@ jobs:
             # query, and a `xwd -root` pixel dump verified host-side (XWD
             # header parse + non-flat pixel sampling). Gating.
             run_smoke demo/node/x11-apps-smoke.mjs
+            # gtk2-hello (M-X4 of the XChat/X11 epic): GTK2 cross-built with
+            # the X11 backend, the last structural layer before XChat itself
+            # (M-X5). gtk2-smoke is the display-free headless gate (class_init
+            # through the fpcast seam, gtk2-hello's own posture); gtk2-x11-smoke
+            # is the live-window pixel proof (Xvfb + xwd, headless-
+            # screenshottable — unlike GTK3's wayland backend, which needs a
+            # real compositor this harness doesn't have). One-per-boot like
+            # its GTK siblings. Gating.
+            run_smoke demo/node/gtk2-smoke.mjs
+            run_smoke demo/node/gtk2-x11-smoke.mjs
           fi
 
   # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --
