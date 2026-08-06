@@ -1,0 +1,323 @@
+diff --git a/src/common/outbound.c b/src/common/outbound.c
+index 7c6e5e6..1b98650 100644
+--- a/src/common/outbound.c
++++ b/src/common/outbound.c
+@@ -30,6 +30,9 @@
+ 
+ #ifndef WIN32
+ #include <sys/wait.h>
++#include <spawn.h> /* posix_spawn/posix_spawn_file_actions_t -- see cmd_exec() */
++
++extern char **environ;
+ #endif
+ 
+ #include <unistd.h>
+@@ -1744,7 +1747,6 @@ cmd_exec (struct session *sess, char *tbuf, char *word[], char *word_eol[])
+ 	int fds[2], pid = 0;
+ 	struct nbexec *s;
+ 	int shell = TRUE;
+-	int fd;
+ 
+ 	if (*cmd)
+ 	{
+@@ -1800,45 +1802,62 @@ cmd_exec (struct session *sess, char *tbuf, char *word[], char *word_eol[])
+ 		s->tochannel = tochannel;
+ 		s->sess = sess;
+ 
+-		pid = fork ();
+-		if (pid == 0)
++		/* wasm NOMMU has no fork()/vfork() (docs/process-model.md's spawn
++		 * contract). Unlike server.c's DNS-resolve child (which never
++		 * execs, so it can't be a posix_spawn -- see the pthread port
++		 * there), /EXEC always execs a real program, so this is exactly
++		 * rule 2 of the process-model holdout rules: a real spawn API in
++		 * a library we need, ported to posix_spawn. The
++		 * dup2(fds[1],{0,1,2}) + close(s->myfd) the child used to do by
++		 * hand are expressed as posix_spawn_file_actions, applied
++		 * atomically by posix_spawn/posix_spawnp between the underlying
++		 * clone() and the exec -- the same ordering the manual fork
++		 * child relied on. Disclosed, not silently dropped: the original
++		 * child also closed every fd from 3 upward before exec (fd
++		 * hygiene); posix_spawn_file_actions has no "closefrom"
++		 * primitive, so the spawned command now inherits any other
++		 * non-CLOEXEC fd XChat holds open, same as util_exec()'s port
++		 * above. */
+ 		{
+-			/* This is the child's context */
+-			close (0);
+-			close (1);
+-			close (2);
+-			/* Close parent's end of pipe */
+-			close(s->myfd);
+-			/* Copy the child end of the pipe to stdout and stderr */
+-			dup2 (fds[1], 1);
+-			dup2 (fds[1], 2);
+-			/* Also copy it to stdin so we can write to it */
+-			dup2 (fds[1], 0);
+-			/* Now close all open file descriptors except stdin, stdout and stderr */
+-			for (fd = 3; fd < 1024; fd++) close(fd);
+-			/* Now we call /bin/sh to run our cmd ; made it more friendly -DC1 */
++			posix_spawn_file_actions_t facts;
++			pid_t spawned_pid;
++			int rc;
++
++			posix_spawn_file_actions_init (&facts);
++			posix_spawn_file_actions_adddup2 (&facts, fds[1], 0);
++			posix_spawn_file_actions_adddup2 (&facts, fds[1], 1);
++			posix_spawn_file_actions_adddup2 (&facts, fds[1], 2);
++			posix_spawn_file_actions_addclose (&facts, s->myfd);
++			posix_spawn_file_actions_addclose (&facts, fds[1]);
++
+ 			if (shell)
+ 			{
+-				execl ("/bin/sh", "sh", "-c", cmd, NULL);
+-			} else
++				char *shargv[] = { "sh", "-c", (char *) cmd, NULL };
++				rc = posix_spawn (&spawned_pid, "/bin/sh", &facts, NULL, shargv, environ);
++			}
++			else
+ 			{
+ 				char **argv;
+ 				int argc;
+ 
+-				my_poptParseArgvString (cmd, &argc, &argv);
+-				execvp (argv[0], argv);
++				if (my_poptParseArgvString (cmd, &argc, &argv) != 0 || argc < 1 || !argv[0])
++				{
++					rc = -1;
++				}
++				else
++				{
++					rc = posix_spawnp (&spawned_pid, argv[0], &facts, NULL, argv, environ);
++					free (argv);
++				}
+ 			}
+-			/* not reached unless error */
+-			/*printf("exec error\n");*/
+-			fflush (stdout);
+-			fflush (stdin);
+-			_exit (0);
++			posix_spawn_file_actions_destroy (&facts);
++			pid = (rc == 0) ? spawned_pid : -1;
+ 		}
+ 		if (pid == -1)
+ 		{
+-			/* Parent context, fork() failed */
++			/* Parent context, spawn failed */
+ 
+-			PrintText (sess, "Error in fork(2)\n");
++			PrintText (sess, "Error in posix_spawn(3)\n");
+ 			close(fds[0]);
+ 			close(fds[1]);
+ 		} else
+diff --git a/src/common/server.c b/src/common/server.c
+index 87f9f02..83c2bb5 100644
+--- a/src/common/server.c
++++ b/src/common/server.c
+@@ -37,6 +37,9 @@
+ #ifndef WIN32
+ #include <signal.h>
+ #include <sys/wait.h>
++#if defined(__wasm__)
++#include <pthread.h> /* server_child_thread() -- see server_connect() */
++#endif
+ #else
+ #include <winbase.h>
+ #endif
+@@ -540,7 +543,22 @@ server_stopconnecting (server * serv)
+ 		serv->joindelay_tag = 0;
+ 	}
+ 
+-#ifndef WIN32
++#if defined(__wasm__)
++	/* No child PROCESS to kill -- see server_connect()'s pthread port
++	 * above. Closing childwrite is our cancellation signal: the resolver
++	 * thread's next write() fails with EBADF (fds are shared with a
++	 * pthread, unlike a forked process) and it falls through to its
++	 * `xit:` label and returns on its own. We deliberately do NOT
++	 * pthread_cancel() it -- it may be inside getaddrinfo()/
++	 * connect(), and cancelling mid-libc-resolver/socket call is not
++	 * guaranteed-safe. Disclosed behavioural difference from the forked
++	 * original, not a silent one: an in-flight resolve can keep running
++	 * in the background (harmlessly, its results are simply never read)
++	 * for up to its own timeout after the user cancels. */
++	close (serv->childwrite);
++	close (serv->childread);
++	serv->childtid_active = FALSE;
++#elif !defined(WIN32)
+ 	/* kill the child process trying to connect */
+ 	kill (serv->childpid, SIGKILL);
+ 	waitpid (serv->childpid, NULL, 0);
+@@ -1473,6 +1491,30 @@ traverse_proxy (int print_fd, int sok, char *ip, int port, struct msproxy_state_
+ 
+ /* this is the child process making the connection attempt */
+ 
++#if defined(__wasm__)
++/* wasm NOMMU has no fork()/vfork() (docs/process-model.md's spawn
++ * contract) -- but server_child() below never execs a second program, it
++ * just does blocking name resolution + connect() off the main GTK thread
++ * and reports progress back over the childwrite pipe, so there is no
++ * posix_spawn to port it to (rule 2 doesn't apply -- there's no exec).
++ * XChat's own WIN32 port already hits this exact wall (Windows has no
++ * fork() either) and solves it by running server_child() in a fresh
++ * CreateThread() that shares the parent's address space in place of a
++ * forked child process (see the #ifdef WIN32 branch in server_connect()
++ * below) -- we follow that same upstream precedent with a POSIX pthread,
++ * which is exactly as safe here: server_child() only touches the `serv`
++ * struct + the read-only `prefs` global and never touches GTK/fe_* state
++ * directly, identically to what the WIN32 thread already relies on. */
++static int server_child (server * serv);
++
++static void *
++server_child_thread (void *arg)
++{
++	server_child ((server *) arg);
++	return NULL;
++}
++#endif
++
+ static int
+ server_child (server * serv)
+ {
+@@ -1721,6 +1763,23 @@ server_connect (server *serv, char *hostname, int port, int no_login)
+ 	CloseHandle (CreateThread (NULL, 0,
+ 										(LPTHREAD_START_ROUTINE)server_child,
+ 										serv, 0, (DWORD *)&pid));
++#elif defined(__wasm__)
++	/* No fork() on this platform -- run server_child() in a pthread
++	 * instead of a forked child process. See the server_child_thread()
++	 * comment above for why this mirrors the WIN32 CreateThread branch
++	 * rather than needing a posix_spawn port. `pid` stays 0 (cosmetic
++	 * only -- see server.c:1127's status message and serv->childpid's
++	 * comment in xchat.h). */
++	{
++		pthread_t tid;
++
++		if (pthread_create (&tid, NULL, server_child_thread, serv) != 0)
++			return;
++		pthread_detach (tid);
++		serv->childtid = tid;
++		serv->childtid_active = TRUE;
++	}
++	pid = 0;
+ #else
+ #ifdef LOOKUPD
+ 	rand();	/* CL: net_resolve calls rand() when LOOKUPD is set, so prepare a different seed for each child. This method giver a bigger variation in seed values than calling srand(time(0)) in the child itself. */
+diff --git a/src/common/util.c b/src/common/util.c
+index 49517ec..f3754bb 100644
+--- a/src/common/util.c
++++ b/src/common/util.c
+@@ -33,10 +33,15 @@
+ #include <pwd.h>
+ #include <sys/time.h>
+ #include <sys/utsname.h>
++#include <spawn.h> /* posix_spawn/posix_spawnp -- see util_exec/util_execv */
+ #endif
+ #include <fcntl.h>
+ #include <dirent.h>
+ #include <errno.h>
++
++#ifndef WIN32
++extern char **environ;
++#endif
+ #include "xchat.h"
+ #include "xchatc.h"
+ #include <glib/gmarkup.h>
+@@ -1247,26 +1252,29 @@ util_exec (const char *cmd)
+ 	int pid;
+ 	char **argv;
+ 	int argc;
+-	int fd;
+ 
+ 	if (my_poptParseArgvString (cmd, &argc, &argv) != 0)
+ 		return -1;
+ 
+ #ifndef WIN32
+-	pid = fork ();
+-	if (pid == -1)
+-		return -1;
+-	if (pid == 0)
+-	{
+-		/* Now close all open file descriptors except stdin, stdout and stderr */
+-		for (fd = 3; fd < 1024; fd++) close(fd);
+-		execvp (argv[0], argv);
+-		_exit (0);
+-	} else
++	/* wasm NOMMU has no fork()/vfork() (docs/process-model.md's spawn
++	 * contract): fork()+execvp() here was always a plain fork-then-exec
++	 * with no shared state used after the fork, so it ports directly to
++	 * posix_spawnp() -- rule 2 of the process-model holdout rules ("a
++	 * real spawn API in a library we need -> port it to posix_spawn").
++	 * Known, disclosed gap: the original child closed every fd from 3
++	 * upward before exec (fd hygiene, so the spawned command doesn't
++	 * inherit XChat's sockets); posix_spawn_file_actions has no
++	 * "closefrom" primitive, so that hygiene step is dropped rather than
++	 * faked -- the spawned command now inherits any non-CLOEXEC fd, same
++	 * as an ordinary shell child would. */
++	if (posix_spawnp (&pid, argv[0], NULL, NULL, argv, environ) != 0)
+ 	{
+ 		free (argv);
+-		return pid;
++		return -1;
+ 	}
++	free (argv);
++	return pid;
+ #else
+ 	spawnvp (_P_DETACH, argv[0], argv);
+ 	free (argv);
+@@ -1277,22 +1285,14 @@ util_exec (const char *cmd)
+ int
+ util_execv (char * const argv[])
+ {
+-	int pid, fd;
++	int pid;
+ 
+ #ifndef WIN32
+-	pid = fork ();
+-	if (pid == -1)
++	/* Same posix_spawn port as util_exec() above, for the argv-vector
++	 * (non-shell) exec path. */
++	if (posix_spawn (&pid, argv[0], NULL, NULL, argv, environ) != 0)
+ 		return -1;
+-	if (pid == 0)
+-	{
+-		/* Now close all open file descriptors except stdin, stdout and stderr */
+-		for (fd = 3; fd < 1024; fd++) close(fd);
+-		execv (argv[0], argv);
+-		_exit (0);
+-	} else
+-	{
+-		return pid;
+-	}
++	return pid;
+ #else
+ 	spawnv (_P_DETACH, argv[0], argv);
+ 	return 0;
+diff --git a/src/common/xchat.h b/src/common/xchat.h
+index 013d6a1..63e10ce 100644
+--- a/src/common/xchat.h
++++ b/src/common/xchat.h
+@@ -12,6 +12,10 @@
+ 
+ #include "history.h"
+ 
++#if defined(__wasm__)
++#include <pthread.h> /* server::childtid -- see server.c's fork->pthread port */
++#endif
++
+ #ifndef HAVE_SNPRINTF
+ #define snprintf g_snprintf
+ #endif
+@@ -451,7 +455,11 @@ typedef struct server
+ #endif
+ 	int childread;
+ 	int childwrite;
+-	int childpid;
++	int childpid;			/* cosmetic-only on wasm (no fork child; see childtid) */
++#if defined(__wasm__)
++	pthread_t childtid;		/* the DNS-resolve pthread (server.c's fork port) */
++	int childtid_active;
++#endif
+ 	int iotag;
+ 	int recondelay_tag;				/* reconnect delay timeout */
+ 	int joindelay_tag;				/* waiting before we send JOIN */

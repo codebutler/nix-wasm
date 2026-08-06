@@ -1045,6 +1045,13 @@
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
 
+        # xchat — M-X5 of the XChat/X11 epic, the headline app: XChat 2.8.8
+        # over GTK2/X11 (userspace/xchat.nix). --selftest is the display-free
+        # gate (servlist_init()'s built-in defaults + GTK2 widget class_init
+        # through fpcast, runtime/demo/node/xchat-smoke.mjs); the same smoke
+        # also drives a live Xvfb + xwd pixel proof of the real main window.
+        xchat = cross.xchat;
+
         # gcolor3 — stock nixpkgs GTK3 color chooser; no override needed (shared
         # cross fixes + auto-fpcast via gtk3). A build target for verification;
         # add to wasmPublishedPkgs once `nix build .#gcolor3` is green.

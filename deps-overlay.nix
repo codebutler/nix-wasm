@@ -1448,6 +1448,20 @@ in
     else
       prev.l3afpad or null;
 
+  # --- xchat: M-X5 of the XChat/X11 epic — the headline IRC client over ------
+  # GTK2/X11 (see userspace/xchat.nix for the full configure/fork/fpcast
+  # rationale). nixpkgs dropped it long before our pin (no by-name/x shard at
+  # 9ae611a) — a from-scratch derivation, isWasm-guarded like l3afpad/
+  # gcalctool — no native fallback exists (null, never evaluated).
+  xchat =
+    if isWasm then
+      import ./userspace/xchat.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.xchat or null;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):

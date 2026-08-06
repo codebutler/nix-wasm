@@ -161,6 +161,13 @@ let
                             # extraBins — the gcalctool tmpfs lesson) so the binary
                             # loads from the evictable squashfs and its window icon
                             # (baked ICONDIR = $out/share/pixmaps) rides the closure.
+          cross.xchat       # M-X5 of the XChat/X11 epic: the headline IRC client
+                            # (GTK2/X11, userspace/xchat.nix). systemPackages (not
+                            # initramfs extraBins) so its own $out/share/pixmaps/
+                            # xchat.png + $out/share/applications/xchat.desktop
+                            # ride the served closure (same pattern as l3afpad's
+                            # baked-ICONDIR icon — XCHATSHAREDIR is this package's
+                            # own store path, no pathsToLink entry needed).
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
