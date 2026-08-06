@@ -42,6 +42,11 @@
 #
 # IMPORTANT — --remote is MANDATORY on `wrangler r2 object put`. Without it
 # wrangler 4.x writes to the local simulator and the live URL 404s.
+#
+# The linux.iso goes up via RCLONE, not wrangler: `wrangler r2 object put` caps
+# at 300 MiB and the image passed that when the X11 stack landed (~340 MiB). That
+# needs R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (an R2 token's S3 keys) and
+# CLOUDFLARE_ACCOUNT_ID, alongside CLOUDFLARE_API_TOKEN for the small objects.
 
 set -euo pipefail
 
@@ -123,8 +128,10 @@ fi
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "==> DRY-RUN (CLOUDFLARE_API_TOKEN unset or DRY_RUN=true) — wrangler commands that WOULD run:"
   echo ""
-  echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/linux.iso\" \\"
-  echo "    --file \"$ISO\" --content-type application/x-iso9660-image --remote"
+  echo "  # rclone (not wrangler): the image is >300 MiB, wrangler's hard cap"
+  echo "  rclone copyto \"$ISO\" \"r2:$BUCKET/linux/$VERSION/linux.iso\" \\"
+  echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
+  echo "    --s3-chunk-size 64M --no-check-dest"
   echo ""
   echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
   ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
@@ -160,8 +167,30 @@ esac
 echo "    wrangler $WRANGLER_OUT"
 
 echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
-bunx wrangler r2 object put "$BUCKET/linux/$VERSION/linux.iso" \
-  --file "$ISO" --content-type application/x-iso9660-image --remote
+# rclone, NOT wrangler: `wrangler r2 object put` hard-caps at 300 MiB, and the
+# channel image crossed that when the X11 stack (Xwayland/sommelier/GTK2/XChat)
+# landed -- it is ~340 MiB now and only grows. rclone talks R2's S3 endpoint and
+# does multipart automatically. Same remedy the big-disc workflows already use
+# (see .claude/rules/disc-packages.md in pc). Needs an R2 API token's S3 keys
+# (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) -- a DIFFERENT credential from
+# CLOUDFLARE_API_TOKEN, which has no r2 scope.
+#
+# --no-check-dest is REQUIRED, not an optimisation: rclone HEADs the destination
+# first, and R2 answers 403 (not 404) for a HeadObject on a MISSING key when the
+# token cannot list the bucket -- so the FIRST publish of any new version dies
+# with "operation error S3: HeadObject ... 403 Forbidden". Skipping the stat is
+# correct anyway: the key is immutable and content-addressed.
+: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID (an R2 API token's S3 access key)}"
+: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY (an R2 API token's S3 secret)}"
+: "${CLOUDFLARE_ACCOUNT_ID:?rclone needs CLOUDFLARE_ACCOUNT_ID for the S3 endpoint}"
+export RCLONE_CONFIG_R2_TYPE=s3
+export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+export RCLONE_CONFIG_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+rclone copyto "$ISO" "r2:$BUCKET/linux/$VERSION/linux.iso" \
+  --header-upload "Content-Type: application/x-iso9660-image" \
+  --s3-chunk-size 64M --no-check-dest
 
 # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
 # new-CLI indexes, which are nix-wasm artifacts NOT present in Cachix. The heavy
