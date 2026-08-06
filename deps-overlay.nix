@@ -746,7 +746,6 @@ in
   # glib, so the wrapper now builds. Enabling it adds libcairo-gobject.a +
   # cairo-gobject.pc; glib is a real cross input again.
   # Still OFF (no X):
-  #   - x11Support: drags libxext/libxrender/libxcb (X11 surfaces). Off.
   #   - gtk_doc=true is set UNCONDITIONALLY in nixpkgs (needs gtk-doc/docbook,
   #     a native doc toolchain that's pointless here) → force -Dgtk_doc=false.
   #   - lzo: cairo-script surface compression; not needed. Off.
@@ -754,18 +753,37 @@ in
   # hard-requires cairo-png.pc (its configure checks `cairo-png`), and
   # rsvg-convert writes PNG through it. Cross libpng rides on zlib; strictly
   # additive to everything downstream.
+  # ON (M-X4, XChat/X11 epic): x11Support — the xlib SURFACE backend, for
+  # GTK2's gdk-x11 backend (gdk/x11/gdkdrawable-x11.c draws through a
+  # `cairo_xlib_surface_create` surface; there is no other rendering path for
+  # GTK2-on-X11). Strictly additive, same posture as the M2 freetype/
+  # fontconfig enable and the GNOME-games png enable: nothing already built
+  # (weston-flowers, the M2 text stack, GTK3) touches x11Support, so flipping
+  # it on cannot regress them — weston-flowers (image-surface-only client)
+  # is the regression gate. cairo's own package.nix ties `x11Support` to BOTH
+  # the `-Dxlib` mesonEnable AND the libxext/libxrender propagatedBuildInputs
+  # (both already cross-built — M-X0's X11 client closure), so no buildInputs
+  # work is needed here beyond un-nulling them. `xcbSupport` (cairo's own arg,
+  # defaults to `x11Support`) is pinned back to `false`: GTK2 only ever wants
+  # the plain Xlib surface (`cairo_xlib_surface_create`), never the xlib-xcb
+  # hybrid, so there is no reason to grow the runtime closure with cairo's
+  # XCB-render surface — scope this milestone to what GTK2 actually needs.
   # Result: libcairo.a + libcairo-gobject.a with CAIRO_HAS_IMAGE_SURFACE +
-  # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 +
-  # fontconfig; cairo-gobject.pc present for GTK3.
+  # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT + CAIRO_HAS_XLIB_SURFACE; cairo.pc
+  # Requires lists freetype2 + fontconfig + x11/xext/xrender;
+  # cairo-gobject.pc present for GTK3.
   cairo = whenWasm
     (p: (p.override {
-      x11Support = false;
+      x11Support = true;
+      xcbSupport = false;
       gobjectSupport = true;
-      # Null the optional inputs so meson's auto-detection can't pick them up
-      # from the sysroot even with the feature flags off.
-      # freetype + fontconfig + glib (gobjectSupport) are real cross deps.
-      libxext = null;
-      libxrender = null;
+      # libxcb stays nulled — xcbSupport=false means cairo's own package.nix
+      # never references it (`optionals xcbSupport [ libxcb ]` is empty), so
+      # this is defensive-only, same posture as before. libxext/libxrender
+      # are NO LONGER nulled: x11Support=true means cairo's own
+      # propagatedBuildInputs now wants them, and they're real cross deps
+      # (M-X0's X11 client closure) — meson's auto-detection picking them up
+      # is exactly the point now, not something to guard against.
       libxcb = null;
       lzo = null;
       gtk-doc = null;
@@ -773,8 +791,6 @@ in
     }).overrideAttrs (o: {
       mesonFlags = (o.mesonFlags or [ ]) ++ [
         "-Dgtk_doc=false"
-        "-Dxcb=disabled"
-        "-Dxlib=disabled"
         "-Dglib=enabled"
         "-Dtests=disabled"
         "-Dfreetype=enabled"
@@ -784,6 +800,11 @@ in
         # lzo backs the cairo-script surface's compression; not needed here,
         # and we nulled the input above.
         "-Dlzo=disabled"
+        # -Dxlib/-Dxcb are NOT repeated here — cairo's own package.nix already
+        # emits them deterministically from the `x11Support`/`xcbSupport` args
+        # above (`lib.mesonEnable "xlib" x11Support` / `"xcb" xcbSupport`), so
+        # duplicating the same `-D` here would be redundant at best and a
+        # meson double-definition footgun at worst.
       ];
       # nixpkgs' postInstall rewrites cairo.pc to add freetype include dirs;
       # freetype is now a real input so let the default postInstall run.
