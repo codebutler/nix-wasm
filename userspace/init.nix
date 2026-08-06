@@ -61,20 +61,28 @@ let
   # ${xwayland}/bin/Xwayland only becomes reachable once the served /nix
   # squashfs is mounted, so an early respawn attempt harmlessly retries.
   #
-  # The trailing `x11-unused` positional arg: sommelier.cc's arg parser
-  # requires a non-empty `[program]` argv REGARDLESS of `-X` (`if (client_fd
-  # == -1) { if (!ctx.runprog || !ctx.runprog[0]) { sl_print_usage(); ...
-  # } }` runs unconditionally, before the `if (ctx.xwayland)` branch —
-  # confirmed by reading sommelier.cc, not assumed). But once `ctx.xwayland`
-  # IS set, the actual "spawn xwayland" code path (further down main())
-  # branches away from ctx.runprog entirely and calls sl_spawn_xwayland()
-  # instead — so this placeholder string is parsed but NEVER executed (no
-  # fork/exec/posix_spawn of it happens). This is normal, documented
-  # sommelier CLI usage (`sommelier [options] [program] [args...]`), not an
-  # app-specific hack — the "program" here is inert filler for an argc
-  # check, identical in spirit to how ChromeOS's own -X launch scripts
-  # always pass some placeholder positional.
-  xwaylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier -X --x-display=1 x11-unused >>/var/log/sommelier-x.log 2>&1; sleep 5'";
+  # The trailing `[program]` positional is REAL — it is the X session leader,
+  # NOT inert filler. sommelier.cc's arg parser requires a non-empty
+  # `[program]` argv regardless of `-X`, and once Xwayland signals
+  # display-ready, `sl_handle_display_ready_event` EXECS that program (it is
+  # the session's "run this under X" slot, exactly like ChromeOS's
+  # `sommelier -X … /usr/bin/some-app`). An earlier version of this line
+  # passed a bogus `x11-unused` placeholder on the theory that the `-X` path
+  # branches away from ctx.runprog and never runs it; a real browser boot
+  # disproved that — /var/log/sommelier-x.log showed Xwayland spawning fine
+  # (0.17s) and then:
+  #     x11-unused: No such file or directory
+  #     Assertion failed: false (../sommelier.cc: sl_handle_display_ready_event: 3768)
+  # i.e. the exec failed, sommelier asserted, and the daemon died taking
+  # Xwayland with it — which is why only `sommelier --parent` was ever
+  # visible in the guest's `ps`. So pass a real, long-lived program: the X
+  # server's lifetime is deliberately tied to it (when the session leader
+  # exits, sommelier tears down X — standard sommelier semantics), and
+  # `/bin/sleep` is a busybox applet symlink baked into the initramfs /bin
+  # alongside /bin/sh, so it needs no served-closure dependency and no
+  # nested shell quoting. This is a headless X SESSION (a server for other
+  # apps to connect to), so an idle session leader is the correct shape.
+  xwaylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier -X --x-display=1 /bin/sleep 2147483647 >>/var/log/sommelier-x.log 2>&1; sleep 5'";
   # ninepd: the read-only 9P rootfs server behind pc's /Linux mount (pc#472).
   # Dials OUT to the host on vsock 1025 and serves the LIVE guest filesystem —
   # Filer browsing + the tray launcher's .desktop reads. INITRAMFS-absolute

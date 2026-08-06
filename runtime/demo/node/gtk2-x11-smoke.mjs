@@ -97,9 +97,7 @@ try {
   // xwd -root: dump the real server framebuffer (gtk2-hello's window
   // included — Xvfb has no compositor, so xwd sees exactly what's on screen)
   // to the 9P-mounted host VFS.
-  s.send(
-    "DISPLAY=:9 xwd -root -silent -out /mnt/pc/Home/gtk2.xwd; echo XWDDONE_RC:$?\n",
-  );
+  s.send("DISPLAY=:9 xwd -root -silent -out /mnt/pc/Home/gtk2.xwd; echo XWDDONE_RC:$?\n");
   const xwdRan = await s.waitForOutput(/XWDDONE_RC:\d+/, 30000);
   const xwdMatch = /XWDDONE_RC:(\d+)/.exec(s.snapshot());
   const xwdOk = xwdRan && xwdMatch && xwdMatch[1] === "0";
