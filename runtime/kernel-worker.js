@@ -11,6 +11,7 @@
 import { DynamicLoader } from "./dylink.js";
 import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
 import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
+import { UserFault, readUser, readUserCString, writeUser } from "./mmu-uaccess.js";
 import { FfiTrampolines } from "./ffi-codegen.js";
 import { WlDevice } from "./virtio/wl-device.js";
 import { NetDevice } from "./virtio/net-device.js";
@@ -1337,37 +1338,78 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             //      dylink.js — GOT resolution, elem-slot dlsym, fpcast rule).
             // dlopen(NULL) is __wasm_dlopen(0,0,0,flags) → handle 1 (the main
             // program); dlsym handle 0 = RTLD_DEFAULT (global scope).
+            // Every pointer these imports receive is a USER VIRTUAL address.
+            // On NOMMU that IS the linear-memory offset; under the software MMU
+            // it is not, and reading it raw fetches unrelated bytes (the
+            // widget-factory "Could not find signal handler" failure: dlsym's
+            // name read; dltest's "not a wasm dylink module": dlopen's image
+            // read). All user reads/writes below therefore go through the
+            // host-side soft uaccess walk (mmu-uaccess.js) keyed on THIS
+            // worker's own_pt_base (0 on NOMMU → identity, byte-identical to
+            // the raw path). A UserFault (non-present page — the host cannot
+            // demand-fault, see mmu-uaccess.js) is logged loudly and turned
+            // into the surface's clean failure code, never a wrong read.
             __wasm_dl_probe: (bufPtr, bufLen, outPtr) => {
-              const b = new Uint8Array(memory.buffer).subarray(
-                Number(bufPtr),
-                Number(bufPtr) + Number(bufLen),
-              );
-              const r = ensure_dyn_loader().probe(b);
-              if (typeof r === "number") return r;
-              const dv = new DataView(memory.buffer);
-              dv.setUint32(Number(outPtr), r.memSize, true);
-              dv.setUint32(Number(outPtr) + 4, r.memAlign, true); // log2, as in dylink.0
-              dv.setUint32(Number(outPtr) + 8, r.tableSize, true);
-              return 0;
+              try {
+                const b = readUser(memory.buffer, own_pt_base, Number(bufPtr), Number(bufLen));
+                const r = ensure_dyn_loader().probe(b);
+                if (typeof r === "number") return r;
+                const out = new Uint8Array(12);
+                const odv = new DataView(out.buffer);
+                odv.setUint32(0, r.memSize, true);
+                odv.setUint32(4, r.memAlign, true); // log2, as in dylink.0
+                odv.setUint32(8, r.tableSize, true);
+                writeUser(memory.buffer, own_pt_base, Number(outPtr), out);
+                return 0;
+              } catch (e) {
+                if (!(e instanceof UserFault)) throw e;
+                console.error(`[dl ${runner_name}] __wasm_dl_probe: ${e.message}`);
+                return -14; // -EFAULT
+              }
             },
             __wasm_dlopen: (bufPtr, bufLen, memoryBase, flags) => {
               if (Number(bufPtr) === 0) return 1; // dlopen(NULL) → the main program
-              const b = new Uint8Array(memory.buffer).subarray(
-                Number(bufPtr),
-                Number(bufPtr) + Number(bufLen),
-              );
-              // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
-              // serve symbols to later loads or RTLD_DEFAULT searches.
-              return ensure_dyn_loader().load(b, Number(memoryBase), {
-                name: `dlopen@${Number(bufPtr)}`,
-                global: (Number(flags) & 0x100) !== 0,
-              });
+              // Software-MMU gap (loud, clean — never silent corruption): a
+              // REAL side module's code is instantiated by DynamicLoader
+              // without softmmu instrumentation, so under a nonzero pt_base
+              // its own loads/stores would bypass translation entirely and
+              // read/write the wrong physical bytes. Refuse the load until
+              // side-module instrumentation lands (nix-wasm#185;
+              // dlopen(NULL)+dlsym — the GModule/GtkBuilder path — is
+              // fully supported above/below, the main image IS instrumented).
+              if (own_pt_base) {
+                console.error(
+                  `[dl ${runner_name}] __wasm_dlopen: side modules are not yet ` +
+                    `softmmu-instrumented — refusing load under the software MMU ` +
+                    `(pt_base=0x${own_pt_base.toString(16)}); dlopen(NULL)/dlsym is unaffected`,
+                );
+                return -8; // -ENOEXEC → a clean dlerror, not a mis-executing module
+              }
+              try {
+                const b = readUser(memory.buffer, own_pt_base, Number(bufPtr), Number(bufLen));
+                // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
+                // serve symbols to later loads or RTLD_DEFAULT searches.
+                return ensure_dyn_loader().load(b, Number(memoryBase), {
+                  name: `dlopen@${Number(bufPtr)}`,
+                  global: (Number(flags) & 0x100) !== 0,
+                });
+              } catch (e) {
+                if (!(e instanceof UserFault)) throw e;
+                console.error(`[dl ${runner_name}] __wasm_dlopen: ${e.message}`);
+                return -14; // -EFAULT
+              }
             },
             __wasm_dlsym: (handle, namePtr) => {
-              return ensure_dyn_loader().dlsym(
-                Number(handle),
-                get_cstring(memory, Number(namePtr)),
-              );
+              try {
+                return ensure_dyn_loader().dlsym(
+                  Number(handle),
+                  readUserCString(memory.buffer, own_pt_base, Number(namePtr)),
+                );
+              } catch (e) {
+                if (!(e instanceof UserFault)) throw e;
+                console.error(`[dl ${runner_name}] __wasm_dlsym: ${e.message}`);
+                return 0; // symbol lookup fails cleanly (dlerror), cause is logged
+              }
             },
 
             // pc (#126 Track C / #130): runtime libffi. The in-tree
@@ -1383,6 +1425,25 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // Canonical-thunk targets (fpcast'd modules) get the (i64×128)->i64
             // ABI; the loader decides from which module owns table[funcIndex].
             __wasm_ffi_call: (funcIndex, argPtr, retPtr, sigPtr, sigLen) => {
+              // Software-MMU gap, same shape as __wasm_dlopen's (loud, clean):
+              // the generated trampoline is a runtime wasm module whose loads/
+              // stores at argPtr/retPtr are NOT softmmu-instrumented, so under
+              // a nonzero pt_base it would read args from / write the result to
+              // the wrong physical bytes. Refuse — the C backend turns a
+              // nonzero return into its loud wasm_ffi_unsupported() abort
+              // ("runtime trampoline call failed"), the existing never-mis-call
+              // contract. The static trampoline table (compiled INTO the
+              // calling binary, instrumented with it) is unaffected and covers
+              // every in-tree caller. Tracked with side-module instrumentation
+              // in nix-wasm#185.
+              if (own_pt_base) {
+                console.error(
+                  `[ffi ${runner_name}] __wasm_ffi_call: runtime trampolines are not yet ` +
+                    `softmmu-instrumented — refusing under the software MMU ` +
+                    `(pt_base=0x${own_pt_base.toString(16)}); the static-table fast path is unaffected`,
+                );
+                return 1;
+              }
               const u8 = new Uint8Array(memory.buffer);
               const base = Number(sigPtr);
               const CODES = [null, "i32", "i64", "f32", "f64"];

@@ -709,6 +709,31 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   FUTEX_WAIT/WAKE). Patch 0015 keeps an unregistered `SYSCALL_DEFINE4(wasm32_futex)` for
   reference only — the syscall table entry is the 6-arg handler. (This host edit, like all
   `kernel-worker.js` edits, needs a pc sync via `sync-to-pc.sh`.)
+- **Host imports that take USER pointers must translate under the software MMU**
+  (`runtime/mmu-uaccess.js` + the dl/ffi imports in `kernel-worker.js`; found by #184's
+  first MMU soak cycle, tracked to done via nix-wasm#185). THREE parties touch user
+  memory under CONFIG_MMU=y: instrumented guest code (the softmmu pass's inline walk),
+  the kernel (patch 0023's soft uaccess), and HOST IMPORTS — and the third was missed
+  when the ABI-8 dlopen/dlsym surface landed (#130 predates the first MMU boot).
+  `__wasm_dlsym` read the symbol NAME at the raw user VA → garbage → GModule's
+  "Could not find signal handler 'wf_on_buf_changed'" (the widget-factory soak
+  failure — NOT a missing dynsym seam, widget-factory has one); `__wasm_dl_probe`/
+  `__wasm_dlopen` read the module IMAGE raw → "not a wasm dylink module". Correct on
+  NOMMU purely because VA == linear-memory offset there. Fix: `mmu-uaccess.js`, a
+  host-side soft-uaccess walk (same 2-level format as the pass and `mm/uaccess.c` —
+  per-LEVEL present tests per the A2 keystone, `_PAGE_WRITE` enforced on stores so a
+  host write can't corrupt a COW page, page-wise gather/scatter since user buffers
+  aren't physically contiguous, NO fault-and-retry: a host import can't re-enter the
+  kernel's fault path, so a non-present page is a loud clean per-call failure).
+  Boot-verified: widget-factory-smoke PASS on `.#kernel-mmu-a2`, dltest `self=1`,
+  NOMMU byte-identical (identity path). The OTHER half of the same finding —
+  runtime-instantiated side modules and ffi trampolines are UN-instrumented guest
+  code — is refused loudly for now (`-ENOEXEC` dlerror / the C `wasm_ffi_unsupported`
+  abort, never silent corruption; the checked pass needs imports a side module
+  doesn't have — full design constraints in #185). New host-import rule going
+  forward: any import taking a guest pointer must state whether it's a KERNEL
+  (identity) or USER (translate via mmu-uaccess) address, and use the walk for user
+  ones. (Engine edits → pc sync via `sync-to-pc.sh` before any pc deploy, as ever.)
 - **glib/GTK `__lsan_*` loader stubs — DO NOT "clean up"** (`runtime/kernel-worker.js`):
   wasm-ld emits glib's weak-undef `__lsan_enable`/`__lsan_ignore_object` as BOTH an
   `env` import AND a `GOT.func` import. Instantiation FAILS if the `env` no-op stub is
@@ -1385,27 +1410,21 @@ CI / the linux box, per the design's "ship what works" scope):
   broke. `continue-on-error` fixes that at the STEP level instead, preserving
   the script's real exit code while still keeping the JOB green (the soak
   period). Full rationale: the SOAK NOTE comments on both jobs in
-  `nix-wasm.yml`. In `mmu-devices` NO smoke is hard-gating yet — all ten
-  (`sigalrm-smoke`, `kill-wake-smoke`, `timeout-repro-smoke`,
-  `ping-pace-smoke`, `vsock-ctl-smoke`, `resize-smoke`, `snd-smoke`,
-  `clock-smoke`, `exec-reject-smoke`, `blk-rw-smoke`) run as `check` calls in
-  the shard's single soak step; none of them has a recorded CI green on this
-  kernel+initramfs pair (a local Node-harness boot greened sigalrm/clock
-  during development, but that is not an in-tree CI record — the shard's SOAK
-  NOTE documents the correction from an earlier two-smoke-gating draft)
-  (`ping-pace-probe-smoke` stays the always-non-gating diagnostic it already
-  is on NOMMU — it isn't wrapped in `check` at all). In `nix-boot-smoke-mmu`'s
-  `core` shard only `smoke.mjs`, `build-from-source-e2e.mjs`, and
-  `selftests-batch.mjs` are hard-gated (they already had a recorded green MMU
-  boot from this job's core-only predecessor); `profile-install-e2e.mjs`,
-  `wrapperless-cc-e2e.mjs`, and `rsvg-smoke.mjs` are `check` calls in that
-  shard's soak step. Every `gtk`-shard smoke (all six) is a soak `check` call
-  — none is hard-gated yet. **A green job is NOT evidence the soak smokes
-  pass** — look for the soak step's own red (non-blocking) status and read its
-  `::error::` annotations — and each moves from the soak step's `check` call
-  to the hard-gates step's `run_smoke` call only once it has an actual green
-  run on record (see the SOAK NOTE in `nix-wasm.yml` and the Remaining
-  checklist in the parity-plan doc below). That shard verifies issue #11 item
+  `nix-wasm.yml`. **PROMOTION (the #131 soak-flip) is DONE for 18 of 19**: PR
+  #184's first soak cycle recorded first-attempt greens for all ten
+  `mmu-devices` smokes (whole shard ~2.5 min, no panic-retries), `core`'s
+  three new e2es, and five of the six `gtk` smokes — each moved to a
+  `run_smoke` hard gate (`ping-pace-probe-smoke` stays the always-non-gating
+  diagnostic it is on NOMMU). The 19th — `widget-factory-smoke` — was the
+  cycle's one REAL finding: the ABI-8 dl host surface read USER pointers
+  untranslated (see the "Host imports that take USER pointers" learnings
+  entry above; engine fix `runtime/mmu-uaccess.js`, boot-verified green
+  locally on `.#kernel-mmu-a2`); it stays the single remaining soak `check`
+  until its own CI green records, then takes the last promotion. While any
+  soak smoke remains: **a green job is NOT evidence the soak smoke passes**
+  — look for the soak step's own red (non-blocking) status and its
+  `::error::` annotations (see the SOAK NOTEs in `nix-wasm.yml` and the
+  Remaining checklist in the parity-plan doc below). That shard verifies issue #11 item
   1 ONLY — device models still work
   when USER pages are translated (the kernel's soft uaccess walk + the
   instrumented user binary's own buffer accesses); the vring/pfn addressing
@@ -1422,10 +1441,7 @@ CI / the linux box, per the design's "ship what works" scope):
   publishes a SECOND artifact set (`pr-preview.yml` + `runtime/demo/web/
   main.js`'s `?variant=mmu`), so a human CAN boot the MMU/fork guest in a real
   browser from any PR — the closest thing to a wl_shm-on-MMU check today, and
-  it's a manual one, not a CI gate. **First green CI run of the `mmu-devices` +
-  `gtk` shards is still pending** (uncommitted working-tree edits at the time
-  of writing) — read the shard descriptions above as what they're built to
-  prove, not a result already obtained. None of this touches
+  it's a manual one, not a CI gate. None of this touches
   `.#linux-image`/`.#kernel`/`ENGINE_ABI` — it is additive coverage on the
   existing `-mmu`/`-fork`-suffixed attrs only. Full 4-phase plan (this parity
   proof → #131 slice-1 default-flip, a batched world rebuild → the ship flip
