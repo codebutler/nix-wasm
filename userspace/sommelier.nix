@@ -85,6 +85,19 @@ cross.stdenv.mkDerivation {
     # to, and stock sommelier doesn't implement the protocol, so the host
     # (Greenfield -> pc) sees a silent client and CSD-defaults it to frameless.
     ../patches/sommelier/0003-xdg-decoration-passthrough.patch
+    # 0004: `-X` with no [program] = a standing X server, not a usage error.
+    # Sommelier's model is "run this app under X": it REQUIRES a trailing
+    # [program] and execs it as the X session leader when Xwayland signals
+    # display-ready. We want the other shape — a boot-time daemon that just
+    # SERVES :1 for whatever connects later — and Sommelier itself (Xwayland
+    # + the XWM) is the whole service, so there is no leader to run. Without
+    # this the daemon must be fed a filler program purely to satisfy the
+    # exec, and any exec failure asserts and takes X down with it (that is
+    # exactly how the first `-X` wiring died: a bogus placeholder ->
+    # ENOENT -> `Assertion failed: sl_handle_display_ready_event`). Making
+    # server-only a first-class mode is the honest fix, and it is generic:
+    # nothing here knows or cares which X app connects.
+    ../patches/sommelier/0004-xwayland-server-only-mode.patch
   ];
 
   nativeBuildInputs = [
