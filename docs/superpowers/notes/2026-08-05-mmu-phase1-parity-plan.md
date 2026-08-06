@@ -43,20 +43,15 @@ surface already exist; Phase 1 only widens what boots on top of it).
   whose *outcome* differs by design — this is the first kernel where the
   softmmu pass can actually REFUSE an image (NOMMU's `signals` shard only
   proves the conforming-twin/no-panic assertions, not the rejection itself).
-  **Gating split (soak, #131):** NONE of the 10 smokes in this shard is
-  hard-gating yet — all ten (sigalrm/kill-wake/timeout-repro/ping-pace/
-  vsock-ctl/resize/snd/clock/exec-reject/blk-rw) run as `check` calls in a
-  single `continue-on-error: true` soak step (the shard has no hard-gates
-  step at all; an earlier draft gated sigalrm/clock on a local Node-harness
-  green, but that is not an in-tree CI record — the workflow's SOAK NOTE
-  records the correction) — same panic-retry loop, but a real
-  failure prints an `::error::` annotation and fails that step's own exit code
-  (a genuinely red, non-blocking step in the Checks UI; the JOB stays green)
-  — because this is each one's first-ever boot against `.#kernel-mmu-a2` +
-  `.#wasm-initramfs-fork`. See the workflow's own SOAK NOTE (`nix-wasm.yml`,
-  immediately above the `mmu-devices` steps) and the soak-flip checkbox in
-  Remaining below: each moves from the soak step's `check` call to the
-  hard-gates step's `run_smoke` call once it has a recorded green run.
+  **Gating split — PROMOTED (#131 soak-flip):** all ten smokes in this shard
+  (sigalrm/kill-wake/timeout-repro/ping-pace/vsock-ctl/resize/snd/clock/
+  exec-reject/blk-rw) recorded first-attempt greens in PR #184's first soak
+  cycle (whole shard ~2.5 min, no panic-retries) and are `run_smoke` HARD
+  GATES since; `ping-pace-probe` stays the permanently-non-gating diagnostic.
+  (History: they shipped soak-first because a first-ever boot must record an
+  in-tree CI green before it can gate — an earlier draft gated sigalrm/clock
+  on a local Node-harness green, corrected in review; the promotion followed
+  one cycle later, per the rule.)
 - **`nix-boot-smoke-mmu`'s `gtk` shard** (`nix-wasm.yml`, closing out the PR
   #172 "GTK set follows" promise) — the full one-per-boot GTK smoke set
   (`gtk-smoke`, `galculator-smoke`, `widget-factory-smoke`, `gtk-demo-smoke`,
@@ -73,17 +68,21 @@ surface already exist; Phase 1 only widens what boots on top of it).
   initramfs pair for far less cost — that shard is what the stale "the MMU
   job below runs this" comment on the NOMMU job's own `exec-reject-smoke` line
   now names directly, closing it out without adding a duplicate boot here.
-  **Gating split (soak, #131):** `core` keeps `smoke.mjs`/
-  `build-from-source-e2e.mjs`/`selftests-batch.mjs` hard-gating (`run_smoke`
-  calls in the hard-gates step — this job's core-only predecessor already
-  boot-verified them), but the three smokes new to `core`
-  (`profile-install-e2e`, `wrapperless-cc-e2e`, `rsvg-smoke`) and all six
-  `gtk`-shard smokes run as `check` calls in a SEPARATE `continue-on-error:
-  true` soak step — identical panic-retry loop, but a real failure prints an
-  `::error::` annotation and fails that step's own exit code (a genuinely red,
-  non-blocking step; the JOB stays green) — until each has a recorded green
-  run. See this job's own SOAK NOTE and the soak-flip checkbox in Remaining
-  below.
+  **Gating split — PROMOTED except one (#131 soak-flip):** `core` hard-gates
+  all six of its smokes (`smoke.mjs`/`build-from-source-e2e`/`selftests-batch`
+  since the core-only predecessor; `profile-install-e2e`/`wrapperless-cc-e2e`/
+  `rsvg-smoke` promoted on PR #184's recorded greens), and `gtk` hard-gates
+  five of six. The exception is `widget-factory-smoke` — the first soak
+  cycle's one REAL finding: GModule autoconnect resolves `.ui` handlers BY
+  NAME via dlsym, and the ABI-8 dl host surface read its user pointers RAW
+  (untranslated) under the MMU — garbage name, "Could not find signal
+  handler". NOT a missing dynsym seam (widget-factory has one; galculator's
+  selftest never calls `connect_signals`, which is why it passed). Fixed
+  engine-side (`runtime/mmu-uaccess.js` host soft-uaccess + the dl imports in
+  `kernel-worker.js`; side modules/ffi trampolines refused loudly pending
+  nix-wasm#185); green in a local `.#kernel-mmu-a2` boot, soaking until its
+  own CI green records, then it takes the last promotion. See this job's SOAK
+  NOTE and the soak-flip checkbox in Remaining below.
 - **MMU browser preview variant** (`pr-preview.yml` + `runtime/demo/web/
   main.js`) — every same-repo PR preview now publishes a SECOND artifact set
   (`.#kernel-mmu-a2` + `.#wasm-initramfs-fork` + `.#wasm-base-squashfs-fork`)
@@ -163,46 +162,29 @@ surface already exist; Phase 1 only widens what boots on top of it).
   that actually allocates a `wl_shm` buffer. Until this lands, the ticket
   close-out map's #11 entry (below) can only claim item 1, not the ticket as a
   whole — do not close #11 on the `gtk` shard's evidence alone.
-- [ ] **Move every soak-step `check` call up to the hard-gates step's
-  `run_smoke` once it has a green run on record.** Per the SOAK NOTEs in
-  `nix-wasm.yml` (`mmu-devices` and `nix-boot-smoke-mmu`'s `core`/`gtk`
-  shards): of the 20 smoke invocations the Landed section above added (11 in
-  `mmu-devices` incl. its `ping-pace-probe` diagnostic, 3 new to `core`, 6 in
-  `gtk`), NONE can fail the job today. 19 are `check` calls, inside each
-  job's `continue-on-error: true` soak step, pending exactly this move:
-  sigalrm/kill-wake/timeout-repro/ping-pace/vsock-ctl/resize/snd/clock/
-  exec-reject/blk-rw (`mmu-devices`, all ten — an earlier draft hard-gated
-  sigalrm/clock on a local Node-harness green, corrected because that is not
-  an in-tree CI record), profile-install-e2e/wrapperless-cc-e2e/
-  rsvg-smoke (`core`), and all six `gtk`-shard smokes — each reports a real
-  failure as an `::error::` annotation and a red (but non-blocking) soak step,
-  with the JOB still SUCCESS, until it earns a recorded green run and its call
-  site moves up. The 20th invocation, `ping-pace-probe`, is
-  DIFFERENT — it is permanently non-gating by design (the established
-  `signals` shard's own diagnostic breakdown behind the gating
-  `ping-pace-smoke`, and it runs bare in the soak step, never wrapped in
-  `check`), so it is not part of this checkbox's move. This is a **Phase-2
-  precondition, not parallel cleanup**: Phase 2's Validation section below
-  re-points these exact shards at the rebuilt world and calls them "the
-  regression net" — a claim that only holds once each of the 19 actually
-  fails the job on a real regression. Move each individually as it earns a
-  recorded green run (not all-at-once — some may need a real fix first, not
-  just a move), and do not start Phase 2 until every one of the 19 is moved
-  or has a tracked reason it can't be yet.
+- [x] **(18/19 done) Move every soak-step `check` call up to the hard-gates
+  step's `run_smoke` once it has a green run on record.** PR #184's first
+  soak cycle recorded first-attempt greens for 18 of the 19 soak invocations
+  (all ten `mmu-devices` smokes, `core`'s three new e2es, five of six `gtk`
+  smokes) and each is a `run_smoke` hard gate since. (`ping-pace-probe`, the
+  20th invocation, is permanently non-gating by design — the `signals`
+  shard's own diagnostic breakdown, never part of this move.) The 19th,
+  `widget-factory-smoke`, failed its first cycle for a REAL cause — the
+  ABI-8 dl host surface reading user pointers untranslated under the MMU
+  (see the Landed section's gating-split note; engine fix
+  `runtime/mmu-uaccess.js`, remainder tracked in nix-wasm#185) — exactly the
+  "some may need a real fix first, not just a move" case this checkbox
+  anticipated. It soaks until its own CI green records, then takes the last
+  promotion and this checkbox closes fully.
 
-Phase 1's CI wiring is meant to be the regression net Phase 2's risky world
-rebuild runs against continuously, but that claim is only true once the
-soak-flip checkbox above lands — today NONE of the 20 invocations Phase 1
-added can fail the job; 19 report a real
-failure as a red (non-blocking) soak step + `::error::` annotation instead
-(the 20th, `ping-pace-probe`, is permanently non-gating by design, not a soak
-item), so as shipped the net catches nothing that turns the JOB red on those
-19 paths. Do not start Phase 2 before the autotools
-proof above, the wl_shm/#11 item, AND the soak-flip checkbox are closed — the
+Phase 1's CI wiring is now the regression net Phase 2's risky world rebuild
+runs against continuously: a regression on any of the 18 promoted paths turns
+the JOB red. Do not start Phase 2 before the autotools proof above, the
+wl_shm/#11 item, AND widget-factory's final promotion are resolved — the
 wl_shm/#11 gap is orthogonal to Phase 2's fork-default flip and does not block
-it (it only blocks closing #11 in full), but the soak-flip is not orthogonal:
+it (it only blocks closing #11 in full), but the last soak promotion is not:
 it is what makes "Phase 2 is CI-validated against these shards" (see
-Validation, below) a true statement rather than an aspiration.
+Validation, below) a complete statement.
 
 ---
 
@@ -306,14 +288,14 @@ attrs"; Phase 3 is "pc downloads this by default."
 ### Validation
 
 **Precondition, not part of this phase's own edit set:** the Phase-1 Remaining
-checklist's soak-flip checkbox (every soak-step `check` call moved up to a
-hard-gates-step `run_smoke` call) must already be done before this section's
-re-point happens — see that checkbox's own reasoning. That move IS a
-job-wiring change, just one that belongs to Phase 1 finishing, not to Phase 2;
-by the time Phase 2 re-points these shards at the rebuilt world they should
-already be hard-gating end to end, or a Phase-2 regression on one of the 19
-previously-soaking paths would report a green JOB (its red, non-blocking soak
-step is easy to miss next to that green job status).
+checklist's soak-flip checkbox must be FULLY closed before this section's
+re-point happens — 18 of 19 are promoted already (PR #184's recorded greens);
+the one outstanding promotion is `widget-factory-smoke`, pending its
+post-mmu-uaccess-fix CI green (see that checkbox). By the time Phase 2
+re-points these shards at the rebuilt world they must be hard-gating end to
+end, or a Phase-2 regression on the one still-soaking path would report a
+green JOB (its red, non-blocking soak step is easy to miss next to that green
+job status).
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
@@ -584,14 +566,10 @@ or no-dlopen — do not touch them in this cleanup.
     kernel-identity-mapping argument above — or (b) is a real, independent gap
     (ramfs's missing `->fallocate`, wasm's missing `CRTJMP`) that Phase 4's
     slice-3 table above resolves on its own merits, not as a "NOMMU vs MMU"
-    question. **But** every one of those confirming smokes currently runs as
-    a `check` call inside a
-    `continue-on-error: true` soak step (see the Phase-1 Remaining
-    soak-flip checkbox above and the SOAK NOTEs in `nix-wasm.yml`) — a real
-    regression in vsock/resize/snd/blk-rw today fails that soak step (a
-    genuinely red, non-blocking step + an `::error::` annotation) but does NOT
-    fail the JOB. Treat item 1 as answered by the argument, but not yet
-    CI-PROTECTED (in the sense of failing the job) until the soak-flip lands.
+    question. Every one of those confirming smokes is a `run_smoke` HARD GATE
+    since the PR #184 promotion cycle — a real regression in
+    vsock/resize/snd/blk-rw now fails the JOB. Item 1 is answered by the
+    argument AND CI-protected.
   - **Items 2/3/5 (the Wayland/`wl_shm` user-mapping accommodations) are NOT
     answered yet, despite `nix-boot-smoke-mmu`'s `gtk` shard running real GTK
     binaries.** Every smoke in that shard is the display-free `--selftest`
