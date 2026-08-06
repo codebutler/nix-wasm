@@ -43,6 +43,33 @@
 //   than an asserted, always-red CI job. The visual milestone's actual
 //   definition of done is the BROWSER check below.
 //
+// BROWSER-CHECK RESULT (2026-08-06) — M-X3's guest side is DONE; the one
+// remaining defect is HOST-side, in the compositor:
+//   With the session-leader fix, a real browser boot shows all three
+//   processes (`sommelier --parent`, `sommelier -X --x-display=1 …`, and
+//   `{Xwayland}`), and `DISPLAY=:1 xeyes` genuinely CONNECTS and MAPS a
+//   window through Xwayland -> sommelier's XWM -> virtwl -> Greenfield.
+//   But every X window renders ~1 pixel:
+//       DISPLAY=:1 xdpyinfo | grep dimensions
+//         dimensions:    1x1 pixels (0x0 millimeters)
+//   ROOT CAUSE (host, not guest): Greenfield advertises its wl_output mode
+//   straight from its scene canvas (`packages/compositor/src/Output.ts`:
+//   `wlOutputResource.mode(flags, this.canvas.width, this.canvas.height, …)`),
+//   and the DOM-windows shell drives it with a HIDDEN 1x1 canvas (the real
+//   windows are DOM elements). So the compositor announces a 1x1 display.
+//   Wayland-native clients never noticed — they size from xdg_toplevel
+//   configure, independent of the output. ROOTLESS XWAYLAND DOES care: it
+//   sizes the X SCREEN from the advertised output, and X windows are clamped
+//   to the screen, so no client-side `-geometry` and no sommelier `--scale`
+//   can widen them (both were tested against a real compositor and neither
+//   helped — the screen itself is 1x1).
+//   FIX BELONGS IN THE COMPOSITOR: advertise a real output size (viewport
+//   dimensions) rather than the 1x1 driver canvas — a change in
+//   codebutler/greenfield that pc then re-vendors. X clients are simply the
+//   first consumer for which the advertised output size is load-bearing.
+//   Xvfb (M-X1/M-X2) is unaffected: its screen size is set explicitly on the
+//   command line, which is why those pixel proofs pass.
+//
 // BROWSER CHECK (manual, defines the actual M-X3 visual milestone):
 //   Boot pc's Linux app in a real browser (Greenfield compositor, real GL —
 //   see CLAUDE.md's Playwright/Greenfield notes for the SwiftShader flags a
