@@ -68,11 +68,11 @@ surface already exist; Phase 1 only widens what boots on top of it).
   initramfs pair for far less cost — that shard is what the stale "the MMU
   job below runs this" comment on the NOMMU job's own `exec-reject-smoke` line
   now names directly, closing it out without adding a duplicate boot here.
-  **Gating split — PROMOTED except one (#131 soak-flip):** `core` hard-gates
+  **Gating split — FULLY PROMOTED (#131 soak-flip):** `core` hard-gates
   all six of its smokes (`smoke.mjs`/`build-from-source-e2e`/`selftests-batch`
   since the core-only predecessor; `profile-install-e2e`/`wrapperless-cc-e2e`/
   `rsvg-smoke` promoted on PR #184's recorded greens), and `gtk` hard-gates
-  five of six. The exception is `widget-factory-smoke` — the first soak
+  all six. The last to promote was `widget-factory-smoke` — the first soak
   cycle's one REAL finding: GModule autoconnect resolves `.ui` handlers BY
   NAME via dlsym, and the ABI-8 dl host surface read its user pointers RAW
   (untranslated) under the MMU — garbage name, "Could not find signal
@@ -80,9 +80,9 @@ surface already exist; Phase 1 only widens what boots on top of it).
   selftest never calls `connect_signals`, which is why it passed). Fixed
   engine-side (`runtime/mmu-uaccess.js` host soft-uaccess + the dl imports in
   `kernel-worker.js`; side modules/ffi trampolines refused loudly pending
-  nix-wasm#185); green in a local `.#kernel-mmu-a2` boot, soaking until its
-  own CI green records, then it takes the last promotion. See this job's SOAK
-  NOTE and the soak-flip checkbox in Remaining below.
+  nix-wasm#185); PR #186's soak recorded the post-fix CI green and it took
+  the last promotion — `gtk` hard-gates all six. See this job's SOAK NOTE
+  and the (closed) soak-flip checkbox in Remaining below.
 - **MMU browser preview variant** (`pr-preview.yml` + `runtime/demo/web/
   main.js`) — every same-repo PR preview now publishes a SECOND artifact set
   (`.#kernel-mmu-a2` + `.#wasm-initramfs-fork` + `.#wasm-base-squashfs-fork`)
@@ -162,29 +162,27 @@ surface already exist; Phase 1 only widens what boots on top of it).
   that actually allocates a `wl_shm` buffer. Until this lands, the ticket
   close-out map's #11 entry (below) can only claim item 1, not the ticket as a
   whole — do not close #11 on the `gtk` shard's evidence alone.
-- [x] **(18/19 done) Move every soak-step `check` call up to the hard-gates
+- [x] **(DONE, 19/19) Move every soak-step `check` call up to the hard-gates
   step's `run_smoke` once it has a green run on record.** PR #184's first
   soak cycle recorded first-attempt greens for 18 of the 19 soak invocations
   (all ten `mmu-devices` smokes, `core`'s three new e2es, five of six `gtk`
-  smokes) and each is a `run_smoke` hard gate since. (`ping-pace-probe`, the
+  smokes), each a `run_smoke` hard gate since. (`ping-pace-probe`, the
   20th invocation, is permanently non-gating by design — the `signals`
   shard's own diagnostic breakdown, never part of this move.) The 19th,
   `widget-factory-smoke`, failed its first cycle for a REAL cause — the
   ABI-8 dl host surface reading user pointers untranslated under the MMU
   (see the Landed section's gating-split note; engine fix
-  `runtime/mmu-uaccess.js`, remainder tracked in nix-wasm#185) — exactly the
-  "some may need a real fix first, not just a move" case this checkbox
-  anticipated. It soaks until its own CI green records, then takes the last
-  promotion and this checkbox closes fully.
+  `runtime/mmu-uaccess.js` in PR #186, remainder tracked in nix-wasm#185) —
+  exactly the "some may need a real fix first, not just a move" case this
+  checkbox anticipated. PR #186's soak recorded its post-fix CI green and it
+  took the last promotion; no soak step remains in the MMU jobs.
 
-Phase 1's CI wiring is now the regression net Phase 2's risky world rebuild
-runs against continuously: a regression on any of the 18 promoted paths turns
-the JOB red. Do not start Phase 2 before the autotools proof above, the
-wl_shm/#11 item, AND widget-factory's final promotion are resolved — the
-wl_shm/#11 gap is orthogonal to Phase 2's fork-default flip and does not block
-it (it only blocks closing #11 in full), but the last soak promotion is not:
-it is what makes "Phase 2 is CI-validated against these shards" (see
-Validation, below) a complete statement.
+Phase 1's CI wiring is now, completely, the regression net Phase 2's risky
+world rebuild runs against continuously: a regression on any of the 19
+promoted paths turns the JOB red. Of Phase 2's preconditions only the
+autotools proof above remains (the wl_shm/#11 gap is orthogonal to Phase 2's
+fork-default flip and does not block it — it only blocks closing #11 in
+full).
 
 ---
 
@@ -287,15 +285,11 @@ attrs"; Phase 3 is "pc downloads this by default."
 
 ### Validation
 
-**Precondition, not part of this phase's own edit set:** the Phase-1 Remaining
-checklist's soak-flip checkbox must be FULLY closed before this section's
-re-point happens — 18 of 19 are promoted already (PR #184's recorded greens);
-the one outstanding promotion is `widget-factory-smoke`, pending its
-post-mmu-uaccess-fix CI green (see that checkbox). By the time Phase 2
-re-points these shards at the rebuilt world they must be hard-gating end to
-end, or a Phase-2 regression on the one still-soaking path would report a
-green JOB (its red, non-blocking soak step is easy to miss next to that green
-job status).
+**Precondition — SATISFIED:** the Phase-1 Remaining checklist's soak-flip
+checkbox is fully closed (19/19 promoted: 18 on PR #184's recorded greens,
+`widget-factory-smoke` on PR #186's post-mmu-uaccess-fix green). Every MMU
+shard is hard-gating end to end — a Phase-2 regression on any of these paths
+fails the JOB, no soak step remains to hide behind.
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
