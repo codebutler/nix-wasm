@@ -58,6 +58,26 @@ describe("translateUser", () => {
     expect(translateUser(dv, PT_BASE, 0x00803010, false)).toBe(0x6010);
     expect(() => translateUser(dv, PT_BASE, 0x00803010, true)).toThrow(UserFault);
   });
+
+  test("bit-31 pgd entry stays unsigned: UserFault (bounds), never a RangeError", () => {
+    // JS bitwise & is SIGNED — a pte-page address with bit 31 set would go
+    // negative after masking, pass the upper-bound-only check, and blow up as
+    // a DataView RangeError that escapes the dl imports' UserFault-only catch
+    // (Codex review on #186). Normalized, it's a huge POSITIVE offset that the
+    // bounds check turns into a clean UserFault on this small test buffer.
+    const { dv } = makeMemory();
+    dv.setUint32(PT_BASE + 2 * 4, 0x80002000, true);
+    expect(() => translateUser(dv, PT_BASE, 0x00801234)).toThrow(UserFault);
+  });
+
+  test("negative (i32-signed) ptBase is normalized, not treated as identity or crash", () => {
+    // ptBase crosses a host import as an i32: above 2 GiB it arrives negative.
+    // -0x80000000 >>> 0 = 0x80000000 — out of this buffer, so the pgd read
+    // must be a clean bounds UserFault (and NOT the identity fast path, which
+    // a signed-truthiness bug could never hit anyway, nor a RangeError).
+    const { dv } = makeMemory();
+    expect(() => translateUser(dv, -0x80000000, 0x00801234)).toThrow(UserFault);
+  });
 });
 
 describe("readUser / writeUser", () => {

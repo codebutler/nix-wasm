@@ -66,6 +66,16 @@ export class UserFault extends Error {
  */
 export function translateUser(dv, ptBase, va, write = false) {
   va = va >>> 0;
+  // EVERY address-valued quantity is normalized `>>> 0`: JS bitwise ops
+  // return SIGNED 32-bit values, and both `ptBase` (an i32 crossing a host
+  // import — arrives negative above 2 GiB) and a masked pgd/pte entry with
+  // bit 31 set would otherwise go negative, slip past the upper-bound-only
+  // checks below, and surface as a DataView RangeError instead of a
+  // UserFault — escaping the dl imports' clean-failure catch. Unreachable
+  // with today's kernel (BOOT_MEM_PAGES stays under the 2 GiB positive-
+  // address limit) but the runtime permits a 4 GiB Memory, so the walk must
+  // be correct over the full unsigned range. (Codex review on #186.)
+  ptBase = ptBase >>> 0;
   if (!ptBase) return va; // NOMMU / identity — byte-identical to the raw path
   const kind = write ? "store" : "load";
   const pgdOff = ptBase + ((va >>> 22) << 2);
@@ -73,7 +83,7 @@ export function translateUser(dv, ptBase, va, write = false) {
   const pgdE = dv.getUint32(pgdOff, true);
   // Level-1 present = entry != 0 (bare pte-page physical address, NO flag bits).
   if (pgdE === 0) throw new UserFault(va, kind, "pgd entry not present");
-  const pteOff = (pgdE & ~PAGE_MASK) + ((((va >>> 12) & 0x3ff) >>> 0) << 2);
+  const pteOff = ((pgdE & ~PAGE_MASK) >>> 0) + ((((va >>> 12) & 0x3ff) >>> 0) << 2);
   if (pteOff + 4 > dv.byteLength) throw new UserFault(va, kind, "pte entry out of memory bounds");
   const pte = dv.getUint32(pteOff, true);
   if ((pte & 1) === 0) throw new UserFault(va, kind, "pte not present");
