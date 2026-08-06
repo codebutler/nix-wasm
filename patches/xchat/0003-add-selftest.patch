@@ -33,7 +33,7 @@ index 251a7d7..3a7db2e 100644
 + *   1. servlist_init() — loads the real compiled-in default server list
 + *      (servlist.c's `def[]` table; no ~/.xchat2/servlist.conf exists in
 + *      a fresh guest home, so this exercises the exact fallback path a
-+ *      first-run XChat takes) and asserts a well-known network ("freenode",
++ *      first-run XChat takes) and asserts a well-known network ("FreeNode",
 + *      shipped in 2.8.8's built-in defaults) is present in network_list.
 + *   2. g_type_class_ref() on a couple of GTK2 widget classes XChat's main
 + *      window is built from (GtkWindow, GtkNotebook — the tab strip) —
@@ -57,7 +57,7 @@ index 251a7d7..3a7db2e 100644
 +	for (list = network_list; list; list = list->next)
 +	{
 +		net = list->data;
-+		if (net->name && !strcmp (net->name, "freenode"))
++		if (net->name && !strcmp (net->name, "FreeNode"))
 +		{
 +			servlist_ok = TRUE;
 +			break;

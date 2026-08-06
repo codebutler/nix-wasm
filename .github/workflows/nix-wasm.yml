@@ -689,6 +689,12 @@ jobs:
             # its GTK siblings. Gating.
             run_smoke demo/node/gtk2-smoke.mjs
             run_smoke demo/node/gtk2-x11-smoke.mjs
+            # xchat (M-X5 of the XChat/X11 epic, the FINALE): XChat 2.8.8
+            # over GTK2/X11. One boot: display-free --selftest (servlist
+            # defaults + GTK2 class_init through fpcast) THEN a live main
+            # window against Xvfb, xwd-verified like its GTK2/X11 siblings
+            # above. One-per-boot like its GTK siblings. Gating.
+            run_smoke demo/node/xchat-smoke.mjs
           fi
 
   # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --
