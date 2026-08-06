@@ -1410,7 +1410,7 @@ CI / the linux box, per the design's "ship what works" scope):
   broke. `continue-on-error` fixes that at the STEP level instead, preserving
   the script's real exit code while still keeping the JOB green (the soak
   period). Full rationale: the SOAK NOTE comments on both jobs in
-  `nix-wasm.yml`. **PROMOTION (the #131 soak-flip) is DONE for 18 of 19**: PR
+  `nix-wasm.yml`. **PROMOTION (the #131 soak-flip) is COMPLETE — 19/19**: PR
   #184's first soak cycle recorded first-attempt greens for all ten
   `mmu-devices` smokes (whole shard ~2.5 min, no panic-retries), `core`'s
   three new e2es, and five of the six `gtk` smokes — each moved to a
@@ -1418,13 +1418,12 @@ CI / the linux box, per the design's "ship what works" scope):
   diagnostic it is on NOMMU). The 19th — `widget-factory-smoke` — was the
   cycle's one REAL finding: the ABI-8 dl host surface read USER pointers
   untranslated (see the "Host imports that take USER pointers" learnings
-  entry above; engine fix `runtime/mmu-uaccess.js`, boot-verified green
-  locally on `.#kernel-mmu-a2`); it stays the single remaining soak `check`
-  until its own CI green records, then takes the last promotion. While any
-  soak smoke remains: **a green job is NOT evidence the soak smoke passes**
-  — look for the soak step's own red (non-blocking) status and its
-  `::error::` annotations (see the SOAK NOTEs in `nix-wasm.yml` and the
-  Remaining checklist in the parity-plan doc below). That shard verifies issue #11 item
+  entry above; engine fix `runtime/mmu-uaccess.js`); PR #186's soak recorded
+  its post-fix CI green and it took the last promotion. NO soak step remains
+  in the MMU jobs — every smoke hard-gates, and a regression on any of them
+  turns the JOB red (the soak idiom's rationale lives in git history +
+  pr-preview.yml's MMU-preview step comment for the next first-ever-boot
+  shard that needs it). That shard verifies issue #11 item
   1 ONLY — device models still work
   when USER pages are translated (the kernel's soft uaccess walk + the
   instrumented user binary's own buffer accesses); the vring/pfn addressing

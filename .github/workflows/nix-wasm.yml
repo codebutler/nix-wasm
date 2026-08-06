@@ -865,27 +865,20 @@ jobs:
   # class) most likely to expose a residual software-MMU bug that a
   # NOMMU-only pass can't see.
   #
-  # SOAK NOTE (#131, post-promotion): PR #184's first soak cycle recorded a
-  # first-attempt green for profile-install-e2e, wrapperless-cc-e2e, and
-  # rsvg-smoke (`core`) and for five of the six `gtk` smokes — per the
-  # promotion rule each of those eight moved from a soak `check` call to a
-  # `run_smoke` hard gate below, joining smoke.mjs / build-from-source-e2e /
-  # selftests-batch (gating since the core-only predecessor). The ONE
-  # remaining soak smoke is widget-factory-smoke: its first-cycle failure was
-  # a REAL finding — GModule autoconnect resolves handlers by NAME via
-  # dlsym, and the ABI-8 dl host surface read its user pointers RAW (correct
-  # on NOMMU where VA == offset, garbage under the MMU's page tables). Fixed
-  # engine-side (runtime/mmu-uaccess.js host soft-uaccess walk +
-  # kernel-worker.js); green in a local .#kernel-mmu-a2 boot, but a local run
-  # is not an in-tree CI record, so it stays a soak `check` until THIS
-  # change's own CI run records its green — then it takes the last promotion.
-  # The soak step keeps the two-part idiom (its full rationale — why
-  # `continue-on-error` + a step-level `timeout-minutes`, and why never a
-  # return-0 helper like the reviewed-out `run_smoke_soft` — lives in git
-  # history and pr-preview.yml's MMU-preview step comment):
-  # continue-on-error bounds FAILURE (the JOB stays green, the step itself
-  # goes visibly red), timeout-minutes bounds WALL CLOCK (a hang fails THIS
-  # step at a bounded point instead of an anonymous job-level cancellation).
+  # SOAK NOTE (#131, CLOSED): the prove-then-flip soak ran its full course —
+  # PR #184's first cycle recorded first-attempt greens for 18 of the 19 new
+  # smoke invocations (promoted to hard gates then) and caught ONE real
+  # finding: widget-factory-smoke failed because GModule autoconnect resolves
+  # handlers by NAME via dlsym, and the ABI-8 dl host surface read its user
+  # pointers RAW (correct on NOMMU where VA == offset, garbage under the
+  # MMU's page tables). PR #186 fixed it engine-side (runtime/mmu-uaccess.js
+  # host soft-uaccess walk + kernel-worker.js) and its soak recorded the
+  # post-fix green — so widget-factory took the last promotion and EVERY
+  # smoke in this job now hard-gates. No soak step remains; the soak idiom's
+  # full rationale (why `continue-on-error` + a step-level `timeout-minutes`,
+  # and why never a return-0 helper like the reviewed-out `run_smoke_soft`)
+  # lives in git history and pr-preview.yml's MMU-preview step comment, for
+  # the next first-ever-boot shard that needs it.
   nix-boot-smoke-mmu:
     name: boot full nix system on software MMU (${{ matrix.shard }}, #131 prove-then-flip)
     needs: [changes, toolchain, artifacts]
@@ -1062,61 +1055,26 @@ jobs:
             # heap and wedges a later one). Exactly the class of memory-
             # intensive, gobject-fpcast-heavy binary the #168 page-crossing
             # corruption was found in, so these boots are real MMU-hardening
-            # coverage. PROMOTED (#131 soak-flip): these five recorded
-            # first-attempt greens in PR #184's soak cycle. The sixth —
-            # widget-factory-smoke — is the shard's one remaining soak smoke
-            # (see the SOAK NOTE + the soak step below).
+            # coverage. PROMOTED (#131 soak-flip, COMPLETE): five recorded
+            # first-attempt greens in PR #184's soak cycle; widget-factory —
+            # the cycle's one real finding (the ABI-8 dl surface reading user
+            # pointers untranslated, fixed by runtime/mmu-uaccess.js) —
+            # recorded its post-fix green in PR #186's soak and takes the
+            # last promotion here. All six gate; no soak step remains in
+            # this job (the soak idiom's rationale lives in git history and
+            # pr-preview.yml's MMU-preview step comment).
             run_smoke demo/node/gtk-smoke.mjs
             run_smoke demo/node/galculator-smoke.mjs
+            # GtkBuilder autoconnect via a WORKING GModule (Track C): .ui
+            # <signal> handlers resolved BY NAME through g_module_symbol →
+            # musl dlsym → the __wasm_dlsym host import — the one gate that
+            # exercises the dl host surface's user-pointer translation under
+            # the MMU (runtime/mmu-uaccess.js; a regression here means the
+            # host read guest memory at a raw user VA again).
+            run_smoke demo/node/widget-factory-smoke.mjs
             run_smoke demo/node/gtk-demo-smoke.mjs
             run_smoke demo/node/gcalctool-smoke.mjs
             run_smoke demo/node/l3afpad-smoke.mjs
-          fi
-
-      # Non-gating soak (#131) — the ONE remaining soak smoke after the
-      # PR #184 promotion cycle: widget-factory (`gtk` shard only; `core` has
-      # nothing left to soak). Its first-cycle failure was the ABI-8 dl host
-      # surface reading user pointers untranslated under the MMU (see the SOAK
-      # NOTE in this job's header comment); the engine fix + a local
-      # .#kernel-mmu-a2 green ride this same change, so this soak exists to
-      # RECORD the in-tree CI green that then promotes it. Two-part idiom as
-      # ever: continue-on-error bounds FAILURE (step goes visibly red, JOB
-      # stays green), step timeout-minutes bounds WALL CLOCK (a hang fails
-      # this step at a bounded point instead of the job-level 240 cancelling
-      # everything, hard gates included).
-      - name: Boot full nix system on MMU + ${{ matrix.shard }} smokes — soak (non-gating, #131)
-        if: matrix.shard == 'gtk'
-        continue-on-error: true
-        timeout-minutes: 30
-        working-directory: runtime
-        env:
-          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
-        run: |
-          run_smoke() {
-            local script="$1" attempt rc
-            for attempt in 1 2 3; do
-              echo "::group::$script (attempt $attempt, soak — #131)"
-              set +e
-              node "$script"
-              rc=$?
-              set -e
-              echo "::endgroup::"
-              if [ "$rc" -eq 0 ]; then return 0; fi
-              if [ "$rc" -eq 2 ]; then echo "$script inconclusive (boot panic) — retrying"; continue; fi
-              return "$rc"
-            done
-            echo "$script still inconclusive after 3 attempts"
-            return 2
-          }
-          # GtkBuilder autoconnect via a WORKING GModule (Track C): resolves
-          # the .ui <signal> handler BY NAME through g_module_symbol → musl
-          # dlsym → the __wasm_dlsym host import — the one smoke that
-          # exercises the dl host surface's user-pointer reads under the MMU
-          # (runtime/mmu-uaccess.js). Promote to the hard-gates step above
-          # once this records its green.
-          if ! run_smoke demo/node/widget-factory-smoke.mjs; then
-            echo "::error::widget-factory-smoke failed in the nix-boot-smoke-mmu soak (#131) — the mmu-uaccess dl fix should have made this green; investigate before promoting."
-            exit 1
           fi
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not
