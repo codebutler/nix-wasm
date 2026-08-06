@@ -175,13 +175,17 @@ echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
 # (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) -- a DIFFERENT credential from
 # CLOUDFLARE_API_TOKEN, which has no r2 scope.
 #
+# NOTE: keep apostrophes OUT of the ${var:?...} messages below -- bash does
+# quote processing on that word, so a lone ' opens a quote and swallows the
+# following line (it did exactly that on the first CI run).
+#
 # --no-check-dest is REQUIRED, not an optimisation: rclone HEADs the destination
 # first, and R2 answers 403 (not 404) for a HeadObject on a MISSING key when the
 # token cannot list the bucket -- so the FIRST publish of any new version dies
 # with "operation error S3: HeadObject ... 403 Forbidden". Skipping the stat is
 # correct anyway: the key is immutable and content-addressed.
-: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID (an R2 API token's S3 access key)}"
-: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY (an R2 API token's S3 secret)}"
+: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID -- the S3 access key of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
+: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY -- the S3 secret of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
 : "${CLOUDFLARE_ACCOUNT_ID:?rclone needs CLOUDFLARE_ACCOUNT_ID for the S3 endpoint}"
 export RCLONE_CONFIG_R2_TYPE=s3
 export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
