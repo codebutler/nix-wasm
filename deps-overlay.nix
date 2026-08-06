@@ -1061,6 +1061,135 @@ in
     }))
     prev.gtk3;
 
+  # --- GTK2 cross-build, X11 backend (M-X4, XChat/X11 epic) -------------------
+  # gtk+-2.24.33: the toolkit XChat (M-X5) needs. Unlike GTK3 (wayland-only,
+  # meson), GTK2 is autotools and X11 is its ONLY real backend — nixpkgs'
+  # `gdktarget` arg already defaults to "x11" on every non-Darwin host
+  # (ours included), so no override is needed there; passed explicitly below
+  # for clarity anyway.
+  #
+  # OFF:
+  #   - cupsSupport (nixpkgs default: true on Linux!) — printing needs a
+  #     cross-built cups, which nothing else in this closure wants and which
+  #     this milestone has no use for (XChat has no print feature either).
+  #   - xineramaSupport (nixpkgs default: true on Linux!) — the Xinerama
+  #     multi-monitor extension; not in the M-X0 client closure and not
+  #     needed for a single Xvfb screen.
+  #   - introspection — GTK2's autotools GOBJECT_INTROSPECTION_CHECK m4 macro
+  #     (unlike GTK3's meson `-Dintrospection=`) has no isWasm-aware
+  #     auto-disable: its default is `--enable-introspection=auto`, which
+  #     probes `gobject-introspection-1.0.pc` on the TARGET pkg-config path.
+  #     We don't cross-build gobject-introspection as a target lib, so this
+  #     would likely auto-disable anyway — but relying on that is exactly the
+  #     kind of implicit auto-detection this codebase avoids (the M2/M3a
+  #     entries in CLAUDE.md are full of "be explicit, don't trust auto").
+  #     `--disable-introspection` makes it explicit. The nativeBuildInputs
+  #     `gobject-introspection` entry is SUPPOSED to be upstream's NATIVE
+  #     (buildPackages) copy of `g-ir-scanner` via nixpkgs' usual splicing —
+  #     but it doesn't splice correctly here: `nix eval` shows it resolving
+  #     to `gobject-introspection-wrapped`, a WASM (hostPlatform.system =
+  #     "wasm32-linux") derivation, which then cascades into cross-building
+  #     python3 (for its own build) → util-linux-minimal (python's `_uuid`
+  #     module) → a hard `undefined symbol: fork` link failure (the exact
+  #     libsm/util-linux-minimal class documented above). Even if it built,
+  #     using it at build time to introspect the freshly-cross-compiled (wasm)
+  #     shared object on the x86_64 build host is impossible regardless (it
+  #     would have to dlopen a wasm .so on a non-wasm host) — so it's dropped
+  #     from nativeBuildInputs entirely, not just disabled via configure. Match
+  #     by substring (not exact name) since the mis-spliced variant carries the
+  #     "-wrapped" suffix, not the bare package name.
+  #   - devdoc/demo output — matches the M-X4 design's "no docs/devdoc
+  #     outputs" call (same posture as gtk3/cairo above): outputs trimmed to
+  #     out+dev, and the demo data dir (which nixpkgs' postInstall normally
+  #     moveToOutputs into devdoc) is just deleted instead of installed.
+  #
+  # fpcast-emu: gtk2 is exactly as gobject-heavy as gtk3 (same class of
+  # indirect-call arity mismatch documented in CLAUDE.md's "gobject class_init
+  # trap" entry) — ride the SAME shared hook via propagatedNativeBuildInputs
+  # so every gtk2 CONSUMER (gtk2-hello) auto-fpcasts its own $out/bin
+  # executables with no per-package line, exactly like gtk3's consumers.
+  #
+  # Everything gtk2 propagates (atk, cairo, gdk-pixbuf, glib, pango, plus on
+  # Linux libxcomposite/libxcursor/libxi/libxrandr/libxrender) is ALREADY
+  # cross-built: atk/cairo/gdk-pixbuf/glib/pango by M2/M3a/M3b, the five X11
+  # libs by M-X0. So — unlike gtk3, which needed x11Support=false + a pile of
+  # nulled inputs to steer AWAY from X11 — gtk2 needs no buildInputs surgery
+  # at all: its own package.nix's Linux-default propagatedBuildInputs are
+  # already exactly the right set for an X11-backed build in this closure.
+  gtk2 = whenWasm
+    (p: (p.override {
+      gdktarget = "x11";
+      cupsSupport = false;
+      xineramaSupport = false;
+    }).overrideAttrs (o: {
+      propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
+        fpcast.hook
+      ];
+      nativeBuildInputs = builtins.filter
+        (i: !(final.lib.hasInfix "gobject-introspection" (i.pname or i.name or "")))
+        (o.nativeBuildInputs or [ ]);
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-introspection" ];
+      # gtk+-2.24.33 is 2010s-era C: it hits clang's newer-than-gcc default
+      # ERRORS (not warnings) for `-Wincompatible-function-pointer-types` /
+      # `-Wimplicit-int` in a few spots. nixpkgs already carries the fix for
+      # this EXACT class — `patches/2.0-clang.patch`
+      # ("Fixes an incompatible function pointer conversion and implicit int
+      # errors with clang 16") plus a `NIX_CFLAGS_COMPILE` downgrade to
+      # warnings — but both are gated to `stdenv.hostPlatform.isDarwin` /
+      # `stdenv.cc.isGNU`, because historically only the Darwin build used
+      # clang. Our wasm cross stdenv is ALSO clang, so we hit the identical
+      # class nixpkgs already decided is safe to patch/downgrade — just on a
+      # host they never gated for. Re-apply the same fix, generalized to any
+      # clang host instead of Darwin specifically:
+      #   - source patch: vendor nixpkgs' own `2.0-clang.patch` verbatim
+      #     (patches/gtk2/0001-clang-incompatible-function-pointer.patch) —
+      #     it fixes the one REAL bug (gtkscale.c's GCompareFunc cast, found
+      #     by attempting the build) that clang's stricter default rejects.
+      #   - NIX_CFLAGS_COMPILE downgrade: our build compiles gdk/x11/*.c —
+      #     the X11 backend nixpkgs' darwin+quartz build never touches — so
+      #     the single upstream patch may not cover every instance in that
+      #     tree; downgrade the same two warning classes nixpkgs' own (isGNU-
+      #     only) env override already treats as non-fatal, as a defensive
+      #     backstop, not a blanket -Wno-error.
+      patches = (o.patches or [ ]) ++ [
+        ./patches/gtk2/0001-clang-incompatible-function-pointer.patch
+      ];
+      # perf/testperf (a `noinst_PROGRAMS` benchmark harness, never installed)
+      # is unconditionally in the top-level Makefile.in's `SRC_SUBDIRS` and
+      # `make all` builds it. It links the FULL gtk+gdk libs a second time via
+      # its own copy of the marshaller sources (perf/marshalers.c duplicates
+      # gtk/gtkmarshalers.c's generated `_gtk_marshal_*` symbols) — invisible
+      # on nixpkgs' normal SHARED-lib native build (the .so already resolves
+      # those symbols, so the archive member with the duplicate is never
+      # pulled in), but our all-static build extracts BOTH the direct
+      # marshalers.o and the .a's gtkmarshalers.o member, and wasm-ld (unlike
+      # a shared-lib link) errors loudly on the true duplicate definition —
+      # the same "static is a platform flag" class of static-only breakage
+      # documented at the top of this file. `perf` is a benchmark tool we
+      # categorically don't need (the "don't build an unused CLI" process-
+      # model rule); drop it from `SRC_SUBDIRS` in the pre-generated
+      # Makefile.in (this tarball ships without re-running autoreconf, so
+      # Makefile.in — not Makefile.am — is what `./configure` actually reads).
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace Makefile.in \
+          --replace-fail 'SRC_SUBDIRS = gdk gtk modules demos tests perf' \
+                         'SRC_SUBDIRS = gdk gtk modules demos tests'
+      '';
+      env = (o.env or { }) // {
+        NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "") + toString [
+          " -Wno-error=implicit-int"
+          " -Wno-error=incompatible-pointer-types"
+          " -Wno-error=incompatible-function-pointer-types"
+        ];
+      };
+      outputs = [ "out" "dev" ];
+      postInstall = ''
+        moveToOutput bin/gtk-update-icon-cache "$out"
+        rm -rf $out/share/gtk-2.0/demo
+      '';
+    }))
+    prev.gtk2;
+
   # --- kernel UAPI headers: use OUR wasm headers, not stock Linux ------------
   # The cross stdenv/musl pull nixpkgs' stock linuxHeaders (linux-6.18.7) and run
   # `make ARCH=wasm32 headers_install`, which fails — stock Linux has no wasm
