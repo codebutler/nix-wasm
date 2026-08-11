@@ -27,7 +27,14 @@ jobs:
   publish:
     # Namespace small runner (x86_64) — substitutes the closure from Cachix and
     # uploads to R2, so the `sm` profile suffices (matches publish-wasm-artifacts).
-    runs-on: namespace-profile-sm
+    # lg (16 vCPU / 32 GB), not sm: this job BUILDS .#linux-image and the
+    # ~22 GiB .#wasm-binary-cache closure for well over an hour. It sat on sm
+    # while every path came from Cachix, but any real build here is the
+    # "CPU-heavy or long-running" class CLAUDE.md routes to md/lg. When the X11
+    # stack made native gnome-themes-extra (-> native gtk2 -> native gtk3) build
+    # for real, gtk3's gtkdoc-mkhtml step died with status 247 -- a resource
+    # kill, not a compile error -- while the leaner master publish passed.
+    runs-on: namespace-profile-lg
     steps:
       - uses: actions/checkout@v4
 
