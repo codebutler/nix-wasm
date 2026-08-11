@@ -170,7 +170,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "  # rclone (not wrangler): the image is >300 MiB, wrangler's hard cap"
   echo "  rclone copyto \"$ISO\" \"r2:$BUCKET/linux/$VERSION/linux.iso\" \\"
   echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
-  echo "    --s3-chunk-size 64M --no-check-dest"
+  echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo ""
   echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
   ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
@@ -231,9 +231,20 @@ export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
 export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
 export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
 export RCLONE_CONFIG_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+# --s3-no-check-bucket AND --no-check-dest are BOTH required, and they cover
+# DIFFERENT probes; either one alone still 403s on a bucket-scoped R2 token:
+#   --s3-no-check-bucket : skip the bucket check, which rclone escalates to
+#                          CreateBucket -> "operation error S3: CreateBucket,
+#                          StatusCode: 403, AccessDenied" (the token may write
+#                          objects in one bucket, not create buckets).
+#   --no-check-dest      : skip the destination HeadObject. R2 returns 403, not
+#                          404, for a HEAD on a MISSING key when the token
+#                          cannot list the bucket -- so the first upload of any
+#                          new version would fail. Skipping it is right anyway:
+#                          the key is immutable and content-addressed.
 rclone copyto "$ISO" "r2:$BUCKET/linux/$VERSION/linux.iso" \
   --header-upload "Content-Type: application/x-iso9660-image" \
-  --s3-chunk-size 64M --no-check-dest
+  --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
 
 # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
 # new-CLI indexes, which are nix-wasm artifacts NOT present in Cachix. The heavy
