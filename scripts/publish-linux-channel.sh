@@ -95,8 +95,6 @@ _wr="$(bunx "$WRANGLER" --version 2>&1)" || {
   echo "ERROR: $WRANGLER failed to run:" >&2; echo "$_wr" >&2; exit 1; }
 : "${CLOUDFLARE_API_TOKEN:?wrangler needs CLOUDFLARE_API_TOKEN}"
 : "${CLOUDFLARE_ACCOUNT_ID:?needed for the R2 S3 endpoint and wrangler}"
-: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID -- the S3 access key of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
-: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY -- the S3 secret of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
 echo "    rclone   $(rclone version 2>/dev/null | head -1)"
 echo "    wrangler $_wr"
 echo "    credentials present"
@@ -223,13 +221,46 @@ echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
 # token cannot list the bucket -- so the FIRST publish of any new version dies
 # with "operation error S3: HeadObject ... 403 Forbidden". Skipping the stat is
 # correct anyway: the key is immutable and content-addressed.
-: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID -- the S3 access key of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
-: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY -- the S3 secret of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
+# WHICH credential can write $BUCKET is the crux here, and it is not obvious.
+# Everything this script writes to pc-packages had always gone through wrangler
+# + CLOUDFLARE_API_TOKEN; master publishes fine because master's linux.iso is
+# under wrangler's 300 MiB cap. Moving the ISO to rclone introduced a NEW
+# requirement -- S3 credentials with write access to pc-packages -- that nobody
+# had ever needed. This repo's R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY belong to
+# nix-wasm-previews (pr-preview.yml's own sync), so against pc-packages they
+# 403: first on the bucket check (CreateBucket), then on CreateMultipartUpload.
+#
+# So prefer credentials that are actually scoped to the PACKAGES bucket, and
+# otherwise derive S3 creds from CLOUDFLARE_API_TOKEN -- the credential that
+# demonstrably can write this bucket, since wrangler uses it for the catalogs
+# and the pointer. R2's documented derivation (same one pc's
+# scripts/screenshot-upload.sh uses): access key id = the token's ID, secret
+# access key = SHA-256 hex of the token value.
 : "${CLOUDFLARE_ACCOUNT_ID:?rclone needs CLOUDFLARE_ACCOUNT_ID for the S3 endpoint}"
+if [ -n "${R2_PACKAGES_ACCESS_KEY_ID:-}" ] && [ -n "${R2_PACKAGES_SECRET_ACCESS_KEY:-}" ]; then
+  echo "    S3 creds: R2_PACKAGES_* (explicitly scoped to $BUCKET)"
+  _s3_id="$R2_PACKAGES_ACCESS_KEY_ID"; _s3_secret="$R2_PACKAGES_SECRET_ACCESS_KEY"
+else
+  echo "    S3 creds: derived from CLOUDFLARE_API_TOKEN (R2 documented derivation)"
+  _tok_id="$(curl -fsS -m 30 -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      https://api.cloudflare.com/client/v4/user/tokens/verify 2>/dev/null \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("id",""))' 2>/dev/null || true)"
+  if [ -z "$_tok_id" ]; then
+    echo "ERROR: could not resolve the CLOUDFLARE_API_TOKEN id from /user/tokens/verify," >&2
+    echo "       so S3 credentials for $BUCKET cannot be derived." >&2
+    echo "       Fix: mint an R2 API token with Object Read & Write on $BUCKET and set" >&2
+    echo "       R2_PACKAGES_ACCESS_KEY_ID / R2_PACKAGES_SECRET_ACCESS_KEY as repo secrets." >&2
+    echo "       (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are scoped to the PREVIEW bucket" >&2
+    echo "        and cannot write $BUCKET -- that is what the 403s were.)" >&2
+    exit 1
+  fi
+  _s3_id="$_tok_id"
+  _s3_secret="$(printf '%s' "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)"
+fi
 export RCLONE_CONFIG_R2_TYPE=s3
 export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$_s3_id"
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$_s3_secret"
 export RCLONE_CONFIG_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
 # --s3-no-check-bucket AND --no-check-dest are BOTH required, and they cover
 # DIFFERENT probes; either one alone still 403s on a bucket-scoped R2 token:

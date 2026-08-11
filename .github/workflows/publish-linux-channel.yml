@@ -85,6 +85,13 @@ jobs:
           # scope. Same secrets pr-preview.yml already uses for its rclone sync.
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Optional, and PREFERRED if set: S3 keys scoped to the packages
+          # bucket. The R2_* pair above is scoped to the PREVIEW bucket
+          # (pr-preview.yml's sync) and cannot write pc-packages. Absent these,
+          # the script derives S3 creds from CLOUDFLARE_API_TOKEN, which does
+          # have access (wrangler writes the catalogs and pointer with it).
+          R2_PACKAGES_ACCESS_KEY_ID: ${{ secrets.R2_PACKAGES_ACCESS_KEY_ID }}
+          R2_PACKAGES_SECRET_ACCESS_KEY: ${{ secrets.R2_PACKAGES_SECRET_ACCESS_KEY }}
         # pipefail so the script's exit code propagates through `tee` — without it
         # a failed publish (e.g. the verify's `exit 1`) is masked by tee's 0 and the
         # job goes green despite publishing nothing.
