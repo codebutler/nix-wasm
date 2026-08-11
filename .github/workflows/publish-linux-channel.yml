@@ -66,6 +66,13 @@ jobs:
       # bun so `bunx wrangler` is available in the publish script.
       - uses: oven-sh/setup-bun@v2
 
+      # linux.iso goes up via rclone (it outgrew wrangler's 300 MiB cap), but
+      # rclone is NOT preinstalled on the runner -- the publish died with
+      # "rclone: command not found" (exit 127) right at the upload. Same
+      # provisioning step pr-preview.yml already uses for its own rclone sync.
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
       - name: Build + publish the linux channel to R2
         env:
           # DRY_RUN=true → the script builds + prints but uploads nothing.

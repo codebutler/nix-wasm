@@ -76,6 +76,31 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # ---------------------------------------------------------------------------
 # 1. Build the channel image + toolchain cache
 # ---------------------------------------------------------------------------
+# ---- PREFLIGHT (before the ~1 hour build) ---------------------------------
+# Everything the upload needs is checked HERE, not after the build. Both of the
+# failures that cost a full build cycle in this epic were discoverable in
+# milliseconds: the workflow not passing R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY,
+# and rclone simply not being installed on the runner ("rclone: command not
+# found", exit 127) -- each surfaced only at the upload step, an hour in.
+# Runs in DRY_RUN too: validating the release environment is precisely what a
+# dry run is for.
+echo "==> preflight (tools + credentials) …"
+command -v rclone >/dev/null || {
+  echo "ERROR: rclone is not installed. linux.iso is uploaded with rclone" >&2
+  echo "       (it outgrew wrangler's 300 MiB single-file cap). In CI add:" >&2
+  echo "         - run: curl -fsSL https://rclone.org/install.sh | sudo bash" >&2
+  exit 1
+}
+_wr="$(bunx "$WRANGLER" --version 2>&1)" || {
+  echo "ERROR: $WRANGLER failed to run:" >&2; echo "$_wr" >&2; exit 1; }
+: "${CLOUDFLARE_API_TOKEN:?wrangler needs CLOUDFLARE_API_TOKEN}"
+: "${CLOUDFLARE_ACCOUNT_ID:?needed for the R2 S3 endpoint and wrangler}"
+: "${R2_ACCESS_KEY_ID:?rclone needs R2_ACCESS_KEY_ID -- the S3 access key of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
+: "${R2_SECRET_ACCESS_KEY:?rclone needs R2_SECRET_ACCESS_KEY -- the S3 secret of an R2 API token, NOT CLOUDFLARE_API_TOKEN}"
+echo "    rclone   $(rclone version 2>/dev/null | head -1)"
+echo "    wrangler $_wr"
+echo "    credentials present"
+
 echo "==> Building .#linux-image …"
 # shellcheck disable=SC2086
 IMG_STORE=$(eval "$NIX build .#linux-image --print-out-paths --no-link")
