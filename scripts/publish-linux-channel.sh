@@ -50,6 +50,20 @@
 
 set -euo pipefail
 
+# Wrangler is PINNED. `bunx wrangler` (unpinned) resolves to the newest release,
+# and on 2026-08-11 that broke the publish outright:
+#
+#     error: No version matching "5.20260804.1-alpha" found for specifier
+#            "miniflare" (but package exists)
+#     error: miniflare@5.20260804.1-alpha failed to resolve
+#
+# A transitive alpha dep of a newer wrangler stopped resolving, so a release
+# path failed for reasons unrelated to what was being released. 4.119.0 is the
+# version this script last published successfully with. Same lesson as the
+# unpinned xkeyboard-config clone: never leave a tool floating in a path you
+# need to be reproducible.
+WRANGLER=wrangler@4.119.0
+
 NIX_CMD="${NIX_CMD:-nix}"
 NIX="$NIX_CMD --extra-experimental-features 'nix-command flakes'"
 # The dedicated disc-packages bucket (pc#416). The linux channel image + pointer
@@ -136,12 +150,12 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
   ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
-      echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
+      echo "  bunx $WRANGLER r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
       echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
     done )
   echo ""
   echo "  # flip the pointer LAST (served no-cache → picked up immediately)"
-  echo "  printf '%s' '<latest.json above>' | bunx wrangler r2 object put \\"
+  echo "  printf '%s' '<latest.json above>' | bunx $WRANGLER r2 object put \\"
   echo "    \"$BUCKET/linux/latest.json\" --file - --content-type application/json --remote"
   echo ""
   echo "==> version=$VERSION minEngine=$MIN_ENGINE bytes=$BYTES"
@@ -159,7 +173,7 @@ fi
 # first run silently published nothing while the job went green. Catch that here
 # (grep the output, not just the exit code) and fail loudly before relying on it.
 echo "==> wrangler preflight …"
-WRANGLER_OUT="$(bunx wrangler --version 2>&1)" || { echo "ERROR: wrangler failed to run:" >&2; echo "$WRANGLER_OUT" >&2; exit 1; }
+WRANGLER_OUT="$(bunx "$WRANGLER" --version 2>&1)" || { echo "ERROR: wrangler failed to run:" >&2; echo "$WRANGLER_OUT" >&2; exit 1; }
 case "$WRANGLER_OUT" in
   *"requires at least Node"*|*"Wrangler requires"*)
     echo "ERROR: wrangler cannot run in this environment:" >&2; echo "$WRANGLER_OUT" >&2; exit 1;;
@@ -208,7 +222,7 @@ echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$
 ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
-    bunx wrangler r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
+    bunx "$WRANGLER" r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
       --file "$CACHE/$REL" --content-type application/octet-stream --remote
   done )
 
@@ -225,7 +239,7 @@ echo "==> Flipping pointer → $BUCKET/linux/latest.json …"
 TMP_LATEST="$(mktemp)"
 trap 'rm -f "$TMP_LATEST"' EXIT
 printf '%s' "$LATEST_JSON" > "$TMP_LATEST"
-bunx wrangler r2 object put "$BUCKET/linux/latest.json" \
+bunx "$WRANGLER" r2 object put "$BUCKET/linux/latest.json" \
   --file "$TMP_LATEST" --content-type application/json --remote
 
 # Verify the flip actually landed (latest.json is served no-cache). Belt-and-
