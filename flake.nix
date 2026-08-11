@@ -605,7 +605,16 @@
         # see xwaylandApp's comment above and userspace/sommelier.nix's
         # `-Dxwayland_path=` mesonFlag, which bakes the exact matching path
         # into Sommelier's own binary.
-        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp ];
+        # M-X4: gtk2Hello moved OFF initramfsExtraBins to here. The initramfs is
+        # UNEVICTABLE tmpfs, so a big statically-linked GTK2 binary sitting in it
+        # permanently costs guest RAM -- the gcalctool tmpfs lesson. It pushed
+        # unevictable to ~270 MB, and the in-guest `nix` substitution of the
+        # 57 MB guest-clang then died on a page-allocation failure ("4352896
+        # from process 137 (nix) failed"), which nix surfaces as the misleading
+        # "no substituter that can build it" -- see nix system smoke (core).
+        # Every gtk2 smoke boots nix:true, so the squashfs copy is on PATH and
+        # is evictable.
+        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2Hello ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -658,7 +667,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello gtk2Hello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).

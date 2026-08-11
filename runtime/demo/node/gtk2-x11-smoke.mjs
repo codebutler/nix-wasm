@@ -76,7 +76,7 @@ try {
   // squashfs), which leaves `$!` empty for a backgrounded job (same gap
   // x11-apps-smoke.mjs's xeyes launch documents) — probe liveness with `ps` +
   // a bracketed pattern instead.
-  s.send("DISPLAY=:9 /bin/gtk2-hello > /tmp/gtk2-hello.log 2>&1 &\n");
+  s.send("DISPLAY=:9 gtk2-hello > /tmp/gtk2-hello.log 2>&1 &\n");
   s.send("echo GTK2HELLO_LAUNCHED\n");
   const gotLaunch = await s.waitForOutput(/GTK2HELLO_LAUNCHED/, 15000);
   check(gotLaunch, "gtk2-hello launched");
