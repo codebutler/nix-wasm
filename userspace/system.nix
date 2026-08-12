@@ -237,6 +237,17 @@ let
         environment.variables.XCURSOR_PATH = "/run/current-system/sw/share/icons";
         environment.variables.XCURSOR_THEME = "Adwaita";
         environment.variables.XCURSOR_SIZE = "24";
+        # DISPLAY so an X11 app "just runs" at the prompt — the whole point of
+        # the standing X server (sommelier -X + Xwayland on :1, autostarted from
+        # init.nix's xwaylandLine). Without it a bare `xeyes` fails with the
+        # empty-DISPLAY error "Can't open display:" (seen in the live deployment)
+        # — the server is up, but the login shell never learned where it is. Set
+        # here (→ /etc/set-environment → /etc/profile, same path as XCURSOR_*/
+        # FONTCONFIG_FILE) so every interactive shell exports it. Matches the
+        # `--x-display=1` in xwaylandLine. A client that starts before Xwayland
+        # has finished coming up just gets "Can't open display: :1" and can retry
+        # — the standard X startup-race behaviour, not a misconfiguration.
+        environment.variables.DISPLAY = ":1";
 
         # TLS trust anchors for everything openssl-linked. security/ca.nix (in
         # the module list above) installs the bundle at the canonical

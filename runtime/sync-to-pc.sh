@@ -18,9 +18,12 @@ mkdir -p "$DEST/ninep" "$DEST/virtio"
 # imports; asyncify.js (#129 fork seam) + softmmu-pass.js (#128 MMU
 # instrumentation) are ENGINE_ABI 10's — the engine fails to load without them.
 # (The ABI-10 sync shipped WITHOUT those two because this list wasn't updated:
+# mmu-uaccess.js (#185 host-import USER-pointer translation) is imported by
+# kernel-worker.js the same way and was likewise missing here — caught by the
+# unresolved-import check below when a pc-side harness first ran a real sync.
 # pc's kernel worker 404'd on ./asyncify.js and died detail-less before any
 # code ran. The completeness check below now fails the sync instead.)
-cp "$SRC"/{index.js,abi.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js,dylink.js,ffi-codegen.js,asyncify.js,softmmu-pass.js} "$DEST/"
+cp "$SRC"/{index.js,abi.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js,dylink.js,ffi-codegen.js,asyncify.js,softmmu-pass.js,mmu-uaccess.js} "$DEST/"
 cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # Wayland Phase 1 (1a/1b/1c/1d): the virtio_wasm transport device models + the
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
