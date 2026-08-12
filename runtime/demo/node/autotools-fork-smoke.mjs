@@ -4,19 +4,19 @@
 // automated regression gate for that 2026-06-17 milestone on ANY guest: a real
 // `./configure && make && ./prog` runs end-to-end inside the booted guest.
 //
-// KNOWN BLOCKER (as of this writing): busybox hush's parser does not accept
-// the VARIABLE-fd redirect autoconf's generated `as_fn_error` helper uses
-// (`>&$4` — the fd number is a shell variable, not a literal `>&5`). This is
-// the actual source of the classic "hush: ambiguous redirect" / "hush: syntax
-// error at 'fi'" failures CLAUDE.md's autotools caveat documents — the #189
-// hush measurement matrix only exercised LITERAL fds and did not catch it.
-// This smoke deliberately still invokes plain `sh ./configure` (the fork
-// guest's real `/bin/sh`, i.e. hush) rather than working around the gap —
-// fixing hush's parser is a SEPARATE change (a patch under patches/busybox/);
-// once it lands, CFGRC should turn green here with no change to this script.
-// See userspace/autotools-fixture-hush-check.nix for an on-demand, host-side,
-// hermetic reproduction of the exact parser failure (not wired into any
-// default build or CI job — see its own header for why).
+// FORMER BLOCKER, NOW FIXED: busybox hush's parser used to reject the
+// VARIABLE-fd redirect autoconf's generated `as_fn_error` helper uses
+// (`>&$4` — the fd number is a shell variable, not a literal `>&5`) — the
+// actual source of the classic "hush: ambiguous redirect" / "hush: syntax
+// error at 'fi'" failures CLAUDE.md's autotools caveat used to document (the
+// #189 hush measurement matrix only exercised LITERAL fds and did not catch
+// it). Fixed by patches/busybox/0009-hush-variable-fd-redirect.patch +
+// 0010-hush-internally-opened-fd0.patch (wired into busybox-fork.nix, the
+// fork guest's actual `/bin/sh`), landed in the same change as this comment
+// update. This smoke invokes plain `sh ./configure` (i.e. hush) and CFGRC is
+// expected to be 0 — a genuine boot confirmation, not a known-gap
+// reproduction. See userspace/autotools-fixture-hush-check.nix for the
+// host-side, hermetic, hard-gated proof of the same fix on a native build.
 //
 // Flow (boots the software-MMU / real-fork artifact set — same mechanism
 // build-from-source-e2e.mjs uses, see its header comment):

@@ -306,11 +306,13 @@
       # real-fork guest by autotools-fork-smoke.mjs to run a genuine
       # `./configure && make && ./prog` against the in-guest cc/make.
       autotoolsFixture = import ./userspace/autotools-fixture.nix { inherit pkgs; };
-      # P2-1 (2026-08-12 review): an on-demand, host-side, hermetic check that
-      # busybox hush can parse the fixture's generated configure — NOT wired
-      # into any default build or CI job (see its own header for why: it is
-      # expected to fail until a SEPARATE sibling patch to hush's parser
-      # lands). `nix build .#autotools-fixture-hush-check -L` runs it by hand.
+      # HARD GATE (flipped from the P2-1 on-demand check once
+      # patches/busybox/0009+0010 landed in this same change, see the file's
+      # own header): a native busybox carrying just those two hush fixes runs
+      # the fixture's real generated `./configure && make && ./prog` to
+      # completion. Wired into nix-wasm.yml's MMU artifacts-assembly step
+      # alongside `.#autotools-fixture` — a plain `nix build`, so its failure
+      # fails the job.
       autotoolsFixtureHushCheck = import ./userspace/autotools-fixture-hush-check.nix {
         inherit pkgs;
         fixture = autotoolsFixture;
@@ -989,8 +991,9 @@
         # Makefile.in,prog.c}. Consumed by
         # runtime/demo/node/autotools-fork-smoke.mjs via AUTOTOOLS_FIXTURE.
         autotools-fixture = autotoolsFixture;
-        # P2-1: on-demand host-side hush-parser regression proof, NOT part of
-        # any default build or CI job — see userspace/autotools-fixture-hush-check.nix.
+        # Hard-gated host-side proof that patches/busybox/0009+0010 make hush
+        # run a real generated configure end to end — see
+        # userspace/autotools-fixture-hush-check.nix; wired into nix-wasm.yml.
         autotools-fixture-hush-check = autotoolsFixtureHushCheck;
 
         # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-

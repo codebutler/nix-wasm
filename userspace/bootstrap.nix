@@ -237,12 +237,16 @@ pkgs.writeText "init" ''
     # its parse-time rejection of the autoconf-generated ">&$4" construct
     # (as_fn_error's variable-fd redirect), not a POSIX-conformance gap in
     # general; see the patch headers for the root cause + upstream-unfixed
-    # status. What forkshell ash still uniquely provides on THIS (NOMMU)
-    # guest is subshell/$()/pipeline/heredoc via serialize+re-exec — hush has
-    # no fork-without-exec story here at all (real fork() only exists on the
-    # software-MMU/fork guest, #131 Track B), so ash stays the promoted
-    # /bin/sh for autoconf on NOMMU until #131 slice 1 retires it in favor of
-    # hush (the fork guest already defaults to hush — see busybox-fork.nix).
+    # status. NOMMU hush isn't totally fork-free either — it carries its own
+    # narrow clone-spawn conversions (0003-hush-cmdsub-clone +
+    # 0006-hush-heredoc-clone, wired into busybox.nix) for $()/heredoc
+    # specifically. What forkshell ash still uniquely provides on THIS
+    # (NOMMU) guest is the GENERAL case — subshells and pipelines via full
+    # serialize+re-exec, which hush's narrow conversions don't cover (real
+    # fork() only exists on the software-MMU/fork guest, #131 Track B) — so
+    # ash stays the promoted /bin/sh for autoconf on NOMMU until #131 slice 1
+    # retires it in favor of hush (the fork guest already defaults to hush —
+    # see busybox-fork.nix).
     # Relink after activation, once the served closure (and its ash) is
     # mounted. System services invoke the profile-absolute busybox sh
     # directly, so only `#!/bin/sh` scripts and the interactive login shell

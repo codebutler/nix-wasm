@@ -1008,6 +1008,20 @@ jobs:
           # masked by `echo`'s own (always-zero) exit status winning under `set -e`.
           fixture_path="$(nix build -L '.#autotools-fixture' --no-link --print-out-paths)"
           echo "AUTOTOOLS_FIXTURE=$fixture_path" >> "$GITHUB_ENV"
+          # Hard gate (native, ~2 min): patches/busybox/0009+0010 make a
+          # native busybox's hush run the fixture's real generated
+          # `./configure && make && ./prog` to completion — see
+          # userspace/autotools-fixture-hush-check.nix. A plain `nix build`;
+          # its failure fails the job, same as any other build step. Scoped
+          # to the `core` shard (in-step shell if, matching this job's own
+          # documented shard-dispatch convention — NOT a step-level `if:`,
+          # see the header comment above the hard-gates step): the hush-check
+          # is proof for the same autotools chain only `core`'s
+          # autotools-fork-smoke soak exercises — the `gtk` shard's
+          # display-free GTK selftests never touch a shell at all.
+          if [ "${{ matrix.shard }}" = "core" ]; then
+            nix build -L '.#autotools-fixture-hush-check' --no-link --print-out-paths
+          fi
 
       - name: Install runtime deps
         working-directory: runtime
@@ -1138,8 +1152,14 @@ jobs:
       # can join the hard-gates step). CLAUDE.md's "In-guest autotools also
       # works" milestone (a real `./configure && make && ./prog` in the guest)
       # has never had an automated regression gate on ANY guest — this is that
-      # gate's first CI run. Soak-first per the promotion rule this job's own
-      # (closed) #131 soak established: `continue-on-error: true` bounds
+      # gate's first CI run. CFGRC is NOT expected-red here anymore: the hush
+      # variable-fd-redirect + fd0-guard fixes (patches/busybox/0009+0010)
+      # landed in this same change (busybox-fork.nix's actual shell), and the
+      # host-side proof (`.#autotools-fixture-hush-check`, hard-gated above)
+      # already confirms the fix on a native build — this step is now a
+      # genuine first-boot CONFIRMATION run on the real MMU/fork guest, not a
+      # reproduction of a known gap. Soak-first per the promotion rule this
+      # job's own (closed) #131 soak established: `continue-on-error: true` bounds
       # FAILURE (a genuine failure shows as this step's own distinct,
       # non-blocking red indicator in the Checks UI — the JOB stays green),
       # `timeout-minutes` bounds WALL CLOCK (continue-on-error does NOT save

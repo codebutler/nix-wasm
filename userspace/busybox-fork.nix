@@ -183,13 +183,17 @@ cross.stdenv.mkDerivation {
     # redirects with LITERAL fds, subshells, pipelines, multi-line if/fi) passes
     # under stock hush with correct exit statuses and zero aborts — unlike stock
     # ash, which SIGABRTs on every subshell via the wasm musl's longjmp abort
-    # stub (#188). That is NOT yet the same claim as "a real autoconf-generated
-    # ./configure completes under stock hush": one such script fails at parse
-    # time on `as_fn_error`'s VARIABLE-fd redirect (`>&$4` — "ambiguous
-    # redirect" → "syntax error at 'fi'"), which the idiom matrix didn't cover
-    # (LITERAL fds only). A hush variable-fd-redirect fix is landing separately
-    # (patches/busybox/00xx-hush-variable-fd-redirect); until it lands, no real
-    # ./configure has completed under stock hush on this guest.
+    # stub (#188). A real autoconf-generated ./configure additionally needs two
+    # more fixes beyond that idiom matrix (it hits `as_fn_error`'s VARIABLE-fd
+    # redirect, `>&$4`, and `exec 7<&0 </dev/null`, neither of which the
+    # LITERAL-fds-only idiom matrix covered) — patches/busybox/0009-hush-
+    # variable-fd-redirect.patch + 0010-hush-internally-opened-fd0.patch,
+    # landed in this same change (applied above). The host-side, hermetic
+    # proof that the full chain (configure/config.status/make/prog) now
+    # completes under exactly this hush is `.#autotools-fixture-hush-check`
+    # (userspace/autotools-fixture-hush-check.nix), hard-gated in
+    # nix-wasm.yml; the in-guest confirmation is
+    # runtime/demo/node/autotools-fork-smoke.mjs.
     grep -q '^CONFIG_SH_IS_HUSH=y' build/.config \
       || { echo "ERROR: CONFIG_SH_IS_HUSH not enabled in .config" >&2; exit 1; }
 

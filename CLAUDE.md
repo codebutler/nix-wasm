@@ -383,17 +383,27 @@ actual, reproducible source of the classic "hush: ambiguous redirect" / "hush:
 syntax error at 'fi'" failures. Confirmed two ways: (a) a real generated
 `configure` (`userspace/autotools-fixture.nix`, added 2026-08-12) hits it in its
 own preamble under stock busybox hush, hermetically, on the HOST — see
-`userspace/autotools-fixture-hush-check.nix`'s on-demand
-`nix build .#autotools-fixture-hush-check` reproduction; (b) the same generated
+`userspace/autotools-fixture-hush-check.nix`; (b) the same generated
 `configure`'s in-guest run (`runtime/demo/node/autotools-fork-smoke.mjs`, also
 added 2026-08-12 — **the first automated autotools regression gate on ANY
 guest**, closing the "nothing regression-gates it" gap this caveat used to cite)
-fails its CFGRC step with the identical signature. So the shell risk this item
-existed to retire is **NOT yet fully retired**: a hush parser fix for the
-variable-fd redirect form (a patch under `patches/busybox/`, separate from this
-smoke/fixture) is the remaining Phase-2 shell blocker — that patch, once it
-lands, is the actual "hush is fully sufficient" proof; until then, CFGRC in
-`autotools-fork-smoke.mjs` is expected red.**
+hit its CFGRC step with the identical signature. **RESOLVED in the same
+change** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
+`0010-hush-internally-opened-fd0.patch` — the second an independent,
+still-unfixed-upstream `<&0` bug found while verifying the first against a
+real `configure`; full record in the "hush can't run a real autoconf
+`configure` at all without two independent fixes" learnings entry below):
+`.#autotools-fixture-hush-check` is now a HARD gate (native, ~2 min, wired
+into `nix-wasm.yml` alongside `.#autotools-fixture`) asserting the full
+`configure`/`config.status`/`make`/`./prog` chain succeeds under exactly this
+hush, and CFGRC in `autotools-fork-smoke.mjs` is no longer expected red. The
+host-side proof is the NECESSARY half — it confirms the hush.c fix itself,
+in isolation — but the shell risk this item existed to retire is only fully
+retired once the in-guest `autotools-fork-smoke.mjs` soak (the 2026-08-05
+parity-plan doc's "Real-fork autotools proof" item) records its own green
+CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising the
+booted guest's full 9P-staging + in-guest cc/make path the host build never
+touches.**
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
