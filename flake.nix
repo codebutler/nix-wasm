@@ -300,6 +300,22 @@
         inherit cross;
       };
 
+      # 2026-08-05 MMU ship-plan Phase-1 precondition (toolchain half): a
+      # minimal real autoconf'd C project, built with NATIVE autoconf only
+      # (no cross toolchain involved) — staged into the software-MMU/
+      # real-fork guest by autotools-fork-smoke.mjs to run a genuine
+      # `./configure && make && ./prog` against the in-guest cc/make.
+      autotoolsFixture = import ./userspace/autotools-fixture.nix { inherit pkgs; };
+      # P2-1 (2026-08-12 review): an on-demand, host-side, hermetic check that
+      # busybox hush can parse the fixture's generated configure — NOT wired
+      # into any default build or CI job (see its own header for why: it is
+      # expected to fail until a SEPARATE sibling patch to hush's parser
+      # lands). `nix build .#autotools-fixture-hush-check -L` runs it by hand.
+      autotoolsFixtureHushCheck = import ./userspace/autotools-fixture-hush-check.nix {
+        inherit pkgs;
+        fixture = autotoolsFixture;
+      };
+
       # Reduced reproducer for the posix_spawn() parent-static-memory
       # corruption found while debugging Xvfb's xkbcomp spawn (worker #6,
       # xchat-irc-setup epic): a large patterned static array + a same-size
@@ -966,6 +982,16 @@
         # #179: the host-rejected-image fixture + its conforming twin (see
         # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
         exec-reject-test = execRejectTest;
+
+        # 2026-08-05 MMU ship-plan Phase-1 precondition (toolchain half): the
+        # real-fork autotools acceptance fixture (see
+        # userspace/autotools-fixture.nix) -> $out/{configure.ac,configure,
+        # Makefile.in,prog.c}. Consumed by
+        # runtime/demo/node/autotools-fork-smoke.mjs via AUTOTOOLS_FIXTURE.
+        autotools-fixture = autotoolsFixture;
+        # P2-1: on-demand host-side hush-parser regression proof, NOT part of
+        # any default build or CI job — see userspace/autotools-fixture-hush-check.nix.
+        autotools-fixture-hush-check = autotoolsFixtureHushCheck;
 
         # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-
         # hang): SA_RESTART one-shot handler re-armed in itself → $out/bin/ping-pace-test.

@@ -360,22 +360,40 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
-history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11):
+history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11,
+UPDATED 2026-08-12):
 this milestone was a HAND-RUN session (its record was `docs/STATUS.md`, since
-deleted) — there is no autotools smoke in `runtime/demo/node/` on ANY guest, so
-nothing regression-gates it. Two things were measured on the MMU/fork guest while
-scoping that gate, both worth knowing before touching shells: (1) "hush isn't
-POSIX-enough" is a NOMMU statement, not a hush statement — the fork guest's STOCK
-hush handles every autoconf idiom cited as broken,
-including the exact `{ …; echo >&5; } >out` "ambiguous redirect" and multi-line
-`if/fi` "syntax error at fi" cases, with correct exit statuses and zero aborts;
-(2) stock busybox **ash** cannot replace forkshell ash on wasm at all — not for
+deleted). Two things were measured on the MMU/fork guest while scoping a
+regression gate for it, both worth knowing before touching shells: (1) stock
+busybox **ash** cannot replace forkshell ash on wasm at all — not for
 fork reasons but because the wasm musl's `longjmp` is an `abort()` stub
 (`patches/musl/0000-harness-wasm-arch.patch` → `src/setjmp/wasm/longjmp.S`), and
 ash unwinds through `longjmp` on its normal path, so every `$()`/subshell child
 dies SIGABRT and reports exit status 134 while still printing correct stdout
 (nix-wasm#188). So #131 slice 1 retires forkshell ash in favor of HUSH, not stock
-ash.**
+ash. (2) **"hush isn't POSIX-enough" is a NOMMU statement, not a hush
+statement — but the original #189 measurement matrix's "every autoconf idiom
+clean" claim was ITSELF too broad, corrected here.** The matrix tested every
+idiom against LITERAL fds only (`{ …; echo >&5; } >out` — a literal `>&5`) and
+found the fork guest's stock hush clean on all of them. A REAL autoconf-generated
+`configure`'s own `as_fn_error` diagnostic-logging helper redirects to a
+**VARIABLE** fd instead (`>&$4` — the fd number is a shell variable), which
+hush's parser does NOT accept — and THIS, not anything NOMMU-specific, is the
+actual, reproducible source of the classic "hush: ambiguous redirect" / "hush:
+syntax error at 'fi'" failures. Confirmed two ways: (a) a real generated
+`configure` (`userspace/autotools-fixture.nix`, added 2026-08-12) hits it in its
+own preamble under stock busybox hush, hermetically, on the HOST — see
+`userspace/autotools-fixture-hush-check.nix`'s on-demand
+`nix build .#autotools-fixture-hush-check` reproduction; (b) the same generated
+`configure`'s in-guest run (`runtime/demo/node/autotools-fork-smoke.mjs`, also
+added 2026-08-12 — **the first automated autotools regression gate on ANY
+guest**, closing the "nothing regression-gates it" gap this caveat used to cite)
+fails its CFGRC step with the identical signature. So the shell risk this item
+existed to retire is **NOT yet fully retired**: a hush parser fix for the
+variable-fd redirect form (a patch under `patches/busybox/`, separate from this
+smoke/fixture) is the remaining Phase-2 shell blocker — that patch, once it
+lands, is the actual "hush is fully sufficient" proof; until then, CFGRC in
+`autotools-fork-smoke.mjs` is expected red.**
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the

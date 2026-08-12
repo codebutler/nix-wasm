@@ -110,8 +110,9 @@ surface already exist; Phase 1 only widens what boots on top of it).
 
 ### Remaining
 
-- [ ] **Real-fork autotools proof — SHELL HALF DONE (2026-08-11), toolchain
-  half remains.** CLAUDE.md's "In-guest autotools also works" milestone
+- [ ] **Real-fork autotools proof — SHELL HALF PARTIALLY DONE (2026-08-11,
+  CORRECTED 2026-08-12), toolchain half added but currently RED on the shell
+  gap below.** CLAUDE.md's "In-guest autotools also works" milestone
   (`./configure && make && ./prog`) is proven only on the shipped NOMMU guest,
   through **forkshell ash** — four patches + six postPatch fixes
   (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist ONLY to fake
@@ -135,8 +136,10 @@ surface already exist; Phase 1 only widens what boots on top of it).
      exit status is garbage — fatal for autoconf. `fork()` itself is healthy
      (`fork-smoke` propagates `status=0x7`); job control was ruled out. The ash
      switch was REVERTED; #188 carries the diagnosis and fix directions.
-  2. **Stock hush is sufficient — the "not POSIX-enough" claim does not hold on
-     the fork guest.** `bootstrap.nix:232-242` says hush "dies with 'ambiguous
+  2. **Stock hush handles every LITERAL-fd autoconf idiom tested — but that
+     matrix was too narrow, and the "not POSIX-enough claim does not hold"
+     conclusion below does NOT hold, corrected 2026-08-12.**
+     `bootstrap.nix:232-242` says hush "dies with 'ambiguous
      redirect' / 'syntax error at fi'", which is why NOMMU promotes forkshell
      ash. That is true of the *NOMMU* hush, which carries
      the NOMMU clone-spawn conversions of its pipeline, `$()` and heredoc paths
@@ -145,22 +148,42 @@ surface already exist; Phase 1 only widens what boots on top of it).
      `0006-hush-heredoc-clone`; `0005` is `archival/tar.c`, unrelated to the
      shell); the fork busybox drops all of them and is stock. Measured on the fork
      guest: **0 aborts**, `$(exit 3)`→3, `(exit 5)`→5, `if (exit 0)`→then,
-     external true/false→0/1, and every autoconf idiom clean — the fd-5 logging
-     block (`{ …; echo >&5; } >out 2>&1`, the exact "ambiguous redirect" case),
-     `as_fn_*` functions + `test` chains, `$( ( … ) || … )`, heredoc into
+     external true/false→0/1, and every autoconf idiom in the matrix clean — the
+     fd-5 logging block (`{ …; echo >&5; } >out 2>&1`, a LITERAL `>&5`, the exact
+     "ambiguous redirect" case as originally reproduced), `as_fn_*` functions +
+     `test` chains, `$( ( … ) || … )`, heredoc into
      `conftest.c`, case/esac + eval, backticks, `trap … EXIT`, and multi-line
      if/fi (the exact "syntax error at fi" case).
-  **So Phase 2 can retire forkshell ash without needing stock ash at all** —
-  hush is the fork guest's POSIX shell, and the shell risk this item existed to
-  retire is retired. **What remains** is the toolchain half: a real
-  `./configure && make && ./prog` needs `cc` + `make` in-guest, which are
+     **CORRECTION (2026-08-12, from the toolchain-half work below): this matrix
+     tested only LITERAL fds. A REAL autoconf-generated `configure`'s own
+     `as_fn_error` diagnostic helper redirects to a VARIABLE fd instead
+     (`>&$4` — the fd number is a shell variable), which hush's parser does
+     NOT accept — reproducing the identical "ambiguous redirect"/"syntax
+     error at 'fi'" signature this item's matrix believed it had cleared.
+     Confirmed two ways: a real generated `configure`
+     (`userspace/autotools-fixture.nix`) hits it in its own preamble under
+     stock busybox hush, hermetically, on the HOST
+     (`userspace/autotools-fixture-hush-check.nix`'s on-demand
+     `nix build .#autotools-fixture-hush-check`); the same `configure`'s
+     in-guest run (`autotools-fork-smoke.mjs`, below) fails its CFGRC step
+     with the same signature.
+  **So Phase 2 CANNOT yet retire forkshell ash on the strength of this
+  measurement alone** — hush is close to being the fork guest's POSIX shell,
+  but the shell risk this item existed to retire is retired only once a
+  SEPARATE hush-parser patch (under `patches/busybox/`, fixing the
+  variable-fd redirect form) lands; that patch, not this item, is the actual
+  "hush is fully sufficient" proof. **What was added** is the toolchain half: a
+  real `./configure && make && ./prog` needs `cc` + `make` in-guest, which are
   substituted from `.#wasm-binary-cache` (~6.9 GB — it carries `.drv` build
-  sources), so the round-trip is a CI-scale run, not a laptop one. Add
+  sources), so the round-trip is a CI-scale run, not a laptop one.
   `demo/node/autotools-fork-smoke.mjs` (nix:true boot on the fork squashfs,
   `nix-env -iA wasm-tools.{guest-cc,make-wasm32}`, then `./configure && make &&
   ./prog` against a small autoconf'd C fixture staged over 9P and copied to
-  ramfs — the 9P-write-failure lesson from the original STATUS.md session) to the
-  `nix-boot-smoke-mmu` `core` shard, soak-first per the promotion rule.
+  ramfs — the 9P-write-failure lesson from the original STATUS.md session) is
+  now added to the `nix-boot-smoke-mmu` `core` shard, soak-first per the
+  promotion rule — but its CFGRC step is expected RED until the hush-parser
+  patch above lands, exactly as intended for a soak: a real, tracked, already
+  explained failure, not a silently-swallowed one.
 - [ ] **#11's Wayland/`wl_shm` half (close-out items 2/3/5) — no MMU compositor
   boot exists yet.** The Landed `mmu-devices` shard above proves #11 item 1
   (vring/pfn addressing is untouched by CONFIG_MMU=y — the kernel stays
