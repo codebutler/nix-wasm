@@ -139,8 +139,11 @@ surface already exist; Phase 1 only widens what boots on top of it).
      the fork guest.** `bootstrap.nix:232-242` says hush "dies with 'ambiguous
      redirect' / 'syntax error at fi'", which is why NOMMU promotes forkshell
      ash. That is true of the *NOMMU* hush, which carries
-     `patches/busybox/0003/0005/0006` converting its `$()`/pipeline/heredoc to
-     clone-spawn; the fork busybox drops those and is stock. Measured on the fork
+     the NOMMU clone-spawn conversions of its pipeline, `$()` and heredoc paths
+     (`0001-wasm-arch-and-clone-spawn.patch`'s `shell/hush.c` hunk —
+     `run_pipe_child` — plus `0003-hush-cmdsub-clone` and
+     `0006-hush-heredoc-clone`; `0005` is `archival/tar.c`, unrelated to the
+     shell); the fork busybox drops all of them and is stock. Measured on the fork
      guest: **0 aborts**, `$(exit 3)`→3, `(exit 5)`→5, `if (exit 0)`→then,
      external true/false→0/1, and every autoconf idiom clean — the fd-5 logging
      block (`{ …; echo >&5; } >out 2>&1`, the exact "ambiguous redirect" case),
