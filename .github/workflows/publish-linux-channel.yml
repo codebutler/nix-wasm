@@ -27,7 +27,14 @@ jobs:
   publish:
     # Namespace small runner (x86_64) — substitutes the closure from Cachix and
     # uploads to R2, so the `sm` profile suffices (matches publish-wasm-artifacts).
-    runs-on: namespace-profile-sm
+    # lg (16 vCPU / 32 GB), not sm: this job BUILDS .#linux-image and the
+    # ~22 GiB .#wasm-binary-cache closure for well over an hour. It sat on sm
+    # while every path came from Cachix, but any real build here is the
+    # "CPU-heavy or long-running" class CLAUDE.md routes to md/lg. When the X11
+    # stack made native gnome-themes-extra (-> native gtk2 -> native gtk3) build
+    # for real, gtk3's gtkdoc-mkhtml step died with status 247 -- a resource
+    # kill, not a compile error -- while the leaner master publish passed.
+    runs-on: namespace-profile-lg
     steps:
       - uses: actions/checkout@v4
 
@@ -59,12 +66,32 @@ jobs:
       # bun so `bunx wrangler` is available in the publish script.
       - uses: oven-sh/setup-bun@v2
 
+      # linux.iso goes up via rclone (it outgrew wrangler's 300 MiB cap), but
+      # rclone is NOT preinstalled on the runner -- the publish died with
+      # "rclone: command not found" (exit 127) right at the upload. Same
+      # provisioning step pr-preview.yml already uses for its own rclone sync.
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
       - name: Build + publish the linux channel to R2
         env:
           # DRY_RUN=true → the script builds + prints but uploads nothing.
           DRY_RUN: ${{ inputs.dry_run }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # linux.iso goes up via rclone (it is ~340 MiB; `wrangler r2 object
+          # put` caps at 300 MiB), which needs an R2 API token's S3 keys — a
+          # DIFFERENT credential from CLOUDFLARE_API_TOKEN, which carries no r2
+          # scope. Same secrets pr-preview.yml already uses for its rclone sync.
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Optional, and PREFERRED if set: S3 keys scoped to the packages
+          # bucket. The R2_* pair above is scoped to the PREVIEW bucket
+          # (pr-preview.yml's sync) and cannot write pc-packages. Absent these,
+          # the script derives S3 creds from CLOUDFLARE_API_TOKEN, which does
+          # have access (wrangler writes the catalogs and pointer with it).
+          R2_PACKAGES_ACCESS_KEY_ID: ${{ secrets.R2_PACKAGES_ACCESS_KEY_ID }}
+          R2_PACKAGES_SECRET_ACCESS_KEY: ${{ secrets.R2_PACKAGES_SECRET_ACCESS_KEY }}
         # pipefail so the script's exit code propagates through `tee` — without it
         # a failed publish (e.g. the verify's `exit 1`) is masked by tee's 0 and the
         # job goes green despite publishing nothing.

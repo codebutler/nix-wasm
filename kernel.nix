@@ -19,9 +19,14 @@
 # BOOTS + execs userspace with the forward-ported JS runtime (pc commit
 # c6a33dbd: kernel-worker.js/kernel-host.js compile the user binary directly
 # from the kernel memory range the new ABI passes).
-{ pkgs, kernelSrc, kernelCC, mmu ? false, a2 ? false, debugTrace ? false }:
+{ pkgs, kernelSrc, kernelCC, mmu ? false, a2 ? false, debugTrace ? false
+, debugNommu ? false }:
 pkgs.stdenv.mkDerivation {
-  pname = if a2 then "vmlinux-wasm-mmu-a2" else if mmu then "vmlinux-wasm-mmu" else "vmlinux-wasm";
+  pname =
+    if debugNommu then "vmlinux-wasm-debug-nommu"
+    else if a2 then "vmlinux-wasm-mmu-a2"
+    else if mmu then "vmlinux-wasm-mmu"
+    else "vmlinux-wasm";
   version = "7.0-039e5f3e";
 
   src = kernelSrc;
@@ -503,6 +508,27 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
         --disable CONFIG_BINFMT_ELF
     ''}
 
+    ${pkgs.lib.optionalString debugNommu ''
+      # Worker #7, xchat-irc-setup spawn-corruption investigation: the NOMMU
+      # allocator (mm/nommu.c) hands out real physical pages via
+      # alloc_pages_exact() per vm_mmap() (do_mmap_private) — each mapping's
+      # region is tracked in a global rb-tree (nommu_region_tree). If the
+      # buddy allocator or the region tree ever hands out / links a region
+      # that overlaps a still-live mapping, that's a genuine kernel bug that
+      # would look EXACTLY like "the child's data_start collided with the
+      # parent's live .data" (the real Xvfb Popen()->posix_spawn() symptom).
+      # CONFIG_DEBUG_NOMMU_REGIONS (upstream, mm/nommu.c
+      # validate_nommu_regions()) BUG()s the instant an overlapping region is
+      # inserted/removed from that tree — i.e. it turns a silent memory
+      # stomp into a loud, addressed panic at the exact do_mmap() call that
+      # caused it, with a backtrace. CONFIG_DEBUG_VM adds the generic mm
+      # assertions (page ref-count sanity etc.) as a second net.
+      bash ./scripts/config --file build/.config \
+        --enable CONFIG_DEBUG_NOMMU_REGIONS \
+        --enable CONFIG_DEBUG_VM \
+        --enable CONFIG_DEBUG_KERNEL
+    ''}
+
     make $makeFlags olddefconfig
 
     # Issue #145: a silently-dropped CONFIG_SND_VIRTIO would ship a kernel with
@@ -523,6 +549,12 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
     ${pkgs.lib.optionalString mmu ''
       grep -qE "^CONFIG_MMU=y" build/.config \
         || { echo "ERROR: CONFIG_MMU did not stick" >&2; exit 1; }
+    ''}
+
+    ${pkgs.lib.optionalString debugNommu ''
+      grep -qE "^CONFIG_DEBUG_NOMMU_REGIONS=y" build/.config \
+        || { echo "ERROR: CONFIG_DEBUG_NOMMU_REGIONS did not stick (depends on" \
+                  "DEBUG_KERNEL && !MMU — check the mmu flag isn't also set)" >&2; exit 1; }
     ''}
 
     runHook postConfigure

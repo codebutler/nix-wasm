@@ -1,0 +1,49 @@
+--- a/sommelier.cc
++++ b/sommelier.cc
+@@ -3758,16 +3758,24 @@
+   putenv(sl_xasprintf("XCURSOR_SIZE=%d",
+                       static_cast<int>(XCURSOR_SIZE_BASE * ctx->scale + 0.5)));
+ 
+-  // Set WAYLAND_DISPLAY to a value that is guaranteed to not point to a
+-  // valid wayland compositor socket name. Unsetting WAYLAND_DISPLAY is
+-  // insufficient as some clients may attempt to connect to wayland-0 as a
+-  // default fallback.
+-  const char* const wm_add_env[] = {"WAYLAND_DISPLAY=.", nullptr};
+-  pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, wm_add_env, nullptr,
+-                 nullptr);
+-  errno_assert(pid >= 0);
++  // SERVER-ONLY MODE: with -X and no [program], there is no session leader to
++  // run -- Sommelier itself (Xwayland + the XWM) IS the service. Skip the
++  // spawn and keep serving; ctx->child_pid stays 0 so the SIGCHLD path that
++  // tears the session down when the leader exits simply never fires. Without
++  // this, an -X daemon has to be handed a filler program (e.g. `sleep`) purely
++  // to satisfy the exec below, and any exec failure asserts and kills X.
++  if (ctx->runprog && ctx->runprog[0]) {
++    // Set WAYLAND_DISPLAY to a value that is guaranteed to not point to a
++    // valid wayland compositor socket name. Unsetting WAYLAND_DISPLAY is
++    // insufficient as some clients may attempt to connect to wayland-0 as a
++    // default fallback.
++    const char* const wm_add_env[] = {"WAYLAND_DISPLAY=.", nullptr};
++    pid = sl_spawn(ctx->runprog[0], ctx->runprog, -1, wm_add_env, nullptr,
++                   nullptr);
++    errno_assert(pid >= 0);
+ 
+-  ctx->child_pid = pid;
++    ctx->child_pid = pid;
++  }
+ 
+   return 1;
+ }
+@@ -4530,7 +4538,11 @@
+     return sl_run_parent(argc, argv, &ctx, socket_name, peer_cmd_prefix);
+   }
+ 
+-  if (client_fd == -1) {
++  // A [program] is the session leader, so it is only REQUIRED when Sommelier
++  // has nothing else to do. Under -X, Sommelier is a standing X server (see
++  // the server-only mode in sl_handle_display_ready_event), so no program is
++  // a valid, first-class invocation rather than a usage error.
++  if (client_fd == -1 && !ctx.xwayland) {
+     if (!ctx.runprog || !ctx.runprog[0]) {
+       sl_print_usage();
+       return EXIT_FAILURE;

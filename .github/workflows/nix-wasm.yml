@@ -405,6 +405,15 @@ jobs:
           }
           run_smoke demo/node/sigalrm-smoke.mjs
           run_smoke demo/node/kill-wake-smoke.mjs
+          # Reduced reproducer (worker #6, xchat-irc-setup epic) for the
+          # posix_spawn() parent-static-memory corruption found debugging Xvfb's
+          # xkbcomp spawn: a large patterned static array + a same-size heap
+          # buffer must survive several posix_spawn() shapes (self-exec,
+          # cross-binary exec, Popen()-style file-actions pipe spawn, and
+          # repeated spawns against a fragmented heap). See
+          # userspace/spawn-canary-test.c. Gating — a regression here is exactly
+          # the class of corruption that made real Xvfb unreliable.
+          run_smoke demo/node/spawn-canary-smoke.mjs
           # #35 regression: `timeout 2 sleep 10` must terminate sleep (now fixed
           # by patches/busybox/0008). Gating — a regression fails the job.
           run_smoke demo/node/timeout-repro-smoke.mjs
@@ -816,6 +825,33 @@ jobs:
             # fires a GtkTextBuffer signal, display-free. One-per-boot like its
             # GTK siblings. Gating.
             run_smoke demo/node/l3afpad-smoke.mjs
+            # Xvfb (xorg-server 21.1.23, M-X1 of the XChat/X11 epic): boots the
+            # cross X server headless (the vfb DDX needs no compositor), then
+            # x11-probe (libxcb) reads back the connection setup. Proves the
+            # posix_spawn Popen port (xkbcomp spawn) + the fpcast-emu pass on
+            # the DIX device vtables, end to end. Gating.
+            run_smoke demo/node/xvfb-smoke.mjs
+            # xeyes/xwd/xdpyinfo (M-X2 of the XChat/X11 epic): the first real
+            # X clients against Xvfb — a live xeyes window, xdpyinfo's server
+            # query, and a `xwd -root` pixel dump verified host-side (XWD
+            # header parse + non-flat pixel sampling). Gating.
+            run_smoke demo/node/x11-apps-smoke.mjs
+            # gtk2-hello (M-X4 of the XChat/X11 epic): GTK2 cross-built with
+            # the X11 backend, the last structural layer before XChat itself
+            # (M-X5). gtk2-smoke is the display-free headless gate (class_init
+            # through the fpcast seam, gtk2-hello's own posture); gtk2-x11-smoke
+            # is the live-window pixel proof (Xvfb + xwd, headless-
+            # screenshottable — unlike GTK3's wayland backend, which needs a
+            # real compositor this harness doesn't have). One-per-boot like
+            # its GTK siblings. Gating.
+            run_smoke demo/node/gtk2-smoke.mjs
+            run_smoke demo/node/gtk2-x11-smoke.mjs
+            # xchat (M-X5 of the XChat/X11 epic, the FINALE): XChat 2.8.8
+            # over GTK2/X11. One boot: display-free --selftest (servlist
+            # defaults + GTK2 class_init through fpcast) THEN a live main
+            # window against Xvfb, xwd-verified like its GTK2/X11 siblings
+            # above. One-per-boot like its GTK siblings. Gating.
+            run_smoke demo/node/xchat-smoke.mjs
           fi
 
   # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --

@@ -109,6 +109,25 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// A string denoting the runner name (same as Worker name), useful for debugging.
   let runner_name = "[Unknown]";
 
+  // pc (worker #7, xchat-irc-setup spawn-corruption investigation): gated debug
+  // logging for the exec/task-creation path, OFF BY DEFAULT (same posture as
+  // trace_syscalls above — this is a diagnostic aid, not a permanent trace).
+  // Enable with SPAWN_DEBUG=1 in the environment of the Node harness (worker_
+  // threads inherit process.env, so no init-message plumbing is needed for the
+  // Node smokes this was built to drive; a browser session has no process.env
+  // and this stays silent there). Logs, per exec/task-create: the binary's
+  // data_start/table_start/pt_base + byte range, and every memory.grow() call
+  // (old/new page count) — the exact facts needed to tell whether a NEW task's
+  // data segment lands inside the byte range still occupied by another live
+  // task's .data (the hypothesis behind the real Xvfb Popen()->posix_spawn()
+  // .data corruption: ProcVector[] correct before the spawn, corrupted right
+  // after, before the child produced any output — see userspace/spawn-canary-
+  // test.c's file comment for the full case history).
+  const SPAWN_DEBUG = typeof process !== "undefined" && !!(process.env && process.env.SPAWN_DEBUG);
+  const sdbg = (...args) => {
+    if (SPAWN_DEBUG) console.error(`[spawn-dbg ${runner_name}]`, ...args);
+  };
+
   /// pc (#128 MMU boot speed): content-keyed cache of compiled user-executable
   /// Modules, seeded from the host at worker creation (init message). Under the
   /// software MMU EVERY exec must instrument the binary (softmmu-pass over a
@@ -837,6 +856,12 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // section (a table smaller than declared fails instantiate).
         table_initial: table_initial,
       };
+      sdbg(
+        `wasm_load_executable: bin=[0x${Number(bin_start).toString(16)}..0x${Number(bin_end).toString(16)}]` +
+          ` (0x${(Number(bin_end) - Number(bin_start)).toString(16)} bytes)` +
+          ` data_start=0x${Number(data_start).toString(16)} table_start=0x${Number(table_start).toString(16)}` +
+          ` pt_base=0x${Number(pt_base || 0).toString(16)} table_initial=0x${Number(table_initial).toString(16)}`,
+      );
 
       // We release our reference already, just to be sure. The promise chain will still have a reference until the
       // kernel exits back to userland, which will termintate the user executable with a Trap.
@@ -1564,7 +1589,48 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           // pointers) has none, so the export is absent. Calling it unconditionally
           // would throw and kill the process at startup. Guard it exactly like the
           // __wasm_call_ctors call below (an optional dylink-module startup export).
-          if (instance.exports.__wasm_apply_data_relocs) {
+          //
+          // pc (worker #7, xchat-irc-setup spawn-corruption fix): apply data relocs
+          // ONLY for a fresh exec, never for a clone child. Unlike
+          // WebAssembly.instantiate()'s implicit __wasm_init_memory (atomic-flag-
+          // gated, so a CLONE_VM child sharing the parent's data_start correctly
+          // finds the flag already set and skips re-copying data segments /
+          // re-clearing bss — see the doc comment on `let woken = …` above), this
+          // explicit call used to be UNCONDITIONAL — it re-ran for every
+          // instantiation, exec OR clone. __wasm_apply_data_relocs blindly rewrites
+          // every relocatable (pointer-valued) global in linear memory to its
+          // LINK-TIME computed value — it has no notion of "was this already
+          // relocated" or "did runtime code subsequently mutate this slot on
+          // purpose". For a FRESH EXEC (should_call_clone_callback == false) that is
+          // correct and necessary — a new program image's own pointer-valued globals
+          // must be relocated to ITS instance's __memory_base. But a clone child
+          // (should_call_clone_callback == true — a CLONE_VM/CLONE_VFORK
+          // clone-with-fn child, a pthread, or an MMU fork child; see
+          // __ret_from_fork, which returns 1 exactly for tasks created WITHOUT a
+          // kernel-thread fn) shares (or COWs) the PARENT's data_start/memory
+          // verbatim: the relocations there are already applied and may have been
+          // legitimately mutated by the running program since. Re-running them
+          // stomped that live state back to link-time defaults — e.g. Xvfb's
+          // AddExtension() writes ProcVector[135] = ProcXkbDispatch over its
+          // dix/tables.c static initializer ProcBadRequest, and the xkbcomp
+          // posix_spawn reverted it, breaking XkbUseExtension for every X client.
+          // Reduced repro + regression guard: userspace/spawn-canary-test.c round 6
+          // (init-canary: 65536/65536 function-pointer entries reverted per spawn
+          // before this gate; spawn-canary-smoke.mjs gates it in CI). The gate is
+          // generic — it keys ONLY on the kernel's clone-vs-exec signal, never on
+          // which program is running. Note the flag is read here BEFORE
+          // user_executable_run consumes+resets it, and a clone child that later
+          // execs re-instantiates through user_executable_chain with the flag
+          // already false, so the fresh image still gets its relocs.
+          sdbg(
+            `__wasm_apply_data_relocs check: present=${!!instance.exports.__wasm_apply_data_relocs} ` +
+              `should_call_clone_callback(=clone child, NOT a fresh exec)=${should_call_clone_callback} ` +
+              `${should_call_clone_callback ? "SKIPPING (shared/COW parent memory already relocated)" : "applying"} ` +
+              `data_start=0x${Number(user_executable_params.data_start).toString(16)} ` +
+              `bin=[0x${user_executable_range ? Number(user_executable_range.bin_start).toString(16) : "?"}..` +
+              `0x${user_executable_range ? Number(user_executable_range.bin_end).toString(16) : "?"}]`,
+          );
+          if (instance.exports.__wasm_apply_data_relocs && !should_call_clone_callback) {
             instance.exports.__wasm_apply_data_relocs();
           }
           if (should_call_clone_callback) {

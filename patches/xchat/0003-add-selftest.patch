@@ -1,0 +1,96 @@
+diff --git a/src/fe-gtk/fe-gtk.c b/src/fe-gtk/fe-gtk.c
+index 251a7d7..3a7db2e 100644
+--- a/src/fe-gtk/fe-gtk.c
++++ b/src/fe-gtk/fe-gtk.c
+@@ -31,6 +31,8 @@
+ #include <gtk/gtktogglebutton.h>
+ #include <gtk/gtkmessagedialog.h>
+ #include <gtk/gtkversion.h>
++#include <gtk/gtkwindow.h>
++#include <gtk/gtknotebook.h>
+ 
+ #include "../common/xchat.h"
+ #include "../common/fe.h"
+@@ -51,6 +53,7 @@
+ #include "fkeys.h"
+ #include "plugin-tray.h"
+ #include "urlgrab.h"
++#include "../common/servlist.h"
+ 
+ #ifdef USE_XLIB
+ #include <gdk/gdkx.h>
+@@ -136,11 +139,74 @@ static const GOptionEntry gopt_entries[] =
+  {NULL}
+ };
+ 
++/* nix-wasm XChat/X11 epic M-X5 headless gate. gtk_init() over GTK2's X11
++ * backend needs a real display connection, which the node test harness
++ * doesn't have (that's what runtime/demo/node/xchat-smoke.mjs's Xvfb +
++ * xwd half is for). --selftest instead proves, DISPLAY-FREE, the two
++ * wasm-specific seams XChat's window chrome depends on, called before
++ * gtk_init() is ever reached:
++ *
++ *   1. servlist_init() — loads the real compiled-in default server list
++ *      (servlist.c's `def[]` table; no ~/.xchat2/servlist.conf exists in
++ *      a fresh guest home, so this exercises the exact fallback path a
++ *      first-run XChat takes) and asserts a well-known network ("FreeNode",
++ *      shipped in 2.8.8's built-in defaults) is present in network_list.
++ *   2. g_type_class_ref() on a couple of GTK2 widget classes XChat's main
++ *      window is built from (GtkWindow, GtkNotebook — the tab strip) —
++ *      the same gobject class_init machinery gtk2-hello proved runs
++ *      cleanly through the fpcast-emu seam, display-free (no GdkDisplay
++ *      needed for class registration, only for instantiation).
++ *
++ * Prints `XCHAT-SELFTEST: ... OK`/FAIL, exits 0/1. The real main window
++ * (a live Xvfb + xwd pixel dump) is the OTHER half of the gate, run
++ * separately by xchat-smoke.mjs without --selftest.
++ */
++static int
++xchat_run_selftest (void)
++{
++	int servlist_ok, gtk_types_ok, ok;
++	GSList *list;
++	ircnet *net;
++
++	servlist_init ();
++	servlist_ok = FALSE;
++	for (list = network_list; list; list = list->next)
++	{
++		net = list->data;
++		if (net->name && !strcmp (net->name, "FreeNode"))
++		{
++			servlist_ok = TRUE;
++			break;
++		}
++	}
++
++	g_type_class_ref (GTK_TYPE_WINDOW);
++	g_type_class_ref (GTK_TYPE_NOTEBOOK);
++	gtk_types_ok = (g_type_from_name ("GtkWindow") != 0) &&
++	               (g_type_from_name ("GtkNotebook") != 0);
++
++	ok = servlist_ok && gtk_types_ok;
++	printf ("XCHAT-SELFTEST: servlist_freenode=%d gtk_types=%d networks=%d %s\n",
++		servlist_ok, gtk_types_ok, g_slist_length (network_list),
++		ok ? "OK" : "FAIL");
++	fflush (stdout);
++	return ok ? 0 : 1;
++}
++
+ int
+ fe_args (int argc, char *argv[])
+ {
+ 	GError *error = NULL;
+ 	GOptionContext *context;
++	int i;
++
++	/* --selftest short-circuits before GOption/gtk_init -- see the
++	 * xchat_run_selftest() comment above. */
++	for (i = 1; i < argc; i++)
++	{
++		if (!strcmp (argv[i], "--selftest"))
++			return xchat_run_selftest ();
++	}
+ 
+ #ifdef ENABLE_NLS
+ 	bindtextdomain (GETTEXT_PACKAGE, LOCALEDIR);

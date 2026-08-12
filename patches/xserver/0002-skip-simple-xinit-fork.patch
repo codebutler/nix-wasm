@@ -1,0 +1,16 @@
+--- a/test/meson.build	2026-08-05 06:22:06.163316750 +0000
++++ b/test/meson.build	2026-08-05 06:22:20.535527818 +0000
+@@ -2,6 +2,13 @@
+     'simple-xinit',
+     'simple-xinit.c',
+     include_directories: inc,
++    # wasm/NOMMU (nix-wasm): simple-xinit.c calls fork() (test harness only,
++    # exercised via `meson test`/piglit, never `ninja`/`ninja install`) and
++    # musl has no fork() (docs/process-model.md) — it would otherwise fail to
++    # LINK on every build, even though nothing outside `meson test` needs it.
++    # `build_by_default: false` keeps it out of the default `ninja` target;
++    # we never invoke `meson test`, so it is simply never built.
++    build_by_default: false,
+ )
+ 
+ piglit_env = environment()

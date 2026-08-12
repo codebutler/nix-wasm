@@ -746,7 +746,6 @@ in
   # glib, so the wrapper now builds. Enabling it adds libcairo-gobject.a +
   # cairo-gobject.pc; glib is a real cross input again.
   # Still OFF (no X):
-  #   - x11Support: drags libxext/libxrender/libxcb (X11 surfaces). Off.
   #   - gtk_doc=true is set UNCONDITIONALLY in nixpkgs (needs gtk-doc/docbook,
   #     a native doc toolchain that's pointless here) → force -Dgtk_doc=false.
   #   - lzo: cairo-script surface compression; not needed. Off.
@@ -754,18 +753,37 @@ in
   # hard-requires cairo-png.pc (its configure checks `cairo-png`), and
   # rsvg-convert writes PNG through it. Cross libpng rides on zlib; strictly
   # additive to everything downstream.
+  # ON (M-X4, XChat/X11 epic): x11Support — the xlib SURFACE backend, for
+  # GTK2's gdk-x11 backend (gdk/x11/gdkdrawable-x11.c draws through a
+  # `cairo_xlib_surface_create` surface; there is no other rendering path for
+  # GTK2-on-X11). Strictly additive, same posture as the M2 freetype/
+  # fontconfig enable and the GNOME-games png enable: nothing already built
+  # (weston-flowers, the M2 text stack, GTK3) touches x11Support, so flipping
+  # it on cannot regress them — weston-flowers (image-surface-only client)
+  # is the regression gate. cairo's own package.nix ties `x11Support` to BOTH
+  # the `-Dxlib` mesonEnable AND the libxext/libxrender propagatedBuildInputs
+  # (both already cross-built — M-X0's X11 client closure), so no buildInputs
+  # work is needed here beyond un-nulling them. `xcbSupport` (cairo's own arg,
+  # defaults to `x11Support`) is pinned back to `false`: GTK2 only ever wants
+  # the plain Xlib surface (`cairo_xlib_surface_create`), never the xlib-xcb
+  # hybrid, so there is no reason to grow the runtime closure with cairo's
+  # XCB-render surface — scope this milestone to what GTK2 actually needs.
   # Result: libcairo.a + libcairo-gobject.a with CAIRO_HAS_IMAGE_SURFACE +
-  # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT; cairo.pc Requires lists freetype2 +
-  # fontconfig; cairo-gobject.pc present for GTK3.
+  # CAIRO_HAS_FT_FONT + CAIRO_HAS_FC_FONT + CAIRO_HAS_XLIB_SURFACE; cairo.pc
+  # Requires lists freetype2 + fontconfig + x11/xext/xrender;
+  # cairo-gobject.pc present for GTK3.
   cairo = whenWasm
     (p: (p.override {
-      x11Support = false;
+      x11Support = true;
+      xcbSupport = false;
       gobjectSupport = true;
-      # Null the optional inputs so meson's auto-detection can't pick them up
-      # from the sysroot even with the feature flags off.
-      # freetype + fontconfig + glib (gobjectSupport) are real cross deps.
-      libxext = null;
-      libxrender = null;
+      # libxcb stays nulled — xcbSupport=false means cairo's own package.nix
+      # never references it (`optionals xcbSupport [ libxcb ]` is empty), so
+      # this is defensive-only, same posture as before. libxext/libxrender
+      # are NO LONGER nulled: x11Support=true means cairo's own
+      # propagatedBuildInputs now wants them, and they're real cross deps
+      # (M-X0's X11 client closure) — meson's auto-detection picking them up
+      # is exactly the point now, not something to guard against.
       libxcb = null;
       lzo = null;
       gtk-doc = null;
@@ -773,8 +791,6 @@ in
     }).overrideAttrs (o: {
       mesonFlags = (o.mesonFlags or [ ]) ++ [
         "-Dgtk_doc=false"
-        "-Dxcb=disabled"
-        "-Dxlib=disabled"
         "-Dglib=enabled"
         "-Dtests=disabled"
         "-Dfreetype=enabled"
@@ -784,6 +800,11 @@ in
         # lzo backs the cairo-script surface's compression; not needed here,
         # and we nulled the input above.
         "-Dlzo=disabled"
+        # -Dxlib/-Dxcb are NOT repeated here — cairo's own package.nix already
+        # emits them deterministically from the `x11Support`/`xcbSupport` args
+        # above (`lib.mesonEnable "xlib" x11Support` / `"xcb" xcbSupport`), so
+        # duplicating the same `-D` here would be redundant at best and a
+        # meson double-definition footgun at worst.
       ];
       # nixpkgs' postInstall rewrites cairo.pc to add freetype include dirs;
       # freetype is now a real input so let the default postInstall run.
@@ -1039,6 +1060,135 @@ in
       ];
     }))
     prev.gtk3;
+
+  # --- GTK2 cross-build, X11 backend (M-X4, XChat/X11 epic) -------------------
+  # gtk+-2.24.33: the toolkit XChat (M-X5) needs. Unlike GTK3 (wayland-only,
+  # meson), GTK2 is autotools and X11 is its ONLY real backend — nixpkgs'
+  # `gdktarget` arg already defaults to "x11" on every non-Darwin host
+  # (ours included), so no override is needed there; passed explicitly below
+  # for clarity anyway.
+  #
+  # OFF:
+  #   - cupsSupport (nixpkgs default: true on Linux!) — printing needs a
+  #     cross-built cups, which nothing else in this closure wants and which
+  #     this milestone has no use for (XChat has no print feature either).
+  #   - xineramaSupport (nixpkgs default: true on Linux!) — the Xinerama
+  #     multi-monitor extension; not in the M-X0 client closure and not
+  #     needed for a single Xvfb screen.
+  #   - introspection — GTK2's autotools GOBJECT_INTROSPECTION_CHECK m4 macro
+  #     (unlike GTK3's meson `-Dintrospection=`) has no isWasm-aware
+  #     auto-disable: its default is `--enable-introspection=auto`, which
+  #     probes `gobject-introspection-1.0.pc` on the TARGET pkg-config path.
+  #     We don't cross-build gobject-introspection as a target lib, so this
+  #     would likely auto-disable anyway — but relying on that is exactly the
+  #     kind of implicit auto-detection this codebase avoids (the M2/M3a
+  #     entries in CLAUDE.md are full of "be explicit, don't trust auto").
+  #     `--disable-introspection` makes it explicit. The nativeBuildInputs
+  #     `gobject-introspection` entry is SUPPOSED to be upstream's NATIVE
+  #     (buildPackages) copy of `g-ir-scanner` via nixpkgs' usual splicing —
+  #     but it doesn't splice correctly here: `nix eval` shows it resolving
+  #     to `gobject-introspection-wrapped`, a WASM (hostPlatform.system =
+  #     "wasm32-linux") derivation, which then cascades into cross-building
+  #     python3 (for its own build) → util-linux-minimal (python's `_uuid`
+  #     module) → a hard `undefined symbol: fork` link failure (the exact
+  #     libsm/util-linux-minimal class documented above). Even if it built,
+  #     using it at build time to introspect the freshly-cross-compiled (wasm)
+  #     shared object on the x86_64 build host is impossible regardless (it
+  #     would have to dlopen a wasm .so on a non-wasm host) — so it's dropped
+  #     from nativeBuildInputs entirely, not just disabled via configure. Match
+  #     by substring (not exact name) since the mis-spliced variant carries the
+  #     "-wrapped" suffix, not the bare package name.
+  #   - devdoc/demo output — matches the M-X4 design's "no docs/devdoc
+  #     outputs" call (same posture as gtk3/cairo above): outputs trimmed to
+  #     out+dev, and the demo data dir (which nixpkgs' postInstall normally
+  #     moveToOutputs into devdoc) is just deleted instead of installed.
+  #
+  # fpcast-emu: gtk2 is exactly as gobject-heavy as gtk3 (same class of
+  # indirect-call arity mismatch documented in CLAUDE.md's "gobject class_init
+  # trap" entry) — ride the SAME shared hook via propagatedNativeBuildInputs
+  # so every gtk2 CONSUMER (gtk2-hello) auto-fpcasts its own $out/bin
+  # executables with no per-package line, exactly like gtk3's consumers.
+  #
+  # Everything gtk2 propagates (atk, cairo, gdk-pixbuf, glib, pango, plus on
+  # Linux libxcomposite/libxcursor/libxi/libxrandr/libxrender) is ALREADY
+  # cross-built: atk/cairo/gdk-pixbuf/glib/pango by M2/M3a/M3b, the five X11
+  # libs by M-X0. So — unlike gtk3, which needed x11Support=false + a pile of
+  # nulled inputs to steer AWAY from X11 — gtk2 needs no buildInputs surgery
+  # at all: its own package.nix's Linux-default propagatedBuildInputs are
+  # already exactly the right set for an X11-backed build in this closure.
+  gtk2 = whenWasm
+    (p: (p.override {
+      gdktarget = "x11";
+      cupsSupport = false;
+      xineramaSupport = false;
+    }).overrideAttrs (o: {
+      propagatedNativeBuildInputs = (o.propagatedNativeBuildInputs or [ ]) ++ [
+        fpcast.hook
+      ];
+      nativeBuildInputs = builtins.filter
+        (i: !(final.lib.hasInfix "gobject-introspection" (i.pname or i.name or "")))
+        (o.nativeBuildInputs or [ ]);
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-introspection" ];
+      # gtk+-2.24.33 is 2010s-era C: it hits clang's newer-than-gcc default
+      # ERRORS (not warnings) for `-Wincompatible-function-pointer-types` /
+      # `-Wimplicit-int` in a few spots. nixpkgs already carries the fix for
+      # this EXACT class — `patches/2.0-clang.patch`
+      # ("Fixes an incompatible function pointer conversion and implicit int
+      # errors with clang 16") plus a `NIX_CFLAGS_COMPILE` downgrade to
+      # warnings — but both are gated to `stdenv.hostPlatform.isDarwin` /
+      # `stdenv.cc.isGNU`, because historically only the Darwin build used
+      # clang. Our wasm cross stdenv is ALSO clang, so we hit the identical
+      # class nixpkgs already decided is safe to patch/downgrade — just on a
+      # host they never gated for. Re-apply the same fix, generalized to any
+      # clang host instead of Darwin specifically:
+      #   - source patch: vendor nixpkgs' own `2.0-clang.patch` verbatim
+      #     (patches/gtk2/0001-clang-incompatible-function-pointer.patch) —
+      #     it fixes the one REAL bug (gtkscale.c's GCompareFunc cast, found
+      #     by attempting the build) that clang's stricter default rejects.
+      #   - NIX_CFLAGS_COMPILE downgrade: our build compiles gdk/x11/*.c —
+      #     the X11 backend nixpkgs' darwin+quartz build never touches — so
+      #     the single upstream patch may not cover every instance in that
+      #     tree; downgrade the same two warning classes nixpkgs' own (isGNU-
+      #     only) env override already treats as non-fatal, as a defensive
+      #     backstop, not a blanket -Wno-error.
+      patches = (o.patches or [ ]) ++ [
+        ./patches/gtk2/0001-clang-incompatible-function-pointer.patch
+      ];
+      # perf/testperf (a `noinst_PROGRAMS` benchmark harness, never installed)
+      # is unconditionally in the top-level Makefile.in's `SRC_SUBDIRS` and
+      # `make all` builds it. It links the FULL gtk+gdk libs a second time via
+      # its own copy of the marshaller sources (perf/marshalers.c duplicates
+      # gtk/gtkmarshalers.c's generated `_gtk_marshal_*` symbols) — invisible
+      # on nixpkgs' normal SHARED-lib native build (the .so already resolves
+      # those symbols, so the archive member with the duplicate is never
+      # pulled in), but our all-static build extracts BOTH the direct
+      # marshalers.o and the .a's gtkmarshalers.o member, and wasm-ld (unlike
+      # a shared-lib link) errors loudly on the true duplicate definition —
+      # the same "static is a platform flag" class of static-only breakage
+      # documented at the top of this file. `perf` is a benchmark tool we
+      # categorically don't need (the "don't build an unused CLI" process-
+      # model rule); drop it from `SRC_SUBDIRS` in the pre-generated
+      # Makefile.in (this tarball ships without re-running autoreconf, so
+      # Makefile.in — not Makefile.am — is what `./configure` actually reads).
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace Makefile.in \
+          --replace-fail 'SRC_SUBDIRS = gdk gtk modules demos tests perf' \
+                         'SRC_SUBDIRS = gdk gtk modules demos tests'
+      '';
+      env = (o.env or { }) // {
+        NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "") + toString [
+          " -Wno-error=implicit-int"
+          " -Wno-error=incompatible-pointer-types"
+          " -Wno-error=incompatible-function-pointer-types"
+        ];
+      };
+      outputs = [ "out" "dev" ];
+      postInstall = ''
+        moveToOutput bin/gtk-update-icon-cache "$out"
+        rm -rf $out/share/gtk-2.0/demo
+      '';
+    }))
+    prev.gtk2;
 
   # --- kernel UAPI headers: use OUR wasm headers, not stock Linux ------------
   # The cross stdenv/musl pull nixpkgs' stock linuxHeaders (linux-6.18.7) and run
@@ -1298,6 +1448,20 @@ in
     else
       prev.l3afpad or null;
 
+  # --- xchat: M-X5 of the XChat/X11 epic — the headline IRC client over ------
+  # GTK2/X11 (see userspace/xchat.nix for the full configure/fork/fpcast
+  # rationale). nixpkgs dropped it long before our pin (no by-name/x shard at
+  # 9ae611a) — a from-scratch derivation, isWasm-guarded like l3afpad/
+  # gcalctool — no native fallback exists (null, never evaluated).
+  xchat =
+    if isWasm then
+      import ./userspace/xchat.nix {
+        cross = final;
+        pkgs = final.buildPackages;
+      }
+    else
+      prev.xchat or null;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):
@@ -1369,4 +1533,655 @@ in
       doCheck = false;
     }))
     prev.libxcb;
+
+  # --- X11 client runtime closure (M-X0, XChat/X11 epic) --------------------------
+  # Promoting libxcb from "link-only for Sommelier" to a REAL runtime dependency:
+  # the ten client-side X libraries XChat/GTK2/Xlib apps need at runtime, not just
+  # to satisfy a linker. All are plain autotools C over libxcb/libx11 and already
+  # cross-build cleanly in nixpkgs — each `package.nix` already conditions its
+  # `--enable-malloc0returnsnull` / `xorg_cv_malloc0_returns_null` autoconf hint on
+  # `stdenv.hostPlatform != stdenv.buildPlatform` (the AC_RUN_IFELSE check that
+  # can't run under cross), so no configure-flag work is needed here — this is
+  # PURELY the output-trimming + doCheck class of fix, same shape as the libxcb
+  # closure above. None of these run a test suite (no doCheck ever set true
+  # upstream); `doCheck = false` is added defensively for symmetry with the rest
+  # of this file, not because a suite was observed to run.
+  #
+  # libX11 is the one exception to "trim outputs": its `share/X11/locale` i18n
+  # tables (XLC_LOCALE / Compose data) are loaded from `$out` at RUNTIME by every
+  # Xlib client (the exact "galculator ICONDIR" lesson — CLAUDE.md's M4 entry) and
+  # must ride the served /nix closure untouched, so `$out` is left completely
+  # alone; only the "man" output (needs the xorg doc toolchain, never built here)
+  # is dropped.
+
+  # libX11: the big one. Only the "man" output needs dropping — "out" (incl. the
+  # runtime-loaded share/X11/locale tree) and "dev" build and install cleanly.
+  # Native `makekeys`/`mkks`-class codegen tools are already covered by upstream's
+  # own `depsBuildBuild = [ buildPackages.stdenv.cc ]` — no override needed there.
+  libx11 = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man") (o.outputs or [ "out" "dev" "man" ]);
+      doCheck = false;
+    }))
+    prev.libx11;
+
+  # libxext: drop "man"+"doc" (xorg doc toolchain, not in the cross closure).
+  libxext = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man" && x != "doc") (o.outputs or [ "out" "dev" "man" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxext;
+
+  # libxrender: drop "doc".
+  libxrender = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxrender;
+
+  # libxrandr: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxrandr = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxrandr;
+
+  # libxcursor: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxcursor = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxcursor;
+
+  # libxfixes: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxfixes = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxfixes;
+
+  # libxdamage: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxdamage = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxdamage;
+
+  # libxcomposite: already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxcomposite = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxcomposite;
+
+  # libxi: drop "man"+"doc". Upstream already sets `xorg_cv_malloc0_returns_null=no`
+  # on cross (a different spelling of the same AC_RUN_IFELSE dodge libx11/libxext use).
+  libxi = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "man" && x != "doc") (o.outputs or [ "out" "dev" "man" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libxi;
+
+  # libxft: already "out"+"dev" only upstream; doCheck guard for symmetry. Its
+  # fontconfig/freetype deps already cross-build (M2 text stack).
+  libxft = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxft;
+
+  # xkbcomp: Xvfb Popen()-spawns this at runtime to compile the XKB keymap
+  # (M-X1), so it rides the served closure via xorg-server's
+  # -Dxkb_bin_dir=${xkbcomp}/bin store-path reference. Like galculator's
+  # nix-support lesson (CLAUDE.md): xkbcomp is a LEAF binary here (nothing
+  # builds against it), so its propagated-build-inputs metadata
+  # (libx11-dev/libxkbfile-dev, ~5.5MB) is pure served-closure bloat.
+  xkbcomp = whenWasm
+    (p: p.overrideAttrs (o: {
+      # nix-support/propagated-build-inputs is written during fixupPhase (see
+      # galculator's postFixup above) — postInstall runs too early to catch it.
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xkbcomp;
+
+  # --- xorg-server (Xvfb) — M-X1, XChat/X11 epic ----------------------------
+  # Cross-build xorg-server 21.1.23, configured DOWN to Xvfb only. PRIME
+  # DIRECTIVE corollary 1: override nixpkgs' own `xorg-server` recipe (the
+  # galculator/l3afpad posture) rather than a from-scratch userspace/xserver.nix
+  # derivation — the meson build cross-compiles cleanly once mesonFlags and
+  # buildInputs are trimmed to what an Xvfb-only, no-GL, no-DRI, no-udev/dbus/
+  # systemd, no secure-rpc build actually needs; nothing here is xorg-server-
+  # specific integration a from-scratch recipe would do any differently.
+  #
+  # Off (per the design plan, M-X1): the Xorg/Xnest/XWin/XQuartz DDXes (and
+  # Xwayland, which isn't even this source package — see xwayland.nix, M-X3),
+  # glamor/GL/GLX, DRI1/2/3 (+ libdrm/libgbm — dropped from buildInputs
+  # entirely: `dependency('libdrm', required: false)` means the DRI logic
+  # degrades to "not available" with no build-time requirement at all once
+  # dri1/2/3 are individually forced false), udev/hal/systemd-logind (+ the
+  # dbus it would otherwise require), XDMCP + secure-rpc (libtirpc), libunwind,
+  # XSELinux (avoids libselinux/libaudit), docs (avoids the xmlto/xsltproc/
+  # xorg-sgml-doctools doc toolchain, uncrossed and unneeded).
+  # On: Xvfb, XKB (xkbcomp + xkeyboard-config — both already cross-build with
+  # NO override, verified directly). MIT-SHM stays COMPILED: musl links
+  # shmget()/shmat() fine (it's libc API, not a kernel feature check at build
+  # time), and the guest kernel has no SysV IPC — shmget() returns ENOSYS at
+  # RUNTIME and MIT-SHM clients fall back to core-protocol PutImage per the
+  # X11 protocol spec (correct, just slower). Not worth fighting at build
+  # time; revisit via memfd/ramfs if paint speed ever matters (per the plan).
+  # xcsecurity is left at meson's own default (false) — plan calls it
+  # optional either way, so there's no reason to grow the surface.
+  #
+  # sha1 is forced to `libcrypto` (our cross openssl, already built for the
+  # Cachix-over-uplink HTTPS trust-anchors work — see CLAUDE.md): musl has
+  # none of meson's other SHA1 providers (no BSD libmd SHA1Init, no
+  # CommonCrypto/CryptoAPI, no libsha1/libnettle/libgcrypt in the cross
+  # closure), so leaving it on "auto" would fail the probe loop outright.
+  #
+  # patches/xserver/0001: os/utils.c's System()/Popen()/Fopen() fork()+exec —
+  # ported to posix_spawn (docs/process-model.md handling rule 2: "a real
+  # spawn API in a library we need → port it to posix_spawn"; same shape as
+  # patches/sommelier/0001-posix-spawn.patch's pipe + posix_spawn_file_actions
+  # approach). This is load-bearing, not cosmetic: Xvfb spawns `xkbcomp`
+  # through Popen() to compile the XKB keymap on every startup.
+  # patches/xserver/0002: test/meson.build's `simple-xinit` helper (used only
+  # by `meson test`/piglit, never by `ninja`/`ninja install`) also calls
+  # fork() and — unlike the real per-DDX unit-test block further down the same
+  # file, which is correctly gated `if build_xorg` — is built UNCONDITIONALLY
+  # by meson's default target on every non-Windows host. Handling rule 1
+  # ("it's an unused CLI/tool → don't build it"), applied as a small patch
+  # since upstream gives no configure knob for it (unlike the ncurses/openssl/
+  # pcre2 cases, which already had one).
+  # patches/xserver/0003: dix/stubmain.c's `int main(int, char**, char**)` —
+  # a REAL wasm-ABI bug, found only by attempting the link. clang's wasm
+  # target canonicalizes exactly two `main` signatures to the symbol names
+  # our musl crt1.o actually calls — `main(void)` → `__main_void`,
+  # `main(int, char**)` → `__main_argc_argv` (crt1.o's own `main` is a WEAK
+  # stub forwarding to `__main_argc_argv`). The xserver's default DDX-main
+  # uses the POSIX/glibc 3-arg extension `main(int, char**, char**)` for
+  # envp, which clang does NOT canonicalize — it stays compiled under the
+  # literal name `main`, so crt1.o's `__main_argc_argv` reference is left
+  # dangling and the link fails ("undefined symbol: main"). Fix: drop to the
+  # canonical 2-arg form and read envp off the POSIX-mandated `environ`
+  # global (musl always maintains it) — a portable substitute for the 3-arg
+  # extension, not a wasm-only workaround. Confirmed by isolating a single
+  # extracted .o + a minimal repro before touching the patch (see the M-X1
+  # session notes) — worth a fork-first check should XWayland (M-X3) ever
+  # need its own DDX main with the same 3-arg shape.
+  #
+  # xkb_output_dir: nixpkgs points this at $out/share/X11/xkb/compiled, which
+  # is WRONG on this guest — the server WRITES freshly-compiled keymaps there
+  # at RUNTIME (not build time), and $out is a read-only store path served
+  # off the squashfs. Point it at a guest-writable path instead: /tmp, the
+  # same ramfs CLAUDE.md's "/dev/shm MUST be mounted" entry already documents
+  # as mandatory for NOMMU MAP_SHARED (ramfs, not tmpfs/shmem — CONFIG_SHMEM
+  # is gated off behind MMU on this kernel).
+  xorg-server = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" ]; # no "dev": nothing in this closure links against Xvfb
+      doCheck = false;
+      # fpcast-emu (the shared gobject/GTK seam, userspace/fpcast-emu.nix):
+      # boot-verified against a real guest (M-X1 session record, xvfb-smoke.mjs)
+      # that Xvfb FAULTS during device init —
+      # "RuntimeError: null function or function signature mismatch" in
+      # InitPtrFeedbackClassDeviceStruct → InitPointerDeviceStruct →
+      # CorePointerProc → ActivateDevice → InitCoreDevices → dix_main. DIX's
+      # device-feedback tables (dix/devices.c) store/call ctrl procs
+      # (PtrCtrlProcPtr et al.) through a canonical prototype that individual
+      # feedback implementations don't all match byte-for-byte — the same
+      # wasm strict-call_indirect arity-mismatch class glib's gobject
+      # class_init cast hits (CLAUDE.md's M3a/M3b entries), just via plain C
+      # function-pointer tables instead of gobject vtables. xorg-server isn't
+      # a gtk3 consumer, so it doesn't ride gtk3's propagated auto-fpcast
+      # hook — apply the pass explicitly, same shape as librsvg's explicit
+      # non-gtk3-gobject line. No dynsym-inject: Xvfb resolves nothing by
+      # name (unlike galculator's GtkBuilder .ui signal lookup), so the raw
+      # canonicalizing pass alone is the fix.
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.binaryen ];
+      # Keep the native (buildPackages) meson/ninja/pkg-config from upstream —
+      # they're already correctly split via strictDeps; only the buildInputs
+      # (target-side, cross-built) and mesonFlags need trimming.
+      buildInputs = [
+        final.xorgproto
+        final.xtrans
+        final.libxau
+        final.libxdmcp
+        final.libxcb
+        final.libx11
+        final.libxext
+        final.libxfixes
+        final.libxkbfile
+        final.libxfont_2
+        final.font-util
+        final.pixman
+        final.zlib
+        final.openssl
+      ];
+      propagatedBuildInputs = [ ];
+      patches = (o.patches or [ ]) ++ [
+        ./patches/xserver/0001-popen-posix-spawn.patch
+        ./patches/xserver/0002-skip-simple-xinit-fork.patch
+        ./patches/xserver/0003-stubmain-wasm-abi.patch
+      ];
+      mesonFlags = [
+        "-Dxorg=false"
+        "-Dxephyr=false"
+        "-Dxnest=false"
+        "-Dxwin=false"
+        "-Dxquartz=false"
+        "-Dxvfb=true"
+        "-Dglamor=false"
+        "-Dglx=false"
+        "-Ddri1=false"
+        "-Ddri2=false"
+        "-Ddri3=false"
+        "-Ddrm=false"
+        "-Dudev=false"
+        "-Dudev_kms=false"
+        "-Dhal=false"
+        "-Dsystemd_logind=false"
+        "-Dxselinux=false"
+        "-Ddocs=false"
+        "-Ddevel-docs=false"
+        "-Dxdmcp=false"
+        "-Dxdm-auth-1=false"
+        "-Dsecure-rpc=false"
+        "-Dlibunwind=false"
+        "-Ddtrace=false"
+        "-Dsha1=libcrypto"
+        "-Dlog_dir=/var/log"
+        "-Ddefault_font_path="
+        "-Dxkb_bin_dir=${final.xkbcomp}/bin"
+        "-Dxkb_dir=${final.xkeyboard-config}/share/X11/xkb"
+        "-Dxkb_output_dir=/tmp"
+      ];
+      postInstall = (o.postInstall or "") + ''
+        rm -rf $out/share/man
+      '';
+      postFixup = (o.postFixup or "") + ''
+        if [ -f "$out/bin/Xvfb" ]; then
+          ${fpcast.binaryen}/bin/wasm-opt \
+            --enable-threads --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue \
+            -pa max-func-params@128 --fpcast-emu \
+            "$out/bin/Xvfb" -o "$out/bin/Xvfb.fpcast"
+          mv "$out/bin/Xvfb.fpcast" "$out/bin/Xvfb"
+          chmod +x "$out/bin/Xvfb"
+        fi
+      '';
+    }))
+    prev.xorg-server;
+
+  # --- xeyes / xwd / xdpyinfo client apps (M-X2, XChat/X11 epic) ------------
+  # First real X11 clients against the cross-built Xvfb (M-X1): xeyes (Xlib +
+  # Xt/Xmu — a real toolkit consumer, not just libxcb like x11-probe), xwd
+  # (root-window dump — the pixel-proof source for the smoke), and xdpyinfo
+  # (server-info query). All three are plain autotools/meson C over libs that
+  # already cross; none forks/popens/systems (checked against upstream source
+  # before writing this) so none needs a process-model accommodation.
+  #
+  # New runtime libs this pulls in (beyond M-X0's ten): xeyes needs the
+  # classic Xt/Xmu toolkit pair, which drags libSM + libICE (Xt's
+  # PKG_CHECK_MODULES(XT, sm ice x11 xproto kbproto) is unconditional — Xt
+  # links ICE/SM support whether or not a session manager is ever present at
+  # runtime; the guest never sets SESSION_MANAGER so that code path is simply
+  # unreached, but it still has to LINK). xdpyinfo needs libXtst (its one
+  # *required* extra dep beyond the M-X0 closure — see the buildInputs
+  # trimming note below for the ones it does NOT need).
+
+  # libice: pure autotools C, no tests, no libuuid/system deps of its own.
+  libice = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+    }))
+    prev.libice;
+
+  # libsm: `--without-libuuid` + DROP libuuid from buildInputs — upstream's
+  # uuid support (AC_ARG_WITH(libuuid, …)) is a client-ID *generation
+  # strategy*, not a hard functional need: with it off, sm_genid.c falls
+  # through to its TCPCONN fallback (gethostname + getaddrinfo + a static
+  # counter — plain libc, no fork/system; verified against the vendored
+  # sm_genid.c before writing this override). nixpkgs' package.nix lists
+  # `libuuid` (= util-linux-minimal's output) in buildInputs unconditionally,
+  # and Nix realizes every buildInput regardless of whether configure ends up
+  # using it — so the configure flag ALONE is not enough, util-linux-minimal
+  # still gets built as an input and it does NOT cross (confirmed by
+  # attempting it: `sys-utils/switch_root.o: undefined symbol: fork` — a real
+  # fork() call site in an unrelated CLI bundled in the same derivation,
+  # exactly the "don't build an unused CLI" process-model rule,
+  # docs/process-model.md). Drop libuuid from buildInputs entirely so it's
+  # never realized; this is the SAME "don't cross something we don't
+  # actually need" call this milestone made for libXaw/xinerama/xpresent/
+  # xxf86dga/xxf86vm, not a workaround for a build failure we're trying to
+  # route around.
+  libsm = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      buildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "util-linux-minimal")
+        (o.buildInputs or [ ]);
+      # `overrideAttrs` merges onto the ALREADY-PROCESSED final attrs of
+      # `prev.libsm` — so `propagatedBuildInputs` here already carries
+      # nixpkgs' multiple-outputs `_multioutPropagateDev` auto-propagation
+      # (it adds every "dev"-output-having buildInput, baked in when
+      # `prev.libsm` was first built with libuuid still present). Filtering
+      # `buildInputs` alone does NOT retroactively re-run that hook, so
+      # util-linux-minimal-dev survives in propagatedBuildInputs unless
+      # filtered here too (confirmed by attempting the build with only the
+      # buildInputs filter: util-linux-minimal was still realized as a
+      # propagated dep and failed the same `undefined symbol: fork`).
+      propagatedBuildInputs = builtins.filter
+        (i: (i.pname or i.name or "") != "util-linux-minimal")
+        (o.propagatedBuildInputs or [ ]);
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--without-libuuid" ];
+      doCheck = false;
+    }))
+    prev.libsm;
+
+  # libxt: the X Toolkit Intrinsics library. Already conditions
+  # `--enable-malloc0returnsnull` on cross (same AC_RUN_IFELSE dodge as
+  # libx11/libxext/libxi), so no configure-flag work needed here — purely the
+  # output-trimming class of fix. "devdoc" needs the xorg doc toolchain
+  # (xmlto/docbook), never built here.
+  libxt = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "devdoc") (o.outputs or [ "out" "dev" "devdoc" ]);
+      doCheck = false;
+      # Dropping the doc output leaves libXt's specs/ install with an EMPTY
+      # docdir -> `mkdir -p '/share/doc/libXt'`. That "worked" in a sandboxed
+      # local build (the mkdir lands in the sandbox's private tmpfs /) and
+      # only failed loudly on CI's sandbox-less unprivileged builder — so
+      # disable the docs/specs install outright instead of relying on where
+      # the stray mkdir happens to land.
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-docs" "--disable-specs" ];
+    }))
+    prev.libxt;
+
+  # libxmu: X miscellaneous utility routines (Xt-based helpers xeyes' Eyes.c
+  # uses). "doc" dropped for the same reason as libxt's "devdoc".
+  libxmu = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = builtins.filter (x: x != "doc") (o.outputs or [ "out" "dev" "doc" ]);
+      doCheck = false;
+      # Same empty-docdir trap as libxt above (libXmu also ships a specs/
+      # tree): keep the docs install off rather than pointed at "/share".
+      configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-docs" "--disable-specs" ];
+    }))
+    prev.libxmu;
+
+  # libxtst: XTEST + RECORD extension client lib — xdpyinfo's one *required*
+  # extra dependency (its meson.build: `dependency('xtst', required: true)`).
+  # Already "out"+"dev" only upstream; doCheck guard for symmetry.
+  libxtst = whenWasm
+    (p: p.overrideAttrs (_o: {
+      doCheck = false;
+    }))
+    prev.libxtst;
+
+  # xeyes: pure Xlib/Xt client (the spiritual sibling of vendored wl-eyes) —
+  # nothing here it forks/popens/systems (checked upstream Eyes.c/xeyes.c/
+  # transform.c before writing this override). Leaf binary (nothing builds
+  # against it) shipped via environment.systemPackages, so its
+  # nix-support/propagated-build-inputs metadata (libxt-dev/libxmu-dev/…) is
+  # pure served-closure bloat — the galculator/xkbcomp lesson (CLAUDE.md).
+  # No fpcast-emu here: unlike Xvfb's DIX device-feedback tables (heterogeneous
+  # C function-pointer arities aliased through one slot), Xt's dispatch
+  # surfaces (XtCallbackProc, XtActionProc, widget class procs) are each
+  # called through ONE consistently-typed typedef throughout the toolkit — a
+  # different shape from the class of bug fpcast-emu exists for. Not
+  # boot-verified yet (M-X2 build-only per this session's scope); if the
+  # guest ever traps with "null function or function signature mismatch"
+  # inside Xt/Xmu, that is the seam to revisit — see xorg-server's fpcast
+  # entry above for the fix shape.
+  xeyes = whenWasm
+    (p: p.overrideAttrs (o: {
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xeyes;
+
+  # xwd: root-window dump utility — plain autotools over libx11 + libxkbfile
+  # (both already crossed). Leaf binary; same nix-support trim as xeyes.
+  xwd = whenWasm
+    (p: p.overrideAttrs (o: {
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xwd;
+
+  # xdpyinfo: server-info query utility, meson-built. Upstream's
+  # nixpkgs package.nix lists ELEVEN buildInputs, but its own meson.build
+  # marks all but six of them `required: false, disabler: true` (xtst/x11-xcb/
+  # xcb/xext/x11/xproto are the only `required: true` deps — verified by
+  # reading the vendored meson.build source before writing this override).
+  # Trim buildInputs down to those six PLUS the M-X0 optional extensions we
+  # already cross for free (libxi/libxrender/libxcomposite/libxrandr) —
+  # dropping libxinerama/libxpresent/libxxf86dga/libxxf86vm, which meson
+  # gracefully disables (`.found() == false`) rather than failing on. This is
+  # the same "question whether it's really needed before crossing it" call
+  # this milestone made for libXaw (xeyes/xwd/xdpyinfo need none of it): four
+  # more small X extension libs would cross fine, but nothing in this
+  # milestone's proof (xeyes rendering + xdpyinfo's PASS line) needs their
+  # info, so they're left uncrossed.
+  xdpyinfo = whenWasm
+    (p: p.overrideAttrs (o: let
+      trimmedInputs = [
+        final.libx11
+        final.libxcb
+        final.libxext
+        final.libxtst
+        final.libxi
+        final.libxrender
+        final.libxcomposite
+        final.libxrandr
+        final.xorgproto
+      ];
+    in {
+      buildInputs = trimmedInputs;
+      # isStatic packages default propagatedBuildInputs to mirror the FULL
+      # (pre-override) buildInputs list — confirmed by attempting the trim
+      # with only `buildInputs` overridden: meson's `dependency('xxf86dga',
+      # required: false)` still FOUND + linked libXxf86dga because its .pc
+      # was still reachable through propagatedBuildInputs' PKG_CONFIG_PATH
+      # contribution, and the link failed the same `undefined symbol: fork`
+      # (libXxf86dga wraps XF86DGA, an old server-extension client lib that
+      # forks internally). Overriding propagatedBuildInputs too closes that
+      # back door.
+      propagatedBuildInputs = trimmedInputs;
+      doCheck = false;
+      postFixup = (o.postFixup or "") + ''
+        rm -rf $out/nix-support
+      '';
+    }))
+    prev.xdpyinfo;
+
+  # libxcvt (M-X3, XChat/X11 epic): Xwayland's ONE new required dep beyond the
+  # M-X1/M-X2 X11 closure (`dependency('libxcvt', required: true)`, unconditional
+  # in its meson.build). nixpkgs marks it `badPlatforms = [ isStatic ]` — its
+  # lib/meson.build hardcodes `shared_library()` regardless of meson's
+  # `default_library` option, so on our all-static crossSystem the standalone
+  # `cvt` tool tried to link against a wasm .so and hit the general-dynamic-TLS
+  # `__musl_tp` problem (CLAUDE.md's "Static is a PLATFORM flag" entry) —
+  # confirmed by attempting the plain cross-build before writing this patch.
+  # Fix: `library()` is meson's generic helper that DOES respect
+  # `default_library`; one-line source patch, not a per-package static flag
+  # (none exists — this isn't a configure option, meson picked a literal type).
+  libxcvt = whenWasm
+    (p: p.overrideAttrs (o: {
+      patches = (o.patches or [ ]) ++ [ ./patches/libxcvt/0001-static-library.patch ];
+      doCheck = false;
+    }))
+    prev.libxcvt;
+
+  # --- Xwayland (M-X3, XChat/X11 epic) --------------------------------------
+  # Cross-build Xwayland 24.1.12 — a SEPARATE upstream release from the
+  # xorg-server 21.1.23 tarball that builds Xvfb (M-X1): since the freedesktop
+  # xserver/Xwayland split, "xwayland" ships its own tarball containing only
+  # the Xwayland + (a second, unused-here) Xvfb DDX, not the full xserver
+  # monorepo (no Xorg/Xnest/XWin/XQuartz code at all in this tree — confirmed
+  # by reading its meson_options.txt/meson.build before writing this override,
+  # not assumed from the M-X1 xorg-server shape). PRIME DIRECTIVE corollary 1:
+  # override nixpkgs' own `xwayland` recipe (the galculator/l3afpad/xorg-server
+  # posture) rather than a from-scratch userspace/xwayland.nix derivation.
+  #
+  # Off: glamor/GL/GLX/DRI3/libdrm-accel (no GPU on the guest — libepoxy is
+  # built no-GL and minigbm is an abort-stub per the sommelier learnings
+  # entry; `-Dglamor=false` alone drops the gbm/epoxy/libdrm(accel)/xshmfence
+  # requirement — verified via the tree's meson.build `if build_glamor` gates
+  # before writing this), libei/emulated-input, libdecor, XDMCP, secure-rpc,
+  # systemd-notify, XSELinux, docs/devel-docs, libunwind (already off under
+  # useLLVM), this tree's OWN Xvfb (`-Dxvfb=false` — we already have one from
+  # M-X1; building a second here would be pure duplication).
+  # On: rootless wl_shm Xwayland (sommelier always passes `-shm -rootless`),
+  # XKB (xkbcomp + xkeyboard-config — the SAME cross-built paths Xvfb already
+  # uses), MIT-SHM left at its build default (matches Xvfb: compiles fine,
+  # ENOSYS's at runtime with no guest SysV IPC, clients fall back to
+  # core-protocol PutImage — not worth fighting per the M-X1 plan).
+  #
+  # sha1=libcrypto: same reasoning as Xvfb — musl has none of meson's other
+  # SHA1 providers in this cross closure.
+  #
+  # patches/xwayland/0001: os/utils.c's Popen() fork()+exec, ported to
+  # posix_spawn — this tree's Popen has DRIFTED far enough from 21.1.23's
+  # (verified: `patch --fuzz=0` of xserver's 0001 fails 4/6 hunks against this
+  # tree) that it needs its own patch rather than reuse; the actual C change
+  # is the same posix_spawn shape (docs/process-model.md handling rule 2).
+  # Note this tree's Popen is the ONLY fork site that matters here — unlike
+  # 21.1.23, this tree's non-Windows build has no separate System() function
+  # at all (xkb/ddxLoad.c's System() call is inside `#ifdef WIN32`; verified
+  # by reading ddxLoad.c before writing this comment), so no analogous System
+  # patch is needed.
+  # patches/xwayland/0002: test/meson.build's `simple-xinit` helper — same
+  # "unused CLI, unconditionally built by `ninja`" issue as xserver's 0002,
+  # but this tree's file has an extra `dependencies:` line so the context
+  # drifted too; same fix (`build_by_default: false`), separate patch.
+  # patches/xwayland/0003: dix/stubmain.c's 3-arg `main` — BYTE-IDENTICAL file
+  # to xserver's copy (diffed before writing this comment), so the same
+  # clang-wasm-ABI fix (patches/xserver/0003) applies verbatim; kept as its
+  # own file per vendor-tree-owns-its-patches convention rather than shared.
+  #
+  # postPatch: nixpkgs' own package.nix rewrites the os/utils.c Popen() exec
+  # target from the literal "/bin/sh" to `${bash}/bin/sh` — but this overlay
+  # ALREADY redirects `bash` to `buildPackages.bash` (the native x86_64 build
+  # tool) for wasm cross builds, for build-time helper scripts (see the `bash`
+  # entry near the top of this file) — baking THAT path into Xwayland would
+  # embed a native x86_64 ELF path into the wasm guest binary, unusable at
+  # guest runtime. Drop nixpkgs' postPatch entirely: the guest DOES have a
+  # real `/bin/sh` (busybox's forkshell ash, promoted to /bin/sh in
+  # bootstrap.nix per CLAUDE.md's "In-guest autotools" note), so the tree's
+  # original literal is already correct for this target and needs no rewrite.
+  #
+  # buildInputs: fully replaced (not appended — nixpkgs' own list pulls in
+  # dri-pkgconfig-stub/egl-wayland/libdecor/libgbm/libepoxy/libei/libGL/libGLU/
+  # libxres/libtirpc/systemd, none of which a glamor-less wl_shm-only build
+  # needs) with the minimal set this tree's meson.build actually requires with
+  # every optional feature off: the same X11/XKB/font stack Xvfb already
+  # cross-builds, PLUS libxcvt (unconditionally `required: true` in this
+  # tree — cross-builds with no override needed, confirmed standalone) and
+  # wayland/wayland-protocols (Xwayland is fundamentally a Wayland client).
+  #
+  # No dynsym-inject: like Xvfb, Xwayland resolves nothing by name (unlike
+  # galculator's GtkBuilder .ui lookup) — the raw fpcast-emu canonicalizing
+  # pass alone is the fix for its DIX device-feedback vtable casts (SAME
+  # dix/devices.c code Xvfb hit — see xorg-server's fpcast-emu comment above;
+  # both trees share this file nearly verbatim).
+  xwayland = whenWasm
+    (p: p.overrideAttrs (o: {
+      outputs = [ "out" ]; # no "dev": nothing in this closure links against Xwayland
+      doCheck = false;
+      postPatch = ""; # see the postPatch note above — do NOT inherit o.postPatch
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ fpcast.binaryen ];
+      buildInputs = [
+        final.xorgproto
+        final.xtrans
+        final.libxau
+        final.libxdmcp
+        final.libxcb
+        final.libx11
+        final.libxext
+        final.libxfixes
+        final.libxkbfile
+        final.libxfont_2
+        final.font-util
+        final.libxcvt
+        # miext/sync/misyncshm.c unconditionally #includes <X11/xshmfence.h>
+        # (the SYNC extension's shm-fence support — not gated behind glamor/
+        # dri3/mitshm at all; found by attempting the build before adding
+        # this). Link-only in practice (glamor=false means nothing calls the
+        # fence-wait path at runtime), but the header + .a must be present.
+        final.libxshmfence
+        # hw/xwayland/xwayland-window.h unconditionally #includes <xf86drm.h>
+        # (found by attempting the build): header-only need here — glamor is
+        # off, so the DRM-lease/dmabuf code paths this guards never execute.
+        # Reuse the SAME link-only libdrm stub Sommelier already established
+        # (see the "Sommelier link-only cross closure" entry in CLAUDE.md) —
+        # not a new dependency class.
+        final.libdrm
+        final.pixman
+        final.wayland
+        final.wayland-protocols
+        final.zlib
+        final.openssl
+      ];
+      propagatedBuildInputs = [ ];
+      patches = [
+        ./patches/xwayland/0001-popen-posix-spawn.patch
+        ./patches/xwayland/0002-skip-simple-xinit-fork.patch
+        ./patches/xwayland/0003-stubmain-wasm-abi.patch
+      ];
+      mesonFlags = [
+        "-Dxvfb=false"
+        "-Dglamor=false"
+        "-Dglx=false"
+        "-Ddri3=false"
+        "-Dxwayland_ei=false"
+        "-Dlibdecor=false"
+        "-Dxdmcp=false"
+        "-Dxdm-auth-1=false"
+        "-Dsecure-rpc=false"
+        "-Dsystemd_notify=false"
+        "-Dxselinux=false"
+        "-Ddocs=false"
+        "-Ddevel-docs=false"
+        "-Ddocs-pdf=false"
+        "-Dlibunwind=false"
+        "-Ddtrace=false"
+        "-Dsha1=libcrypto"
+        "-Ddefault_font_path="
+        "-Dxkb_bin_dir=${final.xkbcomp}/bin"
+        "-Dxkb_dir=${final.xkeyboard-config}/share/X11/xkb"
+        "-Dxkb_output_dir=/tmp"
+      ];
+      postInstall = (o.postInstall or "") + ''
+        rm -rf $out/share/man
+      '';
+      postFixup = (o.postFixup or "") + ''
+        # Leaf binary shipped via environment.systemPackages (nothing builds
+        # against it) — same nix-support bloat trim as galculator/xkbcomp/
+        # xeyes/xwd/xdpyinfo above (CLAUDE.md's galculator lesson).
+        rm -rf $out/nix-support
+        if [ -f "$out/bin/Xwayland" ]; then
+          ${fpcast.binaryen}/bin/wasm-opt \
+            --enable-threads --enable-bulk-memory --enable-mutable-globals \
+            --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue \
+            -pa max-func-params@128 --fpcast-emu \
+            "$out/bin/Xwayland" -o "$out/bin/Xwayland.fpcast"
+          mv "$out/bin/Xwayland.fpcast" "$out/bin/Xwayland"
+          chmod +x "$out/bin/Xwayland"
+        fi
+      '';
+    }))
+    prev.xwayland;
 }

@@ -42,8 +42,27 @@
 #
 # IMPORTANT — --remote is MANDATORY on `wrangler r2 object put`. Without it
 # wrangler 4.x writes to the local simulator and the live URL 404s.
+#
+# The linux.iso goes up via RCLONE, not wrangler: `wrangler r2 object put` caps
+# at 300 MiB and the image passed that when the X11 stack landed (~340 MiB). That
+# needs R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (an R2 token's S3 keys) and
+# CLOUDFLARE_ACCOUNT_ID, alongside CLOUDFLARE_API_TOKEN for the small objects.
 
 set -euo pipefail
+
+# Wrangler is PINNED. `bunx wrangler` (unpinned) resolves to the newest release,
+# and on 2026-08-11 that broke the publish outright:
+#
+#     error: No version matching "5.20260804.1-alpha" found for specifier
+#            "miniflare" (but package exists)
+#     error: miniflare@5.20260804.1-alpha failed to resolve
+#
+# A transitive alpha dep of a newer wrangler stopped resolving, so a release
+# path failed for reasons unrelated to what was being released. 4.119.0 is the
+# version this script last published successfully with. Same lesson as the
+# unpinned xkeyboard-config clone: never leave a tool floating in a path you
+# need to be reproducible.
+WRANGLER=wrangler@4.119.0
 
 NIX_CMD="${NIX_CMD:-nix}"
 NIX="$NIX_CMD --extra-experimental-features 'nix-command flakes'"
@@ -57,6 +76,29 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # ---------------------------------------------------------------------------
 # 1. Build the channel image + toolchain cache
 # ---------------------------------------------------------------------------
+# ---- PREFLIGHT (before the ~1 hour build) ---------------------------------
+# Everything the upload needs is checked HERE, not after the build. Both of the
+# failures that cost a full build cycle in this epic were discoverable in
+# milliseconds: the workflow not passing R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY,
+# and rclone simply not being installed on the runner ("rclone: command not
+# found", exit 127) -- each surfaced only at the upload step, an hour in.
+# Runs in DRY_RUN too: validating the release environment is precisely what a
+# dry run is for.
+echo "==> preflight (tools + credentials) …"
+command -v rclone >/dev/null || {
+  echo "ERROR: rclone is not installed. linux.iso is uploaded with rclone" >&2
+  echo "       (it outgrew wrangler's 300 MiB single-file cap). In CI add:" >&2
+  echo "         - run: curl -fsSL https://rclone.org/install.sh | sudo bash" >&2
+  exit 1
+}
+_wr="$(bunx "$WRANGLER" --version 2>&1)" || {
+  echo "ERROR: $WRANGLER failed to run:" >&2; echo "$_wr" >&2; exit 1; }
+: "${CLOUDFLARE_API_TOKEN:?wrangler needs CLOUDFLARE_API_TOKEN}"
+: "${CLOUDFLARE_ACCOUNT_ID:?needed for the R2 S3 endpoint and wrangler}"
+echo "    rclone   $(rclone version 2>/dev/null | head -1)"
+echo "    wrangler $_wr"
+echo "    credentials present"
+
 echo "==> Building .#linux-image …"
 # shellcheck disable=SC2086
 IMG_STORE=$(eval "$NIX build .#linux-image --print-out-paths --no-link")
@@ -123,18 +165,20 @@ fi
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "==> DRY-RUN (CLOUDFLARE_API_TOKEN unset or DRY_RUN=true) — wrangler commands that WOULD run:"
   echo ""
-  echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/linux.iso\" \\"
-  echo "    --file \"$ISO\" --content-type application/x-iso9660-image --remote"
+  echo "  # rclone (not wrangler): the image is >300 MiB, wrangler's hard cap"
+  echo "  rclone copyto \"$ISO\" \"r2:$BUCKET/linux/$VERSION/linux.iso\" \\"
+  echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
+  echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo ""
   echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
   ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
       REL="${f#./}"
-      echo "  bunx wrangler r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
+      echo "  bunx $WRANGLER r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
       echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
     done )
   echo ""
   echo "  # flip the pointer LAST (served no-cache → picked up immediately)"
-  echo "  printf '%s' '<latest.json above>' | bunx wrangler r2 object put \\"
+  echo "  printf '%s' '<latest.json above>' | bunx $WRANGLER r2 object put \\"
   echo "    \"$BUCKET/linux/latest.json\" --file - --content-type application/json --remote"
   echo ""
   echo "==> version=$VERSION minEngine=$MIN_ENGINE bytes=$BYTES"
@@ -152,7 +196,7 @@ fi
 # first run silently published nothing while the job went green. Catch that here
 # (grep the output, not just the exit code) and fail loudly before relying on it.
 echo "==> wrangler preflight …"
-WRANGLER_OUT="$(bunx wrangler --version 2>&1)" || { echo "ERROR: wrangler failed to run:" >&2; echo "$WRANGLER_OUT" >&2; exit 1; }
+WRANGLER_OUT="$(bunx "$WRANGLER" --version 2>&1)" || { echo "ERROR: wrangler failed to run:" >&2; echo "$WRANGLER_OUT" >&2; exit 1; }
 case "$WRANGLER_OUT" in
   *"requires at least Node"*|*"Wrangler requires"*)
     echo "ERROR: wrangler cannot run in this environment:" >&2; echo "$WRANGLER_OUT" >&2; exit 1;;
@@ -160,8 +204,78 @@ esac
 echo "    wrangler $WRANGLER_OUT"
 
 echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
-bunx wrangler r2 object put "$BUCKET/linux/$VERSION/linux.iso" \
-  --file "$ISO" --content-type application/x-iso9660-image --remote
+# rclone, NOT wrangler: `wrangler r2 object put` hard-caps at 300 MiB, and the
+# channel image crossed that when the X11 stack (Xwayland/sommelier/GTK2/XChat)
+# landed -- it is ~340 MiB now and only grows. rclone talks R2's S3 endpoint and
+# does multipart automatically. Same remedy the big-disc workflows already use
+# (see .claude/rules/disc-packages.md in pc). Needs an R2 API token's S3 keys
+# (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) -- a DIFFERENT credential from
+# CLOUDFLARE_API_TOKEN, which has no r2 scope.
+#
+# NOTE: keep apostrophes OUT of the ${var:?...} messages below -- bash does
+# quote processing on that word, so a lone ' opens a quote and swallows the
+# following line (it did exactly that on the first CI run).
+#
+# --no-check-dest is REQUIRED, not an optimisation: rclone HEADs the destination
+# first, and R2 answers 403 (not 404) for a HeadObject on a MISSING key when the
+# token cannot list the bucket -- so the FIRST publish of any new version dies
+# with "operation error S3: HeadObject ... 403 Forbidden". Skipping the stat is
+# correct anyway: the key is immutable and content-addressed.
+# WHICH credential can write $BUCKET is the crux here, and it is not obvious.
+# Everything this script writes to pc-packages had always gone through wrangler
+# + CLOUDFLARE_API_TOKEN; master publishes fine because master's linux.iso is
+# under wrangler's 300 MiB cap. Moving the ISO to rclone introduced a NEW
+# requirement -- S3 credentials with write access to pc-packages -- that nobody
+# had ever needed. This repo's R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY belong to
+# nix-wasm-previews (pr-preview.yml's own sync), so against pc-packages they
+# 403: first on the bucket check (CreateBucket), then on CreateMultipartUpload.
+#
+# So prefer credentials that are actually scoped to the PACKAGES bucket, and
+# otherwise derive S3 creds from CLOUDFLARE_API_TOKEN -- the credential that
+# demonstrably can write this bucket, since wrangler uses it for the catalogs
+# and the pointer. R2's documented derivation (same one pc's
+# scripts/screenshot-upload.sh uses): access key id = the token's ID, secret
+# access key = SHA-256 hex of the token value.
+: "${CLOUDFLARE_ACCOUNT_ID:?rclone needs CLOUDFLARE_ACCOUNT_ID for the S3 endpoint}"
+if [ -n "${R2_PACKAGES_ACCESS_KEY_ID:-}" ] && [ -n "${R2_PACKAGES_SECRET_ACCESS_KEY:-}" ]; then
+  echo "    S3 creds: R2_PACKAGES_* (explicitly scoped to $BUCKET)"
+  _s3_id="$R2_PACKAGES_ACCESS_KEY_ID"; _s3_secret="$R2_PACKAGES_SECRET_ACCESS_KEY"
+else
+  echo "    S3 creds: derived from CLOUDFLARE_API_TOKEN (R2 documented derivation)"
+  _tok_id="$(curl -fsS -m 30 -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+      https://api.cloudflare.com/client/v4/user/tokens/verify 2>/dev/null \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("result",{}).get("id",""))' 2>/dev/null || true)"
+  if [ -z "$_tok_id" ]; then
+    echo "ERROR: could not resolve the CLOUDFLARE_API_TOKEN id from /user/tokens/verify," >&2
+    echo "       so S3 credentials for $BUCKET cannot be derived." >&2
+    echo "       Fix: mint an R2 API token with Object Read & Write on $BUCKET and set" >&2
+    echo "       R2_PACKAGES_ACCESS_KEY_ID / R2_PACKAGES_SECRET_ACCESS_KEY as repo secrets." >&2
+    echo "       (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are scoped to the PREVIEW bucket" >&2
+    echo "        and cannot write $BUCKET -- that is what the 403s were.)" >&2
+    exit 1
+  fi
+  _s3_id="$_tok_id"
+  _s3_secret="$(printf '%s' "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)"
+fi
+export RCLONE_CONFIG_R2_TYPE=s3
+export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$_s3_id"
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$_s3_secret"
+export RCLONE_CONFIG_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+# --s3-no-check-bucket AND --no-check-dest are BOTH required, and they cover
+# DIFFERENT probes; either one alone still 403s on a bucket-scoped R2 token:
+#   --s3-no-check-bucket : skip the bucket check, which rclone escalates to
+#                          CreateBucket -> "operation error S3: CreateBucket,
+#                          StatusCode: 403, AccessDenied" (the token may write
+#                          objects in one bucket, not create buckets).
+#   --no-check-dest      : skip the destination HeadObject. R2 returns 403, not
+#                          404, for a HEAD on a MISSING key when the token
+#                          cannot list the bucket -- so the first upload of any
+#                          new version would fail. Skipping it is right anyway:
+#                          the key is immutable and content-addressed.
+rclone copyto "$ISO" "r2:$BUCKET/linux/$VERSION/linux.iso" \
+  --header-upload "Content-Type: application/x-iso9660-image" \
+  --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
 
 # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
 # new-CLI indexes, which are nix-wasm artifacts NOT present in Cachix. The heavy
@@ -175,7 +289,7 @@ echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$
 ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
     REL="${f#./}"
     echo "  uploading nix-cache/$REL …"
-    bunx wrangler r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
+    bunx "$WRANGLER" r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
       --file "$CACHE/$REL" --content-type application/octet-stream --remote
   done )
 
@@ -192,7 +306,7 @@ echo "==> Flipping pointer → $BUCKET/linux/latest.json …"
 TMP_LATEST="$(mktemp)"
 trap 'rm -f "$TMP_LATEST"' EXIT
 printf '%s' "$LATEST_JSON" > "$TMP_LATEST"
-bunx wrangler r2 object put "$BUCKET/linux/latest.json" \
+bunx "$WRANGLER" r2 object put "$BUCKET/linux/latest.json" \
   --file "$TMP_LATEST" --content-type application/json --remote
 
 # Verify the flip actually landed (latest.json is served no-cache). Belt-and-

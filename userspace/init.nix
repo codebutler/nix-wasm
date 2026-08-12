@@ -38,6 +38,42 @@ let
   # Guard on /dev/wl0 so a kernel without virtwl doesn't hot-respawn; the trailing
   # `sleep 5` backs off if Sommelier ever exits (same pattern as syslogd above).
   waylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier --parent >>/var/log/sommelier.log 2>&1; sleep 5'";
+  # M-X3 (XChat/X11 epic): a SECOND, independent Sommelier instance dedicated
+  # to X11 forwarding (-X). This is NOT a peer of the --parent daemon above —
+  # sommelier's `--parent` mode returns immediately into its own accept loop
+  # (sl_run_parent) and never reaches the "spawn xwayland" code path at all,
+  # and the flags it forwards to per-client peer instances (sommelier.cc's
+  # posix_spawn-ported peer-spawn block) do NOT include -X/--xwayland-path —
+  # verified by reading sommelier.cc before writing this comment. So X
+  # support is architecturally a separate, standalone `sommelier -X` process
+  # that opens its OWN connection to the host compositor via /dev/wl0 (virtwl
+  # supports multiple concurrent contexts — VIRTIO_WL_CMD_VFD_NEW_CTX; every
+  # wl-eyes/wl-anim/wl-input-probe run already opens a second one alongside
+  # this daemon) and spawns/owns Xwayland itself; X CLIENT apps then connect
+  # over Xwayland's own X11 socket, never through this Sommelier's Wayland
+  # socket. `--x-display=1` forces a deterministic DISPLAY=:1 (xdisplay=0
+  # behaves identically to "unset" in sommelier.cc's `if (xdisplay > 0)`
+  # gate, so it must be >=1) — distinct from Xvfb's own :9 in the M-X1/M-X2
+  # smokes, so the two servers are trivially distinguishable in a client's
+  # `xdpyinfo` output. No --xwayland-path= needed: userspace/sommelier.nix
+  # bakes the matching cross-built Xwayland's store path in as the build-time
+  # default. Same /dev/wl0 guard + respawn/backoff shape as waylandLine;
+  # ${xwayland}/bin/Xwayland only becomes reachable once the served /nix
+  # squashfs is mounted, so an early respawn attempt harmlessly retries.
+  #
+  # NO trailing `[program]`: this is a standing X SERVER, not an X session
+  # running one app. Stock sommelier requires a `[program]` even under -X and
+  # execs it as the session leader when Xwayland signals display-ready
+  # (`sl_handle_display_ready_event`), which is the "run this app under X"
+  # shape ChromeOS uses (`sommelier -X … /usr/bin/some-app`). We want a
+  # daemon that simply serves :1 for whatever connects later, and sommelier
+  # itself (Xwayland + the XWM) IS that service — there is no leader to run.
+  # patches/sommelier/0004 makes server-only a first-class mode; see its
+  # comment in userspace/sommelier.nix for why a filler program was the wrong
+  # answer (the first attempt passed a bogus `x11-unused`, whose failed exec
+  # asserted and killed X: `Assertion failed: …display_ready_event`, leaving
+  # only `sommelier --parent` in the guest's `ps`).
+  xwaylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier -X --x-display=1 >>/var/log/sommelier-x.log 2>&1; sleep 5'";
   # ninepd: the read-only 9P rootfs server behind pc's /Linux mount (pc#472).
   # Dials OUT to the host on vsock 1025 and serves the LIVE guest filesystem —
   # Filer browsing + the tray launcher's .desktop reads. INITRAMFS-absolute
@@ -51,4 +87,4 @@ let
   # space and busybox then reads the tty id as whitespace ("can't open /dev/  ").
 in
 pkgs.writeText "inittab"
-  (lib.concatStringsSep "\n" ([ syslogLine waylandLine ninepdLine ] ++ consoleLines) + "\n")
+  (lib.concatStringsSep "\n" ([ syslogLine waylandLine xwaylandLine ninepdLine ] ++ consoleLines) + "\n")

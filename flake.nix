@@ -64,6 +64,11 @@
       kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
       # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
       kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
+      # Worker #7 spawn-corruption investigation: the shipped-default NOMMU
+      # kernel + CONFIG_DEBUG_NOMMU_REGIONS/CONFIG_DEBUG_VM. Byte-identical to
+      # `kernel` except for kernel .config debug options — no ABI/behavior
+      # change, so it can boot the SAME initramfs/squashfs as a stock preview.
+      kernelDebugNommu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; debugNommu = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
       # ccache). Same derivations as kernelLlvm/kernelCC/kernel except the patched
@@ -295,6 +300,42 @@
         inherit cross;
       };
 
+      # Reduced reproducer for the posix_spawn() parent-static-memory
+      # corruption found while debugging Xvfb's xkbcomp spawn (worker #6,
+      # xchat-irc-setup epic): a large patterned static array + a same-size
+      # heap buffer, posix_spawn() a trivial self-exec'd child, rescan both
+      # after waitpid. See userspace/spawn-canary-test.c.
+      spawnCanaryTest = import ./userspace/spawn-canary-test.nix {
+        inherit cross;
+      };
+
+      # Diagnostic-only variant (worker #7, third shift) of round 5's threaded
+      # canary (spawn-canary-test.c): swaps the busy-compute+sched_yield()
+      # loop for a usleep()-based one, everything else identical. Isolates
+      # "a busy-compute loop starves the scheduler" (round 5's actual finding
+      # — see spawn-canary-test.c's round-5 doc comment) from "any live
+      # secondary thread breaks posix_spawn" (ruled out: this variant runs
+      # completely clean). Not wired into initramfsExtraBins — a standalone
+      # regression/repro tool for the scheduler-starvation finding, not part
+      # of the gating boot-smoke.
+      spawnCanaryTestDiagSleep = cross.stdenv.mkDerivation {
+        pname = "spawn-canary-test-diag-sleep";
+        version = "0.1.0";
+        dontUnpack = true;
+        dontConfigure = true;
+        buildPhase = ''
+          runHook preBuild
+          $CC -O2 -pthread -DSPAWN_CANARY_MB=16 -DDIAG_SLEEP_LOOP=1 \
+            ${./userspace/spawn-canary-test.c} -o spawn-canary-test-diag-sleep
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          install -Dm755 spawn-canary-test-diag-sleep $out/bin/spawn-canary-test-diag-sleep
+          runHook postInstall
+        '';
+      };
+
       # Faithful no-network reproducer for issue #75 (busybox FANCY `ping` sends
       # one packet then hangs): a one-shot SIGALRM handler (installed via signal()
       # = SA_RESTART) re-armed from inside itself, with an async echo-host thread —
@@ -387,6 +428,22 @@
         libffi = cross.libffi; zlib = cross.zlib;
       };
 
+      # M-X4 (XChat/X11 epic): gtk2-hello — the GTK2 hello-window proof, the
+      # last structural layer before XChat itself (M-X5). gtk_init + GtkWindow
+      # + GtkLabel via GTK2's X11 backend. --selftest is the headless CI gate
+      # (display-free, mirroring gtk-hello's posture); the visual check is a
+      # real Xvfb+xwd headless screenshot (runtime/demo/node/gtk2-x11-smoke.mjs)
+      # — something GTK3's wayland-only build never had, since Xvfb needs no
+      # compositor. See userspace/gtk2-hello.* + deps-overlay.nix's "GTK2
+      # cross-build" section.
+      gtk2Hello = import ./userspace/gtk2-hello.nix {
+        inherit cross;
+        gtk2 = cross.gtk2; glib = cross.glib; pango = cross.pango; cairo = cross.cairo;
+        gdk-pixbuf = cross.gdk-pixbuf; atk = cross.atk; fontconfig = cross.fontconfig;
+        freetype = cross.freetype; fribidi = cross.fribidi; pixman = cross.pixman;
+        libffi = cross.libffi; zlib = cross.zlib;
+      };
+
       # #33: gtk3-widget-factory — the headline GTK3 app. GTK's own widget showcase,
       # built standalone against the cross gtk3. Proves GtkBuilder signal autoconnect
       # on the static guest via gtk_builder_add_callback_symbol (no GModule). --selftest
@@ -450,6 +507,37 @@
         src = weston;
       };
 
+      # M-X1 (XChat/X11 epic): xorg-server, configured down to Xvfb only. See
+      # deps-overlay.nix's "xorg-server (Xvfb)" section for the full mesonFlags/
+      # buildInputs/patches rationale. `nix build .#xserver` → $out/bin/Xvfb.
+      xserver = cross.xorg-server;
+
+      # M-X1's probe (XChat/X11 epic): x11-probe — the minimal libxcb client
+      # proof against the Xvfb built above. See userspace/x11-probe.*.
+      x11Probe = import ./userspace/x11-probe.nix {
+        inherit cross;
+      };
+
+      # M-X2 (XChat/X11 epic): the first real X clients against Xvfb —
+      # xeyes (Xlib/Xt/Xmu toolkit client), xwd (root-window dump — the
+      # pixel-proof source for x11-apps-smoke.mjs), xdpyinfo (server-info
+      # query). See deps-overlay.nix's "xeyes / xwd / xdpyinfo" section.
+      xeyesApp = cross.xeyes;
+      xwdApp = cross.xwd;
+      xdpyinfoApp = cross.xdpyinfo;
+
+      # M-X3 (XChat/X11 epic): Xwayland 24.1.12 — a SEPARATE upstream release
+      # from the xorg-server 21.1.23 tarball above (see deps-overlay.nix's
+      # "Xwayland" section for the full mesonFlags/buildInputs/patches
+      # rationale). `nix build .#xwayland` → $out/bin/Xwayland. Ships via
+      # environment.systemPackages (extraSystemPackages below), NOT initramfs
+      # extraBins — Sommelier's own mesonFlags bake in the absolute
+      # `${xwayland}/bin/Xwayland` store path it posix_spawns (see
+      # userspace/sommelier.nix), so that path only resolves on the guest if
+      # something in systemPackages' closure references it — same
+      # store-path-reference reasoning as xserver/xkbcomp above.
+      xwaylandApp = cross.xwayland;
+
       # ---- Phase 3 Stage B: cc-sysroot (a store DIR of musl + LLVM-21 builtin
       # headers + compiler-rt builtins + libc++) — the runtime sysroot the guest
       # clang/clang++ config files reference (#3), served read-only over 9P in the
@@ -502,7 +590,31 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = [ wasmDltest ];
+        # M-X1 (XChat/X11 epic): xorg-server (Xvfb) + its x11-probe client
+        # proof. systemPackages, not initramfs extraBins — Xvfb's mesonFlags
+        # bake in absolute store paths for xkbcomp (spawned at runtime to
+        # compile the XKB keymap) and xkeyboard-config's XKB data tree; those
+        # derivations only enter the served squashfs closure if something in
+        # environment.systemPackages' closure references them, exactly like
+        # galculator/l3afpad's baked share-dir paths above.
+        # M-X2: the first real X clients — xeyes/xwd/xdpyinfo — same
+        # systemPackages-not-extraBins reasoning (they're PATH-looked-up by
+        # x11-apps-smoke.mjs from /run/current-system/sw/bin).
+        # M-X3: Xwayland — systemPackages so its store path (and xkbcomp/
+        # xkeyboard-config/etc closure) actually rides the served squashfs;
+        # see xwaylandApp's comment above and userspace/sommelier.nix's
+        # `-Dxwayland_path=` mesonFlag, which bakes the exact matching path
+        # into Sommelier's own binary.
+        # M-X4: gtk2Hello moved OFF initramfsExtraBins to here. The initramfs is
+        # UNEVICTABLE tmpfs, so a big statically-linked GTK2 binary sitting in it
+        # permanently costs guest RAM -- the gcalctool tmpfs lesson. It pushed
+        # unevictable to ~270 MB, and the in-guest `nix` substitution of the
+        # 57 MB guest-clang then died on a page-allocation failure ("4352896
+        # from process 137 (nix) failed"), which nix surfaces as the misleading
+        # "no substituter that can build it" -- see nix system smoke (core).
+        # Every gtk2 smoke boots nix:true, so the squashfs copy is on PATH and
+        # is evictable.
+        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2Hello ];
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -555,7 +667,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -770,6 +882,7 @@
         kernel-mmu = kernelMmu;
         kernel-mmu-a2 = kernelMmuA2;
         kernel-mmu-a2-dbg = kernelMmuA2Dbg;
+        kernel-debug-nommu = kernelDebugNommu;
 
         # Smoke test for the cc-wrapper over the nix-built sysroot.
         crossZlib = cross.zlib;
@@ -845,6 +958,11 @@
         # Diagnostic reproducer for #35's `timeout 2 sleep 10` hang (cross-process
         # kill() async-signal wake) → $out/bin/kill-wake-test.
         kill-wake-test = killWakeTest;
+        # Reduced reproducer for the posix_spawn() parent-static-memory
+        # corruption found debugging Xvfb's xkbcomp spawn (worker #6) →
+        # $out/bin/spawn-canary-test.
+        spawn-canary-test = spawnCanaryTest;
+        spawn-canary-test-diag-sleep = spawnCanaryTestDiagSleep;
         # #179: the host-rejected-image fixture + its conforming twin (see
         # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
         exec-reject-test = execRejectTest;
@@ -888,6 +1006,20 @@
         # headless CI gate (gtk_init + GtkWindow + GtkLabel widget tree) → $out/bin/gtk-hello.
         gtk-hello = gtkHello;
 
+        # M-X4 (XChat/X11 epic): the cross-built GTK2 library itself, exposed
+        # standalone so `nix build .#gtk2` isolates a GTK2 cross-build failure
+        # from gtk2-hello's own build (same posture as `dep-*` for the M-X0
+        # X11 client libs). See deps-overlay.nix's "GTK2 cross-build" section.
+        gtk2 = cross.gtk2;
+
+        # M-X4: gtk2-hello — the GTK2 hello-window proof, over GTK2's X11
+        # backend. --selftest is the headless CI gate (display-free, gtk_init
+        # + GtkWindow + GtkLabel class registration) → $out/bin/gtk2-hello;
+        # the live-window proof is runtime/demo/node/gtk2-x11-smoke.mjs
+        # (Xvfb + xwd — headless-screenshottable, unlike gtk-hello's wayland
+        # backend which needs a real compositor the node harness lacks).
+        gtk2-hello = gtk2Hello;
+
         # M4: galculator — the headline GTK3 calculator. fpcast-emu post-link seam
         # applied (same gobject indirect-call fix as gtkHello/pangoText). Baked into
         # the initramfs as /bin/galculator; its $out/share/galculator/ui/*.ui ride the
@@ -921,6 +1053,13 @@
         # (runtime/demo/node/l3afpad-smoke.mjs); the editor window + a /mnt/pc
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
+
+        # xchat — M-X5 of the XChat/X11 epic, the headline app: XChat 2.8.8
+        # over GTK2/X11 (userspace/xchat.nix). --selftest is the display-free
+        # gate (servlist_init()'s built-in defaults + GTK2 widget class_init
+        # through fpcast, runtime/demo/node/xchat-smoke.mjs); the same smoke
+        # also drives a live Xvfb + xwd pixel proof of the real main window.
+        xchat = cross.xchat;
 
         # gcolor3 — stock nixpkgs GTK3 color chooser; no override needed (shared
         # cross fixes + auto-fpcast via gtk3). A build target for verification;
@@ -1064,7 +1203,80 @@
         # cairo: image-surface-only build (pixman+zlib) for the toolkit path —
         # backs stock cairo+wl_shm clients like weston-flowers. See deps-overlay.nix.
         "cairo"
-      ]);
+      ])
+      # M-X0 (XChat/X11 epic): the X11 client runtime closure, each cross-built to
+      # wasm as a REAL runtime lib (not link-only) — see deps-overlay.nix's "X11
+      # client runtime closure" section. Exposed as `dep-<name>` (same convention
+      # as Nix's C dep closure above) so `nix build -k .#dep-libx11 …` surfaces
+      # every cross failure at once. libxcb/libxau/libxdmcp already cross today
+      # (the pre-existing libxcb closure, above); xtrans/xorgproto are header-only
+      # and need no override.
+      // builtins.listToAttrs (map (n: { name = "dep-${n}"; value = cross.${n}; }) [
+        "libx11"
+        "libxext"
+        "libxrender"
+        "libxrandr"
+        "libxcursor"
+        "libxfixes"
+        "libxdamage"
+        "libxcomposite"
+        "libxi"
+        "libxft"
+      ])
+      # M-X2 (XChat/X11 epic): the new runtime libs xeyes/xdpyinfo pull in
+      # beyond M-X0's ten — see deps-overlay.nix's "xeyes / xwd / xdpyinfo"
+      # section for why each is needed (libice/libsm/libxt/libxmu for xeyes'
+      # Xt/Xmu toolkit chain, libxtst for xdpyinfo's one required extra dep).
+      // builtins.listToAttrs (map (n: { name = "dep-${n}"; value = cross.${n}; }) [
+        "libice"
+        "libsm"
+        "libxt"
+        "libxmu"
+        "libxtst"
+      ])
+      // {
+        # M-X0 gate: symlinkJoin of the ten X11 client libs above (+ libxcb,
+        # already cross-built) into one derivation. `nix build .#x11-libs` is the
+        # milestone's single pass/fail signal — no boot needed yet (M-X1 is the
+        # first one that runs anything against a real X server).
+        x11-libs = pkgs.symlinkJoin {
+          name = "wasm-x11-libs";
+          paths = [
+            cross.libxcb
+            cross.libx11
+            cross.libxext
+            cross.libxrender
+            cross.libxrandr
+            cross.libxcursor
+            cross.libxfixes
+            cross.libxdamage
+            cross.libxcomposite
+            cross.libxi
+            cross.libxft
+          ];
+        };
+
+        # M-X1: cross-built Xvfb. See deps-overlay.nix's "xorg-server (Xvfb)".
+        inherit xserver;
+
+        # M-X1's probe: the libxcb client proof against it.
+        x11-probe = x11Probe;
+
+        # M-X2: the first real X clients — see deps-overlay.nix's
+        # "xeyes / xwd / xdpyinfo" section. `nix build .#x11-apps` is the
+        # milestone's single pass/fail signal for all three at once.
+        xeyes = xeyesApp;
+        xwd = xwdApp;
+        xdpyinfo = xdpyinfoApp;
+        x11-apps = pkgs.symlinkJoin {
+          name = "wasm-x11-apps";
+          paths = [ xeyesApp xwdApp xdpyinfoApp ];
+        };
+
+        # M-X3: cross-built Xwayland. See deps-overlay.nix's "Xwayland"
+        # section. `nix build .#xwayland` → $out/bin/Xwayland.
+        xwayland = xwaylandApp;
+      };
         };
       # Phase 5 (#2): expose the package set for every supported build host.
       # x86_64-linux is the CI/cache host (fully-cached nixpkgs + Cachix);

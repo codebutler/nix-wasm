@@ -1,0 +1,16 @@
+--- a/lib/meson.build	2024-12-14 01:42:24.000000000 +0000
++++ b/lib/meson.build	2026-08-05 20:55:54.910391315 +0000
+@@ -1,5 +1,12 @@
+ libxcvt_sources = ['libxcvt.c']
+-libxcvt = shared_library('xcvt',
++# wasm/NOMMU (nix-wasm): upstream hardcodes shared_library() regardless of
++# meson's `default_library` option — nixpkgs even marks this package
++# `badPlatforms = [ isStatic ]` because of it. Our crossSystem sets
++# `isStatic = true` (CLAUDE.md: "Static is a PLATFORM flag, not per-dep"),
++# and a separate wasm .so hits the general-dynamic-TLS -> __musl_tp problem
++# documented there. `library()` is meson's generic helper that DOES respect
++# `default_library` (static here), producing a plain .a instead.
++libxcvt = library('xcvt',
+                          libxcvt_sources,
+                          include_directories : inc,
+                          version: meson.project_version(),
