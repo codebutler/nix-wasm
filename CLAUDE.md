@@ -360,7 +360,22 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
-history). The old "hush isn't POSIX-enough" gap is closed.
+history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11):
+this milestone was a HAND-RUN session (its record was `docs/STATUS.md`, since
+deleted) — there is no autotools smoke in `runtime/demo/node/` on ANY guest, so
+nothing regression-gates it. Two things were measured on the MMU/fork guest while
+scoping that gate, both worth knowing before touching shells: (1) "hush isn't
+POSIX-enough" is a NOMMU statement, not a hush statement — the fork guest's STOCK
+hush handles every autoconf idiom cited as broken,
+including the exact `{ …; echo >&5; } >out` "ambiguous redirect" and multi-line
+`if/fi` "syntax error at fi" cases, with correct exit statuses and zero aborts;
+(2) stock busybox **ash** cannot replace forkshell ash on wasm at all — not for
+fork reasons but because the wasm musl's `longjmp` is an `abort()` stub
+(`patches/musl/0000-harness-wasm-arch.patch` → `src/setjmp/wasm/longjmp.S`), and
+ash unwinds through `longjmp` on its normal path, so every `$()`/subshell child
+dies SIGABRT and reports exit status 134 while still printing correct stdout
+(nix-wasm#188). So #131 slice 1 retires forkshell ash in favor of HUSH, not stock
+ash.**
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
