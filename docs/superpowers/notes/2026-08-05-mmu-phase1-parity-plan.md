@@ -110,40 +110,54 @@ surface already exist; Phase 1 only widens what boots on top of it).
 
 ### Remaining
 
-- [ ] **Real-fork-`ash` autotools proof.** CLAUDE.md's "In-guest autotools
-  also works" milestone (`./configure && make && ./prog` end-to-end) is proven
-  only on the shipped NOMMU guest, and specifically through **forkshell ash**
-  — six patches (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist
-  ONLY to make autoconf's `$()`/subshell/pipeline/heredoc machinery work
-  WITHOUT real `fork()`. The MMU/fork guest's `/bin/sh` is currently plain
-  busybox `hush` (`userspace/bootstrap.nix`, `forkMode` branch: "keep
-  busybox-fork's hush as /bin/sh"), and hush is KNOWN not POSIX-enough for
-  autoconf even on NOMMU — `bootstrap.nix`'s own comment on why NOMMU promotes
-  forkshell ash instead: "hush dies with 'ambiguous redirect' / 'syntax error
-  at fi'". So this proof needs more than a new smoke script — it needs a
-  small ADDITIVE build (still `.#`-suffixed, still not the Phase-2 default
-  flip): a stock (non-forkshell) `ash` built through `forkStdenv`/`muslFork`
-  and promoted to `/bin/sh` on the fork initramfs, specifically to test
-  whether real `fork()` makes forkshell ash's serialize-and-re-exec tricks
-  unnecessary (the expectation, since real fork is what those tricks were
-  emulating), the same way `busybox-fork.nix` already proved real fork makes
-  the NOMMU clone-with-fn spawn hack unnecessary for busybox itself.
-  `busybox-fork-smoke` already proves a forked non-last external command
-  completing in a shell script (the task-#5 SIGCHLD-delivery fix — see the
-  Track B status doc), but nobody has yet booted a REAL autoconf `./configure`
-  (which forks external tools, command-substitutes, pipes, and here-docs far
-  more than that smoke's fixture) end-to-end on `.#kernel-mmu-a2`. No such
-  build or smoke exists yet — `runtime/demo/node/` has no `autotools`/
-  `configure` script as of this writing, and there is no stock-ash-over-
-  `muslFork` attr in `flake.nix`. This is the acceptance proof Phase 2 needs
-  before it can safely retire forkshell ash: it is the closing half of "does
-  real fork()+ash reproduce the NOMMU autotools milestone", not an assumption
-  the Phase-2 world rebuild gets to make for free. Add the
-  stock-ash-over-`muslFork` build + e.g. `demo/node/autotools-fork-smoke.mjs`
-  (nix:true boot on the fork squashfs with that ash promoted to `/bin/sh`,
-  `nix-env -iA` the toolchain + `make`, then a real `./configure && make &&
-  ./prog` round-trip against a small autoconf'd C fixture) to the
-  `nix-boot-smoke-mmu` `core` shard once written.
+- [ ] **Real-fork autotools proof — SHELL HALF DONE (2026-08-11), toolchain
+  half remains.** CLAUDE.md's "In-guest autotools also works" milestone
+  (`./configure && make && ./prog`) is proven only on the shipped NOMMU guest,
+  through **forkshell ash** — four patches + six postPatch fixes
+  (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist ONLY to fake
+  autoconf's `$()`/subshell/pipeline/heredoc machinery WITHOUT real `fork()`.
+  (Note: that milestone has never been automated on ANY guest — it was a hand-run
+  session recorded in the since-deleted `docs/STATUS.md`; `runtime/demo/node/`
+  still has no autotools script.) This item asked for a stock-ash-over-`muslFork`
+  build to prove real fork makes those tricks unnecessary. **Booting it answered
+  the question differently, in two ways — both measured on `.#kernel-mmu-a2` +
+  a fork initramfs:**
+  1. **Stock ash is BLOCKED, and not by fork — by `longjmp` (nix-wasm#188).**
+     Stock ash was built and booted (`CONFIG_ASH`/`SH_IS_ASH` in
+     `busybox-fork.nix`, config mirroring `ash.nix`); `/bin/sh` was genuinely
+     ash. But the wasm musl's `longjmp` is an `abort()` stub
+     (`patches/musl/0000-harness-wasm-arch.patch` → `src/setjmp/wasm/longjmp.S`,
+     comment: "we have to abort, let's just hope that never happens"), and ash
+     unwinds through `setjmp`/`longjmp` on its NORMAL path. Every forked child
+     therefore aborts on completion: `x=$(exit 3); echo $?` → **134**,
+     `(exit 5)` → **134**, `if (exit 0)` takes the **else** branch. stdout is
+     still correct (the child writes before aborting), so it looks fine and every
+     exit status is garbage — fatal for autoconf. `fork()` itself is healthy
+     (`fork-smoke` propagates `status=0x7`); job control was ruled out. The ash
+     switch was REVERTED; #188 carries the diagnosis and fix directions.
+  2. **Stock hush is sufficient — the "not POSIX-enough" claim does not hold on
+     the fork guest.** `bootstrap.nix:232-242` says hush "dies with 'ambiguous
+     redirect' / 'syntax error at fi'", which is why NOMMU promotes forkshell
+     ash. That is true of the *NOMMU* hush, which carries
+     `patches/busybox/0003/0005/0006` converting its `$()`/pipeline/heredoc to
+     clone-spawn; the fork busybox drops those and is stock. Measured on the fork
+     guest: **0 aborts**, `$(exit 3)`→3, `(exit 5)`→5, `if (exit 0)`→then,
+     external true/false→0/1, and every autoconf idiom clean — the fd-5 logging
+     block (`{ …; echo >&5; } >out 2>&1`, the exact "ambiguous redirect" case),
+     `as_fn_*` functions + `test` chains, `$( ( … ) || … )`, heredoc into
+     `conftest.c`, case/esac + eval, backticks, `trap … EXIT`, and multi-line
+     if/fi (the exact "syntax error at fi" case).
+  **So Phase 2 can retire forkshell ash without needing stock ash at all** —
+  hush is the fork guest's POSIX shell, and the shell risk this item existed to
+  retire is retired. **What remains** is the toolchain half: a real
+  `./configure && make && ./prog` needs `cc` + `make` in-guest, which are
+  substituted from `.#wasm-binary-cache` (~6.9 GB — it carries `.drv` build
+  sources), so the round-trip is a CI-scale run, not a laptop one. Add
+  `demo/node/autotools-fork-smoke.mjs` (nix:true boot on the fork squashfs,
+  `nix-env -iA wasm-tools.{guest-cc,make-wasm32}`, then `./configure && make &&
+  ./prog` against a small autoconf'd C fixture staged over 9P and copied to
+  ramfs — the 9P-write-failure lesson from the original STATUS.md session) to the
+  `nix-boot-smoke-mmu` `core` shard, soak-first per the promotion rule.
 - [ ] **#11's Wayland/`wl_shm` half (close-out items 2/3/5) — no MMU compositor
   boot exists yet.** The Landed `mmu-devices` shard above proves #11 item 1
   (vring/pfn addressing is untouched by CONFIG_MMU=y — the kernel stays
