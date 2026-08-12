@@ -206,14 +206,17 @@ try {
   // ~24 real compiler invocations (AC_PROG_CC's own probes + one per
   // AC_CHECK_HEADERS/AC_CHECK_FUNCS check), each paying the in-guest exec
   // cost of the 57 MB guest-clang (softmmu-instrumented at load) plus its
-  // own compile — a worst case near 19 minutes, far past the previous 240s
-  // budget (P2-2). 900s leaves real margin over typical runs while staying
-  // well inside this step's 30-minute ceiling alongside install/staging/
-  // make/prog; if actual CI timing needs more, retune from the observed
-  // number rather than guessing further. Never rely on the generated
+  // own compile — a MEASURED worst case near 19 minutes, far past the
+  // previous 240s budget (P2-2). Budget = 19 min measured + ~6 min margin =
+  // 1,500,000ms (25 min) — the previous 900,000ms (15 min) budget was BELOW
+  // its own documented 19-min worst case (Codex P2, 2026-08-12): a
+  // slow-but-genuinely-fine run would time out and report a false CFGRC
+  // failure. This still fits the step's overall time budget — see the
+  // `timeout-minutes` comment in nix-wasm.yml for the full arithmetic
+  // (install + CFGRC + MAKERC + boot/staging). Never rely on the generated
   // script's shebang/exec bit (see autotools-fixture.nix); invoke via `sh`.
   console.log("  [./configure …]");
-  const cfg = await run("sh ./configure 2>&1", "CFGRC", 900000);
+  const cfg = await run("sh ./configure 2>&1", "CFGRC", 1500000);
   const cfgOk = check(cfg === "0", "./configure succeeds against the in-guest cc (CFGRC=0)");
   if (!cfgOk) console.log("\n── configure transcript tail ──\n" + s.snapshot().slice(-3000));
 
@@ -221,7 +224,9 @@ try {
   // system()->posix_spawn/clone-with-fn (toolchain/make.nix). Only ONE
   // compiler invocation (vs configure's ~24), but still pays the same
   // per-exec 57 MB guest-clang cost under the software-MMU guest; 600s is a
-  // generous ceiling above that single-compile cost (P2-2).
+  // generous ceiling above that single-compile cost (P2-2) — unchanged by
+  // the Codex P2 fix above (only CFGRC's budget was inconsistent with its
+  // own documented worst case; MAKERC's single-compile ceiling was fine).
   console.log("  [make …]");
   const mk = await run("make 2>&1", "MAKERC", 600000);
   const mkOk = check(mk === "0", "make builds ./prog with the in-guest cc (MAKERC=0)");

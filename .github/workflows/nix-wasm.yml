@@ -1179,7 +1179,14 @@ jobs:
       # above once it has a green run on record.
       - name: Real-fork autotools acceptance smoke — soak (non-gating, first-ever boot)
         continue-on-error: true
-        timeout-minutes: 30
+        # 60 (Codex P2, 2026-08-12): sized to the SUM of the smoke's own internal
+        # per-step budgets — NIX_MAKE_TIMEOUT_MS install (10m) + CFGRC (25m) +
+        # MAKERC (10m) + boot/staging (~2m) ≈ 47m — plus retry headroom, not the
+        # previous 30 (which could kill the step mid-make even with every internal
+        # operation inside its own documented budget). Bounded cost: continue-on-error
+        # only actually spends this when something is genuinely wedged, and the
+        # job-level 240-min timeout still caps everything regardless.
+        timeout-minutes: 60
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
