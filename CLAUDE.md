@@ -366,8 +366,7 @@ deleted) — there is no autotools smoke in `runtime/demo/node/` on ANY guest, s
 nothing regression-gates it. Two things were measured on the MMU/fork guest while
 scoping that gate, both worth knowing before touching shells: (1) "hush isn't
 POSIX-enough" is a NOMMU statement, not a hush statement — the fork guest's STOCK
-hush (which drops `patches/busybox/0003/0005/0006`, the clone-spawn conversions
-of its `$()`/pipeline/heredoc) handles every autoconf idiom cited as broken,
+hush handles every autoconf idiom cited as broken,
 including the exact `{ …; echo >&5; } >out` "ambiguous redirect" and multi-line
 `if/fi` "syntax error at fi" cases, with correct exit statuses and zero aborts;
 (2) stock busybox **ash** cannot replace forkshell ash on wasm at all — not for
