@@ -1106,6 +1106,65 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (DEAD-END: the first 0008 only stopped the parent-argv mutation — necessary but not
   sufficient; the watcher-side getopt order was the real bug, found via an in-guest
   `TMODBG` argv trace over the ~3-min Cachix-substituted boot-smoke CI loop.)
+- **hush can't run a real autoconf `configure` at all without two independent
+  fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
+  `0010-hush-internally-opened-fd0.patch`; both wired into `busybox-fork.nix`,
+  `busybox.nix`, AND `ash.nix` — shared correctness, all three compile
+  `shell/hush.c`). Both are ORIGINAL fixes for still-unfixed-upstream bugs
+  (confirmed against `mirror/busybox @ master`), found while making the
+  fork/MMU guest's default `/bin/sh` (stock hush) capable of autoconf — the
+  earlier "hush isn't POSIX-enough" framing (see the Current-state autotools
+  caveat) turned out to be TWO specific, narrow hush bugs, not a general
+  conformance gap:
+  1. **0009 — parse-time rejection of variable fd redirects (`>&$fd`).**
+     autoconf's `as_fn_error()` does `printf ... >&$4` (a *variable* dup
+     target — `$4`, a function arg — not a literal digit/`-`). hush's
+     `parse_redir_right_fd()` resolves `&N`/`&-` by peeking raw characters
+     off the input stream at PARSE time; anything else (incl. the first
+     char of a `$var`) was a hard "ambiguous redirect" parse error that
+     desyncs the rest of the parse ("syntax error at 'fi'") — so NO real
+     generated `configure` could even be parsed. POSIX requires the
+     redirect target word to undergo the same expansions as any other word;
+     bash/dash/ash all accept this. Fix: defer via a new `REDIRFD_TO_FD_VAR`
+     sentinel — nothing is consumed at parse time, so the ordinary
+     word-scanner picks up the target as a normal (unexpanded) redirect
+     word, and `setup_redirects()` expands + resolves it at redirect-SETUP
+     time (all-digits → dup like a literal `N>&M`; `-` → close; anything
+     else → "ambiguous redirect", now raised at RUN time like bash).
+  2. **0010 — `<&0` (dup FROM stdin) misfires even on a plain, valid stdin.**
+     Found immediately after 0009, from the SAME real-configure run:
+     autoconf's universal preamble `exec 7<&0 </dev/null` failed with a
+     bogus `can't duplicate file descriptor`, before ever reaching the
+     `>&$4` construct 0009 fixes. Root cause: `internally_opened_fd()`
+     tests `fd == G_interactive_fd` with no guard for `G_interactive_fd`'s
+     "not interactive" SENTINEL value of 0 — so any non-interactive `N<&0`
+     (script/`-c`/shebang execution, i.e. every autoconf run) is
+     misidentified as touching hush's own interactive tty fd. The sibling
+     `save_fd_on_redirect()` a few lines above already carries the correct
+     `fd != 0` guard (with a comment naming this exact ambiguity); the fix
+     just mirrors it into `internally_opened_fd()`. Does NOT change (and
+     correctly still traps) `sh < ./configure` — there fd 0 genuinely IS
+     the script being read (`fd_in_HFILEs`, a different mechanism).
+  **The P1 lesson (from review, worth generalizing):** the FIRST version of
+  0009 was verified only against the constructs it was DESIGNED to fix — it
+  omitted the same `rd_filename == NULL` guard its sibling REDIRFD_TO_FILE
+  branch in `setup_redirects()` starts with, so a dangling/malformed target
+  (`>&<x`, `>&>x`, `>&#c`, or `cmd >&` at EOF — none of them exotic, any one
+  reachable by a typo) SIGSEGV'd the shell (`expand_string_to_string(NULL)`
+  → `strchr(NULL,...)`), and inside `$(...)` the crash was invisible —
+  the substitution silently returned empty with rc=0. **A new redirect-
+  parsing code path needs its NEGATIVE-space cases (dangling/malformed
+  target, not just the happy path) in the verification matrix from the
+  start, not discovered after merge.** A second review pass also caught
+  the initial error-handling shape being wrong on BOTH axes at once:
+  `syntax_error()`+`continue` let the bad command run anyway with the
+  redirect silently dropped (interactively) while killing the WHOLE script
+  on the very first ambiguous redirect (non-interactively) — backwards from
+  bash (which fails only the one command, script continues, in both modes).
+  Fixed to the `bb_error_msg(...); return 1;` shape this function's other
+  runtime redirect failures (the "fd#%d is not open"/`dup2()` checks) were
+  already using — matching a shape upstream itself later converged on
+  elsewhere in `setup_redirects()`, just not (yet) here.
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.

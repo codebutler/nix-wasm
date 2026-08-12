@@ -74,11 +74,36 @@ cross.stdenv.mkDerivation {
     # 0001 minus the clone-spawn conversion files — wasm arch/build support only.
     # Stock fork()/vfork() spawn sites are preserved for the real-fork model.
     ../patches/busybox/0001-wasm-arch.patch
+    # hush: support "N>&WORD" variable fd duplication redirects (e.g. the
+    # autoconf-generated ">&$4"), previously a hard PARSE-time "ambiguous
+    # redirect" that made every real autoconf `configure` script unparseable
+    # under hush. This is what actually makes hush's /bin/sh capable of
+    # running real generated configure scripts, not just hand-picked idioms.
+    ../patches/busybox/0009-hush-variable-fd-redirect.patch
+    # hush: a pre-existing (still-unfixed upstream) bug found while verifying
+    # 0009 end-to-end against a real configure — "N<&0" (dup FROM stdin) was
+    # misidentified as duplicating hush's own (unset, sentinel-0) interactive
+    # fd and refused with a bogus "can't duplicate file descriptor". Every
+    # autoconf configure's standard preamble ("exec 7<&0 </dev/null") hits
+    # this, so it's a necessary companion fix for the same goal.
+    ../patches/busybox/0010-hush-internally-opened-fd0.patch
   ];
 
   postPatch = ''
     substituteInPlace Makefile --replace-fail '/bin/pwd' 'pwd'
     patchShebangs scripts applets
+
+    # Build-level guard for patches/busybox/0009+0010 (hush >&$fd / <&0
+    # fixes): fail LOUDLY if a stacked patch apply silently dropped either
+    # hunk (nixpkgs' default patch fuzz is 2 — these were only hand-verified
+    # with --fuzz=0) instead of shipping a hush that silently regressed to
+    # the parse-time "ambiguous redirect" / the <&0 "can't duplicate file
+    # descriptor" bug. Same lesson as the kernel's 0017-0020 postPatch
+    # assertion (CLAUDE.md).
+    grep -q 'REDIRFD_TO_FD_VAR' shell/hush.c \
+      || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
+    sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
+      || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
   '';
 
   depsBuildBuild = [ pkgs.gcc ];

@@ -230,14 +230,23 @@ pkgs.writeText "init" ''
     sh "$sys/activate" "$sys"
 
     # Promote the autoconf-capable forkshell ash to /bin/sh (the initramfs bakes
-    # busybox hush there). hush isn't POSIX-enough for autoconf: a package's
-    # ./configure and the config.status it generates carry a `#!/bin/sh` shebang,
-    # so they run under whatever /bin/sh is. The forkshell ash (NOMMU-safe
-    # subshell/$()/pipeline/heredoc via serialize+re-exec) parses autoconf; hush
-    # dies with "ambiguous redirect" / "syntax error at 'fi'". Relink after
-    # activation, once the served closure (and its ash) is mounted. System
-    # services invoke the profile-absolute busybox sh directly, so only
-    # `#!/bin/sh` scripts and the interactive login shell pick up ash.
+    # busybox hush there). This is a NOMMU-only accommodation, not a hush
+    # capability gap: patches/busybox/0009+0010 (hush >&$fd / <&0 fixes) make
+    # patched hush run a REAL generated `configure`/`config.status` end to
+    # end — hush's old "ambiguous redirect" / "syntax error at 'fi'" death was
+    # its parse-time rejection of the autoconf-generated ">&$4" construct
+    # (as_fn_error's variable-fd redirect), not a POSIX-conformance gap in
+    # general; see the patch headers for the root cause + upstream-unfixed
+    # status. What forkshell ash still uniquely provides on THIS (NOMMU)
+    # guest is subshell/$()/pipeline/heredoc via serialize+re-exec — hush has
+    # no fork-without-exec story here at all (real fork() only exists on the
+    # software-MMU/fork guest, #131 Track B), so ash stays the promoted
+    # /bin/sh for autoconf on NOMMU until #131 slice 1 retires it in favor of
+    # hush (the fork guest already defaults to hush — see busybox-fork.nix).
+    # Relink after activation, once the served closure (and its ash) is
+    # mounted. System services invoke the profile-absolute busybox sh
+    # directly, so only `#!/bin/sh` scripts and the interactive login shell
+    # pick up ash.
     # See CLAUDE.md (Architecture: guest userspace) + userspace/ash.nix comments.
     # forkMode: keep busybox-fork's hush as /bin/sh (see the header comment).
     ${pkgs.lib.optionalString (!forkMode) ''[ -x "$sys/sw/bin/ash" ] && ln -sf "$sys/sw/bin/ash" /bin/sh''}
