@@ -197,3 +197,63 @@ test("a keymap larger than MAX_FILL_CHUNK is split into multiple fill VFD_RECVs 
   expect(off).toBe(keymap.length);
   expect([...reassembled]).toEqual([...keymap]);
 });
+
+// ---------------------------------------------------------------------------
+// CLOSE must notify the bridge ONLY for a CTX vfd — never for a pipe or an shm
+// buffer. The bridge keys its Wayland CLIENTS by ctx vfd_id, and guest-allocated
+// vfd ids are ONE flat space shared by ctxs, pipes and shm allocations. So a
+// pipe/shm close whose id happens to equal a live ctx id would destroy that
+// client: guest-side that is `failed to read Wayland events: Connection reset by
+// peer`, and under `sommelier -X` it kills the XWM mid-handshake ("Assertion
+// failed: xfixes_query_version_reply"), leaving a zombie Xwayland and nothing
+// serving DISPLAY=:1. Invisible with a single Sommelier (no second id to collide
+// with), which is why it only surfaced once the X11 stack added a 2nd context.
+const VFD_NEW_CTX = 0x104;
+const VFD_NEW_PIPE = 0x105;
+const VFD_CLOSE = 0x101;
+
+/** ctrl_vfd hdr(type,flags) + vfd_id — the shape NEW_CTX/NEW_PIPE/CLOSE use. */
+function buildVfdCmd(type, vfdId) {
+  const b = new Uint8Array(12);
+  const dv = new DataView(b.buffer);
+  dv.setUint32(0, type, true);
+  dv.setUint32(8, vfdId, true);
+  return b;
+}
+
+test("CLOSE notifies the bridge for a ctx vfd", () => {
+  const closed = [];
+  const dev = makeDevice({ waylandBridge: { sendOut() {}, onClose: (id) => closed.push(id) } });
+  dev._handle(buildVfdCmd(VFD_NEW_CTX, 1));
+  dev._handle(buildVfdCmd(VFD_CLOSE, 1));
+  expect(closed).toEqual([1]);
+});
+
+test("CLOSE does NOT notify the bridge for a pipe vfd", () => {
+  const closed = [];
+  const dev = makeDevice({ waylandBridge: { sendOut() {}, onClose: (id) => closed.push(id) } });
+  dev._handle(buildVfdCmd(VFD_NEW_PIPE, 2));
+  dev._handle(buildVfdCmd(VFD_CLOSE, 2));
+  expect(closed).toEqual([]);
+});
+
+test("a pipe close does not tear down a live ctx client with the same id", () => {
+  // The exact collision: ctx 2 is a LIVE client (the -X Sommelier); another
+  // Sommelier opens and closes an ordinary pipe that reuses id 2 after the ctx
+  // is gone... but while ctx 2 is live, closing a NON-ctx vfd must never fire.
+  const closed = [];
+  const dev = makeDevice({ waylandBridge: { sendOut() {}, onClose: (id) => closed.push(id) } });
+  dev._handle(buildVfdCmd(VFD_NEW_CTX, 1)); // Sommelier --parent
+  dev._handle(buildVfdCmd(VFD_NEW_PIPE, 2)); // an ordinary pipe
+  dev._handle(buildVfdCmd(VFD_CLOSE, 2)); // closing it must NOT kill a client
+  expect(closed).toEqual([]);
+  dev._handle(buildVfdCmd(VFD_CLOSE, 1)); // the real ctx close still notifies
+  expect(closed).toEqual([1]);
+});
+
+test("CLOSE of an unknown vfd id notifies nothing", () => {
+  const closed = [];
+  const dev = makeDevice({ waylandBridge: { sendOut() {}, onClose: (id) => closed.push(id) } });
+  dev._handle(buildVfdCmd(VFD_CLOSE, 0x40000001)); // host-allocated, never registered
+  expect(closed).toEqual([]);
+});
