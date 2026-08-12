@@ -634,9 +634,12 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
   #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
   loudly. `.#nofork-linkcheck` is the gate; memory/table/base come from
-  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds only
-  guest-clang + nix.wasm; the cross.* set is keyed on the byte-identical store path so
-  it stays cached.)
+  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds
+  guest-clang + nix.wasm + `.#userspace-busybox-fork` → the fork initramfs → the
+  fork squashfs, since #131 slice-1 PR-2 wired `busybox-fork.nix`'s post-link
+  `wasm-check-imports.py` check to consume the same generated file as an
+  argument; the cross.* set is keyed on the byte-identical store path so it
+  stays cached.)
 - **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
   without `--export-all` MUST name every engine-called startup export** (#179; the
   mirror image of the allow-list entry above). The host bridge calls
