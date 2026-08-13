@@ -400,7 +400,7 @@ change** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
 `0010-hush-internally-opened-fd0.patch` — the second an independent,
 still-unfixed-upstream `<&0` bug found while verifying the first against a
 real `configure`; full record in the "hush can't run a real autoconf
-`configure` at all without two independent fixes" learnings entry below):
+`configure` at all without three independent fixes" learnings entry below):
 `.#autotools-fixture-hush-check` is now a HARD gate (native, ~2 min, wired
 into `nix-wasm.yml` alongside `.#autotools-fixture`) asserting the full
 `configure`/`config.status`/`make`/`./prog` chain succeeds under exactly this
@@ -411,7 +411,17 @@ retired once the in-guest `autotools-fork-smoke.mjs` soak (the 2026-08-05
 parity-plan doc's "Real-fork autotools proof" item) records its own green
 CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising the
 booted guest's full 9P-staging + in-guest cc/make path the host build never
-touches.**
+touches. **UPDATE (2026-08-13, #193): that first in-guest soak found a
+THIRD hush bug** the host-side gate's happy-path-only checks could not have
+caught — a genuinely fatal `configure` (hit an unrelated in-guest cc bug,
+#192) still reported `CFGRC=0` to the harness, because a bare `exit` run
+from inside autoconf's universal `ac_exit_trap` EXIT-trap handler resumed
+the trap body's own last exit status (0, from a successful cleanup `rm`)
+instead of the real, pending one. Fixed by
+`patches/busybox/0011-hush-exit-trap-status.patch` (full record in the
+learnings entry below); `.#autotools-fixture-hush-check` gained a hard
+NEGATIVE case (a sabotaged always-failing compiler) so this class of bug is
+now gated on the host side too, not just discoverable by an in-guest soak.**
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
@@ -1142,16 +1152,29 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (DEAD-END: the first 0008 only stopped the parent-argv mutation — necessary but not
   sufficient; the watcher-side getopt order was the real bug, found via an in-guest
   `TMODBG` argv trace over the ~3-min Cachix-substituted boot-smoke CI loop.)
-- **hush can't run a real autoconf `configure` at all without two independent
-  fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
-  `0010-hush-internally-opened-fd0.patch`; both wired into `busybox-fork.nix`,
-  `busybox.nix`, AND `ash.nix` — shared correctness, all three compile
-  `shell/hush.c`). Both are ORIGINAL fixes for still-unfixed-upstream bugs
-  (confirmed against `mirror/busybox @ master`), found while making the
-  fork/MMU guest's default `/bin/sh` (stock hush) capable of autoconf — the
-  earlier "hush isn't POSIX-enough" framing (see the Current-state autotools
-  caveat) turned out to be TWO specific, narrow hush bugs, not a general
-  conformance gap:
+- **hush can't run a real autoconf `configure` at all without three
+  independent fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch`
+  + `0010-hush-internally-opened-fd0.patch` + `0011-hush-exit-trap-status.patch`;
+  all three wired into `busybox-fork.nix`, `busybox.nix`, AND `ash.nix` for
+  source-tree consistency — but only TWO of the three derivations actually
+  COMPILE `shell/hush.c` into their shipped binary: `busybox-fork.nix` (hush
+  is its `/bin/sh`) and `busybox.nix` (NOMMU; hush is present as the `hush`
+  applet even though forkshell ash is the guest's actual `/bin/sh` there —
+  see `bootstrap.nix`). `ash.nix` builds via `allnoconfig` + an ASH-only
+  enable list that never sets `CONFIG_SHELL_HUSH=y` (only `ASH`/
+  `SHELL_ASH`/`SH_IS_ASH`), and busybox's `shell/Kbuild` gates `hush.o`
+  behind exactly that symbol (`lib-$(CONFIG_SHELL_HUSH) += hush.o ...`) — so
+  `ash.nix`'s copy of `shell/hush.c` is patched (the postPatch guards below
+  still run and still catch a dropped hunk) but never actually compiled into
+  that derivation's busybox binary; it's wired there purely to keep the
+  source tree — and the guard machinery — identical across all three.) All
+  three fixes are ORIGINAL fixes for still-unfixed-upstream bugs (confirmed
+  against `mirror/busybox @ master`, commit
+  `371fe9f71d445d18be28c82a2a6d82115c8af19d` as checked 2026-08-13 for 0011 —
+  see its patch header), found while making the fork/MMU guest's default
+  `/bin/sh` (stock hush) capable of autoconf — the earlier "hush isn't
+  POSIX-enough" framing (see the Current-state autotools caveat) turned out
+  to be THREE specific, narrow hush bugs, not a general conformance gap:
   1. **0009 — parse-time rejection of variable fd redirects (`>&$fd`).**
      autoconf's `as_fn_error()` does `printf ... >&$4` (a *variable* dup
      target — `$4`, a function arg — not a literal digit/`-`). hush's
@@ -1181,6 +1204,90 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
      just mirrors it into `internally_opened_fd()`. Does NOT change (and
      correctly still traps) `sh < ./configure` — there fd 0 genuinely IS
      the script being read (`fd_in_HFILEs`, a different mechanism).
+  3. **0011 — a bare `exit` inside the EXIT (`trap ... 0`) handler, AND a
+     `$?` read anywhere inside that handler's body, both resume/reflect the
+     WRONG status (#193; completed in a follow-up review pass, P2-1).**
+     Found by #193's first in-guest autotools soak: the fixture `configure`,
+     under 0009+0010-patched hush, hit a genuinely fatal error mid-run
+     (`cannot compute suffix of executables: cannot compile and link` — an
+     unrelated in-guest cc bug, #192), printed the error correctly, stopped
+     — and the harness still captured `CFGRC=0`. Root cause: every autoconf
+     `configure` installs `trap 'ac_exit_trap $?' 0`, and `ac_exit_trap`
+     deliberately does `exit_status=` (left empty) then `... && exit
+     $exit_status` — word-splitting drops the empty word, so this is a
+     completely bare `exit`. POSIX/bash/dash give a bare `exit` run FROM
+     INSIDE a trap a special meaning: resume the status that was PENDING
+     before the trap fired (here, `as_fn_exit`'s real status, e.g. 77), NOT
+     the status of whatever the trap body's own commands (a successful `rm
+     -f -r ...`) last left in `$?`. hush already implements this correctly
+     for every ORDINARY signal trap, and does so in TWO halves —
+     `check_and_run_traps()` both saves `G.last_exitcode` into
+     `G.pre_trap_exitcode` AND leaves `G.last_exitcode` itself holding that
+     pending value before invoking the trap, so `builtin_exit()`'s no-arg
+     path can prefer `G.pre_trap_exitcode` (`>= 0`) for the bare-`exit` case
+     AND a `$?` read from the very first statement of the trap body already
+     reflects the pending status — but the EXIT pseudo-trap (signal 0) is
+     run by a SEPARATE code path, `hush_exit()` itself, which calls
+     `builtin_eval()` directly and (before this fix) touched NEITHER half —
+     so `G.pre_trap_exitcode` stayed at its startup -1 sentinel (breaking
+     bare `exit`) and `G.last_exitcode` stayed whatever the pre-exit command
+     left it at (breaking a `$?` read, e.g. the equally common `trap
+     'rc=$?; cleanup; exit $rc' 0` idiom — autoconf's own `config.status`
+     generates exactly this shape, coincidentally unaffected today only
+     because `as_fn_exit` happens to pre-arrange a matching `$?`, not
+     because the bug doesn't apply). CONFIRMED pre-existing, NOT introduced
+     by 0009/0010 — both minimal repros (`trap 'ac_exit_trap $?' 0; exit 5`
+     with a bare `exit`, and `trap 'exit_status=$?; exit $exit_status' 0;
+     exit 77` reading `$?` first) reproduce byte-for-byte on PRISTINE,
+     unpatched busybox-1.36.1 hush too (no variable-fd redirect or `<&0`
+     involved at all), and are still present, unfixed, in busybox git as of
+     2026-08-13 (`github.com/mirror/busybox` commit
+     `371fe9f71d445d18be28c82a2a6d82115c8af19d`, fetched and checked directly
+     in-session). Fix: `hush_exit()` sets BOTH `G.pre_trap_exitcode` AND
+     `G.last_exitcode` to `exitcode & 0xff` (its own real, precise argument)
+     immediately before invoking the EXIT trap's `builtin_eval()`, mirroring
+     `check_and_run_traps()`'s own two-field precedent; no restore needed
+     (`hush_exit()` never returns). Verified host-side (native, hermetic)
+     against a full matrix cross-checked with bash/dash ground truth: both
+     minimal repros; the real fixture `configure` against a sabotaged
+     always-failing `cc`/`gcc` (CFGRC=0 pre-fix -> 77 post-fix, matching
+     bash/dash exactly) and against a working compiler (0 throughout); the
+     P1 dangling-redirect negative probe; a trap body whose last command
+     FAILS before its own bare `exit` (resumes the real pending status, not
+     the failing command's); an EXIT trap calling `exit N` explicitly; a
+     script with no EXIT trap; explicit `exit 9`/`exit -2` (->254); an EXIT
+     trap that itself fails without calling exit (pending status wins); and
+     fall-off-end / EOF-after-`false` / `set -e` (all unaffected). Also
+     recorded (not designed, a consequence of fork() copying hush's global
+     state): a bare `exit` in a CHILD spawned FROM the trap body (`$()`,
+     pipeline, subshell) now inherits the outer pending status too — matches
+     both bash and dash for `$()`/pipeline children, and matches dash (not
+     bash, a pre-existing bash/dash divergence, not something this patch
+     invents) for a `(cmd; exit)` subshell child; this inheritance is a
+     property of a REAL fork() and does NOT apply to the NOMMU
+     busybox.nix/ash.nix guest's re-exec'd subshells (a fresh process image,
+     not copied memory — confirmed structurally, no `!BB_MMU` code path
+     touches `pre_trap_exitcode`), though ash.nix's `/bin/sh` is ash, not
+     hush, either way. Full matrix + patch text: the 0011 patch header.
+     `.#autotools-fixture-hush-check` gained a hard NEGATIVE case (sabotaged
+     `cc`/`gcc` on PATH, `unset CC CXX`) asserting a genuinely-failing
+     `./configure` exits EXACTLY 77 (not merely nonzero — a regression
+     elsewhere, e.g. in 0009's own `>&$4` handling, could fail configure
+     early with some OTHER nonzero and this gate would still wrongly declare
+     the exit-trap fix "holds") AND that the captured output names "C
+     compiler cannot create executables", so a pass is attributable
+     specifically to the compiler-probe -> as_fn_error -> exit-trap path —
+     every check before it only proved the happy path, which could not have
+     caught this class of bug; the new case fails loudly (as expected) when
+     0011 is reverted, confirmed by temporarily dropping it and re-running
+     the gate. All three consumers' postPatch guards are similarly
+     tightened: they check the two assignment lines' positions PRECEDE
+     `hush_exit()`'s `builtin_eval(argv)` call (not merely that they're
+     present somewhere in the function), so a fuzzy stacked-patch apply that
+     landed them AFTER it (a no-op position — the trap body has already run
+     by then) fails the build loudly too; verified by manufacturing that
+     exact mis-apply and confirming the tightened guard (and not the
+     original bare-presence one) catches it.
   **The P1 lesson (from review, worth generalizing):** the FIRST version of
   0009 was verified only against the constructs it was DESIGNED to fix — it
   omitted the same `rd_filename == NULL` guard its sibling REDIRFD_TO_FILE

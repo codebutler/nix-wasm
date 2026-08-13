@@ -47,6 +47,18 @@ cross.stdenv.mkDerivation {
     # misidentified as duplicating hush's own (unset, sentinel-0) interactive
     # fd and refused with a bogus "can't duplicate file descriptor".
     ../patches/busybox/0010-hush-internally-opened-fd0.patch
+    # hush: a bare "exit" run FROM WITHIN the EXIT (trap 0) handler must
+    # resume the exit status that was PENDING before the trap fired (POSIX;
+    # bash/dash both do this), not whatever the trap body's own commands
+    # last left in $?. Found by #193's soak: autoconf's universal
+    # `ac_exit_trap` idiom ("... && exit $exit_status" with $exit_status
+    # deliberately empty -> a bare exit) made a genuinely-fatal `configure`
+    # report CFGRC=0 under (pristine OR 0009+0010-patched) hush — the exact
+    # "broken exit status" class #188/#189/#190 exist to eliminate. This
+    # build's default /bin/sh is ash, not hush, but the source tree still
+    # carries shell/hush.c — shared correctness fix, applies zero-fuzz on
+    # top of 0001 alone. Pre-existing upstream bug, unrelated to 0009/0010.
+    ../patches/busybox/0011-hush-exit-trap-status.patch
     # ash forkshell stack (pc vendor/busybox/wasi-compat, busybox-w32 lineage):
     ../patches/busybox/ash/0001-ash-cb-spawn.patch
     ../patches/busybox/ash/0002-ash-m3-m4.patch
@@ -133,6 +145,26 @@ cross.stdenv.mkDerivation {
       || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
     sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
       || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
+    # Tightened (2026-08-13 review, P2-1/P3-3): don't just check the two
+    # G.pre_trap_exitcode/G.last_exitcode assignments are PRESENT somewhere
+    # in hush_exit()'s body — a fuzzy patch apply could land them AFTER the
+    # builtin_eval(argv) call that runs the EXIT trap (a position where they
+    # are a no-op: the trap body has already run by then), which a bare
+    # presence check would not catch. Assert both assignment lines' line
+    # numbers precede builtin_eval(argv)'s within the extracted function body.
+    # (This source tree's hush.c is never actually COMPILED here — ash.nix's
+    # allnoconfig build never sets CONFIG_SHELL_HUSH=y — but the patch/guard
+    # stay wired for source-tree consistency across all three busybox
+    # derivations; see the 0011 patch header's SCOPE note.)
+    hush_exit_body=$(sed -n '/^static void hush_exit(int exitcode)$/,/^}/p' shell/hush.c)
+    pre_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.pre_trap_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+    last_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.last_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+    eval_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'builtin_eval(argv);' | head -1 | cut -d: -f1)
+    if [ -z "$pre_line" ] || [ -z "$last_line" ] || [ -z "$eval_line" ] \
+       || [ "$pre_line" -ge "$eval_line" ] || [ "$last_line" -ge "$eval_line" ]; then
+      echo "ERROR: 0011-hush-exit-trap-status.patch didn't apply correctly (hush_exit's G.pre_trap_exitcode/G.last_exitcode assignments are missing, or don't precede its builtin_eval(argv) call that runs the EXIT trap)" >&2
+      exit 1
+    fi
   '';
 
   depsBuildBuild = [ pkgs.gcc ];

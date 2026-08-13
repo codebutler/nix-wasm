@@ -19,6 +19,21 @@
 # of reproducing the failure. A derivation failure here IS the gate failing —
 # wired as a hard `nix build` step in nix-wasm.yml, not soak/on-demand.
 #
+# UPDATE (2026-08-13, #193): a THIRD hush bug was found the same way as the
+# first two — running the fixture `configure` for real, this time against a
+# SABOTAGED (always-failing) compiler under the patched hush, in-guest
+# during a soak. A bare "exit" run FROM WITHIN autoconf's universal
+# `ac_exit_trap` EXIT-trap handler ("... && exit $exit_status" with
+# $exit_status deliberately left empty) must resume the exit status that
+# was PENDING before the trap fired (POSIX; bash/dash both do this) — hush
+# instead resumed whatever the trap body's own cleanup commands (a
+# successful "rm -f -r ...") last left in $?, so a genuinely FATAL
+# `configure` reported CFGRC=0. Fixed by
+# patches/busybox/0011-hush-exit-trap-status.patch (also wired here); this
+# derivation's step 6 (below) reproduces the same shape hermetically (a
+# sabotaged cc on PATH) as a hard NEGATIVE gate — every check before it only
+# proved the HAPPY path, which could not have caught this.
+#
 # WHY A FRESH NATIVE BUSYBOX (not nixpkgs' own `pkgs.busybox`): the two
 # patches were authored + `patch -p1 --fuzz=0` verified against pristine
 # busybox-1.36.1 (the exact version userspace/busybox.nix, busybox-fork.nix,
@@ -52,6 +67,13 @@ let
     patches = [
       ../patches/busybox/0009-hush-variable-fd-redirect.patch
       ../patches/busybox/0010-hush-internally-opened-fd0.patch
+      # hush: a bare "exit" run FROM WITHIN the EXIT (trap 0) handler must
+      # resume the exit status that was PENDING before the trap fired
+      # (POSIX; bash/dash both do this), not whatever the trap body's own
+      # commands last left in $?. This is what THIS derivation's own
+      # negative case (below) exists to catch — see its comment for the
+      # full #193 finding.
+      ../patches/busybox/0011-hush-exit-trap-status.patch
     ];
 
     postPatch = ''
@@ -62,6 +84,22 @@ let
         || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
       sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
         || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
+      # Tightened (2026-08-13 review, P2-1/P3-3): don't just check the two
+      # G.pre_trap_exitcode/G.last_exitcode assignments are PRESENT somewhere
+      # in hush_exit()'s body — a fuzzy patch apply could land them AFTER the
+      # builtin_eval(argv) call that runs the EXIT trap (a position where
+      # they are a no-op: the trap body has already run by then), which a
+      # bare presence check would not catch. Assert both assignment lines'
+      # line numbers precede builtin_eval(argv)'s within the extracted body.
+      hush_exit_body=$(sed -n '/^static void hush_exit(int exitcode)$/,/^}/p' shell/hush.c)
+      pre_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.pre_trap_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+      last_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.last_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+      eval_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'builtin_eval(argv);' | head -1 | cut -d: -f1)
+      if [ -z "$pre_line" ] || [ -z "$last_line" ] || [ -z "$eval_line" ] \
+         || [ "$pre_line" -ge "$eval_line" ] || [ "$last_line" -ge "$eval_line" ]; then
+        echo "ERROR: 0011-hush-exit-trap-status.patch didn't apply correctly (hush_exit's G.pre_trap_exitcode/G.last_exitcode assignments are missing, or don't precede its builtin_eval(argv) call that runs the EXIT trap)" >&2
+        exit 1
+      fi
     '';
 
     # Standard busybox defconfig already turns on CONFIG_HUSH=y (the `hush`
@@ -269,5 +307,76 @@ pkgs.runCommand "autotools-fixture-hush-check"
       exit 1
     fi
 
-    echo "PASS: patched hush ran a real generated ./configure && make && ./prog end to end (rc=0 throughout), and the P1 dangling-redirect fix holds (rc=1, no crash)." | tee "$out"
+    # 6. NEGATIVE case (2026-08-13, #193 finding; tightened 2026-08-13 review
+    #    P2-2): a genuinely-FAILING ./configure must exit NONZERO under this
+    #    hush, matching bash/dash — not the "exit status class" bug
+    #    patches/busybox/0011-hush-exit-trap-status.patch fixes (autoconf's
+    #    universal `ac_exit_trap` idiom — "... && exit $exit_status" with
+    #    $exit_status deliberately left empty, i.e. a bare "exit" run FROM
+    #    WITHIN the EXIT/trap-0 handler — must resume the exit status that
+    #    was PENDING before the trap fired, not whatever the trap body's own
+    #    cleanup commands (here, a successful "rm -f -r ...") last left in
+    #    $?). Every check above this point only proves the HAPPY path
+    #    (configure succeeds); without this case, this gate could not have
+    #    caught #193's finding (a real in-guest boot: the fixture's
+    #    ./configure hit a genuinely fatal, unrelated cc bug — #192 —
+    #    printed its error correctly, and still reported CFGRC=0 to the
+    #    harness). Reproduce the same shape hermetically here: sabotage the
+    #    compiler this hush's ./configure resolves ("gcc" — AC_PROG_CC's
+    #    first probe name — and "cc" as a fallback) so AC_PROG_CC's real
+    #    "checking whether the C compiler works" probe genuinely fails, in a
+    #    FRESH copy of the fixture (the steps above already wrote
+    #    config.status/Makefile/prog/*.o into the cwd copy; reusing it here
+    #    would exercise config.status's cache reuse, not a first-run
+    #    compiler-fails path). `unset CC CXX` so this build's own environment
+    #    could never hand configure a working, PATH-independent compiler
+    #    that bypasses the sabotage (nothing sets them here today, but this
+    #    closes the hole against a future change that would).
+    #
+    #    ATTRIBUTABILITY (P2-2): a bare "exited nonzero" is too weak a check
+    #    on its own — a REGRESSION elsewhere in this same hush build (e.g. in
+    #    0009's variable-fd-redirect handling, the one place a real configure
+    #    actually uses ">&$4", inside as_fn_error itself) could make
+    #    configure fail EARLY with some OTHER nonzero status, and this gate
+    #    would still declare the exit-trap fix "holds" without having
+    #    exercised it at all. Pin to the EXACT value bash/dash/hush (post-fix)
+    #    all independently produce for this exact sabotage (measured and
+    #    recorded in the 0011 patch header's VERIFIED section: 77, from
+    #    `as_fn_error 77 "C compiler cannot create executables"`) AND grep the
+    #    captured configure output for that exact diagnostic, so a pass here
+    #    is attributable specifically to the compiler-probe -> as_fn_error ->
+    #    exit-trap path this patch fixes, not to some other failure that
+    #    happens to also be nonzero.
+    mkdir -p neg-cc-case/sabotage-bin
+    cat > neg-cc-case/sabotage-bin/cc <<'SABOTAGE'
+#!/bin/sh
+echo "sabotaged cc: refusing to compile" >&2
+exit 1
+SABOTAGE
+    cp neg-cc-case/sabotage-bin/cc neg-cc-case/sabotage-bin/gcc
+    chmod +x neg-cc-case/sabotage-bin/cc neg-cc-case/sabotage-bin/gcc
+    cp ${fixture}/configure.ac ${fixture}/configure ${fixture}/Makefile.in ${fixture}/prog.c neg-cc-case/
+    chmod -R u+w neg-cc-case
+    chmod +x neg-cc-case/configure
+    (
+      cd neg-cc-case
+      unset CC CXX
+      set +e
+      PATH="$PWD/sabotage-bin:$PATH" "$HUSH" ./configure >configure.log 2>&1
+      echo $? > cfg_rc.txt
+      set -e
+    )
+    neg_cfg_rc=$(cat neg-cc-case/cfg_rc.txt)
+    cat neg-cc-case/configure.log
+    if [ "$neg_cfg_rc" -ne 77 ]; then
+      echo "FAIL: ./configure against a SABOTAGED (always-failing) compiler exited $neg_cfg_rc under patched hush, expected EXACTLY 77 (as_fn_error's status, matching bash/dash on this identical setup) -- this is the #193 broken-exit-status class patches/busybox/0011-hush-exit-trap-status.patch fixes" >&2
+      exit 1
+    fi
+    if ! grep -q 'C compiler cannot create executables' neg-cc-case/configure.log; then
+      echo "FAIL: ./configure exited 77 but its output doesn't mention 'C compiler cannot create executables' -- the nonzero status isn't attributable to the compiler-probe -> as_fn_error -> exit-trap path this gate exists to exercise (some OTHER failure produced a coincidentally-matching 77)" >&2
+      exit 1
+    fi
+    echo "sabotaged-cc ./configure correctly exited 77 (as_fn_error's status, matching bash/dash) via the C-compiler-cannot-create-executables path"
+
+    echo "PASS: patched hush ran a real generated ./configure && make && ./prog end to end (rc=0 throughout), the P1 dangling-redirect fix holds (rc=1, no crash), and a genuinely-failing ./configure (sabotaged compiler) correctly exits exactly 77 via the C-compiler-cannot-create-executables path (the #193 exit-trap-status fix holds, attributably)." | tee "$out"
   ''
