@@ -19,22 +19,41 @@
 # exec of the SAME bytes after the first is a spinlock-only cache hit: no
 # allocation, no read, no ~57 MB squashfs-zstd re-decompression.
 #
-# CORRECTNESS: the identity key is (s_dev, i_ino) — deliberately NOT treated
-# as unique. 32-bit overlayfs (this guest's wasm32 /nix — CONFIG_OVERLAY_FS_
-# XINO_AUTO depends on 64BIT) discards the layer fsid and stores the raw
-# underlying ino, so squashfs-lower/ramfs-upper ino collisions are routine,
-# not a rare edge case; Nix also normalizes every store file's mtime to a
-# fixed epoch, and store paths are fixed-length, so size/mtime discriminate
-# almost nothing on /nix either. The validator that actually bounds
-# staleness is a memcmp of the cached bytes against the caller's bprm->buf
-# (the file's own leading BINPRM_BUF_SIZE==256 bytes, already read by
-# generic exec code) — see the struct comment in exec_image.h for the full
-# accounting, including that validator's own honest residual (only the
-# first 256 bytes are compared). wasm_exec_image_get() now returns
-# ERR_PTR()-encoded errors (not a blanket -ENOMEM) so a short read
-# propagates distinctly from an allocation failure, and takes the caller's
-# already-validated whole_size as the SOLE size source (no second, possibly-
-# divergent i_size_read() sample inside the cache).
+# CORRECTNESS — the identity key is the BACKING inode, not the overlay one:
+# d_real_inode(file->f_path.dentry) (include/linux/dcache.h), NEVER
+# file_inode(bprm->file). On this guest's overlay /nix, file_inode() gives
+# the OVERLAY inode, and — wasm32 being 32-bit, CONFIG_OVERLAY_FS_XINO_AUTO
+# depending on 64BIT — ovl_xino_bits() is structurally 0 here, so
+# ovl_map_ino() stores the RAW underlying layer ino with the layer fsid
+# discarded: an (s_dev, i_ino) collision between an unrelated squashfs-lower
+# file and a ramfs-upper file is routine. An EARLIER version of this cache
+# tried to compensate with a memcmp of the cached bytes against the exec'd
+# file's leading 256 bytes — narrows, but does NOT close, the collision: two
+# builds of the SAME Nix derivation, differing only deep in the body (e.g. an
+# embedded store-path hash string), share magic + dylink.0 meminfo + type-
+# section prefix, and can share size (fixed-length /nix store paths) and
+# mtime (Nix normalizes every store mtime to a fixed epoch) too under the old
+# overlay-inode key. Keying on the BACKING inode instead kills the collision
+# at the ROOT: two different real filesystems always have different s_dev, so
+# a cross-layer collision is now STRUCTURALLY impossible, not merely
+# unlikely — this restores (s_dev, i_ino) to what it's supposed to mean (a
+# true, mount-lifetime identity within one real fs). A copy-up naturally
+# yields a NEW backing inode, so it correctly misses the old entry rather
+# than aliasing it. size/mtime/i_version/the prefix memcmp are KEPT as
+# defense-in-depth — now genuinely useful, since Nix's own immutable-store-
+# path contract (a substitute/rebuild unpacks its NAR into a FRESH temp
+# inode and renames it into place — a new backing inode, not an in-place
+# rewrite of the old one) means the residual they guard is a same-backing-
+# inode CONTENT change (a locally-recompiled a.out at a reused ramfs path),
+# which is exactly what they're good at; see the struct comment in
+# exec_image.h for the full, honest accounting of what's left. read still
+# goes through the overlay `file` (bprm->file) — identical bytes either way.
+#
+# wasm_exec_image_get() returns ERR_PTR()-encoded errors (not a blanket
+# -ENOMEM) so a short read propagates distinctly from an allocation failure,
+# and takes the caller's already-validated whole_size as the SOLE size
+# source (no second, possibly-divergent i_size_read() sample inside the
+# cache).
 #
 # RECLAIM: a shrinker alone is not sufficient to serve the very allocation
 # this cache exists to unblock — the direct-reclaim path that runs a
@@ -44,12 +63,21 @@
 # referenced) entries LRU-first and retries the allocation once on
 # failure — the actual heuristic-independent mechanism — and a byte cap
 # (160 MB, sized against this guest's ~1.75-2 GiB RAM) is enforced at
-# every insert, evicting only the EXCESS over the cap LRU-first (not every
-# idle entry, which would cold-start warm entries like clang's own image
-# on every over-cap insert), so steady-state retention is bounded even
-# with no memory pressure at all. The registered shrinker stays as
-# best-effort BACKGROUND reclaim for OTHER allocations' pressure; full
-# design in the arch/wasm/mm/exec_image.c file comment.
+# TWO points, both evicting only the EXCESS over the cap LRU-first (not
+# every idle entry, which would cold-start warm entries like clang's own
+# image on every over-cap event): at INSERT (wasm_exec_image_get()) and at
+# the IDLE TRANSITION (wasm_exec_image_put(), whenever a refcount drop
+# leaves an entry idle without freeing it) — insert-only enforcement is NOT
+# enough on its own, since an entry becomes idle later, whenever its last mm
+# dies, which can happen with no exec anywhere nearby to re-trigger the
+# insert-time check. wasm_exec_image_put() runs from ATOMIC context on some
+# paths (destroy_context() -> __mmdrop(), reachable synchronously from
+# finish_task_switch()'s scheduler-context mm drop) — the added work there
+# is spinlock-only + non-sleeping frees, no mutex, no recursion back into
+# put() (full analysis at that function's definition). So steady-state
+# retention is bounded even with no memory pressure at all. The registered
+# shrinker stays as best-effort BACKGROUND reclaim for OTHER allocations'
+# pressure; full design in the arch/wasm/mm/exec_image.c file comment.
 #
 # The load also MOVES ahead of begin_new_exec(bprm) (bprm's point of no
 # return): an allocation/read/parse failure is now a clean execve() ==
@@ -77,7 +105,7 @@
 # view; which mm's exec caused that range to be populated is invisible to it.
 --- /dev/null
 +++ b/arch/wasm/include/asm/exec_image.h
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,194 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifndef _ASM_WASM_EXEC_IMAGE_H
 +#define _ASM_WASM_EXEC_IMAGE_H
@@ -119,45 +147,52 @@
 +	refcount_t refs;
 +
 +	/*
-+	 * Identity key: VALUES read out of the inode at lookup time, never a
-+	 * pinned `struct inode *`. Deliberately no igrab()/iget(): pinning
-+	 * would leak into "VFS: busy inodes on unmount" on the served
-+	 * squashfs/9P mounts, and it wouldn't even buy correctness — see
-+	 * below.
++	 * Identity key: VALUES read out of the BACKING inode at lookup time
++	 * — d_real_inode(file->f_path.dentry), NEVER file_inode(bprm->file)
++	 * — and never a pinned `struct inode *`. Deliberately no igrab()/
++	 * iget(): pinning would leak into "VFS: busy inodes on unmount" on
++	 * the served squashfs/9P mounts, and it isn't needed for correctness
++	 * either — see below.
 +	 *
-+	 * (s_dev, i_ino) is NOT a reliably unique key on this guest's own
-+	 * /nix. file_inode(bprm->file) on the overlay mount is the OVERLAY
-+	 * inode, and ovl_map_ino() (fs/overlayfs/inode.c) only remaps it to
-+	 * something collision-resistant when xino is active; wasm32 is a
-+	 * 32-bit arch, CONFIG_OVERLAY_FS_XINO_AUTO depends on 64BIT, and
-+	 * ovl_xino_bits() is therefore structurally 0 here — the RAW
-+	 * underlying layer ino is stored with its layer fsid discarded. The
-+	 * squashfs lower and ramfs upper both hand out small ino numbers
-+	 * starting near 1, so an (s_dev, i_ino) collision between an
-+	 * unrelated squashfs file and a ramfs file is routine, not a rare
-+	 * edge case. The validators below are what actually carry the
-+	 * correctness burden, not this key — treat (s_dev, i_ino) as a hash
-+	 * BUCKET selector, not an identity proof.
++	 * WHY THE BACKING INODE, NOT THE OVERLAY INODE: file_inode(bprm->file)
++	 * on this guest's overlay /nix mount is the OVERLAY inode, and
++	 * ovl_map_ino() (fs/overlayfs/inode.c) only remaps it to something
++	 * collision-resistant when xino is active; wasm32 is a 32-bit arch,
++	 * CONFIG_OVERLAY_FS_XINO_AUTO depends on 64BIT, and ovl_xino_bits()
++	 * is therefore structurally 0 here — the RAW underlying layer ino is
++	 * stored with its layer fsid discarded, so an overlay (s_dev, i_ino)
++	 * collision between an unrelated squashfs-lower file and a
++	 * ramfs-upper file is routine, not a rare edge case. Keying on the
++	 * BACKING inode instead (d_real_inode(), a no-op for any non-union
++	 * dentry) sidesteps this at the root: two different real filesystems
++	 * always have different s_dev, so a cross-layer collision becomes
++	 * STRUCTURALLY impossible, not just statistically unlikely — this
++	 * restores (s_dev, i_ino) to what it is supposed to mean (a true,
++	 * mount-lifetime identity within one real fs). A copy-up (the upper
++	 * layer gaining its own copy of a previously lower-only file)
++	 * naturally yields a NEW backing inode, so it correctly misses the
++	 * old lower-keyed entry instead of being confused with it.
 +	 */
 +	dev_t s_dev;
 +	unsigned long i_ino;
 +
 +	/*
 +	 * Validators, checked in this file's image_validators_match() in
-+	 * increasing cost order — NONE of the cheap ones is trustworthy
-+	 * alone on this guest, which is why the memcmp exists:
++	 * increasing cost order. With the key now a true per-real-fs
++	 * identity (see above), these no longer have to catch a CROSS-LAYER
++	 * collision — only a same-backing-inode CONTENT change, which is
++	 * what they are actually good at:
 +	 *
-+	 *   - size: on /nix, store paths are fixed-length, so two different
-+	 *     builds of the same derivation (or two unrelated derivations
-+	 *     that happen to produce same-length outputs) are routinely
-+	 *     byte-identical in SIZE. Discriminates almost nothing here.
-+	 *   - mtime: Nix normalizes every store file's mtime to the fixed
-+	 *     epoch+1 timestamp, so every /nix file has the SAME mtime —
-+	 *     discriminates nothing there at all. Off /nix (ramfs scratch
-+	 *     binaries, e.g. a locally-compiled a.out) mtime is live but
-+	 *     coarse (ramfs's clock granularity is on the order of a
-+	 *     millisecond tick): a same-inode, same-size rewrite within one
-+	 *     tick is invisible to it.
++	 *   - size, mtime, i_version: on /nix, an in-place content change of
++	 *     an existing store path never happens (store paths are
++	 *     immutable by Nix's own contract; substituting/rebuilding a
++	 *     path unpacks its NAR into a FRESH temp inode and renames it
++	 *     into place, which is a NEW backing inode — a cache miss on the
++	 *     new key, not a stale hit on the old one). Off /nix (ramfs
++	 *     scratch binaries, e.g. a locally-compiled a.out at a reused
++	 *     path) these DO fire: mtime is live there (ramfs's clock
++	 *     granularity is on the order of a millisecond tick) and a
++	 *     rebuild is essentially never byte-identical in size.
 +	 *   - i_version: present in the struct for filesystems that support
 +	 *     it, but effectively DORMANT on this guest today — none of
 +	 *     squashfs, ramfs, or overlayfs set SB_I_VERSION here, so
@@ -166,19 +201,34 @@
 +	 *     free, not because it currently helps.
 +	 *   - memcmp of the leading bytes (done in wasm_exec_image_get()
 +	 *     against the caller's bprm->buf, NOT stored on this struct):
-+	 *     this is the validator that actually bounds staleness on this
-+	 *     guest. Its own honest limit: only the first
-+	 *     min(size, BINPRM_BUF_SIZE) == min(size, 256) bytes are
++	 *     defense-in-depth on top of the above, NOT what makes the key
++	 *     safe (an earlier version of this cache leaned on this memcmp
++	 *     to compensate for a collision-prone key; that framing was
++	 *     wrong — a 256-byte prefix match does NOT distinguish two
++	 *     different builds of the SAME package that differ only deep in
++	 *     the body, e.g. an embedded store-path hash string, and two
++	 *     such builds could plausibly share size/mtime too under the
++	 *     OLD overlay-inode key. The backing-inode key above is what
++	 *     actually closes that case — different builds substitute to
++	 *     different backing inodes.) Its own honest limit: only the
++	 *     first min(size, BINPRM_BUF_SIZE) == min(size, 256) bytes are
 +	 *     compared (that's all binfmt already has read into bprm->buf
-+	 *     before any binfmt handler runs), so two DIFFERENT files that
-+	 *     happen to share both size and a 256-byte prefix — astronomically
-+	 *     unlikely for real compiled wasm binaries, but not provably
-+	 *     impossible — would still alias. Nothing short of a full-file
-+	 *     content hash closes that residual, and that would tax the
-+	 *     *hit* path this cache exists to make free. A validator
-+	 *     mismatch at ANY of these checks is treated as a MISS: the
-+	 *     stale entry is unhashed (see wasm_exec_image_get()) and a
-+	 *     fresh copy is loaded, exactly as if the key had never matched.
++	 *     before any binfmt handler runs).
++	 *   - A validator mismatch at ANY of these checks is treated as a
++	 *     MISS: the stale entry is unhashed (see wasm_exec_image_get())
++	 *     and a fresh copy is loaded, exactly as if the key had never
++	 *     matched.
++	 *
++	 * HONEST RESIDUAL with the backing-inode key: serving stale/wrong
++	 * bytes now requires an IN-PLACE rewrite of the SAME backing inode,
++	 * at the SAME size, within one mtime tick (on /nix that additionally
++	 * requires the impossible — an in-place NAR overwrite, which nix
++	 * never does). The remaining theoretical window is a NON-Nix writer
++	 * — some other program — rewriting a binary in place at the same
++	 * size, between two execs of it, faster than the ramfs mtime clock
++	 * can tick. Accepted, not solved: nothing short of a full-file
++	 * content hash on every lookup would close it, and that would tax
++	 * the *hit* path this cache exists to make free.
 +	 */
 +	loff_t size;
 +	struct timespec64 mtime;
@@ -191,16 +241,21 @@
 +
 +/*
 + * Look up (or load fresh) the cached image backing bprm->file, taking a
-+ * reference on the caller's behalf. `whole_size` is the exact byte size the
-+ * caller intends to exec (already validated against i_size by the caller;
-+ * used verbatim as both the size validator and the allocation size — this
-+ * function does NOT re-sample i_size itself, so there is exactly one source
-+ * of truth for "how big is this image" and no risk of it drifting from a
-+ * second, later i_size_read() sample under this file's caller). `head` must
-+ * point at (at least) `head_len` bytes of the file's own leading content —
-+ * the caller's bprm->buf, already populated by generic exec code before any
-+ * binfmt handler runs — used to memcmp-validate a candidate cache hit (see
-+ * the struct comment above).
++ * reference on the caller's behalf. Identity/validators are read off
++ * d_real_inode(file->f_path.dentry) — the BACKING inode, not the overlay
++ * inode file_inode(file) would give (see the struct comment above); the
++ * actual bytes are still read through `file` itself (the overlay file),
++ * which resolves to the identical backing data. `whole_size` is the exact
++ * byte size the caller intends to exec (already validated against i_size by
++ * the caller; used verbatim as both the size validator and the allocation
++ * size — this function does NOT re-sample i_size itself, so there is
++ * exactly one source of truth for "how big is this image" and no risk of it
++ * drifting from a second, later i_size_read() sample under this file's
++ * caller). `head` must point at (at least) `head_len` bytes of the file's
++ * own leading content — the caller's bprm->buf, already populated by
++ * generic exec code before any binfmt handler runs — used to
++ * memcmp-validate a candidate cache hit as defense-in-depth (see the struct
++ * comment above for what this does and does NOT prove on its own).
 + *
 + * Returns a valid pointer on success, or an ERR_PTR() on failure — check
 + * with IS_ERR()/PTR_ERR(), standard kernel pointer-or-errno convention (NOT
@@ -220,7 +275,13 @@
 + * once the entry is both unhashed (evicted/replaced) AND no mm references it
 + * any longer. `image` may be NULL (mirrors kfree()/free_pages_exact() taking
 + * a NULL/absent pointer gracefully — callers on an error path that never got
-+ * an image can call this unconditionally). */
++ * an image can call this unconditionally). If the drop instead leaves the
++ * entry idle (cache-only-referenced), enforces the steady-state byte cap
++ * right there (see arch/wasm/mm/exec_image.c's design comment, reclaim
++ * mechanism 2) — safe from destroy_context()'s ATOMIC-context call sites
++ * (__mmdrop() via a synchronous finish_task_switch() mm drop): spinlock and
++ * non-sleeping frees only, no mutex, no recursion back into this function
++ * (full analysis in the .c file at this function's definition). */
 +void wasm_exec_image_put(struct wasm_exec_image *image);
 +
 +/* Take an extra reference on an ALREADY-HELD image. Used by arch_dup_mmap()
@@ -361,7 +422,7 @@
 +obj-$(CONFIG_MMU) += pgtable.o uaccess.o fault.o exec_image.o
 --- /dev/null
 +++ b/arch/wasm/mm/exec_image.c
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,614 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Software-MMU exec image cache (#192).
@@ -402,14 +463,20 @@
 + * retries once) is exactly the backstop for this raised peak — an idle
 + * predecessor image doesn't have to wait for the shrinker to be reclaimed.
 + *
-+ * Identity + validators. See the struct comment in asm/exec_image.h for the
-+ * full accounting of what (s_dev, i_ino) does and does NOT prove on this
-+ * guest (32-bit overlayfs without xino discards the layer fsid, so it is a
-+ * hash bucket, not an identity proof) and why size/mtime/i_version are weak
-+ * or dormant validators here (fixed-length /nix store paths, Nix's
-+ * normalized-to-epoch mtime, no fs on this guest setting SB_I_VERSION). The
-+ * validator that actually carries the correctness burden is the memcmp
-+ * against the caller's bprm->buf in wasm_exec_image_get() below.
++ * Identity + validators. The cache is keyed on the BACKING inode
++ * (d_real_inode(file->f_path.dentry) — squashfs lower or ramfs upper, never
++ * the overlay inode file_inode(file) would give), which is what makes
++ * (s_dev, i_ino) a true identity again: two different real filesystems
++ * always have different s_dev, so the cross-layer (s_dev, i_ino) collision a
++ * 32-bit-overlayfs (no xino) key would otherwise be exposed to is
++ * structurally impossible. See the struct comment in asm/exec_image.h for
++ * the full accounting, including the honest residual this key still leaves
++ * (an in-place same-size rewrite of the SAME backing inode within one mtime
++ * tick) and why Nix's own store semantics make that residual theoretical in
++ * practice. size/mtime/i_version/the prefix memcmp are kept as
++ * defense-in-depth against exactly that residual — same-backing-inode
++ * content changes — which is what they are actually good at; they were
++ * never what made the KEY safe.
 + *
 + * Locking. Two locks, deliberately not one:
 + *
@@ -448,12 +515,24 @@
 + *      to maybe find it: it evicts idle entries LRU-first ITSELF, exactly
 + *      when (and only when) an allocation actually needs the memory back,
 + *      and retries the allocation once.
-+ *   2. A byte-budget CAP enforced at insert (wasm_exec_image_evict_idle()
-+ *      again, called after every successful insert): bounds steady-state
-+ *      retention even with NO memory pressure at all. Without a cap,
-+ *      distinct large binaries execed over a session (clang, wasm-ld, a
-+ *      locally built a.out, …) would accumulate unboundedly — cheap on a
-+ *      real 64 GB devbox, not on a ~2 GiB guest.
++ *   2. A byte-budget CAP enforced at TWO points, both via
++ *      wasm_exec_image_evict_idle(idle_bytes - CAP) (evict only the excess,
++ *      LRU-first — not everything idle, which would cold-start a warm entry
++ *      like clang's own image on every single over-cap event): at INSERT
++ *      (wasm_exec_image_get(), after every successful load) and at the IDLE
++ *      TRANSITION (wasm_exec_image_put(), whenever a refcount drop leaves an
++ *      entry idle without freeing it). Insert-only enforcement is NOT
++ *      enough on its own: an entry becomes idle later, whenever its last mm
++ *      dies, which can happen with no exec anywhere nearby to re-trigger the
++ *      insert-time check — so between inserts the idle set can exceed the
++ *      cap by however many pinned images happen to go idle, and without the
++ *      put()-side check it would STAY over cap until the next insert
++ *      (bounded, since the next insert always catches up, but not the
++ *      "steady-state" bound this cap exists to promise). Both call sites
++ *      bound steady-state retention even with NO memory pressure at all;
++ *      without a cap, distinct large binaries execed over a session (clang,
++ *      wasm-ld, a locally built a.out, …) would accumulate unboundedly —
++ *      cheap on a real 64 GB devbox, not on a ~2 GiB guest.
 + *   3. The registered shrinker (count/scan_objects) is kept as best-effort
 + *      BACKGROUND reclaim under system-wide memory pressure from OTHER
 + *      allocations (not this cache's own) — genuinely useful, but neither
@@ -466,6 +545,7 @@
 + * entries only, LRU-first — an entry pinned by a live mm is exactly as
 + * unreclaimable as that mm's mapped text on real Linux, cap or no cap.
 + */
++#include <linux/dcache.h> /* d_real_inode */
 +#include <linux/err.h>
 +#include <linux/errno.h>
 +#include <linux/fs.h>
@@ -560,22 +640,26 @@
 +	kfree(img);
 +}
 +
-+void wasm_exec_image_put(struct wasm_exec_image *image)
-+{
-+	if (!image)
-+		return;
-+	if (refcount_dec_and_test(&image->refs))
-+		wasm_exec_image_release(image);
-+}
-+
 +/*
 + * Evict up to `max_bytes` worth of IDLE (refcount==1, i.e. cache-only-
 + * referenced) entries, LRU-first, and drop the cache's own reference to
-+ * each. Used both synchronously on an allocation failure (evict everything
-+ * idle: max_bytes == ULONG_MAX) and to enforce the steady-state byte cap on
-+ * every insert (evict just enough to get back under the cap). Returns the
-+ * number of bytes evicted. Never touches an entry a live mm still
-+ * references — see the file comment's "reclaim" section.
++ * each. Used (a) synchronously on an allocation failure — evict everything
++ * idle: max_bytes == ULONG_MAX, the emergency case, maximum headroom for the
++ * failing alloc — and (b) to enforce the steady-state byte cap, both at
++ * INSERT (wasm_exec_image_get()) and at the IDLE TRANSITION
++ * (wasm_exec_image_put(), below) — the cap callers pass just the excess over
++ * the cap as `max_bytes`, so this stops as soon as it's evicted "just
++ * enough", not everything. Returns the number of bytes evicted. Never
++ * touches an entry a live mm still references — see the file comment's
++ * "reclaim" section.
++ *
++ * Callable from ATOMIC context (see wasm_exec_image_put()'s comment for why
++ * that matters): only ever takes wasm_exec_image_lock (a spinlock, legal in
++ * atomic context) and frees via free_pages_exact()/kfree() (both
++ * non-sleeping — see the pinned tree's mm/page_alloc.c free_pages_exact(),
++ * a plain free_page() loop with no might_sleep()/cond_resched() path). Calls
++ * wasm_exec_image_release() directly, never wasm_exec_image_put() — so a
++ * put()-triggered eviction can never recurse back into put().
 + */
 +static unsigned long wasm_exec_image_evict_idle(unsigned long max_bytes)
 +{
@@ -608,7 +692,9 @@
 +	return evicted;
 +}
 +
-+/* Sum of buf_size across every IDLE entry currently in the cache. */
++/* Sum of buf_size across every IDLE entry currently in the cache. Same
++ * atomic-context safety as wasm_exec_image_evict_idle() above: spinlock
++ * only, no allocation, no freeing. */
 +static unsigned long wasm_exec_image_idle_bytes(void)
 +{
 +	struct wasm_exec_image *img;
@@ -621,6 +707,53 @@
 +	}
 +	spin_unlock(&wasm_exec_image_lock);
 +	return bytes;
++}
++
++void wasm_exec_image_put(struct wasm_exec_image *image)
++{
++	unsigned long idle;
++
++	if (!image)
++		return;
++
++	if (!refcount_dec_and_test(&image->refs)) {
++		/*
++		 * The refcount dropped but didn't hit zero: this MAY be the
++		 * transition that just made `image` idle (cache-only-
++		 * referenced again — refs==1), which is precisely the moment
++		 * the insert-time cap enforcement (wasm_exec_image_get())
++		 * canNOT see: nothing re-checks the cap between inserts, so
++		 * without this, an image that goes idle here could sit over
++		 * the steady-state byte cap indefinitely (bounded — the next
++		 * insert always catches up — but not the "steady-state" bound
++		 * the cap exists to promise). So re-run the exact same
++		 * excess-eviction insert uses.
++		 *
++		 * ATOMIC CONTEXT: this function is destroy_context()'s
++		 * (arch/wasm/include/asm/mmu_context.h) sole body, reached via
++		 * __mmdrop() -> destroy_context() on EVERY mm teardown path,
++		 * including the synchronous mmdrop_lazy_tlb_sched() ->
++		 * mmdrop() -> __mmdrop() call inside finish_task_switch()
++		 * (kernel/sched/core.c) — scheduler context, preemption
++		 * elevated, MUST NOT sleep. That's always been true of this
++		 * function (it never took a lock before either); the added
++		 * work below preserves it: wasm_exec_image_idle_bytes() and
++		 * wasm_exec_image_evict_idle() take only the spinlock (legal
++		 * in atomic context) and free via free_pages_exact()/kfree()
++		 * (both non-sleeping — see evict_idle()'s own comment), and
++		 * evict_idle() frees via wasm_exec_image_release() directly,
++		 * never back through this function, so there is no recursion
++		 * hazard either. Net effect: every process-exit path now does
++		 * one short spinlocked list walk — cheap, since the list is
++		 * small (a handful of images) by construction of the cap.
++		 */
++		idle = wasm_exec_image_idle_bytes();
++		if (idle > WASM_EXEC_IMAGE_CACHE_CAP_BYTES)
++			wasm_exec_image_evict_idle(idle - WASM_EXEC_IMAGE_CACHE_CAP_BYTES);
++		return;
++	}
++
++	wasm_exec_image_release(image);
 +}
 +
 +/*
@@ -661,16 +794,29 @@
 +struct wasm_exec_image *wasm_exec_image_get(struct file *file,
 +		unsigned long whole_size, const void *head, size_t head_len)
 +{
-+	struct inode *inode = file_inode(file);
++	/*
++	 * Key + validators are all read off the BACKING inode, not
++	 * file_inode(file) (which on an overlay mount is the OVERLAY inode).
++	 * d_real_inode() is a no-op (returns d_inode(dentry) unchanged) for
++	 * any non-union dentry, and on this guest's overlay /nix resolves to
++	 * the real squashfs-lower or ramfs-upper inode that actually owns the
++	 * bytes — see the file comment's "Identity + validators" section for
++	 * why this, not the validators below, is what makes the (s_dev,
++	 * i_ino) key trustworthy.
++	 */
++	struct inode *inode = d_real_inode(file->f_path.dentry);
 +	dev_t s_dev = inode->i_sb->s_dev;
 +	unsigned long i_ino = inode->i_ino;
 +	/*
-+	 * `whole_size` (the CALLER's already-validated i_size sample) is the
-+	 * single source of truth for this image's size — used verbatim as
-+	 * both the validator and the allocation/buf_size. Deliberately NOT
-+	 * re-sampling i_size_read(inode) here: a second sample could diverge
-+	 * from the caller's (e.g. a revalidating network fs like 9P) and
-+	 * store a validator that doesn't match the bytes actually read.
++	 * `whole_size` (the CALLER's already-validated i_size sample, off the
++	 * overlay file — overlayfs mirrors i_size from the same backing inode
++	 * we just keyed on, so this doesn't reintroduce a second source of
++	 * truth) is the single source of truth for this image's size — used
++	 * verbatim as both the validator and the allocation/buf_size.
++	 * Deliberately NOT re-sampling i_size_read(inode) here: a second
++	 * sample could diverge from the caller's (e.g. a revalidating network
++	 * fs like 9P) and store a validator that doesn't match the bytes
++	 * actually read.
 +	 */
 +	loff_t size = (loff_t)whole_size;
 +	struct timespec64 mtime = inode_get_mtime(inode);
@@ -749,6 +895,11 @@
 +		}
 +	}
 +	pos = 0;
++	/* Read through the OVERLAY `file` (bprm->file, as passed by the
++	 * caller) — not the backing `inode` we keyed/validated against above.
++	 * Same bytes either way (the overlay file's read path resolves to the
++	 * identical backing data this inode owns), so this is not a second,
++	 * possibly-divergent source of content. */
 +	nread = kernel_read(file, buf, whole_size, &pos);
 +	if (nread != (ssize_t)whole_size) {
 +		free_pages_exact(buf, whole_size);
@@ -783,12 +934,15 @@
 +
 +	mutex_unlock(&wasm_exec_image_load_mutex);
 +
-+	/* Reclaim mechanism (2): enforce the steady-state idle-byte cap now
-+	 * that the new entry is inserted (and therefore itself eligible to
-+	 * be counted/evicted once it goes idle later — this call only ever
-+	 * evicts entries OTHER than the one this caller now holds a live
-+	 * reference to, since a fresh entry starts at refcount 2). Done
-+	 * outside the load mutex: eviction takes only the spinlock.
++	/* Reclaim mechanism (2), INSERT side (see wasm_exec_image_put() below
++	 * for the other half — the IDLE-TRANSITION side, needed because an
++	 * insert-only check can't see an entry that goes idle between two
++	 * inserts): enforce the steady-state idle-byte cap now that the new
++	 * entry is inserted (and therefore itself eligible to be counted/
++	 * evicted once it goes idle later — this call only ever evicts
++	 * entries OTHER than the one this caller now holds a live reference
++	 * to, since a fresh entry starts at refcount 2). Done outside the
++	 * load mutex: eviction takes only the spinlock.
 +	 *
 +	 * Evict only the EXCESS over the cap, not everything idle: this is a
 +	 * steady-state budget, not an emergency (that's the ULONG_MAX call in
