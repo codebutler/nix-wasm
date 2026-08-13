@@ -915,13 +915,24 @@ jobs:
   # return-0 helper like the reviewed-out `run_smoke_soft`) lives in git
   # history and pr-preview.yml's MMU-preview step comment.
   #
-  # NEW SOAK, 2026-08-05 parity-plan Phase-1 precondition (a DIFFERENT soak
-  # from the #131 one just closed above — that one's 19 smokes are done and
-  # promoted; this one has its own single smoke, `core`-shard only):
-  # `demo/node/autotools-fork-smoke.mjs`, the first automated regression gate
-  # anywhere for CLAUDE.md's "In-guest autotools also works" milestone (a real
-  # `./configure && make && ./prog` in the guest) — see that step's own
-  # comment for the full soak-idiom rationale restated for this smoke.
+  # SECOND SOAK, 2026-08-05 parity-plan Phase-1 precondition (a DIFFERENT soak
+  # from the #131 one closed above — that one's 19 smokes were done and
+  # promoted long before this one had its first green): `demo/node/
+  # autotools-fork-smoke.mjs`, the first automated regression gate anywhere
+  # for CLAUDE.md's "In-guest autotools also works" milestone (a real
+  # `./configure && make && ./prog` in the guest). It stayed non-gating while
+  # issue #192 (a pre-existing kernel exec-image fragmentation bug — large
+  # repeated execs, e.g. clang's driver+cc1, failing around the 6th with a
+  # `page allocation failure: order:14`) made the fixture's own in-guest cc
+  # invocations fail deterministically, unrelated to the shell/autoconf fixes
+  # this smoke exists to prove. PR #199's per-inode exec-image cache (patch
+  # 0030) fixed #192; the very next boot (workflow run 31697211801, job "boot
+  # full nix system on software MMU (core," id 94455421162) recorded the
+  # FIRST-EVER green CFGRC on attempt 1 (`CFGRC=0`, `MAKERC=0`,
+  # `AUTOTOOLS_FIXTURE_OK`, `RUNRC=0`). CLOSED here: `autotools-fork-smoke.mjs`
+  # is now a `run_smoke` call in the `core` hard-gates step below (see its own
+  # comment) and the dedicated soak step is gone — there is nothing left to
+  # soak in this job.
   nix-boot-smoke-mmu:
     name: boot full nix system on software MMU (${{ matrix.shard }}, #131 prove-then-flip)
     needs: [changes, toolchain, artifacts]
@@ -1001,11 +1012,12 @@ jobs:
           # real-fork autotools acceptance fixture (userspace/autotools-fixture.nix)
           # — a plain, tiny (native-autoconf-only) source tree, so building it here
           # unconditionally (both shards) costs nothing. Exported via $GITHUB_ENV so
-          # it's just present in AUTOTOOLS_FIXTURE for the soak step below, same as
-          # every other env var this job's steps read. Capture into a variable FIRST
-          # (not `echo "X=$(nix build …)" >> "$GITHUB_ENV"` directly) — piping the
-          # command substitution straight into `echo` lets a `nix build` FAILURE be
-          # masked by `echo`'s own (always-zero) exit status winning under `set -e`.
+          # it's just present in AUTOTOOLS_FIXTURE for the `core` shard's
+          # autotools-fork-smoke run_smoke call below, same as every other env var
+          # this job's steps read. Capture into a variable FIRST (not `echo
+          # "X=$(nix build …)" >> "$GITHUB_ENV"` directly) — piping the command
+          # substitution straight into `echo` lets a `nix build` FAILURE be masked
+          # by `echo`'s own (always-zero) exit status winning under `set -e`.
           fixture_path="$(nix build -L '.#autotools-fixture' --no-link --print-out-paths)"
           echo "AUTOTOOLS_FIXTURE=$fixture_path" >> "$GITHUB_ENV"
           # Hard gate (native, ~2 min): patches/busybox/0009+0010 make a
@@ -1017,7 +1029,7 @@ jobs:
           # documented shard-dispatch convention — NOT a step-level `if:`,
           # see the header comment above the hard-gates step): the hush-check
           # is proof for the same autotools chain only `core`'s
-          # autotools-fork-smoke soak exercises — the `gtk` shard's
+          # autotools-fork-smoke gate exercises — the `gtk` shard's
           # display-free GTK selftests never touch a shell at all.
           if [ "${{ matrix.shard }}" = "core" ]; then
             nix build -L '.#autotools-fixture-hush-check' --no-link --print-out-paths
@@ -1032,8 +1044,10 @@ jobs:
       # Retry a boot panic (exit 2); 0 pass / 1 fail are terminal. Shard
       # dispatch via a shell if/else inside each step, matching nix-boot-smoke's
       # own style (not nix-boot-smoke-mmu's smaller sibling boot-smoke, which
-      # uses per-step `if: matrix.shard == …`). Split into a hard-gates step and
-      # a soak step — see the SOAK NOTE in this job's header comment for why.
+      # uses per-step `if: matrix.shard == …`). Every smoke in this job now
+      # hard-gates here — see the SOAK NOTE + the SECOND SOAK note in this
+      # job's header comment for the two promotion cycles that got it there;
+      # no separate soak step remains.
       - name: Boot full nix system on MMU + ${{ matrix.shard }} smokes — hard gates
         working-directory: runtime
         env:
@@ -1120,11 +1134,25 @@ jobs:
             # order-14 warn_alloc signature never appears. Before patch 0030
             # (arch/wasm/mm/exec_image.c's refcounted per-inode exec-image
             # cache) this failed deterministically well before cycle 12 —
-            # exactly the bug the "Real-fork autotools acceptance smoke —
-            # soak" step below works around with its own `!cancelled()`
-            # override; that override stays (harmless once this is fixed —
-            # see its own comment), but THIS gate is the direct proof.
+            # exactly the bug that kept the autotools-fork-smoke gate below
+            # non-gating; that gate is the acceptance-level proof, THIS one
+            # is the direct, targeted regression guard.
             run_smoke demo/node/exec-churn-smoke.mjs
+            # 2026-08-05 parity-plan Phase-1 precondition — CLAUDE.md's
+            # "In-guest autotools also works" milestone (a real `./configure
+            # && make && ./prog` in the guest), the first automated
+            # regression gate for it on ANY guest. Ran as a non-gating soak
+            # here until #192 (the exec-fragmentation bug exec-churn-smoke
+            # above regression-gates) made its own in-guest cc invocations
+            # fail deterministically — unrelated to the shell/autoconf fixes
+            # (patches/busybox/0009-0011) this smoke actually proves.
+            # PROMOTED: PR #199's per-inode exec-image cache (patch 0030)
+            # fixed #192, and the very next boot (workflow run 31697211801,
+            # job "boot full nix system on software MMU (core," id
+            # 94455421162) recorded the first-ever green CFGRC on attempt 1
+            # (`CFGRC=0`, `MAKERC=0`, `AUTOTOOLS_FIXTURE_OK`, `RUNRC=0`) —
+            # this hard-gates now, and the dedicated soak step is gone.
+            run_smoke demo/node/autotools-fork-smoke.mjs
             # and the GNOME-games tier render (rsvg-convert → libcroco →
             # librsvg → pango/cairo → cairo-png, headless).
             run_smoke demo/node/rsvg-smoke.mjs
@@ -1155,103 +1183,6 @@ jobs:
             run_smoke demo/node/gtk-demo-smoke.mjs
             run_smoke demo/node/gcalctool-smoke.mjs
             run_smoke demo/node/l3afpad-smoke.mjs
-          fi
-
-      # 2026-08-05 parity-plan Phase-1 precondition (toolchain half) —
-      # SEPARATE, NEW soak, NOT a reopening of the #131 soak closed above (that
-      # soak covered 19 DIFFERENT smokes and finished its promotion cycle; this
-      # is a distinct first-ever-boot smoke that needs its own cycle before it
-      # can join the hard-gates step). CLAUDE.md's "In-guest autotools also
-      # works" milestone (a real `./configure && make && ./prog` in the guest)
-      # has never had an automated regression gate on ANY guest — this is that
-      # gate's first CI run. CFGRC is NOT expected-red here anymore: the hush
-      # variable-fd-redirect + fd0-guard fixes (patches/busybox/0009+0010)
-      # landed in this same change (busybox-fork.nix's actual shell), and the
-      # host-side proof (`.#autotools-fixture-hush-check`, hard-gated above)
-      # already confirms the fix on a native build — this step is now a
-      # genuine first-boot CONFIRMATION run on the real MMU/fork guest, not a
-      # reproduction of a known gap. Soak-first per the promotion rule this
-      # job's own (closed) #131 soak established: `continue-on-error: true` bounds
-      # FAILURE (a genuine failure shows as this step's own distinct,
-      # non-blocking red indicator in the Checks UI — the JOB stays green),
-      # `timeout-minutes` bounds WALL CLOCK (continue-on-error does NOT save
-      # you from a hang, and this job's own 240-min job-level timeout would
-      # cancel the WHOLE job, hard-gates step included, regardless of any
-      # step's continue-on-error — see pr-preview.yml's MMU-preview step
-      # comment for the fully-spelled-out version of this exact argument).
-      # NEVER a helper whose every path returns 0 (the reviewed-out
-      # `run_smoke_soft` this job's own history warns against) — `check()`
-      # here lets a real failure make the STEP's own exit code nonzero, which
-      # `continue-on-error` then catches. Shard dispatch via an in-step shell
-      # if/else (NOT a step-level `if:`), matching this job's own documented
-      # convention (see the header comment above the hard-gates step): only
-      # `core` runs the smoke (the fixture exercises the 9P-staging + in-guest
-      # cc/make path, orthogonal to the `gtk` shard's display-free GTK
-      # selftests). Move this to a `run_smoke` call in the hard-gates step
-      # above once it has a green run on record.
-      - name: Real-fork autotools acceptance smoke — soak (non-gating, first-ever boot)
-        # #192 (2026-08-12): the hard-gates step above fails DETERMINISTICALLY on
-        # a pre-existing kernel fragmentation bug (per-mm 57MB exec-image buffers +
-        # driver/cc1 concurrency — its own workstream, unrelated to this smoke),
-        # which by GitHub Actions' default `if: success()` PERMANENTLY skips this
-        # soak — so the first-ever CFGRC recording this cycle exists to collect
-        # could never happen. This soak boots FRESH and is otherwise entirely
-        # independent of the hard-gates step's outcome, so run it regardless of
-        # that step's result: `!cancelled()` (deliberately NOT `always()`) still
-        # skips if the JOB itself is cancelled, so a cancelled run doesn't spawn a
-        # doomed boot. Masks nothing — the hard-gates step still fails the job on
-        # #192. Once this soak is PROMOTED into the hard-gates step (its stated
-        # goal), this condition disappears with it — the promoted `run_smoke` call
-        # inherits the hard-gates step's own (unconditional-on-siblings) run.
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        # 60 (Codex P2, 2026-08-12): sized to the SUM of the smoke's own internal
-        # per-step budgets — NIX_MAKE_TIMEOUT_MS install (10m) + CFGRC (25m) +
-        # MAKERC (10m) + boot/staging (~2m) ≈ 47m — plus retry headroom, not the
-        # previous 30 (which could kill the step mid-make even with every internal
-        # operation inside its own documented budget). Bounded cost: continue-on-error
-        # only actually spends this when something is genuinely wedged, and the
-        # job-level 240-min timeout still caps everything regardless.
-        timeout-minutes: 60
-        working-directory: runtime
-        env:
-          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
-          NIX_MAKE_TIMEOUT_MS: "600000"
-        run: |
-          run_smoke() {
-            local script="$1" attempt rc
-            for attempt in 1 2 3; do
-              echo "::group::$script (attempt $attempt, soak — autotools proof)"
-              set +e
-              node "$script"
-              rc=$?
-              set -e
-              echo "::endgroup::"
-              if [ "$rc" -eq 0 ]; then return 0; fi
-              if [ "$rc" -eq 2 ]; then echo "$script inconclusive (boot panic) — retrying"; continue; fi
-              return "$rc"
-            done
-            echo "$script still inconclusive after 3 attempts"
-            return 2
-          }
-          failed=()
-          check() {
-            if ! run_smoke "$1"; then
-              echo "::error::$1 failed on its first-ever nix-boot-smoke-mmu boot (2026-08-05 parity-plan Phase-1 precondition, autotools proof) — this step is continue-on-error so the JOB stays green, but the step itself now genuinely fails; investigate before moving it to a run_smoke() call in the hard-gates step above."
-              failed+=("$1")
-            fi
-          }
-          if [ "${{ matrix.shard }}" = "core" ]; then
-            check demo/node/autotools-fork-smoke.mjs
-          else
-            # The fixture exercises the 9P-staging + in-guest cc/make path,
-            # orthogonal to the `gtk` shard's display-free GTK selftests —
-            # nothing to run here.
-            :
-          fi
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "::error::nix-boot-smoke-mmu autotools soak: ${#failed[@]} smoke(s) failed: ${failed[*]}"
-            exit 1
           fi
 
   # Issue #138: the guest must boot IN A BROWSER with a dlopen workload, not

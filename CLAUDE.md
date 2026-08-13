@@ -438,16 +438,18 @@ record in the learnings entry below); `.#autotools-fixture-hush-check` gained
 a hard NEGATIVE case (a sabotaged always-failing compiler) so this class of
 bug is now gated on the host side too, not just discoverable by an in-guest
 soak. **This closes the SHELL half of the item for good** — no known hush
-defect stands between autoconf and this guest's `/bin/sh` any more. **The
-in-guest soak's CFGRC is still NOT expected green, though, and for a reason
-0011 cannot fix: issue #192**, a kernel exec-image-buffer fragmentation bug
-(large repeated execs, e.g. clang's driver+cc1, fail around the 6th with
-`page allocation failure: order:14`; a per-inode exec-buffer cache is the
-queued, not-started fix). Net effect: CFGRC now fails *honestly* (a real
-nonzero status) instead of the pre-0011 masked-failure mode — but it still
-fails, so the soak stays a soak (NOT promoted to a `run_smoke` hard gate)
-until #192 is fixed. **Full #192 record (compaction-hypothesis refutation,
-the per-inode-cache fix direction, the fixture-`configure` data point):**
+defect stands between autoconf and this guest's `/bin/sh` any more. **UPDATE
+(2026-08-13, same day, PR #199): the compiler/#192 half is closed too.**
+Issue #192 (a kernel exec-image-buffer fragmentation bug — large repeated
+execs, e.g. clang's driver+cc1, failed around the 6th with `page allocation
+failure: order:14`) is fixed by a refcounted per-inode exec-image cache
+(`patches/kernel/0030`). The very next `autotools-fork-smoke.mjs` boot
+recorded the first-ever green CFGRC (workflow run 31697211801) and the smoke
+is now a `run_smoke` hard gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu`
+`core` shard — no soak step remains for it. **This closes the item in
+full: no known blocker stands between autoconf and the real-fork MMU guest.**
+Full record (compaction-hypothesis refutation, the per-inode-cache fix,
+the fixture-`configure` data point, the CI promotion):
 `docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s "Real-fork
 autotools proof" item.
 
@@ -1725,10 +1727,12 @@ CI / the linux box, per the design's "ship what works" scope):
   them turns the JOB red (the soak idiom's rationale lives in git history +
   pr-preview.yml's MMU-preview step comment for the next first-ever-boot
   shard that needs it). (One soak WAS added to the same `core` shard later,
-  2026-08-12: `autotools-fork-smoke.mjs`'s acceptance soak, deliberately
-  non-gating until issue #192 is fixed — see the autotools caveat above and
-  the 2026-08-05 parity-plan note. It postdates this 19/19 flip and is not
-  one of the 19.) That shard verifies issue #11 item
+  2026-08-12: `autotools-fork-smoke.mjs`'s acceptance soak, non-gating until
+  issue #192 was fixed — see the autotools caveat above and the 2026-08-05
+  parity-plan note. It postdated this 19/19 flip and was not one of the 19;
+  it was itself promoted to a `run_smoke` hard gate on 2026-08-13 once #192
+  was fixed, so no soak step remains in this job at all now.) That shard
+  verifies issue #11 item
   1 ONLY — device models still work
   when USER pages are translated (the kernel's soft uaccess walk + the
   instrumented user binary's own buffer accesses); the vring/pfn addressing

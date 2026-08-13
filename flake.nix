@@ -777,7 +777,18 @@
       wasmSystemFork = import ./userspace/system.nix {
         inherit nixpkgs cross;
         busybox = wasmBusyboxFork;
-        toolchain = [ nixWasmForkClean wasmAsh ];
+        # #131 slice-1 (first accommodation retirement, 2026-08-13): wasmAsh
+        # dropped from this profile's toolchain. The fork guest's /bin/sh is
+        # busybox-fork's own stock hush applet (userspace/busybox-fork.nix) —
+        # bootstrap.nix's forkshell-ash `/bin/sh` promotion is unconditionally
+        # skipped in forkMode (`pkgs.lib.optionalString (!forkMode) ...`), and
+        # nothing else in the fork boot path (initramfsExtraBins, the fork
+        # bootstrap script) references `ash`/`wasmAsh` — it rode along in
+        # environment.systemPackages purely as unused closure weight. The
+        # NOMMU profile (wasmSystem above) is untouched: forkshell ash stays
+        # its `/bin/sh`. See docs/superpowers/specs/2026-07-01-cleanup-131-
+        # audit.md's slice-1 REVERT list.
+        toolchain = [ nixWasmForkClean ];
         nixPackage = nixWasmForkClean;
         extraSystemPackages = [ wasmDltest ];
       };
