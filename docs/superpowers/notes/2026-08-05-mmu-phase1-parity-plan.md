@@ -117,14 +117,18 @@ surface already exist; Phase 1 only widens what boots on top of it).
   system on software MMU (core," id 94455421162) on `.#kernel-mmu-a2` + the
   fork guest; the `autotools-fork-smoke.mjs` soak is now promoted to a
   `run_smoke` hard gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu` `core`
-  shard (no soak step remains for it).** CLAUDE.md's "In-guest autotools also works" milestone
-  (`./configure && make && ./prog`) is proven only on the shipped NOMMU guest,
-  through **forkshell ash** — four patches + six postPatch fixes
-  (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist ONLY to fake
-  autoconf's `$()`/subshell/pipeline/heredoc machinery WITHOUT real `fork()`.
-  (Note: that milestone has never been automated on ANY guest — it was a hand-run
-  session recorded in the since-deleted `docs/STATUS.md`; `runtime/demo/node/`
-  still has no autotools script.) This item asked for a stock-ash-over-`muslFork`
+  shard (no soak step remains for it).** Historical body as written 2026-08-05
+  (kept as the record of WHY this item existed; every present-tense claim in it
+  is superseded by the DONE headline above): CLAUDE.md's "In-guest autotools
+  also works" milestone (`./configure && make && ./prog`) was AT THAT TIME
+  proven only on the shipped NOMMU guest, through **forkshell ash** — four
+  patches + six postPatch fixes (`userspace/ash.nix`, `patches/busybox/ash/*`)
+  that exist ONLY to fake autoconf's `$()`/subshell/pipeline/heredoc machinery
+  WITHOUT real `fork()`. (And at that time it had never been automated on ANY
+  guest — a hand-run session recorded in the since-deleted `docs/STATUS.md`,
+  with no autotools script in `runtime/demo/node/`. That gap closed 2026-08-12
+  with `autotools-fork-smoke.mjs` — the first automated autotools gate on any
+  guest — now the hard gate cited in the headline.) This item asked for a stock-ash-over-`muslFork`
   build to prove real fork makes those tricks unnecessary. **Booting it answered
   the question differently, in two ways — both measured on `.#kernel-mmu-a2` +
   a fork initramfs:**
