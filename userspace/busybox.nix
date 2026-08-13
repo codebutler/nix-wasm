@@ -77,6 +77,18 @@ cross.stdenv.mkDerivation {
     # autoconf configure's standard preamble ("exec 7<&0 </dev/null") hits
     # this. Same zero-fuzz applicability as 0009.
     ../patches/busybox/0010-hush-internally-opened-fd0.patch
+    # hush: a bare "exit" run FROM WITHIN the EXIT (trap 0) handler must
+    # resume the exit status that was PENDING before the trap fired (POSIX;
+    # bash/dash both do this), not whatever the trap body's own commands
+    # last left in $?. Found by #193's soak: autoconf's universal
+    # `ac_exit_trap` idiom ("... && exit $exit_status" with $exit_status
+    # deliberately empty -> a bare exit) made a genuinely-fatal `configure`
+    # report CFGRC=0 under (pristine OR 0009+0010-patched) hush — the exact
+    # "broken exit status" class #188/#189/#190 exist to eliminate.
+    # Pre-existing upstream bug, unrelated to 0009/0010 (different function,
+    # no shared lines; the minimal repro needs no variable-fd redirect or
+    # <&0 at all — reproduces on pristine busybox-1.36.1 too).
+    ../patches/busybox/0011-hush-exit-trap-status.patch
   ];
 
   # busybox's Makefile resolves the O= dir via a hardcoded `/bin/pwd`, which
@@ -97,6 +109,22 @@ cross.stdenv.mkDerivation {
       || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
     sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
       || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
+    # Tightened (2026-08-13 review, P2-1/P3-3): don't just check the two
+    # G.pre_trap_exitcode/G.last_exitcode assignments are PRESENT somewhere
+    # in hush_exit()'s body — a fuzzy patch apply could land them AFTER the
+    # builtin_eval(argv) call that runs the EXIT trap (a position where they
+    # are a no-op: the trap body has already run by then), which a bare
+    # presence check would not catch. Assert both assignment lines' line
+    # numbers precede builtin_eval(argv)'s within the extracted function body.
+    hush_exit_body=$(sed -n '/^static void hush_exit(int exitcode)$/,/^}/p' shell/hush.c)
+    pre_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.pre_trap_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+    last_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'G\.last_exitcode = exitcode & 0xff;' | head -1 | cut -d: -f1)
+    eval_line=$(printf '%s\n' "$hush_exit_body" | grep -n 'builtin_eval(argv);' | head -1 | cut -d: -f1)
+    if [ -z "$pre_line" ] || [ -z "$last_line" ] || [ -z "$eval_line" ] \
+       || [ "$pre_line" -ge "$eval_line" ] || [ "$last_line" -ge "$eval_line" ]; then
+      echo "ERROR: 0011-hush-exit-trap-status.patch didn't apply correctly (hush_exit's G.pre_trap_exitcode/G.last_exitcode assignments are missing, or don't precede its builtin_eval(argv) call that runs the EXIT trap)" >&2
+      exit 1
+    fi
   '';
 
   # gnumake drives the build; gcc builds busybox's own kconfig host tools
