@@ -75,7 +75,16 @@ jobs:
     if: >-
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: namespace-profile-md
+    # lg, not md: this job has no `needs:` on nix-wasm.yml (separate workflow,
+    # can't cross-file depend), so on a cold Cachix cache it races nix-wasm.yml's
+    # `toolchain` job to build the SAME from-source guest-clang/kernel — and,
+    # unlike that job, was doing so on the weaker `md` profile. Real CI history
+    # showed this job's "Build + publish preview" step taking 65+ min in exactly
+    # that race, vs. ~2 min once Cachix is warm. Matching nix-wasm.yml's `lg`
+    # profile doesn't remove the race (only cross-workflow coordination would),
+    # but it stops the preview from doing the same expensive build on
+    # meaningfully slower hardware than its sibling.
+    runs-on: namespace-profile-lg
     # 180 min covers the default (NOMMU) preview's steps alone (checkout through
     # "Comment preview link"), same as before the MMU variant was added; the extra
     # 60 is earmarked ENTIRELY for the "Build + publish MMU preview" step below and
