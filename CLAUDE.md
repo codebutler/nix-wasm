@@ -39,7 +39,10 @@ Hard-won corollaries (each was a real mistake; don't repeat them):
    `# ` prompt to inject keystrokes, or appending `/root/.profile` is
    **forbidden** (pc `.claude/rules/linux.md`). A stale published ISO is a
    `publish-linux-channel` republish, not a keystroke. If a login shell doesn't
-   have it, the image is wrong.
+   have it, the image is wrong. Same for Xwayland's `-noreset`: 24.1 defaults
+   to `-terminate` (exit ~1s after the last X client), which is why Ctrl-C of
+   `xeyes` used to take `:1` down until inittab respawned. That flag is
+   `patches/sommelier/0005-xwayland-noreset.patch`, not a typed restart.
 
 ## Workflow
 
