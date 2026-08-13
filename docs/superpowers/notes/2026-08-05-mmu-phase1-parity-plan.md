@@ -397,11 +397,54 @@ attrs"; Phase 3 is "pc downloads this by default."
    `deps-overlay.nix` entry for them.) Each was disabled ONLY because it
    forked (rule 1 in `docs/process-model.md`); with fork restored there is no
    reason left to carve them out.
-8. **`.#nofork-linkcheck`** (`spikes/nofork/`) — the probe's PINNED contract
-   flips from `fork=ABSENT / spawn=LINKED` to `fork=LINKED / spawn=LINKED`.
-   Keep the probe (it is still a useful regression sentinel — "fork did not
-   silently vanish again" — not a dead check), just invert its assertion and
-   rename if the `nofork-` prefix becomes misleading.
+8. **`.#spawn-linkcheck`** (`spikes/spawn-contract/check.nix`, renamed from
+   `spikes/nofork/`/`.#nofork-linkcheck` — `.#nofork-linkcheck` kept only as a
+   compat alias — by #202 PR-1, which also parameterized the probe over both
+   process-model profiles ahead of this flip; PR-1's own review additionally
+   found and fixed the `__post_Fork`/`_Fork` object-file coupling this item's
+   PINNED contract depends on — see item 8a below) — the probe's PINNED
+   `mmu-fork`-profile contract flips from `fork=NEEDS_CAPTURE_STACK /
+   spawn=NEEDS_CAPTURE_STACK` to **`fork=NEEDS_CAPTURE_STACK / spawn=LINKED`**
+   — NOT `fork=LINKED / spawn=LINKED`. capture_stack does NOT go on the
+   shared allow-list (`toolchain/wasm-host-imports.nix`) as part of this
+   flip — a non-asyncified binary that genuinely calls `fork()` must keep
+   failing to LINK loudly, which is the entire point of the probe and the
+   process-model contract this document exists to protect. `spawn=LINKED`
+   (not `NEEDS_CAPTURE_STACK`) only becomes correct once item 8a's musl TU
+   split lands — until then, restoring `fork = true` alone would make
+   `spawn=NEEDS_CAPTURE_STACK` too (posix_spawn's `__clone` still drags in
+   `_Fork.c` incidentally), which the probe's own `expected` table would
+   correctly still flag as a violation, not a pass. Keep the probe (it is
+   still a useful regression sentinel — "fork did not silently vanish
+   again" — not a dead check); update `expected.mmu-fork` in
+   `spikes/spawn-contract/check.nix`, not the probe's logic.
+8a. **musl TU split (a NEW prerequisite this flip needs, found by #202 PR-1's
+   review, not originally scoped here): `__post_Fork` must move out of
+   `_Fork.c` into its own `src/process/post_Fork.c`.** The coupling that
+   makes item 8's contract non-trivial is SELF-INFLICTED: `patches/musl/0000`
+   defines wasm's `__clone` inside `src/linux/clone.c` (upstream musl gives
+   `__clone` its own TU, where it never references `__post_Fork` at all), and
+   `__post_Fork` happens to be defined in `_Fork.c` alongside `_Fork()`
+   itself — so ANY caller of `__clone` (posix_spawn, pthread_create, i.e.
+   nearly every real program) pulls `_Fork.c`'s own `capture_stack` reference
+   in too, purely from archive/object-file granularity, whether or not that
+   program ever calls `fork()`. `--gc-sections` cannot rescue a non-forking
+   binary from this either — `wasm-cross.nix`'s `--export-all` roots every
+   DEFINED symbol against GC, proved on the shipped NOMMU busybox TODAY
+   (`_Fork`/`__post_Fork`/`__clone`/`clone`/`posix_spawn` already coexist
+   there with no fork() caller in sight). Splitting `__post_Fork` (plus its
+   `static void dummy` / `weak_alias(dummy, __aio_atfork)`) into
+   `src/process/post_Fork.c` breaks the coupling: `__clone`/posix_spawn/
+   pthread_create then never pull `_Fork.c` unless a caller genuinely calls
+   `fork()`. Do this split BEFORE (or in the same change as) flipping
+   `toolchain/musl.nix`'s default — otherwise every posix_spawn-only program
+   in the world rebuild needs capture_stack too, and `.#guest-spawn-contract-
+   fork`'s (#202 PR-1) pinned "exactly 2 modules import capture_stack" count
+   stops meaning "genuinely calls fork()" (a false-positive-machine: the
+   count would still read some fixed number, but it would no longer
+   discriminate fork-callers from spawn-only programs). Full trace + the
+   corrected post-split contract: `spikes/spawn-contract/check.nix`'s header
+   and the root CLAUDE.md's "#202 PR-1" learnings entry's AXIS-1 update.
 9. **Rewrite `docs/process-model.md`.** The whole document is framed around
    "`posix_spawn`-only by default, fork as a per-binary opt-in" — that framing
    inverts. Keep, rather than delete, the "measured dead-ends" section

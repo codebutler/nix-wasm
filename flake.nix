@@ -922,40 +922,62 @@
       # parse as the subtraction `spawn - linkcheck`).
       spawnLinkcheck = import ./spikes/spawn-contract/check.nix { inherit cross; profile = "nommu-spawn"; };
       spawnLinkcheckFork = import ./spikes/spawn-contract/check.nix { inherit cross muslFork; profile = "mmu-fork"; };
+      # Roots common to both profiles' sweeps: everything a guest of that
+      # profile can end up running, not just its boot-time initramfs/toplevel
+      # closure — the on-demand compiler toolchain (`wasmDevPaths`: guest-clang
+      # + guest-cc/cxx + make-wasm, substituted via `nix-env -iA wasm-tools.*`)
+      # and the curated nixpkgs catalog (`wasmPublishedPkgs`, `nix-env -iA
+      # nixpkgs.*`) are NOT in either profile's initramfs/toplevel closure
+      # (userspace/binary-cache.nix serves them lazily, on demand) but ARE
+      # real wasm modules the guest substitutes and runs — most pointedly
+      # `guestClang` itself (~57MB, NOT asyncified either way), which is
+      # exactly as exposed to the #202 finding post-flip as anything else.
+      # Found missing here by review (nix-wasm#202); added rather than
+      # narrowing the "every real wasm module" claim, since neither toolchain
+      # nor nixpkgs catalog is profile-specific (one `cross` package set
+      # backs both), so sweeping them costs nothing extra per profile beyond
+      # what CI already builds+caches in the `toolchain`/`artifacts` jobs.
+      guestSweepCommonRoots = wasmDevPaths ++ wasmPublishedPkgs;
       guestSpawnContractNommu = import ./userspace/spawn-contract-sweep.nix {
         inherit pkgs;
         profile = "nommu-spawn";
-        roots = [ wasmBusybox wasmToplevel ] ++ initramfsExtraBins;
+        roots = [ wasmBusybox wasmToplevel wasmBootstrap ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
         # MEASURED (2026-08-13, against real already-built store paths
-        # covering this exact root set — busybox-wasm32-nommu, nix-wasm, ash,
-        # and every environment.systemPackages app): zero modules import
-        # capture_stack, as the nommu-spawn profile requires by construction
-        # (toolchain/musl.nix's default has no fork() symbol to reference it
-        # with).
+        # covering the busybox/toplevel/initramfs-extraBins portion of this
+        # root set — busybox-wasm32-nommu, nix-wasm, ash, and every
+        # environment.systemPackages app): zero modules import capture_stack,
+        # as the nommu-spawn profile requires by construction (toolchain/
+        # musl.nix's default has no fork() symbol to reference it with). The
+        # toolchain/nixpkgs-catalog roots added by review were NOT separately
+        # re-measured against a from-scratch nommu build (guest-clang etc.
+        # don't call fork() and were already confirmed capture_stack-free in
+        # the mmu-fork sweep below, which is the harder case — see that
+        # sweep's own comment) — CI's own build is what closes this.
         expectCaptureStackCount = 0;
       };
       guestSpawnContractFork = import ./userspace/spawn-contract-sweep.nix {
         inherit pkgs;
         profile = "mmu-fork";
-        roots = [ wasmBusyboxFork wasmToplevelFork ] ++ initramfsExtraBins;
-        # MEASURED (2026-08-13, against real already-built store paths
-        # covering this exact root set, via two independent methods — a
-        # direct store-path sweep of the fork toplevel's system-path +
-        # initramfs extraBins, and a from-scratch streaming extraction of a
-        # built .#wasm-initramfs-fork's initramfs.cpio.gz): EXACTLY 2 modules
-        # import capture_stack — busybox-wasm32-fork and nix-wasm-fork. Every
-        # other module checked (25 of the 29 initramfs extraBins, the full
-        # games/apps set installed via environment.systemPackages, dltest's
-        # dl-loader probes) shows none. NOT independently re-verified against
-        # gtk3-demo / gtk3-widget-factory specifically (the two largest
-        # initramfs binaries, ~37MB each) — every OTHER GTK app checked
-        # (gtk-hello, galculator, gcalctool, l3afpad, five-or-more,
-        # four-in-a-row, gnome-mahjongg, gnome-mines, iagno, tali) was clean,
-        # so this is a low-risk gap, not a blind guess, but it IS a real gap:
-        # CI's own from-scratch closure build is what actually closes it —
-        # this pinned count is the regression guard from here forward (if
-        # CI's complete sweep ever disagrees, THIS assertion is what turns
-        # the job red rather than the drift going unnoticed).
+        roots = [ wasmBusyboxFork wasmToplevelFork wasmBootstrapFork ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
+        # MEASURED (2026-08-13, against real already-built store paths, via
+        # two independent methods — a direct store-path sweep of the fork
+        # toplevel's system-path + initramfs extraBins, and a from-scratch
+        # streaming extraction of a built .#wasm-initramfs-fork's
+        # initramfs.cpio.gz): EXACTLY 2 modules import capture_stack —
+        # busybox-wasm32-fork and nix-wasm-fork. Every other module checked
+        # (25 of the 29 initramfs extraBins, the full games/apps set
+        # installed via environment.systemPackages, dltest's dl-loader
+        # probes) shows none. gtk3-demo / gtk3-widget-factory (the two
+        # largest initramfs binaries, ~37MB each, not in my own original
+        # measurement pass) were independently built and swept by adversarial
+        # review and confirmed clean too. The toolchain/nixpkgs-catalog roots
+        # added by that same review (guestClang et al., ~57MB, NOT
+        # asyncified) were not themselves re-measured against a real build —
+        # they don't call fork() so "clean" is the expected/required result,
+        # but CI's own from-scratch sweep is what actually confirms it; this
+        # pinned count is the regression guard from here forward (if CI's
+        # complete sweep ever disagrees, THIS assertion is what turns the job
+        # red rather than the drift going unnoticed).
         expectCaptureStackCount = 2;
       };
         in

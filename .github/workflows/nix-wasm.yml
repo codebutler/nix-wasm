@@ -283,8 +283,13 @@ jobs:
     # gate has nothing to do with the engine, so it only needs to run when the
     # nix world itself changed.
     if: ${{ needs.changes.outputs.nix == 'true' && !failure() && !cancelled() }}
-    runs-on: namespace-profile-xs
-    timeout-minutes: 15
+    # md, not xs (review finding): the two guest-spawn-contract-* sweeps each
+    # closureInfo-REALIZE their whole profile's guest closure (busybox/nix.wasm
+    # + every initramfs extraBin + every environment.systemPackages app +
+    # the toolchain/nixpkgs catalog, ~1-2GB) to enumerate store-paths — that's
+    # substituted I/O, not compute, but xs's disk/memory undersized it.
+    runs-on: namespace-profile-md
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

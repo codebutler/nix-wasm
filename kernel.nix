@@ -673,15 +673,35 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
 
   # nix-wasm#202 PR-1: the process-model coherence marker. A NOMMU (mmu=false,
   # a2=false) kernel pairs ONLY with the posix_spawn-only "nommu-spawn" guest
-  # (fork()/vfork() removed at the musl symbol level); an MMU/A2 kernel pairs
-  # ONLY with the real-fork "mmu-fork" guest (musl-fork + the busybox-fork /
-  # nix-wasm realFork binaries) — booting the wrong pairing corrupts the
-  # guest's own memory model (the parent's address space under a NOMMU kernel
-  # has no per-process page table for a forked child to diverge into; see
+  # (fork()/vfork() removed at the musl symbol level); the A2 kernel (a2=true
+  # — demand paging + COW, patches 0023/0024/0026) pairs ONLY with the
+  # real-fork "mmu-fork" guest (musl-fork + the busybox-fork / nix-wasm
+  # realFork binaries) — booting the wrong pairing corrupts the guest's own
+  # memory model (the parent's address space under a NOMMU kernel has no
+  # per-process page table for a forked child to diverge into; see
   # docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md). `passthru`
   # is nixpkgs' documented "attach metadata without touching the derivation"
   # mechanism — stdenv.mkDerivation strips it before building the actual
   # derivation attrs, so this does NOT change vmlinux.wasm's content or store
-  # path. Consumed by userspace/linux-image.nix's coherence assert.
-  passthru.processModel = if (mmu || a2) then "mmu-fork" else "nommu-spawn";
+  # path. Consumed by userspace/toplevel.nix's + linux-image.nix's coherence
+  # asserts.
+  #
+  # A1 (mmu=true, a2=false — CONFIG_MMU without demand paging/COW, `.#kernel-
+  # mmu`) is DELIBERATELY its own third string, "mmu-a1", never "mmu-fork":
+  # Track B's real fork() needs A2's demand-paging + copy-on-write to give a
+  # forked child a genuinely private, diverging address space (see the #202
+  # PR-1 review that caught this) — A1 alone cannot back a real-fork
+  # userspace. Mapping A1 to "mmu-fork" would make an A1+fork-userspace
+  # pairing PASS the coherence check while still being invalid; a distinct
+  # string makes that pairing fail loudly instead, exactly like NOMMU+fork
+  # does. In practice A1 is never paired with busybox/initramfs/squashfs at
+  # all — `.#mmu-init` (a standalone fixture, mmu-smoke.mjs) is its only
+  # consumer, not this toplevel/linux-image chain — so "mmu-a1" is currently
+  # unreachable from any real coherence check; it exists so that if a future
+  # change ever DOES wire A1 into that chain, it fails instead of silently
+  # matching "mmu-fork".
+  passthru.processModel =
+    if a2 then "mmu-fork"
+    else if mmu then "mmu-a1"
+    else "nommu-spawn";
 }

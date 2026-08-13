@@ -4,7 +4,7 @@ allow-list (nix-wasm#131 slice-1 PR-2 — the busybox-fork `--import-undefined`
 hardening), OR run the Phase-2 spawn-contract sweep (--fork-contract).
 
     wasm-check-imports.py MODULE.wasm ALLOWLIST.txt [EXTRA_SYM ...]
-    wasm-check-imports.py --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]
+    wasm-check-imports.py --fork-contract=PROFILE --exports-script=PATH MODULE.wasm [MODULE.wasm ...]
 
 ALLOWLIST.txt is the one-name-per-line file toolchain/wasm-host-imports.nix
 generates (the shared no-undef contract, #52) — the SAME file every other
@@ -21,7 +21,11 @@ obvious) and exits 1.
 (#202 PR-1) needs BEFORE it's safe to flip toolchain/musl.nix's default: it
 checks the two-sided capture_stack/asyncify contract described in the module
 docstring below, over one or more real shipped modules, in one of two
-profiles:
+profiles. --exports-script=PATH (REQUIRED in this mode) is the path to
+wasm-check-exports.py — passed explicitly, never guessed from this script's
+own location, because in a Nix build the caller may have interpolated only
+THIS file into the store (busybox-fork.nix's existing call does exactly
+that for the OTHER mode), which would leave no sibling to find:
 
   nommu-spawn — the profile that SHIPS today: NO module may import
     `capture_stack` at all (the default guest libc has fork()/vfork()
@@ -252,21 +256,33 @@ ASYNCIFY_EXPORTS = (
 FORK_CONTRACT_PROFILES = ("nommu-spawn", "mmu-fork")
 
 
-def _load_exported_funcs():
-    """Return wasm-check-exports.py's `exported_funcs`, loaded from the sibling
-    script file by path (not by `import` — the filename has a hyphen, so it
-    isn't a valid Python module name) rather than re-implementing a second
+def _load_exported_funcs(exports_script):
+    """Return wasm-check-exports.py's `exported_funcs`, loaded from
+    `exports_script` by path (not by `import` — the filename has a hyphen, so
+    it isn't a valid Python module name) rather than re-implementing a second
     export-section parser here. Both scripts already duplicate the trivial
     `read_u32` LEB128 reader (an established convention in this directory —
     see wasm-strip-export.py too); the export-section WALK itself (name +
     kind + index decoding, the part actually worth not tripling) is reused
     for real via this loader instead.
+
+    `exports_script` MUST be passed explicitly by the caller — this used to
+    guess it via `os.path.dirname(os.path.abspath(__file__))`, which is
+    exactly wrong in a Nix build: interpolating a path to THIS file alone
+    (`${../scripts/wasm-check-imports.py}`, the shape busybox-fork.nix's own
+    unrelated call already uses) copies only that one file into the store as
+    its own singleton `/nix/store/<hash>-wasm-check-imports.py`; siblings are
+    NOT copied alongside it. `__file__`-relative lookup would then raise
+    FileNotFoundError inside the Nix sandbox the first time anything called
+    `--fork-contract` mode that way — found by review, reproduced with a
+    minimal flake of identical shape (nix-wasm#202). Every caller — this
+    script's own `--fork-contract` CLI mode and scripts/wasm-closure-sweep.py
+    — must now say explicitly where wasm-check-exports.py lives; there is no
+    silent same-directory fallback to regress back into.
     """
     import importlib.util
-    import os
 
-    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wasm-check-exports.py")
-    spec = importlib.util.spec_from_file_location("wasm_check_exports", sibling)
+    spec = importlib.util.spec_from_file_location("wasm_check_exports", exports_script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.exported_funcs
@@ -318,14 +334,21 @@ def fork_contract_check(path, data, profile, exported_funcs):
     return violations, has_capture_stack
 
 
-def run_fork_contract(profile, paths):
+def run_fork_contract(profile, exports_script, paths):
     if profile not in FORK_CONTRACT_PROFILES:
         raise SystemExit(
             f"ERROR: --fork-contract profile must be one of {FORK_CONTRACT_PROFILES}, got {profile!r}"
         )
+    if exports_script is None:
+        raise SystemExit(
+            "usage: wasm-check-imports.py --fork-contract=PROFILE "
+            "--exports-script=PATH/to/wasm-check-exports.py MODULE.wasm [MODULE.wasm ...]\n"
+            "  --exports-script is REQUIRED (no same-directory guessing — see "
+            "_load_exported_funcs's docstring for why)."
+        )
     if not paths:
-        raise SystemExit("usage: wasm-check-imports.py --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]")
-    exported_funcs = _load_exported_funcs()
+        raise SystemExit("usage: wasm-check-imports.py --fork-contract=PROFILE --exports-script=PATH MODULE.wasm [MODULE.wasm ...]")
+    exported_funcs = _load_exported_funcs(exports_script)
     all_violations = []
     fork_users = []
     for path in paths:
@@ -356,11 +379,18 @@ def run_fork_contract(profile, paths):
 def main(argv):
     if len(argv) >= 2 and argv[1].startswith("--fork-contract="):
         profile = argv[1].split("=", 1)[1]
-        return run_fork_contract(profile, argv[2:])
+        exports_script = None
+        paths = []
+        for arg in argv[2:]:
+            if arg.startswith("--exports-script="):
+                exports_script = arg.split("=", 1)[1]
+            else:
+                paths.append(arg)
+        return run_fork_contract(profile, exports_script, paths)
     if len(argv) < 3:
         raise SystemExit(
             f"usage: {argv[0]} MODULE.wasm ALLOWLIST.txt [EXTRA_SYM ...]\n"
-            f"   or: {argv[0]} --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]"
+            f"   or: {argv[0]} --fork-contract=PROFILE --exports-script=PATH MODULE.wasm [MODULE.wasm ...]"
         )
     path, allowlist_path = argv[1], argv[2]
     extra = argv[3:]

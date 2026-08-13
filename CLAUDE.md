@@ -794,6 +794,102 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   capture_stack call, so pulling one drags the other in by object-file
   granularity. PR-2 flips the expectation by editing one `expected` table
   entry in `spikes/spawn-contract/check.nix`, not by rewriting the probe.
+  **UPDATE (adversarial review, same day) — a P0 (the gate never actually ran
+  as a derivation) plus the PR-2 framing above being wrong in a load-bearing
+  way, both fixed in a follow-up commit:**
+  1. **P0 — path interpolation.** `userspace/spawn-contract-sweep.nix`
+     interpolated `${../scripts/wasm-closure-sweep.py}` — a path to a single
+     FILE. Nix copies exactly that one file into the store; SIBLINGS are not
+     copied alongside it. `wasm-closure-sweep.py`'s (and, one level deeper,
+     `wasm-check-imports.py`'s) `__file__`-relative loads of their sibling
+     scripts then raised FileNotFoundError inside the sandbox — reproduced by
+     review with a minimal flake of identical shape, and the gate had
+     therefore never been built as a real derivation before that review.
+     Fixed two ways, applied together: (a) `spawn-contract-sweep.nix` now
+     interpolates the DIRECTORY (`${../scripts}/wasm-closure-sweep.py`), so
+     the whole `scripts/` tree is copied as one store path; (b)
+     `wasm-check-imports.py`'s `_load_exported_funcs` no longer guesses its
+     sibling's location via `__file__` at all — it takes an explicit
+     `exports_script` argument (a new required `--exports-script=PATH` CLI
+     flag in `--fork-contract` mode), so a FUTURE single-file interpolation
+     of just this script fails with a clear usage error instead of silently
+     reproducing the same class of bug. Re-verified by temporarily rooting
+     `.#guest-spawn-contract-fork` at a single tiny package
+     (`.#userspace-busybox-fork`) and actually building it (`nix build -L`):
+     first with the real `expectCaptureStackCount` unchanged (2) it correctly
+     BUILT busybox-fork from source, ran the sweep for real inside the
+     sandbox, found 1 module (not 2), and FAILED the build with the expected
+     violation message; then with the count temporarily set to 1 it PASSED
+     cleanly, `$out` containing the real per-module report. Both runs proved
+     the directory copy + explicit sibling-path passing work end-to-end
+     inside a genuine Nix build, not just in local `python3` testing. Real
+     roots/count restored immediately after.
+  2. **AXIS-1 — the post-split contract is `fork=NEEDS_CAPTURE_STACK` /
+     `spawn=LINKED`, NOT `fork=LINKED / spawn=LINKED`, and PR-2 will NOT add
+     capture_stack to the shared allow-list.** Review independently
+     reproduced and extended the `--why-extract` finding: the
+     `__post_Fork`/`_Fork` coupling above is SELF-INFLICTED —
+     `patches/musl/0000` defines wasm's `__clone` inside `src/linux/clone.c`
+     (upstream musl gives `__clone` its own TU, where it never touches
+     `__post_Fork`), and `--gc-sections` cannot save a non-forking binary from
+     it either: `wasm-cross.nix`'s `--export-all` roots every DEFINED symbol
+     against GC, proved on the shipped NOMMU busybox TODAY, where
+     `_Fork`/`__post_Fork`/`__clone`/`clone`/`posix_spawn` already all coexist
+     with no fork() caller in sight. PR-2's actual fix (recorded here so the
+     framing survives, not re-litigated per PR): a musl TU split — move
+     `__post_Fork` (+ its `dummy`/`weak_alias(dummy, __aio_atfork)`) out of
+     `_Fork.c` into its own `src/process/post_Fork.c` — breaking the
+     accidental coupling so `posix_spawn`/`pthread_create`/`__clone` never
+     pull `_Fork.c` unless a caller genuinely calls `fork()`. capture_stack
+     stays OFF `wasm-host-imports.nix` even after the split — a
+     non-asyncified binary that truly reaches `fork()` must still fail to
+     LINK loudly, which is the entire point of this gate. So the intended
+     post-split spawn-linkcheck-fork contract is
+     `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` (genuinely discriminating
+     "calls fork(), needs asyncify" from "only spawns/threads, needs
+     nothing") — `fork=LINKED` would only become correct if some UNPLANNED
+     future change also allow-listed capture_stack. The SAME correction
+     applies to `.#guest-spawn-contract-fork`'s pinned
+     `expectCaptureStackCount = 2`: that count is only a real,
+     non-false-positive-machine regression guard AFTER the TU split lands —
+     before the split (i.e. if the default-flip ever shipped without it),
+     EVERY posix_spawn-only program would ALSO need capture_stack, and the
+     count would stop meaning "genuinely calls fork()". Full corrected text:
+     `spikes/spawn-contract/check.nix`'s header.
+  3. **P2 fixes applied the same pass** (each detailed in its own file):
+     sweep roots now also cover the on-demand compiler toolchain + nixpkgs
+     catalog (`wasmDevPaths`/`wasmPublishedPkgs` — most pointedly the 57MB
+     `guest-clang`, not asyncified, equally exposed post-flip) and the
+     generated `/init` (`wasmBootstrap{,Fork}`), not just the initramfs/
+     toplevel closures — `userspace/spawn-contract-sweep.nix`; the sweep also
+     now skips relocatable objects (`crt1.o` and similar, which pass the
+     `\0asm`-magic filter but are not final-linked) via a `dylink.0`
+     custom-section check, so a shipped `_Fork.o` post-split can't slip
+     through as a false positive — `scripts/wasm-closure-sweep.py`'s
+     `has_dylink_section`; gtk3-demo/gtk3-widget-factory (the two largest
+     initramfs binaries, flagged as an unverified gap in the original commit)
+     were independently built and swept by review and confirmed clean (no
+     capture_stack), closing that gap; the `toplevel.nix`/`base-squashfs.nix`
+     coherence checks are now forced via a real `assert` (not left inert
+     inside a lazily-merged `passthru`, which `mkDerivation` never evaluates
+     on its own — review noted the actual MMU boot-smoke CI path builds
+     `.#kernel-mmu-a2` + `.#wasm-initramfs-fork` + `.#wasm-base-squashfs-fork`
+     as three INDEPENDENT `nix build` invocations, exactly the scenario a
+     lazy-only check would silently sit through); `kernel.nix`'s A1
+     (`mmu=true, a2=false`, `.#kernel-mmu` — no demand paging/COW) now maps to
+     its own `"mmu-a1"` model string rather than `"mmu-fork"`, since Track B's
+     real fork() needs A2's COW and an A1+fork-userspace pairing must fail
+     the coherence check, not pass it by accident; `nix-wasm.yml`'s `contract`
+     job moved from `namespace-profile-xs`/15min to `md`/30min (closureInfo
+     must actually REALIZE both profiles' full closures, ~1-2GB, twice); and
+     `spikes/spawn-contract/check.nix`'s header now states precisely what the
+     `mmu-fork` probe's hybrid link (muslFork forced first, the default
+     sysroot `-lc` still appended after) does and does not prove — it IS the
+     same technique both real shipped fork binaries use (verified against
+     `busybox-fork.nix`'s and `nix-wasm.nix`'s own recipes), so it's
+     representative of the link-graph shape, but it exercises none of the
+     runtime asyncify machinery and isn't a stand-in for either real binary's
+     full build.
 - **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
   without `--export-all` MUST name every engine-called startup export** (#179; the
   mirror image of the allow-list entry above). The host bridge calls

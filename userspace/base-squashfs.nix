@@ -15,19 +15,35 @@ let
   closure = pkgs.closureInfo {
     rootPaths = [ toplevel ] ++ pkgs.lib.optional (channel != null) channel;
   };
+
+  # nix-wasm#202 PR-1: the process-model coherence marker, propagated from
+  # `toplevel` (already coherence-checked against ITS OWN kernel/initramfs/
+  # busybox inputs by userspace/toplevel.nix's own `assert`, which — because
+  # that assert is a real `assert`, not a passthru-only value — is ALREADY
+  # forced transitively the moment `closure` above is evaluated (closureInfo
+  # needs `toplevel`'s outPath, which requires evaluating the `assert ...;
+  # runCommand ...` expression toplevel.nix returns to WHNF). This file's OWN
+  # `busyboxModelValid`-style self-check (below) is the same belt-and-braces
+  # forcing initramfs.nix does — if a future caller ever constructs a
+  # `toplevel`-shaped value that bypasses toplevel.nix's own assert, this
+  # still catches a missing/malformed marker locally rather than trusting the
+  # transitive path alone. userspace/linux-image.nix reads this passthru
+  # alongside its own `kernel`/`initramfs` args for the final cross-check.
+  toplevelModel = toplevel.processModel or (throw
+    "userspace/base-squashfs.nix: the `toplevel` derivation has no "
+    + "passthru.processModel — wire it in userspace/toplevel.nix before "
+    + "building a squashfs of otherwise-ambiguous process model");
+  toplevelModelValid = builtins.elem toplevelModel [ "nommu-spawn" "mmu-fork" ] || throw ''
+    userspace/base-squashfs.nix: toplevel.processModel = "${toplevelModel}" is
+    not one of the known process-model strings ("nommu-spawn"/"mmu-fork").
+  '';
 in
+assert toplevelModelValid;
 pkgs.runCommand "base-squashfs"
   {
     nativeBuildInputs = [ pkgs.squashfsTools ];
-    # nix-wasm#202 PR-1: propagate the process-model coherence marker from
-    # `toplevel` (already coherence-checked against ITS OWN kernel/initramfs/
-    # busybox inputs by userspace/toplevel.nix). userspace/linux-image.nix
-    # reads this alongside its own `kernel`/`initramfs` args. Metadata-only —
-    # does not affect $out's content.
-    passthru.processModel = toplevel.processModel or (throw
-      "userspace/base-squashfs.nix: the `toplevel` derivation has no "
-      + "passthru.processModel — wire it in userspace/toplevel.nix before "
-      + "building a squashfs of otherwise-ambiguous process model");
+    # `passthru` is metadata-only — it does not affect $out's content.
+    passthru.processModel = toplevelModel;
   }
   ''
     mkdir -p root/nix/store root/nix/var/nix/profiles

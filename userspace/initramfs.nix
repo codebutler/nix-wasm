@@ -72,18 +72,39 @@ let
     esac
     exit 0
   '';
+
+  # nix-wasm#202 PR-1: the process-model coherence marker, propagated from
+  # `busybox` (kernel.nix / userspace/busybox{,-fork}.nix's passthru;
+  # userspace/toplevel.nix cross-checks it against the paired kernel — this
+  # file has no `kernel` input of its own to cross-check against, only
+  # `busybox`, so the most this file alone can assert is that busybox's own
+  # marker is present and well-formed). Computed OUTSIDE the runCommand attrs
+  # and forced via `assert` below rather than left as a passthru-only value:
+  # `passthru` is merged in lazily by `runCommand`/`mkDerivation`, so nothing
+  # ever evaluates `.processModel` merely because `.#wasm-initramfs{,-fork}`
+  # got built — found by review (the actual MMU boot-smoke CI path builds
+  # `.#wasm-initramfs-fork` directly, never through toplevel.nix, so a
+  # lazy-only check would never run there). `assert cond; expr` forces `cond`
+  # the moment `expr` is evaluated to any degree, which happens the instant
+  # anything needs this derivation's outPath.
+  busyboxModel = busybox.processModel or (throw
+    "userspace/initramfs.nix: the `busybox` derivation has no "
+    + "passthru.processModel — wire it in busybox.nix/busybox-fork.nix "
+    + "before building an initramfs of otherwise-ambiguous process model");
+  busyboxModelValid = builtins.elem busyboxModel [ "nommu-spawn" "mmu-fork" ] || throw ''
+    userspace/initramfs.nix: busybox.processModel = "${busyboxModel}" is not
+    one of the known process-model strings ("nommu-spawn"/"mmu-fork") — a
+    typo'd or newly-introduced model string here would silently defeat every
+    downstream coherence check (toplevel.nix, linux-image.nix) that compares
+    against it by equality.
+  '';
 in
+assert busyboxModelValid;
 pkgs.runCommand "wasm-initramfs"
   {
     nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
-    # nix-wasm#202 PR-1: propagate the process-model coherence marker from
-    # `busybox` (kernel.nix / userspace/busybox{,-fork}.nix's passthru;
-    # userspace/toplevel.nix cross-checks it against the paired kernel).
     # `passthru` is metadata-only — it does not affect $out's content.
-    passthru.processModel = busybox.processModel or (throw
-      "userspace/initramfs.nix: the `busybox` derivation has no "
-      + "passthru.processModel — wire it in busybox.nix/busybox-fork.nix "
-      + "before building an initramfs of otherwise-ambiguous process model");
+    passthru.processModel = busyboxModel;
   }
   ''
     root=$(mktemp -d)

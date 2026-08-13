@@ -38,9 +38,23 @@ let
   kernelModel = reqProcessModel "kernel" kernel;
   initramfsModel = reqProcessModel "initramfs" initramfs;
   busyboxModel = reqProcessModel "busybox" busybox;
-  processModel =
+  # A PLAIN `let processModel = if ... then ... else throw ...;` bound only
+  # into `passthru.processModel` does NOT force this check: `passthru` is
+  # merged into the derivation attrset lazily by `mkDerivation`/`runCommand`,
+  # so nothing evaluates `.processModel` merely because `.#wasm-system{,-fork}`
+  # (or anything that only references `${toplevel}` for its store path, e.g.
+  # base-squashfs.nix's `closureInfo`) got built — found by review, which
+  # noted CI's actual MMU boot-smoke path builds `.#kernel-mmu-a2` +
+  # `.#wasm-initramfs-fork` + `.#wasm-base-squashfs-fork` as THREE INDEPENDENT
+  # `nix build` invocations (nix-wasm.yml), so a lazy-only check could sit
+  # unevaluated through the very CI runs it exists to guard. `assert`, unlike
+  # a passthru-embedded value, is forced the moment the ENCLOSING expression
+  # is evaluated to any degree (even WHNF) — which happens the instant
+  # anything, including a bare `${toplevel}` interpolation, needs this
+  # derivation's outPath.
+  processModelCoherent =
     if kernelModel == initramfsModel && initramfsModel == busyboxModel
-    then kernelModel
+    then true
     else throw ''
       userspace/toplevel.nix: process-model MISMATCH assembling this boot
       image: kernel=${kernelModel} initramfs=${initramfsModel} busybox=${busyboxModel}.
@@ -51,7 +65,8 @@ let
       silently-broken image.
     '';
 in
-pkgs.runCommand "wasm-system" { passthru.processModel = processModel; } ''
+assert processModelCoherent;
+pkgs.runCommand "wasm-system" { passthru.processModel = kernelModel; } ''
   mkdir -p $out $out/boot
   # Real /etc = module-generated etc + our static passwd/group + profile inittab.
   # Preserve the store symlinks inside etc (resolved in-guest, /nix mounted).

@@ -24,17 +24,31 @@
 #      or the swept packages themselves change; Nix's content-addressed
 #      caching gives this for free once the two concerns are separate attrs.
 #
-# `roots` = the derivations to sweep — mirrors initramfs.nix's OWN
-# `busybox`/`extraBins` parameterization (the caller passes the SAME lists
-# flake.nix already assembles for the real initramfs, so this attr's closure
-# is defined identically to what actually ships) PLUS the toplevel system
-# closure (nix.wasm + every environment.systemPackages app — galculator,
-# gcalctool, l3afpad, the games, …), covering the OTHER half of the shipped
-# guest (installed packages, not just initramfs extraBins). Every root's
-# FULL transitive closure is swept (pkgs.closureInfo, the same idiom
-# userspace/base-squashfs.nix already uses for its own store-paths list) —
-# not just each root's own $out — so a wasm module reached only indirectly
-# (a runtime dependency of an extraBin, say) is not silently skipped.
+# `roots` = the derivations to sweep — the flake.nix callers pass, per profile:
+# busybox + the generated /init (bootstrap.nix) + every initramfs extraBin
+# (mirrors initramfs.nix's OWN `busybox`/`extraBins` parameterization — the
+# SAME lists flake.nix already assembles for the real initramfs) + the
+# toplevel system closure (nix.wasm + every environment.systemPackages app —
+# galculator, gcalctool, l3afpad, the games, …) + the on-demand compiler
+# toolchain and nixpkgs catalog (wasmDevPaths/wasmPublishedPkgs — substituted
+# lazily via `nix-env -iA wasm-tools.*`/`nixpkgs.*`, so NOT reachable from
+# either the initramfs or toplevel closures, but real modules the guest runs
+# all the same — see the flake.nix callers' own comments). Every root's FULL
+# transitive closure is swept (pkgs.closureInfo, the same idiom userspace/
+# base-squashfs.nix already uses for its own store-paths list) — not just
+# each root's own $out — so a wasm module reached only indirectly (a runtime
+# dependency of an extraBin, say) is not silently skipped. This is now, to
+# the best of this repo's knowledge, EVERY real wasm module a profile's guest
+# can end up running — not merely its boot-time closure — but "the roots
+# flake.nix happens to pass" is the actual, checkable claim; if a future
+# guest-facing artifact category is added without a matching root here, this
+# sweep will not see it, silently.
+#
+# A "real wasm module" here means a FINAL, linked dylink module (one that
+# carries a `dylink.0` custom section) — scripts/wasm-closure-sweep.py's
+# `has_dylink_section` filters out relocatable objects (crt1.o and similar)
+# that also start with the wasm magic but are not yet linked, so their
+# unresolved references are not host imports and must not be graded as such.
 #
 # We do NOT unpack the packaged initramfs.cpio.gz / base.squashfs artifacts
 # themselves to find their contents — both are compressed, so nothing in
@@ -59,7 +73,15 @@ pkgs.runCommand "guest-spawn-contract-${profile}"
     # fails whenever the checker does, while $out still carries the full
     # per-module report for a human (or the log) to read.
     set -o pipefail
-    python3 ${../scripts/wasm-closure-sweep.py} ${profile} \
+    # ${../scripts} (the DIRECTORY, not ${../scripts/wasm-closure-sweep.py})
+    # is deliberate: interpolating a path to a single FILE copies only that
+    # file into the store — siblings are NOT copied alongside it. This
+    # script's own `_HERE`-relative loads of wasm-check-imports.py and
+    # wasm-check-exports.py would then FileNotFoundError inside the sandbox
+    # (nix-wasm#202, found by review — reproduced with a minimal flake of
+    # identical shape before this fix). Interpolating the directory copies
+    # the whole `scripts/` tree as one store path, so the siblings survive.
+    python3 ${../scripts}/wasm-closure-sweep.py ${profile} \
       ${pkgs.lib.optionalString (expectCaptureStackCount != null)
         "--expect-capture-stack-count=${toString expectCaptureStackCount}"} \
       --roots-file=${closure}/store-paths \

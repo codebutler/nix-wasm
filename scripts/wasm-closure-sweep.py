@@ -31,6 +31,13 @@ is still in flux.
 
 Reuses wasm-check-imports.py's parser/checker directly (loaded by path, like
 that script reuses wasm-check-exports.py) rather than a fourth wasm parser.
+THIS script's own directory is the anchor for both sibling scripts, so the
+Nix caller MUST interpolate the whole `scripts/` DIRECTORY (e.g.
+`${../scripts}/wasm-closure-sweep.py`), not just this one file
+(`${../scripts/wasm-closure-sweep.py}`) — the latter copies only this file
+into the store and both sibling `importlib` loads below then raise
+FileNotFoundError (nix-wasm#202, found by review; see
+userspace/spawn-contract-sweep.nix's comment on its own interpolation).
 """
 
 import importlib.util
@@ -43,12 +50,47 @@ _spec = importlib.util.spec_from_file_location(
 )
 wci = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wci)
+_EXPORTS_SCRIPT = os.path.join(_HERE, "wasm-check-exports.py")
+
+
+def has_dylink_section(data):
+    """True if `data` (a wasm module's bytes) carries a `dylink.0` (or the
+    legacy `dylink`) custom section — i.e. it is a FINAL, linked dylink
+    module, not a relocatable object file (crt1.o/crti.o/crtn.o/Scrt1.o/
+    rcrt1.o and similar `.o`s also start with the `\\0asm` magic and carry a
+    real import section, so the magic-byte filter alone lets them through).
+    A relocatable object's undefined references show up as ordinary
+    functions with NO defining body at this stage — wasm-ld hasn't run yet
+    — which the import-section parser cannot distinguish from a genuine
+    host-import; a shipped `_Fork.o` post-split (PR-2) would otherwise be a
+    guaranteed false positive here. Custom sections have id 0, followed by a
+    length-prefixed NAME then the section payload — this checks the name
+    only, cheaply, without parsing the payload.
+    """
+    if data[0:4] != b"\0asm":
+        return False
+    i = 8
+    while i < len(data):
+        sec_id = data[i]
+        i += 1
+        size, i = wci.read_u32(data, i)
+        if sec_id == 0:
+            name, _ = wci.read_str(data, i)
+            if name in ("dylink.0", "dylink"):
+                return True
+        i += size
+    return False
 
 
 def find_wasm_modules(roots):
-    """Yield the realpath of every distinct file under `roots` whose first 4
-    bytes are the wasm magic. Dedupes via realpath so a symlink farm (every
-    busybox applet -> the one busybox binary) is visited once."""
+    """Yield (realpath, data) for every distinct file under `roots` whose
+    first 4 bytes are the wasm magic AND which carries a dylink section (see
+    has_dylink_section) — i.e. every real, FINAL-LINKED guest module, never
+    an intermediate relocatable object. Dedupes via realpath so a symlink
+    farm (every busybox applet -> the one busybox binary) is visited once.
+    Yields the already-read bytes too (module sizes run into the tens of MB
+    and the caller needs them again for the actual check — no reason to open
+    every module twice)."""
     seen = set()
     for root in roots:
         paths = [root] if os.path.isfile(root) else None
@@ -66,11 +108,11 @@ def find_wasm_modules(roots):
             seen.add(rp)
             try:
                 with open(rp, "rb") as f:
-                    magic = f.read(4)
+                    data = f.read()
             except OSError:
                 continue
-            if magic == b"\0asm":
-                yield rp
+            if data[0:4] == b"\0asm" and has_dylink_section(data):
+                yield rp, data
 
 
 def main(argv):
@@ -98,7 +140,7 @@ def main(argv):
     if not roots:
         raise SystemExit("ERROR: no ROOT paths given to sweep")
 
-    modules = sorted(find_wasm_modules(roots))
+    modules = sorted(find_wasm_modules(roots), key=lambda pd: pd[0])
     if not modules:
         raise SystemExit(
             "ERROR: found ZERO wasm modules under the given roots — the sweep "
@@ -106,12 +148,10 @@ def main(argv):
             "is wrong, not that the closure genuinely has no wasm binaries."
         )
 
-    exported_funcs = wci._load_exported_funcs()
+    exported_funcs = wci._load_exported_funcs(_EXPORTS_SCRIPT)
     all_violations = []
     fork_users = []
-    for path in modules:
-        with open(path, "rb") as f:
-            data = f.read()
+    for path, data in modules:
         violations, has_capture_stack = wci.fork_contract_check(path, data, profile, exported_funcs)
         all_violations += violations
         if has_capture_stack:

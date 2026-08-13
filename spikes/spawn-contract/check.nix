@@ -26,6 +26,32 @@
 # uses NEITHER, because it exists to observe today's un-extended contract, not
 # to make a fork program buildable.
 #
+# WHAT "muslFork forced first" DOES AND DOES NOT PROVE (raised in review):
+# this is a HYBRID link — muslFork's libc.a is placed first, but the
+# cc-wrapper still appends the DEFAULT (nommu) sysroot's own `-lc` after it,
+# so any symbol muslFork's forced-in objects don't happen to pull still
+# resolves from the plain no-fork musl, not from muslFork. This is NOT a
+# probe-specific shortcut — it is EXACTLY the same hybrid-link technique both
+# real shipped mmu-fork binaries use for the identical reason (verified by
+# reading their own recipes, not assumed): userspace/busybox-fork.nix's own
+# comment ("Every other archive member is byte-identical to the sysroot's, so
+# no ODR risk") and nix-wasm.nix's realFork link ("same rule as userspace/
+# busybox-fork.nix") both force muslFork's libc.a first and rely on the same
+# byte-identical-elsewhere property. So this probe's result IS representative
+# of the real technique — it faithfully answers "does resolving fork()/
+# posix_spawn() under the shared cc-wrapper genuinely reach muslFork's
+# fork-seam objects, with everything else still resolving normally?" (yes,
+# confirmed via --why-extract below). What it does NOT prove: it exercises
+# NONE of the actual runtime asyncify/capture_stack double-return machinery
+# (a two-line `fork()`/`posix_spawn()` call site, compiled but never run) —
+# only fork-smoke.mjs's real boot proves that works; and it does not
+# reproduce nix-wasm.nix's realFork build byte-for-byte (that link assembles
+# hundreds of specific .o files via meson, not this probe's plain two-file
+# compile) — treat this probe's PASS/FAIL as evidence about the LINK GRAPH
+# SHAPE (which library provides which symbol) under the shared cc-wrapper,
+# never as a stand-in for either real shipped binary's full build or for
+# runtime correctness.
+#
 # MEASURED (not assumed) result of that unmodified link, both probes, TODAY —
 # before PR-2 adds capture_stack to wasm-host-imports.nix: BOTH fork() and
 # posix_spawn() fail to link, and — this is the finding worth recording — BOTH
@@ -48,12 +74,45 @@
 # dishonest about what the UNMODIFIED toolchain can do before PR-2 lands.
 #
 # PR-2 flips the expectation BY CHANGING A PARAMETER, not by rewriting this
-# file: once capture_stack is added to wasm-host-imports.nix (and, per that
-# file's own header, that addition is PLANNED as a full cross.* world
-# rebuild, landing together with the musl.nix default flip), this SAME
-# unmodified link will simply succeed — flip the `mmu-fork` entry in
-# `expected` below from NEEDS_CAPTURE_STACK to LINKED and the probe's own
-# logic needs no other change.
+# file — but NOT to fork=LINKED/spawn=LINKED, and capture_stack does NOT go
+# on the shared allow-list (a decision, not a TODO — see the AXIS-1 finding
+# in the #202 PR-1 review response). The `__post_Fork`/`_Fork` coupling this
+# header traces above is SELF-INFLICTED: `patches/musl/0000` defines wasm's
+# `__clone` inside `src/linux/clone.c`, which happens to share a translation
+# unit's worth of archive-pull granularity with `_Fork()`'s own
+# `_Fork.c` — upstream musl gives `__clone` its own TU, where it never
+# touches `__post_Fork` at all. `--gc-sections` cannot rescue a binary that
+# doesn't need fork() from this either: `wasm-cross.nix`'s `--export-all`
+# roots every DEFINED symbol against GC, and this is already true TODAY on
+# the shipped NOMMU busybox, where `_Fork`/`__post_Fork`/`__clone`/`clone`/
+# `posix_spawn` all already coexist, rooted, needing no fork() caller at
+# all. PR-2's real fix is a musl TU split — move `__post_Fork` (plus its
+# `static void dummy` / `weak_alias(dummy, __aio_atfork)`) out of `_Fork.c`
+# into its own `src/process/post_Fork.c` — which breaks the accidental
+# coupling: `__clone`/posix_spawn/pthread_create then never pull `_Fork.c`
+# (so never reference capture_stack) unless a caller ACTUALLY calls fork().
+# capture_stack itself is deliberately kept OFF wasm-host-imports.nix even
+# after the split, so a non-asyncified binary that genuinely reaches fork()
+# still fails to LINK loudly (the whole point of this gate) rather than
+# silently TypeError-ing at runtime. So the intended POST-SPLIT contract —
+# what PR-2 flips `expected.mmu-fork` to below — is
+# fork=NEEDS_CAPTURE_STACK / spawn=LINKED: genuinely discriminating between
+# "this program calls fork() and must be asyncified" and "this program only
+# spawns/threads and needs nothing extra". `fork=LINKED` would ONLY become
+# correct if some FUTURE change also added capture_stack to the shared
+# allow-list — which is explicitly not part of PR-2's plan, so this probe
+# (and CLAUDE.md's mirroring `.#guest-spawn-contract-fork` sweep note) must
+# not describe that outcome as pending. Until the split lands, TODAY's
+# fork=NEEDS_CAPTURE_STACK / spawn=NEEDS_CAPTURE_STACK stands, and it is
+# ALSO the reason the closure-wide sweep's "exactly 2 modules import
+# capture_stack" count (flake.nix's expectCaptureStackCount) is only
+# meaningful once the split lands: before it, that count could not
+# distinguish "a module calls fork()" from "a module merely spawns" — after
+# it, capture_stack-importing becomes synonymous with "genuinely calls
+# fork()", and the pinned count is a real, non-false-positive-machine
+# regression guard for exactly that. Shipping the default-flip WITHOUT the
+# split would make every posix_spawn-only program need capture_stack too,
+# defeating the count's discriminating power entirely.
 { cross, muslFork ? null, profile ? "nommu-spawn" }:
 let
   lib = cross.lib;
