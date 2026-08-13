@@ -1113,6 +1113,18 @@ jobs:
             # guest-clang under this kernel, exercising the #179
             # startup-export contract (__wasm_early_tp_init seed);
             run_smoke demo/node/wrapperless-cc-e2e.mjs
+            # #192: the targeted exec-fragmentation repro/regression gate —
+            # 12 consecutive `clang hello.c -> ./a.out` cycles (>=24 large
+            # execs, 4-5x past the observed 5th-7th-exec cliff) in one boot,
+            # per-cycle exit-code assertions, and an assertion that the
+            # order-14 warn_alloc signature never appears. Before patch 0030
+            # (arch/wasm/mm/exec_image.c's refcounted per-inode exec-image
+            # cache) this failed deterministically well before cycle 12 —
+            # exactly the bug the "Real-fork autotools acceptance smoke —
+            # soak" step below works around with its own `!cancelled()`
+            # override; that override stays (harmless once this is fixed —
+            # see its own comment), but THIS gate is the direct proof.
+            run_smoke demo/node/exec-churn-smoke.mjs
             # and the GNOME-games tier render (rsvg-convert → libcroco →
             # librsvg → pango/cairo → cairo-png, headless).
             run_smoke demo/node/rsvg-smoke.mjs

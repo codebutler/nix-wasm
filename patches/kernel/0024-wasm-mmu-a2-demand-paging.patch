@@ -1,24 +1,38 @@
 # nix-wasm #128 A2 (a2=true only): drop the A1 full-populate accommodations
 # (VM_LOCKED def_flags + the initial-stack mm_populate) so the checked softmmu
-# translate's __wasm_mmu_fault path does real DEMAND PAGING. Applied after 0023.
+# translate's __wasm_mmu_fault path does real DEMAND PAGING. Applied after
+# 0023 (+0026, +0030 on mmu builds that carry Track B / #192).
+#
+# Regenerated for #192 (context-only refresh, NO semantic change): 0030's
+# exec-image-cache rewrite of fs/binfmt_wasm.c's CONFIG_MMU block moved the
+# VM_LOCKED assignment this hunk deletes to new surrounding text (the alloc/
+# read/parse now happens ahead of begin_new_exec(), the buffer is a cache
+# lookup instead of a raw alloc_pages_exact()), so the OLD hunk's context no
+# longer matches. This version deletes the exact same two things — the
+# VM_LOCKED def_flags assignment and the initial-stack mm_populate() call —
+# against 0030's new context; the SECOND hunk (the stack mm_populate removal)
+# is untouched by 0030 and is byte-identical to before. Re-regenerated once
+# more after 0030's post-review fixes (P1/P2, #192 review) shifted line
+# numbers again — same two deletions, zero semantic change, zero offset.
 --- a/fs/binfmt_wasm.c
 +++ b/fs/binfmt_wasm.c
-@@ -318,14 +318,6 @@
- 	setup_new_exec(bprm);
+@@ -350,15 +350,6 @@ static int load_wasm_file(struct linux_binprm *bprm, unsigned long extra_stack)
+ 		set_personality(PER_LINUX_32BIT);
+ 		setup_new_exec(bprm);
  
- #ifdef CONFIG_MMU
--	/*
--	 * Software MMU (#128, A1): the fast-path translate has NO present
--	 * check (the __mmu_fault demand-paging path is A2), so every user
--	 * mapping must be POPULATED at creation. VM_LOCKED on def_flags makes
--	 * all VMAs of this image mlockall-style populated.
--	 */
--	current->mm->def_flags |= VM_LOCKED;
+-		/*
+-		 * Software MMU (#128, A1): the fast-path translate has NO
+-		 * present check (the __mmu_fault demand-paging path is A2),
+-		 * so every user mapping must be POPULATED at creation.
+-		 * VM_LOCKED on def_flags makes all VMAs of this image
+-		 * mlockall-style populated.
+-		 */
+-		current->mm->def_flags |= VM_LOCKED;
 -
- 	{
  		/*
- 		 * The engine consumes the binary BYTES from kernel memory (see
-@@ -546,21 +538,6 @@
+ 		 * Attach: from here the mm is a full, independent owner of
+ 		 * this reference (the cache's own separate reference lives
+@@ -568,21 +559,6 @@ static int load_wasm_binary(struct linux_binprm *bprm)
  	res = setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
  	if (!res)
  		res = create_wasm_tables(bprm, bprm->p);
