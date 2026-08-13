@@ -300,6 +300,24 @@
         inherit cross;
       };
 
+      # 2026-08-05 MMU ship-plan Phase-1 precondition (toolchain half): a
+      # minimal real autoconf'd C project, built with NATIVE autoconf only
+      # (no cross toolchain involved) — staged into the software-MMU/
+      # real-fork guest by autotools-fork-smoke.mjs to run a genuine
+      # `./configure && make && ./prog` against the in-guest cc/make.
+      autotoolsFixture = import ./userspace/autotools-fixture.nix { inherit pkgs; };
+      # HARD GATE (flipped from the P2-1 on-demand check once
+      # patches/busybox/0009+0010 landed in this same change, see the file's
+      # own header): a native busybox carrying just those two hush fixes runs
+      # the fixture's real generated `./configure && make && ./prog` to
+      # completion. Wired into nix-wasm.yml's MMU artifacts-assembly step
+      # alongside `.#autotools-fixture` — a plain `nix build`, so its failure
+      # fails the job.
+      autotoolsFixtureHushCheck = import ./userspace/autotools-fixture-hush-check.nix {
+        inherit pkgs;
+        fixture = autotoolsFixture;
+      };
+
       # Reduced reproducer for the posix_spawn() parent-static-memory
       # corruption found while debugging Xvfb's xkbcomp spawn (worker #6,
       # xchat-irc-setup epic): a large patterned static array + a same-size
@@ -966,6 +984,17 @@
         # #179: the host-rejected-image fixture + its conforming twin (see
         # userspace/exec-reject-test.nix) -> $out/bin/{exec-reject-test,exec-ok-test}.
         exec-reject-test = execRejectTest;
+
+        # 2026-08-05 MMU ship-plan Phase-1 precondition (toolchain half): the
+        # real-fork autotools acceptance fixture (see
+        # userspace/autotools-fixture.nix) -> $out/{configure.ac,configure,
+        # Makefile.in,prog.c}. Consumed by
+        # runtime/demo/node/autotools-fork-smoke.mjs via AUTOTOOLS_FIXTURE.
+        autotools-fixture = autotoolsFixture;
+        # Hard-gated host-side proof that patches/busybox/0009+0010 make hush
+        # run a real generated configure end to end — see
+        # userspace/autotools-fixture-hush-check.nix; wired into nix-wasm.yml.
+        autotools-fixture-hush-check = autotoolsFixtureHushCheck;
 
         # Faithful no-network reproducer for #75 (busybox `ping` one-packet-then-
         # hang): SA_RESTART one-shot handler re-armed in itself → $out/bin/ping-pace-test.

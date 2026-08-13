@@ -368,22 +368,50 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
-history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11):
+history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11,
+UPDATED 2026-08-12):
 this milestone was a HAND-RUN session (its record was `docs/STATUS.md`, since
-deleted) — there is no autotools smoke in `runtime/demo/node/` on ANY guest, so
-nothing regression-gates it. Two things were measured on the MMU/fork guest while
-scoping that gate, both worth knowing before touching shells: (1) "hush isn't
-POSIX-enough" is a NOMMU statement, not a hush statement — the fork guest's STOCK
-hush handles every autoconf idiom cited as broken,
-including the exact `{ …; echo >&5; } >out` "ambiguous redirect" and multi-line
-`if/fi` "syntax error at fi" cases, with correct exit statuses and zero aborts;
-(2) stock busybox **ash** cannot replace forkshell ash on wasm at all — not for
+deleted). Two things were measured on the MMU/fork guest while scoping a
+regression gate for it, both worth knowing before touching shells: (1) stock
+busybox **ash** cannot replace forkshell ash on wasm at all — not for
 fork reasons but because the wasm musl's `longjmp` is an `abort()` stub
 (`patches/musl/0000-harness-wasm-arch.patch` → `src/setjmp/wasm/longjmp.S`), and
 ash unwinds through `longjmp` on its normal path, so every `$()`/subshell child
 dies SIGABRT and reports exit status 134 while still printing correct stdout
 (nix-wasm#188). So #131 slice 1 retires forkshell ash in favor of HUSH, not stock
-ash.**
+ash. (2) **"hush isn't POSIX-enough" is a NOMMU statement, not a hush
+statement — but the original #189 measurement matrix's "every autoconf idiom
+clean" claim was ITSELF too broad, corrected here.** The matrix tested every
+idiom against LITERAL fds only (`{ …; echo >&5; } >out` — a literal `>&5`) and
+found the fork guest's stock hush clean on all of them. A REAL autoconf-generated
+`configure`'s own `as_fn_error` diagnostic-logging helper redirects to a
+**VARIABLE** fd instead (`>&$4` — the fd number is a shell variable), which
+hush's parser does NOT accept — and THIS, not anything NOMMU-specific, is the
+actual, reproducible source of the classic "hush: ambiguous redirect" / "hush:
+syntax error at 'fi'" failures. Confirmed two ways: (a) a real generated
+`configure` (`userspace/autotools-fixture.nix`, added 2026-08-12) hits it in its
+own preamble under stock busybox hush, hermetically, on the HOST — see
+`userspace/autotools-fixture-hush-check.nix`; (b) the same generated
+`configure`'s in-guest run (`runtime/demo/node/autotools-fork-smoke.mjs`, also
+added 2026-08-12 — **the first automated autotools regression gate on ANY
+guest**, closing the "nothing regression-gates it" gap this caveat used to cite)
+hit its CFGRC step with the identical signature. **RESOLVED in the same
+change** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
+`0010-hush-internally-opened-fd0.patch` — the second an independent,
+still-unfixed-upstream `<&0` bug found while verifying the first against a
+real `configure`; full record in the "hush can't run a real autoconf
+`configure` at all without two independent fixes" learnings entry below):
+`.#autotools-fixture-hush-check` is now a HARD gate (native, ~2 min, wired
+into `nix-wasm.yml` alongside `.#autotools-fixture`) asserting the full
+`configure`/`config.status`/`make`/`./prog` chain succeeds under exactly this
+hush, and CFGRC in `autotools-fork-smoke.mjs` is no longer expected red. The
+host-side proof is the NECESSARY half — it confirms the hush.c fix itself,
+in isolation — but the shell risk this item existed to retire is only fully
+retired once the in-guest `autotools-fork-smoke.mjs` soak (the 2026-08-05
+parity-plan doc's "Real-fork autotools proof" item) records its own green
+CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising the
+booted guest's full 9P-staging + in-guest cc/make path the host build never
+touches.**
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
@@ -642,9 +670,12 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
   #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
   loudly. `.#nofork-linkcheck` is the gate; memory/table/base come from
-  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds only
-  guest-clang + nix.wasm; the cross.* set is keyed on the byte-identical store path so
-  it stays cached.)
+  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds
+  guest-clang + nix.wasm + `.#userspace-busybox-fork` → the fork initramfs → the
+  fork squashfs, since #131 slice-1 PR-2 wired `busybox-fork.nix`'s post-link
+  `wasm-check-imports.py` check to consume the same generated file as an
+  argument; the cross.* set is keyed on the byte-identical store path so it
+  stays cached.)
 - **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
   without `--export-all` MUST name every engine-called startup export** (#179; the
   mirror image of the allow-list entry above). The host bridge calls
@@ -1111,6 +1142,65 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (DEAD-END: the first 0008 only stopped the parent-argv mutation — necessary but not
   sufficient; the watcher-side getopt order was the real bug, found via an in-guest
   `TMODBG` argv trace over the ~3-min Cachix-substituted boot-smoke CI loop.)
+- **hush can't run a real autoconf `configure` at all without two independent
+  fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
+  `0010-hush-internally-opened-fd0.patch`; both wired into `busybox-fork.nix`,
+  `busybox.nix`, AND `ash.nix` — shared correctness, all three compile
+  `shell/hush.c`). Both are ORIGINAL fixes for still-unfixed-upstream bugs
+  (confirmed against `mirror/busybox @ master`), found while making the
+  fork/MMU guest's default `/bin/sh` (stock hush) capable of autoconf — the
+  earlier "hush isn't POSIX-enough" framing (see the Current-state autotools
+  caveat) turned out to be TWO specific, narrow hush bugs, not a general
+  conformance gap:
+  1. **0009 — parse-time rejection of variable fd redirects (`>&$fd`).**
+     autoconf's `as_fn_error()` does `printf ... >&$4` (a *variable* dup
+     target — `$4`, a function arg — not a literal digit/`-`). hush's
+     `parse_redir_right_fd()` resolves `&N`/`&-` by peeking raw characters
+     off the input stream at PARSE time; anything else (incl. the first
+     char of a `$var`) was a hard "ambiguous redirect" parse error that
+     desyncs the rest of the parse ("syntax error at 'fi'") — so NO real
+     generated `configure` could even be parsed. POSIX requires the
+     redirect target word to undergo the same expansions as any other word;
+     bash/dash/ash all accept this. Fix: defer via a new `REDIRFD_TO_FD_VAR`
+     sentinel — nothing is consumed at parse time, so the ordinary
+     word-scanner picks up the target as a normal (unexpanded) redirect
+     word, and `setup_redirects()` expands + resolves it at redirect-SETUP
+     time (all-digits → dup like a literal `N>&M`; `-` → close; anything
+     else → "ambiguous redirect", now raised at RUN time like bash).
+  2. **0010 — `<&0` (dup FROM stdin) misfires even on a plain, valid stdin.**
+     Found immediately after 0009, from the SAME real-configure run:
+     autoconf's universal preamble `exec 7<&0 </dev/null` failed with a
+     bogus `can't duplicate file descriptor`, before ever reaching the
+     `>&$4` construct 0009 fixes. Root cause: `internally_opened_fd()`
+     tests `fd == G_interactive_fd` with no guard for `G_interactive_fd`'s
+     "not interactive" SENTINEL value of 0 — so any non-interactive `N<&0`
+     (script/`-c`/shebang execution, i.e. every autoconf run) is
+     misidentified as touching hush's own interactive tty fd. The sibling
+     `save_fd_on_redirect()` a few lines above already carries the correct
+     `fd != 0` guard (with a comment naming this exact ambiguity); the fix
+     just mirrors it into `internally_opened_fd()`. Does NOT change (and
+     correctly still traps) `sh < ./configure` — there fd 0 genuinely IS
+     the script being read (`fd_in_HFILEs`, a different mechanism).
+  **The P1 lesson (from review, worth generalizing):** the FIRST version of
+  0009 was verified only against the constructs it was DESIGNED to fix — it
+  omitted the same `rd_filename == NULL` guard its sibling REDIRFD_TO_FILE
+  branch in `setup_redirects()` starts with, so a dangling/malformed target
+  (`>&<x`, `>&>x`, `>&#c`, or `cmd >&` at EOF — none of them exotic, any one
+  reachable by a typo) SIGSEGV'd the shell (`expand_string_to_string(NULL)`
+  → `strchr(NULL,...)`), and inside `$(...)` the crash was invisible —
+  the substitution silently returned empty with rc=0. **A new redirect-
+  parsing code path needs its NEGATIVE-space cases (dangling/malformed
+  target, not just the happy path) in the verification matrix from the
+  start, not discovered after merge.** A second review pass also caught
+  the initial error-handling shape being wrong on BOTH axes at once:
+  `syntax_error()`+`continue` let the bad command run anyway with the
+  redirect silently dropped (interactively) while killing the WHOLE script
+  on the very first ambiguous redirect (non-interactively) — backwards from
+  bash (which fails only the one command, script continues, in both modes).
+  Fixed to the `bb_error_msg(...); return 1;` shape this function's other
+  runtime redirect failures (the "fd#%d is not open"/`dup2()` checks) were
+  already using — matching a shape upstream itself later converged on
+  elsewhere in `setup_redirects()`, just not (yet) here.
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.

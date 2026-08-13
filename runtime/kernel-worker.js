@@ -1128,6 +1128,74 @@ import { SharedQueues } from "./virtio/shared-queues.js";
 
       // This is a global error handler that is used when calling Wasm code.
       const wasm_error = (error) => {
+        // pc (#196): worker.terminate() can land a V8 "termination exception"
+        // on whichever promise chain happens to be in flight in THIS worker
+        // right now: user_executable_chain's .catch(user_executable_error),
+        // which funnels here, or the .catch(wasm_error) directly below
+        // vmlinux_run. Traced all three .terminate() call sites in this repo:
+        // kill_task()'s case 2/3 terminates a task only once it's confirmed
+        // NOT running (task.running is false), but stop_secondary()
+        // (kernel-host.js:490) terminates a secondary CPU's worker
+        // UNCONDITIONALLY — including while it's parked mid-wasm inside
+        // _start_secondary, i.e. exactly the direct vmlinux_run ->
+        // .catch(wasm_error) chain below. That is the strongest in-engine
+        // (non-test-harness) case that this path is reachable; the test
+        // harness's own hard-kill teardown (runtime/demo/node/web-shims.mjs's
+        // terminateAllWorkers(), which every smoke's s.kill() drives) is a
+        // deliberate mid-wasm interrupt for fast test teardown, same effect.
+        // None of the three postMessage a shutdown notice before calling
+        // .terminate(). That's not the only channel available in principle —
+        // this worker shares SharedArrayBuffers with the host (see `locks`),
+        // so a host-written Atomics flag checked here IS feasible — but the
+        // structural check below is simpler and sufficient, so that route
+        // wasn't built.
+        //
+        // A termination exception is not a normal thrown value and has no
+        // useful JS representation (V8's own embedder docs describe its
+        // TryCatch handle as reading IsUndefined()); once TerminateExecution()
+        // has fired, further V8 work done while "handling" it — reading a
+        // property, describe_cpp_exception()'s WebAssembly.Exception probes,
+        // console.error()'s internal stringification of the value — can abort
+        // the isolate outright (SIGTRAP) instead of unwinding as an ordinary
+        // JS exception. That is exactly nix-wasm#196: CI's gtk shard killed a
+        // worker mid-wasm during teardown, this function touched the
+        // exception, node exited 133 AFTER every smoke had already printed
+        // PASS.
+        //
+        // So: check BEFORE touching `error` any further than this. `instanceof`
+        // does call GetMethod(rhs, @@hasInstance) and, absent an override, walks
+        // the LHS's prototype chain via [[GetPrototypeOf]] — trappable if `error`
+        // were a Proxy. It's safe HERE specifically: the RHS operands below are
+        // trusted intrinsics (`Error`, `WebAssembly.Exception`) with no custom
+        // @@hasInstance, and a non-object `error` (the realistic shape of a
+        // termination sentinel) short-circuits to `false` before
+        // [[GetPrototypeOf]] is ever invoked — no property read, no user code.
+        // `Trap` extends `Error`, and so do the WebAssembly spec's own error
+        // types (RuntimeError/CompileError/LinkError); `WebAssembly.Exception`
+        // (the wasm-EH tag-exception object describe_cpp_exception() decodes)
+        // does not extend Error, so it is listed separately. Teardown is not a
+        // bug: anything outside this allow-list is treated as the termination
+        // exception (or some other value we don't understand) and left alone.
+        if (!(error instanceof Error || error instanceof WebAssembly.Exception)) {
+          // Constant string only — no interpolation, no property access on
+          // `error` — so a genuine engine bug that throws some OTHER exotic
+          // value here doesn't vanish silently.
+          console.error("[user-exec] non-Error rejection swallowed (teardown?)");
+          // Never resolve. wasm_error is used directly as a .catch() handler
+          // (.catch(wasm_error).then(user_executable_chain) below) — a plain
+          // `return` here makes THAT .catch() RESOLVE, which fires the
+          // trailing .then(user_executable_chain) and starts a FRESH
+          // user-executable setup/run inside an isolate that is already
+          // terminating, instead of doing nothing. Pre-patch, wasm_error()
+          // always threw, so that .then() could never be reached on the
+          // error path; swallowing the exception must preserve that — it has
+          // to also STOP the chain, not just avoid re-reporting it. A promise
+          // that never settles does exactly that (and produces no unhandled
+          // rejection either), and V8 keeps re-terminating this worker
+          // regardless of what we return.
+          return new Promise(() => {});
+        }
+
         // console.error, not log(): log() drains into boot.js's onLog sink,
         // which defaults to a no-op — the page console is what the headless
         // harness (debug.mjs) actually captures.

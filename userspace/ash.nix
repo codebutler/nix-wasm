@@ -36,6 +36,17 @@ cross.stdenv.mkDerivation {
     # ash can be compiled — ash depends on !NOMMU in Kconfig — but fork() is still
     # absent on wasm; guard xfork() with !defined(__wasm__) to match musl's reality).
     ../patches/busybox/0007-xfork-no-fork-wasm.patch
+    # hush: this build's default /bin/sh is ash, not hush, but ash.nix's source
+    # tree still carries shell/hush.c — shared correctness fix, applies
+    # zero-fuzz on top of 0001 alone (0004/0007 don't touch hush.c). Support
+    # "N>&WORD" variable fd duplication redirects (e.g. the autoconf-generated
+    # ">&$4"), previously a hard PARSE-time "ambiguous redirect".
+    ../patches/busybox/0009-hush-variable-fd-redirect.patch
+    # hush: a pre-existing (still-unfixed upstream) bug found while verifying
+    # 0009 end-to-end against a real configure — "N<&0" (dup FROM stdin) was
+    # misidentified as duplicating hush's own (unset, sentinel-0) interactive
+    # fd and refused with a bogus "can't duplicate file descriptor".
+    ../patches/busybox/0010-hush-internally-opened-fd0.patch
     # ash forkshell stack (pc vendor/busybox/wasi-compat, busybox-w32 lineage):
     ../patches/busybox/ash/0001-ash-cb-spawn.patch
     ../patches/busybox/ash/0002-ash-m3-m4.patch
@@ -111,6 +122,17 @@ cross.stdenv.mkDerivation {
     cp ${./ash-cb-guest.c} shell/ash_cb_guest.c
     cp ${./ash-wasm-sjlj.c} shell/ash_wasm_sjlj.c
     echo 'lib-$(CONFIG_ASH) += ash_cb_guest.o ash_wasm_sjlj.o' >> shell/Kbuild.src
+
+    # Build-level guard for patches/busybox/0009+0010 (hush >&$fd / <&0
+    # fixes): this build's default /bin/sh is ash, not hush, but the source
+    # tree still carries shell/hush.c — fail LOUDLY if a stacked patch apply
+    # silently dropped either hunk (nixpkgs' default patch fuzz is 2 — these
+    # were only hand-verified with --fuzz=0). Same lesson as the kernel's
+    # 0017-0020 postPatch assertion (CLAUDE.md).
+    grep -q 'REDIRFD_TO_FD_VAR' shell/hush.c \
+      || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
+    sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
+      || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
   '';
 
   depsBuildBuild = [ pkgs.gcc ];

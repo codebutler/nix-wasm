@@ -33,6 +33,18 @@
 # Add capture_stack here in the PR that ships the first REAL fork package
 # through forkStdenv — a deliberate, CI-planned world rebuild.
 #
+# Until then there are exactly TWO local-extension idioms for capture_stack —
+# do not invent a third: (1) nix-wasm.nix's fork build copies this file's
+# CONTENT and appends capture_stack to make its own runCommand-generated
+# allow-list (still consumed via --allow-undefined-file, the file just has one
+# extra line); (2) userspace/busybox-fork.nix links with a blanket
+# --import-undefined (it can't use --allow-undefined-file at all here — see
+# the comment on CONFIG_EXTRA_LDFLAGS in that file for why a user-supplied one
+# would be overridden by the cc-wrapper's own) and instead passes capture_stack
+# as an EXTRA argv name to scripts/wasm-check-imports.py, which checks it
+# post-link against (this file's contents ∪ the extra argv names) without ever
+# writing a second allow-list file to disk.
+#
 # __wasm_ffi_call (#126 Track C / #130): the runtime-libffi host surface —
 # runtime/kernel-worker.js → runtime/ffi-codegen.js generates a trampoline
 # module for a call signature the static wasm32-raw-ffi.c table can't express

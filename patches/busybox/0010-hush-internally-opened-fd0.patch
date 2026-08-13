@@ -1,0 +1,98 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] hush: don't mistake a "<&0" dup source for the (unset) interactive fd
+
+Applies on top of 0009-hush-variable-fd-redirect.patch (independent fix,
+same file/function area; found while validating 0009 end-to-end against a
+REAL autoconf-generated `configure`, not a hand-picked idiom — see below).
+
+PROBLEM: found while running the fixture `configure` from
+0009-hush-variable-fd-redirect.patch's own verification end-to-end (not
+part of that patch's own feature) under a non-interactive hush. Every
+autoconf-generated configure script contains, very early, the standard
+preamble line:
+
+    test -n "$DJDIR" || exec 7<&0 </dev/null
+
+which fails under hush with `hush: can't duplicate file descriptor: Bad
+file descriptor` — before reaching *any* of the redirect constructs
+0009 addresses. Minimal repro: `hush -c 'exec 3<&0'` fails the same way
+even standalone, with a valid, open stdin. This reproduces byte-for-byte
+on PRISTINE busybox-1.36.1 (no patches at all), so it is a pre-existing
+hush bug, unrelated to 0009's fix, not a regression it introduces —
+confirmed still present in busybox git (mirror/busybox @ master) too.
+
+ROOT CAUSE: `setup_redirects()` (shell/hush.c) calls
+`internally_opened_fd(newfd, ...)` to check whether the fd it's about to
+`dup2()` FROM is one hush has already claimed for its own bookkeeping (the
+saved/interactive tty fd, a script fd, ...) — if so it refuses to touch it
+(simulates EBADF) rather than silently duplicating hush's own internal fd.
+`internally_opened_fd()` tests `fd == G_interactive_fd`. But
+`G.interactive_fd` (aliased `G_interactive_fd`) is 0 whenever hush is NOT
+interactive (e.g. running a script/`-c`, exactly the configure case) — 0 is
+its "not set" sentinel, not a real claimed fd. So `N<&0` (dup FROM stdin,
+fd 0, into any new fd N) is misidentified as "duplicating the interactive
+fd" and `newfd` gets forced to -1, and the subsequent `xdup2(-1, N)` fails
+with EBADF — exactly the observed message. Duplicating from fd 1 or fd 2
+is unaffected (0 is never their value), which is why this only bites `<&0`.
+
+hush already documents and guards against this EXACT ambiguity in the
+SIBLING function `save_fd_on_redirect()`, a few lines above in the same
+file:
+
+    if (fd != 0 /* don't trigger for G_interactive_fd == 0 (that's "not
+                   interactive" flag) */
+     && fd == G_interactive_fd
+    ) { ... }
+
+`internally_opened_fd()` is missing the same `fd != 0` guard. This is a
+straightforward oversight, not a deliberate difference — the two functions
+exist to answer the same question ("is this fd one of hush's own?") for
+the two sides of a dup (the fd being redirected vs. the fd being
+duplicated from), and only one of them was hardened against the sentinel
+ambiguity.
+
+UPSTREAM: confirmed still present, unfixed, in busybox git
+(mirror/busybox @ master, shell/hush.c `internally_opened_fd()`) as of this
+writing. Original fix, mirroring the sibling function's own precedent
+(comment text reused verbatim).
+
+FIX: add the identical `fd != 0` guard to `internally_opened_fd()`'s
+`ENABLE_HUSH_INTERACTIVE` check. `fd_in_HFILEs()` and the `sq[]` scan below
+are untouched (they don't share this ambiguity — the caller never passes a
+"real fd 0" through those checks in a way that collides with a sentinel).
+
+COVERAGE NOTE: this fixes the shebang / `-c` / `hush script` (file-argument)
+invocation forms — the ones that matter for running a generated `configure`
+(its own `#!/bin/sh` shebang, or a direct `hush ./configure` / `sh
+./configure`). It deliberately does NOT change behavior for `sh <
+./configure` (script fed over hush's OWN stdin via a shell redirect): there,
+fd 0 genuinely *is* the script being read (hush's `HFILEs` bookkeeping, not
+`G_interactive_fd`), so `fd_in_HFILEs(0)` still (correctly) traps a `<&0` in
+that mode — same as it always has, arguably the right behavior (duplicating
+out from under the very fd hush is mid-parse of is genuinely unsafe), and
+out of scope for this fix either way.
+
+SCOPE: applies with `patch -p1 --fuzz=0` cleanly against pristine
+busybox-1.36.1 (with or without 0009 — different function, no interaction)
+and on top of the full NOMMU hush patch stack (0001-wasm-arch-and-clone-
+spawn.patch + 0003-hush-cmdsub-clone.patch + 0006-hush-heredoc-clone.patch)
+and the ash.nix hush.c state (0001-wasm-arch-and-clone-spawn.patch alone) —
+none of those touch this function either. Wired everywhere 0009 is; all
+three derivations' postPatch asserts the shipped shell/hush.c's
+`internally_opened_fd()` carries the `fd != 0` guard, so a stacked apply
+that silently drops this hunk fails the BUILD loudly.
+
+diff -ruN a/shell/hush.c b/shell/hush.c
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -8060,7 +8060,9 @@
+ 	int i;
+
+ #if ENABLE_HUSH_INTERACTIVE
+-	if (fd == G_interactive_fd)
++	if (fd != 0 /* don't trigger for G_interactive_fd == 0 (that's "not interactive" flag) */
++	 && fd == G_interactive_fd
++	)
+ 		return 1;
+ #endif
+ 	/* If this one of script's fds? */

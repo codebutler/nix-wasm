@@ -53,6 +53,13 @@
 let
   cc = cross.stdenv.cc;
   p = cc.targetPrefix; # "wasm32-unknown-linux-musl-"
+
+  # The shared no-undef contract's allow-list (#52, toolchain/wasm-host-imports.nix)
+  # — the same file every other guest link passes to wasm-ld via
+  # --allow-undefined-file. This build can't use that flag directly (see the
+  # --import-undefined comment in configurePhase below), so the FINAL shipped
+  # binary is checked against this same list post-link instead (installPhase).
+  allowUndefined = import ../toolchain/wasm-host-imports.nix { inherit pkgs; };
 in
 cross.stdenv.mkDerivation {
   pname = "busybox-wasm32-fork";
@@ -67,15 +74,40 @@ cross.stdenv.mkDerivation {
     # 0001 minus the clone-spawn conversion files — wasm arch/build support only.
     # Stock fork()/vfork() spawn sites are preserved for the real-fork model.
     ../patches/busybox/0001-wasm-arch.patch
+    # hush: support "N>&WORD" variable fd duplication redirects (e.g. the
+    # autoconf-generated ">&$4"), previously a hard PARSE-time "ambiguous
+    # redirect" that made every real autoconf `configure` script unparseable
+    # under hush. This is what actually makes hush's /bin/sh capable of
+    # running real generated configure scripts, not just hand-picked idioms.
+    ../patches/busybox/0009-hush-variable-fd-redirect.patch
+    # hush: a pre-existing (still-unfixed upstream) bug found while verifying
+    # 0009 end-to-end against a real configure — "N<&0" (dup FROM stdin) was
+    # misidentified as duplicating hush's own (unset, sentinel-0) interactive
+    # fd and refused with a bogus "can't duplicate file descriptor". Every
+    # autoconf configure's standard preamble ("exec 7<&0 </dev/null") hits
+    # this, so it's a necessary companion fix for the same goal.
+    ../patches/busybox/0010-hush-internally-opened-fd0.patch
   ];
 
   postPatch = ''
     substituteInPlace Makefile --replace-fail '/bin/pwd' 'pwd'
     patchShebangs scripts applets
+
+    # Build-level guard for patches/busybox/0009+0010 (hush >&$fd / <&0
+    # fixes): fail LOUDLY if a stacked patch apply silently dropped either
+    # hunk (nixpkgs' default patch fuzz is 2 — these were only hand-verified
+    # with --fuzz=0) instead of shipping a hush that silently regressed to
+    # the parse-time "ambiguous redirect" / the <&0 "can't duplicate file
+    # descriptor" bug. Same lesson as the kernel's 0017-0020 postPatch
+    # assertion (CLAUDE.md).
+    grep -q 'REDIRFD_TO_FD_VAR' shell/hush.c \
+      || { echo "ERROR: 0009-hush-variable-fd-redirect.patch didn't apply (REDIRFD_TO_FD_VAR missing from shell/hush.c)" >&2; exit 1; }
+    sed -n '/^static int internally_opened_fd/,/^}/p' shell/hush.c | grep -q 'fd != 0' \
+      || { echo "ERROR: 0010-hush-internally-opened-fd0.patch didn't apply (internally_opened_fd missing its fd != 0 guard)" >&2; exit 1; }
   '';
 
   depsBuildBuild = [ pkgs.gcc ];
-  nativeBuildInputs = [ pkgs.gnumake binaryen ];
+  nativeBuildInputs = [ pkgs.gnumake binaryen pkgs.python3 ];
 
   configurePhase = ''
     runHook preConfigure
@@ -98,6 +130,28 @@ cross.stdenv.mkDerivation {
       # --import-undefined keeps the seam's `capture_stack` (the asyncify unwind
       # trigger, host-provided at runtime like the syscall imports) an undefined
       # import instead of a link error — same as userspace/asyncify-cc.nix.
+      #
+      # This is the exact blanket flag CLAUDE.md's no-undef contract (#52) warns
+      # against (--allow-undefined-file with a named list is the rule everywhere
+      # else). It is kept here NOT because kbuild lacks a seam to pass flags
+      # (CONFIG_EXTRA_LDFLAGS passes anything fine) but because the CROSS
+      # CC-WRAPPER (wasm-cross.nix) itself already bakes in its own
+      # `--allow-undefined-file=<the shared list, without capture_stack>` via
+      # nix-support/cc-ldflags, and nixpkgs' cc-wrapper appends cc-ldflags AFTER
+      # the caller's flags — so a user-supplied --allow-undefined-file naming
+      # capture_stack would be LAST-WINS-OVERRIDDEN by the wrapper's own, not
+      # merged with it (confirmed empirically: a probe TU compiled with an extra
+      # user --allow-undefined-file listing a symbol NOT in the shared list still
+      # fails to link — the wrapper's own flag, appended after, wins outright).
+      # Passing an allow-list file here would therefore silently NOT relax
+      # anything, and a future reader "fixing" this by rewiring kbuild to pass
+      # one would find it changes nothing. --import-undefined is the only lever
+      # that actually reaches wasm-ld before the wrapper's own flag settles the
+      # matter. The asyncify pass below also runs AFTER this link and may itself
+      # touch imports, so the meaningful check point is the FINAL shipped binary
+      # regardless. installPhase below runs wasm-check-imports.py over the
+      # asyncified $out/bin/busybox against the shared allow-list (+ capture_stack)
+      # to restore the "a stray unresolved symbol fails loudly" guarantee.
       "CONFIG_EXTRA_LDFLAGS=-Wl,--import-undefined ${muslFork}/lib/libc.a"
     )
     make "''${mk[@]}" wasm_defconfig
@@ -106,6 +160,50 @@ cross.stdenv.mkDerivation {
     sed -i 's/^CONFIG_NOMMU=y$/# CONFIG_NOMMU is not set/' build/.config
     grep -q '^# CONFIG_NOMMU is not set' build/.config \
       || { echo "ERROR: CONFIG_NOMMU not disabled" >&2; exit 1; }
+
+    # #131 slice-1 invariant asserts (mirrors the CONFIG_NOMMU idiom above and
+    # userspace/busybox.nix's configurePhase asserts, PR-2 hardening). These all
+    # hold BY CONSTRUCTION today (wasm_defconfig ships them this way and this
+    # build applies no disabling sed for any of them) — assert it so a future
+    # patches/busybox/0001-wasm-arch.patch regen or defconfig drift fails the
+    # BUILD loudly instead of silently shipping a degraded fork guest.
+    #
+    # IFUP/IFDOWN/TELNETD: OPPOSITE polarity from the NOMMU build, which disables
+    # them because their vfork()-exec spawn path has no NOMMU equivalent (see
+    # userspace/busybox.nix). Real fork() makes that vfork call site safe again,
+    # so the fork build KEEPS them enabled — no reason to leave real applets off
+    # once the spawn model they needed actually works.
+    for c in IFUP IFDOWN TELNETD; do
+      grep -q "^CONFIG_$c=y" build/.config \
+        || { echo "ERROR: CONFIG_$c not enabled in .config" >&2; exit 1; }
+    done
+
+    # SH_IS_HUSH: hush is the fork guest's shell. The #189 boot-measured idiom
+    # matrix (the exact idioms autoconf's preamble/config.status use — variable
+    # redirects with LITERAL fds, subshells, pipelines, multi-line if/fi) passes
+    # under stock hush with correct exit statuses and zero aborts — unlike stock
+    # ash, which SIGABRTs on every subshell via the wasm musl's longjmp abort
+    # stub (#188). A real autoconf-generated ./configure additionally needs two
+    # more fixes beyond that idiom matrix (it hits `as_fn_error`'s VARIABLE-fd
+    # redirect, `>&$4`, and `exec 7<&0 </dev/null`, neither of which the
+    # LITERAL-fds-only idiom matrix covered) — patches/busybox/0009-hush-
+    # variable-fd-redirect.patch + 0010-hush-internally-opened-fd0.patch,
+    # landed in this same change (applied above). The host-side, hermetic
+    # proof that the full chain (configure/config.status/make/prog) now
+    # completes under exactly this hush is `.#autotools-fixture-hush-check`
+    # (userspace/autotools-fixture-hush-check.nix), hard-gated in
+    # nix-wasm.yml; the in-guest confirmation is
+    # runtime/demo/node/autotools-fork-smoke.mjs.
+    grep -q '^CONFIG_SH_IS_HUSH=y' build/.config \
+      || { echo "ERROR: CONFIG_SH_IS_HUSH not enabled in .config" >&2; exit 1; }
+
+    # ASH must stay OFF: the wasm musl's longjmp is an abort() stub
+    # (patches/musl/0000-harness-wasm-arch.patch), and stock ash unwinds through
+    # longjmp on its normal $()/subshell path, so every subshell child would
+    # SIGABRT (exit 134) — see #188/#189. hush is the fork shell; ash is not a
+    # fallback.
+    grep -q '^# CONFIG_ASH is not set' build/.config \
+      || { echo "ERROR: CONFIG_ASH not disabled in .config" >&2; exit 1; }
 
     # Colorized ls with no env config (same as the NOMMU build).
     for c in FEATURE_LS_COLOR FEATURE_LS_COLOR_IS_DEFAULT; do
@@ -153,6 +251,19 @@ cross.stdenv.mkDerivation {
     mv "$bb.fork" "$bb"
     chmod +x "$bb"
     echo "[busybox-fork] asyncified -> $(wc -c < "$bb") bytes"
+
+    # #52/#131 slice-1 hardening: this build's -Wl,--import-undefined is the
+    # blanket flag the shared no-undef contract forbids everywhere else (kept
+    # only because the asyncify seam's capture_stack must stay undefined).
+    # Restore the "a stray unresolved symbol fails loudly" guarantee by
+    # checking the FINAL shipped binary (asyncify runs after the link and may
+    # itself add/keep imports, so this is the meaningful check point) against
+    # the SAME shared allow-list every other guest link uses, plus the one
+    # documented extra: capture_stack, the asyncify unwind import provided by
+    # kernel-worker.js since ENGINE_ABI 10 (fork-variant-only — the NOMMU guest
+    # never links this seam).
+    python3 ${../scripts/wasm-check-imports.py} "$bb" ${allowUndefined} capture_stack
+
     runHook postInstall
   '';
 
