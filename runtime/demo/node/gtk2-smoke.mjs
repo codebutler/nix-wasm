@@ -6,6 +6,23 @@
 // mirrors gtk-smoke.mjs's posture exactly, so it runs in the same no-DISPLAY
 // boot as every other GTK selftest. The LIVE window (via GTK2's X11 backend,
 // screenshotted with Xvfb+xwd) is gtk2-x11-smoke.mjs, a separate boot. Exit 0/1/2.
+//
+// ROOT CAUSE OF #193's hang, confirmed via this smoke's own transcript-based
+// diagnosis (below): cc217a9/#194 ("bake DISPLAY=:1 + GDK_USE_XSHM=0 +
+// QT_X11_NO_MITSHM=1 into /etc/profile", landed for the sommelier/Xwayland
+// guest-X11 work) bakes a REAL `DISPLAY=:1` into every login shell — and this
+// smoke's boot has no compositor/Xwayland actually listening on :1. Before
+// cc217a9, gtk2-hello's `gtk_init_check()` saw no DISPLAY at all and (per its
+// own source comment in userspace/gtk2-hello.c) failed cleanly; after cc217a9
+// it instead tries to connect to a DEAD `:1` and hangs — this gate is
+// DISPLAY-FREE BY CONTRACT (see the file header above) and must not silently
+// inherit whatever the ambient login-shell env happens to bake in for real
+// X11 apps. `env -u DISPLAY` (not `DISPLAY=`) genuinely UNSETS it for the
+// child (busybox `env`'s `-u` is unconditional under CONFIG_ENV=y, verified
+// against busybox-1.36.1's coreutils/env.c — no feature-flag gate), matching
+// the "none set" case gtk2-hello.c was written against, rather than leaving
+// DISPLAY set to an untested empty string (`DISPLAY=`), which Xlib may still
+// try to parse/connect on.
 import { bootNode } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
@@ -28,20 +45,17 @@ try {
   // this command was sent" — a pre-command prompt (or anything else already
   // in the transcript) can't false-positive into the post-command checks.
   const cmdOffset = s.snapshot().length;
-  s.send("gtk2-hello --selftest\n");
+  s.send("env -u DISPLAY gtk2-hello --selftest\n");
   pass = await s.waitForOutput(/GTK2-SELFTEST: .* OK/, 180000);
-  // #193: this smoke has failed with a COMPLETELY EMPTY transcript after the
-  // command — no echo, no "not found", no GTK/GDK error, nothing — which is
-  // consistent with at least two very different root causes that a bare
-  // timeout can't tell apart: (a) the shell never received/ran the command at
-  // all (a boot-log false-positive prompt match — waitForPrompt matches ANY
-  // trailing `#`/`$` in the whole accumulated transcript, so a transient boot
-  // line could in principle satisfy it before the real login shell is up,
-  // swallowing the command into pre-login output), vs (b) the shell DID run
-  // it and gtk2-hello itself hung before its first printf (e.g. inside
-  // gtk_init_check()'s X connection attempt — this smoke is the only one that
-  // invokes an X11-linked binary without an explicit `DISPLAY=` on the
-  // command line, unlike xdpyinfo/xeyes in x11-apps-smoke.mjs).
+  // #193 PROVEN ROOT CAUSE (see the file-header comment): this smoke hung
+  // with a COMPLETELY EMPTY transcript after the command — no echo, no
+  // "not found", no GTK/GDK error, nothing — because gtk_init_check() was
+  // trying to connect to a freshly-baked but dead `DISPLAY=:1`. The fix is
+  // `env -u DISPLAY` above. The transcript-based diagnosis machinery below
+  // is kept as a standing regression guard: it's what proved this exact
+  // failure shape (echoed=true, no prompt after, ^C freed it, was HUNG in
+  // the foreground) and will do the same for any future recurrence of a
+  // similarly silent hang, from whatever cause.
   //
   // Round 1 (Bugbot, correct): a bare post-timeout `echo` can't tell these
   // apart, because `gtk2-hello --selftest` runs in the FOREGROUND — the shell
