@@ -110,10 +110,9 @@ surface already exist; Phase 1 only widens what boots on top of it).
 
 ### Remaining
 
-- [ ] **Real-fork autotools proof — SHELL HALF PARTIALLY DONE (2026-08-11,
-  CORRECTED 2026-08-12), toolchain half added, hush-parser fix now landed
-  (below) — awaiting the in-guest soak's green CFGRC before this checkbox can
-  close.** CLAUDE.md's "In-guest autotools also works" milestone
+- [ ] **Real-fork autotools proof — SHELL HALF NOW FULLY CLOSED (2026-08-13),
+  compiler/#192 half still open: blocked by a kernel exec-fragmentation bug,
+  not by the shell.** CLAUDE.md's "In-guest autotools also works" milestone
   (`./configure && make && ./prog`) is proven only on the shipped NOMMU guest,
   through **forkshell ash** — four patches + six postPatch fixes
   (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist ONLY to fake
@@ -196,6 +195,41 @@ surface already exist; Phase 1 only widens what boots on top of it).
   first-boot CONFIRMATION, not a reproduction of a known gap. Promote it to
   a `run_smoke` call in the hard-gates step once that green is on record,
   same as every other soak in this job.
+  **UPDATE (2026-08-13): the "expected GREEN" call above was wrong, for a
+  reason the shell fixes could not have prevented — the SHELL half is
+  fully closed, but the soak still cannot promote.** The first in-guest
+  soak run (#193) found a THIRD hush bug (EXIT-trap bare-`exit`/`$?` status
+  resumption), now fixed by `patches/busybox/0011-hush-exit-trap-status.patch`
+  and pinned by a hard NEGATIVE case in `.#autotools-fixture-hush-check`
+  (a sabotaged always-failing compiler, asserted to exit exactly 77) — landed
+  and merged via PR #197. (This note's own update recording that fact is a
+  later, separate commit — it did not land in #197 itself.) With all three hush
+  fixes (0009/0010/0011) in place, `.#autotools-fixture-hush-check` proves
+  the ENTIRE `configure`/`config.status`/`make`/`./prog` chain, including
+  its EXIT-trap error path, hermetically and reproducibly on the host. The
+  shell half of this item is therefore CLOSED: there is no more known hush
+  defect standing between autoconf and this guest's `/bin/sh`. But the
+  IN-GUEST `autotools-fork-smoke.mjs` soak still cannot record a green
+  `CFGRC` — its blocker is now issue **#192**, an unrelated kernel bug: `fs/
+  binfmt_wasm.c` loads each exec'd module into one contiguous kernel
+  allocation, and repeated large execs (clang's driver+cc1 pair, compiling
+  `conftest.c` over and over during `configure`) fragment the NOMMU-style
+  buddy heap and fail around the 6th large exec with `page allocation
+  failure: order:14`. The CONFIG_COMPACTION hypothesis for this was
+  EMPIRICALLY REFUTED (it is already `=y` once `CONFIG_MMU=y`, via Kconfig
+  default-y propagation — reproduced directly against the real
+  kernel-llvm-tools configurePhase); the fixture `configure`'s own run is
+  itself a real-world data point for #192, not just a synthetic repro. Fix
+  direction on #192 is a per-inode exec image-buffer cache — a kernel
+  workstream, queued, not started. Net effect: with 0011, the soak's
+  `CFGRC` now fails *honestly* (a genuine nonzero status once a conftest
+  compile dies to #192) instead of the pre-0011 failure mode where a masked
+  EXIT-trap bug could silently report `CFGRC=0` on a run that had actually
+  died fatally — but it still fails, so **this checkbox stays OPEN and the
+  soak stays a soak** (do NOT promote to `run_smoke`) until #192 is fixed
+  and a green CFGRC is on record. Full record: `docs/process-model.md`'s
+  2026-08-13 update, and the "hush can't run a real autoconf `configure`"
+  learnings entry + the #192 references in the root `CLAUDE.md`.
 - [ ] **#11's Wayland/`wl_shm` half (close-out items 2/3/5) — no MMU compositor
   boot exists yet.** The Landed `mmu-devices` shard above proves #11 item 1
   (vring/pfn addressing is untouched by CONFIG_MMU=y — the kernel stays
@@ -227,7 +261,10 @@ surface already exist; Phase 1 only widens what boots on top of it).
   `runtime/mmu-uaccess.js` in PR #186, remainder tracked in nix-wasm#185) —
   exactly the "some may need a real fix first, not just a move" case this
   checkbox anticipated. PR #186's soak recorded its post-fix CI green and it
-  took the last promotion; no soak step remains in the MMU jobs.
+  took the last promotion; no soak step remains from THIS promotion cycle
+  (the autotools acceptance soak added later, below, is a separate item that
+  postdates this 19/19 flip and is deliberately not one of the 19 — see its
+  own 2026-08-13 update).
 
 Phase 1's CI wiring is now, completely, the regression net Phase 2's risky
 world rebuild runs against continuously: a regression on any of the 19
@@ -339,9 +376,19 @@ attrs"; Phase 3 is "pc downloads this by default."
 
 **Precondition — SATISFIED:** the Phase-1 Remaining checklist's soak-flip
 checkbox is fully closed (19/19 promoted: 18 on PR #184's recorded greens,
-`widget-factory-smoke` on PR #186's post-mmu-uaccess-fix green). Every MMU
-shard is hard-gating end to end — a Phase-2 regression on any of these paths
-fails the JOB, no soak step remains to hide behind.
+`widget-factory-smoke` on PR #186's post-mmu-uaccess-fix green). Every one of
+those 19 promoted paths is hard-gating end to end — a Phase-2 regression on
+any of them fails the JOB, no soak step remains from that cycle to hide
+behind. (The `core` shard's later-added autotools acceptance soak — the
+"Real-fork autotools proof" item in the Phase-1 Remaining checklist above —
+is a separate, still-open, deliberately non-gating soak, not one of the 19.
+It does not weaken the 19/19 regression net described here — but it IS the
+one remaining Phase-2 precondition in its own right (the "only the autotools
+proof above remains" statement at the end of Phase 1, and the audit doc's
+"do not check a REVERT box until that gate is green" rule): the prove-then-
+flip procedure must NOT execute the Phase-2 world rebuild until that soak
+has been promoted to a green `run_smoke` hard gate, which is blocked by
+issue #192.)
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
@@ -594,8 +641,10 @@ or no-dlopen — do not touch them in this cleanup.
 - **#11** ("revisit NOMMU Wayland accommodations if MMU lands") enumerates SIX
   accommodations (the ticket's own table). It is answered IN PART by Phase 1,
   not closed by it, and the evidence splits into four groups, not two:
-  - **Item 1 (virtio vring/pfn addressing) is answered by ARGUMENT, but its CI
-    confirmation is still soak-gated.** The structural reason: **the MMU
+  - **Item 1 (virtio vring/pfn addressing) is answered by ARGUMENT, and its CI
+    confirmation is now hard-gated** (stale as of an earlier draft of this
+    map: it used to be soak-gated, before the PR #184 promotion cycle below
+    moved all ten `mmu-devices` smokes to `run_smoke`). The structural reason: **the MMU
     kernel keeps the kernel itself identity-mapped** — only USER virtual
     addresses are translated (`patches/kernel/0023`'s own comments: "the
     kernel runs in physical/identity space... A user va resolves through the
@@ -655,9 +704,9 @@ or no-dlopen — do not touch them in this cleanup.
     motivation here to rewrite it. Whoever eventually picks up items 2/3/4/5
     on a real wl_shm-allocating boot should record this decision explicitly
     rather than leaving item 6 silently unaddressed.
-  **#11 as a whole cannot close on Phase 1's current CI evidence — not even
-  item 1 in full** (its structural argument holds, but its CI confirmation is
-  still soak-gated pending the flip checkbox above) **— items 2/3/4/5 all need
+  **#11 as a whole still cannot close on Phase 1's current CI evidence, even
+  though item 1 is now fully answered** (structural argument AND hard-gated
+  CI, both above) **— items 2/3/4/5 all need
   a wl_shm-allocating MMU boot that does not exist yet, and item 6's
   keep-as-is disposition above still needs recording on the ticket itself.**
   Do not close the ticket, and do not cite the `gtk` shard as "real wl_shm"

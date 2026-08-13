@@ -185,6 +185,21 @@ Worker unit tests (`src/index.test.js`) before `bunx wrangler deploy`. Boot
 artifacts only — the guest `nix-cache/` catalog tree stays #2's concern. Setup
 runbook: `infra/preview-worker/README.md`.
 
+**PR CI boots the MERGE REF (branch + master merged), not the branch tip —
+a parallel master commit can change what an open PR's own boot-smoke sees**
+(#193/#194). PR #194 baked `DISPLAY=:1` into `/etc/profile` (the "GDK_USE_XSHM"
+learnings entry below) and landed on master while PR #193 was still open;
+#193's next CI run built the merge of its own branch + that master commit,
+so its `gtk2-smoke` — a display-free `--selftest` gate that assumes no
+`DISPLAY` is set — inherited a real `DISPLAY` from the now-merged environment
+and hung in `gtk_init_check` waiting for a compositor that was never going to
+answer. Nothing in #193's own diff caused this. Fixed by making the smoke
+itself robust (`env -u DISPLAY` before invoking the selftest, `c80e08d`)
+rather than trying to pin CI off the merge ref — the lesson is to write
+display-free smokes so they don't *inherit* ambient guest env from whatever
+else happens to be on master at merge time, since that environment is not
+under the PR's control.
+
 Run these from the **runtime/** directory:
 
 ```sh
@@ -404,24 +419,37 @@ real `configure`; full record in the "hush can't run a real autoconf
 `.#autotools-fixture-hush-check` is now a HARD gate (native, ~2 min, wired
 into `nix-wasm.yml` alongside `.#autotools-fixture`) asserting the full
 `configure`/`config.status`/`make`/`./prog` chain succeeds under exactly this
-hush, and CFGRC in `autotools-fork-smoke.mjs` is no longer expected red. The
-host-side proof is the NECESSARY half — it confirms the hush.c fix itself,
-in isolation — but the shell risk this item existed to retire is only fully
-retired once the in-guest `autotools-fork-smoke.mjs` soak (the 2026-08-05
-parity-plan doc's "Real-fork autotools proof" item) records its own green
-CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising the
-booted guest's full 9P-staging + in-guest cc/make path the host build never
-touches. **UPDATE (2026-08-13, #193): that first in-guest soak found a
-THIRD hush bug** the host-side gate's happy-path-only checks could not have
-caught — a genuinely fatal `configure` (hit an unrelated in-guest cc bug,
-#192) still reported `CFGRC=0` to the harness, because a bare `exit` run
-from inside autoconf's universal `ac_exit_trap` EXIT-trap handler resumed
-the trap body's own last exit status (0, from a successful cleanup `rm`)
-instead of the real, pending one. Fixed by
-`patches/busybox/0011-hush-exit-trap-status.patch` (full record in the
-learnings entry below); `.#autotools-fixture-hush-check` gained a hard
-NEGATIVE case (a sabotaged always-failing compiler) so this class of bug is
-now gated on the host side too, not just discoverable by an in-guest soak.**
+hush. The host-side proof is the NECESSARY half — it confirms the hush.c fix
+itself, in isolation — but the shell risk this item existed to retire is only
+fully retired once the in-guest `autotools-fork-smoke.mjs` soak (the
+2026-08-05 parity-plan doc's "Real-fork autotools proof" item) records its
+own green CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising
+the booted guest's full 9P-staging + in-guest cc/make path the host build
+never touches — see the UPDATE below for why that soak still hasn't recorded
+one, even with the shell fully fixed. **UPDATE (2026-08-13, #193): that first
+in-guest soak found a THIRD hush bug** the host-side gate's happy-path-only
+checks could not have caught — a genuinely fatal `configure` (hit an
+unrelated in-guest cc bug, #192) still reported `CFGRC=0` to the harness,
+because a bare `exit` run from inside autoconf's universal `ac_exit_trap`
+EXIT-trap handler resumed the trap body's own last exit status (0, from a
+successful cleanup `rm`) instead of the real, pending one. Fixed by
+`patches/busybox/0011-hush-exit-trap-status.patch` (merged via PR #197; full
+record in the learnings entry below); `.#autotools-fixture-hush-check` gained
+a hard NEGATIVE case (a sabotaged always-failing compiler) so this class of
+bug is now gated on the host side too, not just discoverable by an in-guest
+soak. **This closes the SHELL half of the item for good** — no known hush
+defect stands between autoconf and this guest's `/bin/sh` any more. **The
+in-guest soak's CFGRC is still NOT expected green, though, and for a reason
+0011 cannot fix: issue #192**, a kernel exec-image-buffer fragmentation bug
+(large repeated execs, e.g. clang's driver+cc1, fail around the 6th with
+`page allocation failure: order:14`; a per-inode exec-buffer cache is the
+queued, not-started fix). Net effect: CFGRC now fails *honestly* (a real
+nonzero status) instead of the pre-0011 masked-failure mode — but it still
+fails, so the soak stays a soak (NOT promoted to a `run_smoke` hard gate)
+until #192 is fixed. **Full #192 record (compaction-hypothesis refutation,
+the per-inode-cache fix direction, the fixture-`configure` data point):**
+`docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s "Real-fork
+autotools proof" item.
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
@@ -1155,19 +1183,30 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
 - **hush can't run a real autoconf `configure` at all without three
   independent fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch`
   + `0010-hush-internally-opened-fd0.patch` + `0011-hush-exit-trap-status.patch`;
-  all three wired into `busybox-fork.nix`, `busybox.nix`, AND `ash.nix` for
-  source-tree consistency — but only TWO of the three derivations actually
-  COMPILE `shell/hush.c` into their shipped binary: `busybox-fork.nix` (hush
-  is its `/bin/sh`) and `busybox.nix` (NOMMU; hush is present as the `hush`
-  applet even though forkshell ash is the guest's actual `/bin/sh` there —
-  see `bootstrap.nix`). `ash.nix` builds via `allnoconfig` + an ASH-only
-  enable list that never sets `CONFIG_SHELL_HUSH=y` (only `ASH`/
-  `SHELL_ASH`/`SH_IS_ASH`), and busybox's `shell/Kbuild` gates `hush.o`
-  behind exactly that symbol (`lib-$(CONFIG_SHELL_HUSH) += hush.o ...`) — so
-  `ash.nix`'s copy of `shell/hush.c` is patched (the postPatch guards below
-  still run and still catch a dropped hunk) but never actually compiled into
-  that derivation's busybox binary; it's wired there purely to keep the
-  source tree — and the guard machinery — identical across all three.) All
+  all three wired into FOUR consumers — `busybox-fork.nix`, `busybox.nix`,
+  `ash.nix`, AND `userspace/autotools-fixture-hush-check.nix` (the host-side,
+  hermetic native-busybox proof itself, not a wasm consumer — see its own
+  header) — for source-tree consistency, but only TWO of the four
+  derivations actually COMPILE `shell/hush.c` into their shipped/tested
+  binary as `/bin/sh`-relevant hush: `busybox-fork.nix` (hush is its
+  `/bin/sh`) and `autotools-fixture-hush-check.nix` (a native, non-cross
+  busybox built purely to run this hush through a real `configure`
+  hermetically on the host). `busybox.nix` (NOMMU) also compiles
+  `shell/hush.c` — hush is present there as the `hush` applet even though
+  forkshell ash is the guest's actual `/bin/sh` (see `bootstrap.nix`) — so it
+  is a THIRD derivation that genuinely builds hush.c, just not as the
+  default shell. `ash.nix` builds via `allnoconfig` + an ASH-only enable list
+  that never sets `CONFIG_SHELL_HUSH=y` (only `ASH`/`SHELL_ASH`/`SH_IS_ASH`),
+  and busybox's `shell/Kbuild` gates `hush.o` behind exactly that symbol
+  (`lib-$(CONFIG_SHELL_HUSH) += hush.o ...`) — so `ash.nix`'s copy of
+  `shell/hush.c` is patched (the postPatch guards below still run and still
+  catch a dropped hunk) but never actually compiled into that derivation's
+  busybox binary; it's wired there purely to keep the source tree — and the
+  guard machinery — identical across all four. (A dropped hunk in ANY of the
+  four would go unnoticed by the other three's guards — this is why the
+  count matters: a future agent touching only `busybox-fork.nix`'s patch list
+  and forgetting `autotools-fixture-hush-check.nix` would silently desync the
+  host-side hard gate from the guest it's supposed to be proving.) All
   three fixes are ORIGINAL fixes for still-unfixed-upstream bugs (confirmed
   against `mirror/busybox @ master`, commit
   `371fe9f71d445d18be28c82a2a6d82115c8af19d` as checked 2026-08-13 for 0011 —
@@ -1280,7 +1319,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
      every check before it only proved the happy path, which could not have
      caught this class of bug; the new case fails loudly (as expected) when
      0011 is reverted, confirmed by temporarily dropping it and re-running
-     the gate. All three consumers' postPatch guards are similarly
+     the gate. All FOUR consumers' postPatch guards are similarly
      tightened: they check the two assignment lines' positions PRECEDE
      `hush_exit()`'s `builtin_eval(argv)` call (not merely that they're
      present somewhere in the function), so a fuzzy stacked-patch apply that
@@ -1308,6 +1347,39 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   runtime redirect failures (the "fd#%d is not open"/`dup2()` checks) were
   already using — matching a shape upstream itself later converged on
   elsewhere in `setup_redirects()`, just not (yet) here.
+- **`wasm_error()` must bail out BEFORE touching a V8 termination exception,
+  and its guard must never RESOLVE the `.catch()` it's installed as**
+  (#196, commit `705e832`). TRIGGER: `worker.terminate()` mid-wasm —
+  `kernel-host.js`'s `kill_task`/`stop_secondary` (`stop_secondary` terminates
+  a secondary-CPU worker UNCONDITIONALLY, mid-`_start_secondary` if need be —
+  the strongest in-engine repro) and the test harness's hard-kill teardown
+  (`runtime/demo/node/web-shims.mjs`'s `terminateAllWorkers()`, which every
+  smoke's `s.kill()` drives) can land a V8 "termination exception" on
+  whichever promise chain is in flight — seen 2× in CI **on the GTK shard**
+  (not the autotools soak, and not a step timeout: a normal, deliberate
+  worker-kill during teardown). FAILURE: a termination exception has no real
+  JS representation; `wasm_error()` used to touch it further
+  (`describe_cpp_exception()`'s `WebAssembly.Exception` probes,
+  `console.error()`'s stringification), which **aborted the isolate outright**
+  — SIGTRAP, node exit 133 — AFTER the smoke had already printed PASS, turning
+  a green run red. FIX, two load-bearing parts, both worth stating explicitly
+  because a future "simplify this" pass could break either: (a) a structural
+  allow-list — `error instanceof Error || error instanceof
+  WebAssembly.Exception` — checked BEFORE touching `error` any further, so
+  the termination exception is never inspected at all; (b) on that guard's
+  bail-out path, `return new Promise(() => {})` — a Promise that never
+  settles — NOT a bare `return`. `wasm_error` is used directly as a
+  `.catch()` handler (`.catch(wasm_error).then(user_executable_chain)`), and
+  pre-fix it always threw, so that `.then()` was never reached on the error
+  path; a bare `return` makes the `.catch()` RESOLVE instead, firing the
+  trailing `.then()` and starting a FRESH `user_executable_chain()` inside an
+  isolate that is already terminating (concrete repro: `stop_secondary()`
+  lands directly on this chain). The odd-looking never-settling Promise IS
+  the fix, not incidental scaffolding. Engine-only change — no `ENGINE_ABI`
+  bump (no import added, removed, or retyped) — but it IS a
+  `kernel-worker.js` edit, so it carries the standing `runtime/sync-to-pc.sh
+  <pc-checkout>` obligation before any pc deploy, same as every other
+  engine-file change (see the ABI-BUMP RULE above).
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.
@@ -1649,10 +1721,14 @@ CI / the linux box, per the design's "ship what works" scope):
   untranslated (see the "Host imports that take USER pointers" learnings
   entry above; engine fix `runtime/mmu-uaccess.js`); PR #186's soak recorded
   its post-fix CI green and it took the last promotion. NO soak step remains
-  in the MMU jobs — every smoke hard-gates, and a regression on any of them
-  turns the JOB red (the soak idiom's rationale lives in git history +
+  from THAT promotion cycle — all 19 hard-gate, and a regression on any of
+  them turns the JOB red (the soak idiom's rationale lives in git history +
   pr-preview.yml's MMU-preview step comment for the next first-ever-boot
-  shard that needs it). That shard verifies issue #11 item
+  shard that needs it). (One soak WAS added to the same `core` shard later,
+  2026-08-12: `autotools-fork-smoke.mjs`'s acceptance soak, deliberately
+  non-gating until issue #192 is fixed — see the autotools caveat above and
+  the 2026-08-05 parity-plan note. It postdates this 19/19 flip and is not
+  one of the 19.) That shard verifies issue #11 item
   1 ONLY — device models still work
   when USER pages are translated (the kernel's soft uaccess walk + the
   instrumented user binary's own buffer accesses); the vring/pfn addressing

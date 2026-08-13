@@ -65,6 +65,72 @@ Until #129 lands, the **default** toolchain remains `posix_spawn`-only and the
 holdout rules below apply. Do not describe `fork()` as impossible on this
 platform — it is an opt-in with a per-binary cost.
 
+## 2026-08-13 update — two process-model shapes now coexist
+
+As of this date the repo builds (CI-gated, **not** the published image) a
+second, complete process-model shape alongside the one this document
+specifies as the default. Both are real and both boot; this document's spawn
+contract remains the accurate description of shape (i) — the one that
+actually ships — until issue #131's slice-1 default-flip (Phase 2 of the MMU
+ship plan) lands and rewrites this document, per that plan's own item 9.
+
+**(i) Shipped NOMMU guest — `posix_spawn`-only, unchanged, still the
+default.** Everything above this section describes it: `fork`/`vfork`
+removed at the musl symbol level (`toolchain/musl.nix`), the busybox/ash/glib
+spawn-port patches, `.#nofork-linkcheck`'s `fork=ABSENT / spawn=LINKED`
+contract. This is what `.#linux-image`/`.#kernel` publish today.
+
+**(ii) Software-MMU / real-fork guest — `.#kernel-mmu-a2` + the
+`-fork`-suffixed initramfs/squashfs (Track B of #126, issue #131 slice 1).**
+A parallel, CI-gated build (never shipped) where real `fork()`+COW works:
+`toolchain/musl.nix`'s `fork = true` variant (`.#musl-fork`, patch 0010)
+restores the symbols, the kernel's software-MMU page tables
+(`patches/kernel/0023`/`0024`/`0026`) give a forked child a genuinely
+isolated, copy-on-write address space (Track A2's demand-paging + COW,
+boot-verified), and the engine's asyncify-based `capture_stack`/
+`run_user_entry` machinery (ENGINE_ABI 10) makes the fork call genuinely
+return twice. On this guest `/bin/sh` is **stock busybox hush**, not
+forkshell ash — stock ash was tried and found blocked by an orthogonal wasm
+limit (musl's `longjmp` is an `abort()` stub, nix-wasm#188), not by fork
+itself.
+
+Boot-verified today: `fork()`+`wait()` returns twice with real COW
+divergence (`fork-smoke.mjs`, gated); the promoted `nix-boot-smoke-mmu` GTK +
+core smoke set (the same one-per-boot apps the NOMMU guest runs) each
+recorded CI greens and hard-gate — a regression on any of them turns the job
+red. (Two caveats so this isn't read as "the MMU jobs are all green today":
+the `core` shard is currently RED on the pre-existing issue #192 — its
+in-guest compiler gates hit the exec-fragmentation bug deterministically —
+and that job's *acceptance* soak, `autotools-fork-smoke.mjs`, added later
+and separate from those promoted hard gates, is deliberately still
+non-gating — see "Not yet closed" below.) And hush itself is autoconf-capable — three independent,
+previously-unfixed-upstream hush bugs (the variable-fd redirect `>&$4`, the
+internally-opened-fd-0 misdetection on `N<&0`, and EXIT-trap bare-`exit`/`$?`
+status resumption) are fixed (`patches/busybox/0009`–`0011`) and HARD-GATED
+on the host, hermetically, by `.#autotools-fixture-hush-check` against a real
+generated `configure` (including a sabotaged-compiler negative case pinned to
+exit 77). Full record: CLAUDE.md's hush learnings entry.
+
+**Not yet closed — pending, not regressed:** the IN-GUEST autotools proof
+(`runtime/demo/node/autotools-fork-smoke.mjs`, a soak, not a hard gate) still
+cannot record a green `CFGRC` end-to-end — blocked by issue #192, a kernel
+exec-image-buffer fragmentation bug (repeated large execs, e.g. clang's
+driver+cc1 pair, fail around the 6th with `page allocation failure:
+order:14`), **not** any remaining hush defect: the soak now fails
+*honestly* (a real nonzero status) instead of the pre-0011 masked failure.
+Full #192 record: the root `CLAUDE.md`'s autotools caveat and the
+2026-08-05 parity-plan note's "Real-fork autotools proof" item (see "Full
+status record" just below). Retiring the `posix_spawn`-only accommodation
+layer itself (forkshell ash, the busybox/glib spawn-port patches below) is
+issue #131 slice 1, and that retirement has not started — but groundwork for
+it has: hush is already `/bin/sh` on the fork variant (above), and the fork
+initramfs build (`userspace/busybox-fork.nix`) already runs the shared
+`scripts/wasm-check-imports.py` import-contract check ("#131 slice-1 PR-2").
+
+Full status record: `docs/superpowers/specs/2026-07-01-cleanup-131-audit.md`,
+`docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`, and the
+hush/#192 entries in the root `CLAUDE.md`.
+
 ## Handling a fork/vfork holdout — the decision rule
 
 When a package fails to link with `undefined symbol: fork`/`vfork`, pick exactly
@@ -154,8 +220,31 @@ per-package hacks; no symbol that links but aborts at runtime.
   spread, and `--no-wasm-trap-handler`. Measured in `spikes/elastic-mem/`.
 - **Real `fork()`** needs *both* multi-shot control (unavailable — see above) and
   a same-address child copy (which forces per-process Memory → the ~124 cap). Two
-  independent walls.
-- **Software MMU** (per-access translation) — 10–100× slowdown, not viable.
+  independent walls. **Both are superseded by measurement/boot-verification**
+  (see the 2026-08-13 update above): asyncify supplies the multi-shot control
+  this document itself describes and ships as an opt-in seam ("Real `fork()`
+  — the asyncify seam" above), and the software MMU gives a forked child a
+  *private page table* on the SAME one shared `WebAssembly.Memory` — a
+  same-address COW copy without needing a second per-process `Memory` object
+  at all, so the ~124-Memory cap never comes into play. Track B's
+  `fork-smoke.mjs` is boot-verified and hard-gated in CI. Per this document's
+  own rule: never describe fork as impossible — it is a working, opt-in guest
+  shape today (shape (ii) above), not (yet) the default.
+- **Software MMU** (per-access translation) — assumed too costly to be viable
+  when this section was first written; **superseded by measurement** (see the
+  2026-08-13 update above). The pass's real per-access cost, measured on real
+  compiler output with the SHIPPED kernel-layout 2-level walk, is ~3–4× on
+  pure-memory loops (3.01×/4.10×/3.60× across three micro-benchmarks) and
+  ~1.01× (near-free) on compute-mixed code (`spikes/softmmu/REAL-BINARY.md`'s
+  2026-07-02 two-level re-measurement — an earlier single-level spike had
+  measured ~2.2× on the memory poles, before the pass moved to the kernel's
+  real 2-level table format). Track A/B
+  (`docs/superpowers/specs/2026-07-01-software-mmu-asyncify-design.md`)
+  shipped a booted, CI-gated software-MMU + real-fork guest on top of this
+  cost, consistent with CLAUDE.md's "permanent ~2-3× per-access-walk cost"
+  framing. It is not a per-process-Memory-style dead end — it is a second,
+  working, opt-in guest shape that coexists with the NOMMU default (see
+  above), not (yet) a replacement for it.
 
 Full rationale and the investigation record:
 `docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md`. Per-holdout
