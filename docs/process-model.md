@@ -96,14 +96,13 @@ itself.
 
 Boot-verified today: `fork()`+`wait()` returns twice with real COW
 divergence (`fork-smoke.mjs`, gated); the promoted `nix-boot-smoke-mmu` GTK +
-core smoke set (the same one-per-boot apps the NOMMU guest runs) each
-recorded CI greens and hard-gate — a regression on any of them turns the job
-red. (Two caveats so this isn't read as "the MMU jobs are all green today":
-the `core` shard is currently RED on the pre-existing issue #192 — its
-in-guest compiler gates hit the exec-fragmentation bug deterministically —
-and that job's *acceptance* soak, `autotools-fork-smoke.mjs`, added later
-and separate from those promoted hard gates, is deliberately still
-non-gating — see "Not yet closed" below.) And hush itself is autoconf-capable — three independent,
+core smoke set (the same one-per-boot apps the NOMMU guest runs), plus
+`autotools-fork-smoke.mjs`'s in-guest autotools acceptance smoke (promoted
+2026-08-13, see "Now closed" below for its history), each recorded CI
+greens and hard-gate — a regression on any of them turns the job red. The
+`core` shard is fully green as of 2026-08-13 (issue #192, the exec-image
+fragmentation bug that used to hit its in-guest compiler gates, is fixed —
+see below). And hush itself is autoconf-capable — three independent,
 previously-unfixed-upstream hush bugs (the variable-fd redirect `>&$4`, the
 internally-opened-fd-0 misdetection on `N<&0`, and EXIT-trap bare-`exit`/`$?`
 status resumption) are fixed (`patches/busybox/0009`–`0011`) and HARD-GATED
@@ -111,14 +110,16 @@ on the host, hermetically, by `.#autotools-fixture-hush-check` against a real
 generated `configure` (including a sabotaged-compiler negative case pinned to
 exit 77). Full record: CLAUDE.md's hush learnings entry.
 
-**Not yet closed — pending, not regressed:** the IN-GUEST autotools proof
-(`runtime/demo/node/autotools-fork-smoke.mjs`, a soak, not a hard gate) still
-cannot record a green `CFGRC` end-to-end — blocked by issue #192, a kernel
-exec-image-buffer fragmentation bug (repeated large execs, e.g. clang's
-driver+cc1 pair, fail around the 6th with `page allocation failure:
-order:14`), **not** any remaining hush defect: the soak now fails
-*honestly* (a real nonzero status) instead of the pre-0011 masked failure.
-Full #192 record: the root `CLAUDE.md`'s autotools caveat and the
+**Now closed (2026-08-13):** the IN-GUEST autotools proof
+(`runtime/demo/node/autotools-fork-smoke.mjs`) recorded its first-ever green
+`CFGRC` end-to-end once issue #192 — a kernel exec-image-buffer fragmentation
+bug (repeated large execs, e.g. clang's driver+cc1 pair, failed around the
+6th with `page allocation failure: order:14`) — was fixed by a per-inode
+exec-image cache (`patches/kernel/0030`, PR #199); no remaining hush defect
+stood in the way (the shell half closed earlier the same day via
+`patches/busybox/0009`–`0011`). The smoke is now a `run_smoke` hard gate in
+`nix-wasm.yml`'s `nix-boot-smoke-mmu` `core` shard — no soak step remains
+for it. Full record: the root `CLAUDE.md`'s autotools caveat and the
 2026-08-05 parity-plan note's "Real-fork autotools proof" item (see "Full
 status record" just below). Retiring the `posix_spawn`-only accommodation
 layer itself (forkshell ash, the busybox/glib spawn-port patches below) is

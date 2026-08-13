@@ -110,16 +110,25 @@ surface already exist; Phase 1 only widens what boots on top of it).
 
 ### Remaining
 
-- [ ] **Real-fork autotools proof — SHELL HALF NOW FULLY CLOSED (2026-08-13),
-  compiler/#192 half still open: blocked by a kernel exec-fragmentation bug,
-  not by the shell.** CLAUDE.md's "In-guest autotools also works" milestone
-  (`./configure && make && ./prog`) is proven only on the shipped NOMMU guest,
-  through **forkshell ash** — four patches + six postPatch fixes
-  (`userspace/ash.nix`, `patches/busybox/ash/*`) that exist ONLY to fake
-  autoconf's `$()`/subshell/pipeline/heredoc machinery WITHOUT real `fork()`.
-  (Note: that milestone has never been automated on ANY guest — it was a hand-run
-  session recorded in the since-deleted `docs/STATUS.md`; `runtime/demo/node/`
-  still has no autotools script.) This item asked for a stock-ash-over-`muslFork`
+- [x] **Real-fork autotools proof — DONE (2026-08-13). Shell half closed
+  2026-08-13 (hush 0009/0010/0011); compiler/#192 half closed the same day
+  by the per-inode exec-image cache (PR #199, `patches/kernel/0030`); first
+  green CFGRC recorded in workflow run 31697211801 (job "boot full nix
+  system on software MMU (core," id 94455421162) on `.#kernel-mmu-a2` + the
+  fork guest; the `autotools-fork-smoke.mjs` soak is now promoted to a
+  `run_smoke` hard gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu` `core`
+  shard (no soak step remains for it).** Historical body as written 2026-08-05
+  (kept as the record of WHY this item existed; every present-tense claim in it
+  is superseded by the DONE headline above): CLAUDE.md's "In-guest autotools
+  also works" milestone (`./configure && make && ./prog`) was AT THAT TIME
+  proven only on the shipped NOMMU guest, through **forkshell ash** — four
+  patches + six postPatch fixes (`userspace/ash.nix`, `patches/busybox/ash/*`)
+  that exist ONLY to fake autoconf's `$()`/subshell/pipeline/heredoc machinery
+  WITHOUT real `fork()`. (And at that time it had never been automated on ANY
+  guest — a hand-run session recorded in the since-deleted `docs/STATUS.md`,
+  with no autotools script in `runtime/demo/node/`. That gap closed 2026-08-12
+  with `autotools-fork-smoke.mjs` — the first automated autotools gate on any
+  guest — now the hard gate cited in the headline.) This item asked for a stock-ash-over-`muslFork`
   build to prove real fork makes those tricks unnecessary. **Booting it answered
   the question differently, in two ways — both measured on `.#kernel-mmu-a2` +
   a fork initramfs:**
@@ -225,11 +234,28 @@ surface already exist; Phase 1 only widens what boots on top of it).
   `CFGRC` now fails *honestly* (a genuine nonzero status once a conftest
   compile dies to #192) instead of the pre-0011 failure mode where a masked
   EXIT-trap bug could silently report `CFGRC=0` on a run that had actually
-  died fatally — but it still fails, so **this checkbox stays OPEN and the
-  soak stays a soak** (do NOT promote to `run_smoke`) until #192 is fixed
+  died fatally — but it still fails, so (historical, superseded by the
+  closing UPDATE below) this checkbox stays OPEN and the
+  soak stays a soak (do NOT promote to `run_smoke`) until #192 is fixed
   and a green CFGRC is on record. Full record: `docs/process-model.md`'s
   2026-08-13 update, and the "hush can't run a real autoconf `configure`"
   learnings entry + the #192 references in the root `CLAUDE.md`.
+  **UPDATE (2026-08-13, same day, later commit — the #192-payoff change):
+  #192 is FIXED.** PR #199 landed `patches/kernel/0030` — a refcounted
+  per-inode exec-image cache in `arch/wasm/mm/exec_image.c` — closing the
+  compiler/#192 half this item was waiting on. The very next
+  `nix-boot-smoke-mmu` `core` boot recorded the first-ever green CFGRC on
+  attempt 1 (workflow run 31697211801, job "boot full nix system on
+  software MMU (core," id 94455421162: `CFGRC=0`, `MAKERC=0`,
+  `AUTOTOOLS_FIXTURE_OK`, `RUNRC=0`), with the same run's
+  `exec-churn-smoke.mjs` and `wrapperless-cc-e2e.mjs` also green, confirming
+  the fix under exactly the exec-fragmentation load #192 described. This
+  checkbox is now CLOSED and `autotools-fork-smoke.mjs` is promoted to a
+  `run_smoke` hard gate in the `core` shard's hard-gates step — the
+  dedicated soak step is removed from `nix-wasm.yml`; there is no more
+  Phase-1 precondition blocking Phase 2's fork-default-flip on this axis.
+  (Phase 2 itself is NOT started by this change — see the Phase 2 section
+  below for its own remaining preconditions.)
 - [ ] **#11's Wayland/`wl_shm` half (close-out items 2/3/5) — no MMU compositor
   boot exists yet.** The Landed `mmu-devices` shard above proves #11 item 1
   (vring/pfn addressing is untouched by CONFIG_MMU=y — the kernel stays
@@ -268,10 +294,11 @@ surface already exist; Phase 1 only widens what boots on top of it).
 
 Phase 1's CI wiring is now, completely, the regression net Phase 2's risky
 world rebuild runs against continuously: a regression on any of the 19
-promoted paths turns the JOB red. Of Phase 2's preconditions only the
-autotools proof above remains (the wl_shm/#11 gap is orthogonal to Phase 2's
-fork-default flip and does not block it — it only blocks closing #11 in
-full).
+promoted paths turns the JOB red. The autotools proof above is now MET
+(2026-08-13) — Phase 2's fork-default flip is unblocked on this axis (the
+wl_shm/#11 gap remains orthogonal to Phase 2 and does not block it either —
+it only blocks closing #11 in full). Phase 2 itself is NOT started by the
+change that closed the autotools item; see the Phase 2 section below.
 
 ---
 
@@ -379,22 +406,22 @@ checkbox is fully closed (19/19 promoted: 18 on PR #184's recorded greens,
 `widget-factory-smoke` on PR #186's post-mmu-uaccess-fix green). Every one of
 those 19 promoted paths is hard-gating end to end — a Phase-2 regression on
 any of them fails the JOB, no soak step remains from that cycle to hide
-behind. (The `core` shard's later-added autotools acceptance soak — the
+behind. (The `core` shard's later-added autotools acceptance check — the
 "Real-fork autotools proof" item in the Phase-1 Remaining checklist above —
-is a separate, still-open, deliberately non-gating soak, not one of the 19.
-It does not weaken the 19/19 regression net described here — but it IS the
-one remaining Phase-2 precondition in its own right (the "only the autotools
-proof above remains" statement at the end of Phase 1, and the audit doc's
-"do not check a REVERT box until that gate is green" rule): the prove-then-
-flip procedure must NOT execute the Phase-2 world rebuild until that soak
-has been promoted to a green `run_smoke` hard gate, which is blocked by
-issue #192.)
+was a separate soak, not one of the 19, and is now ALSO CLOSED (2026-08-13):
+issue #192 is fixed (PR #199), the soak recorded its first green CFGRC and
+was promoted to a `run_smoke` hard gate — no soak step remains for it
+either. This was the one remaining Phase-2 precondition (the "only the
+autotools proof above remains" statement at the end of Phase 1, and the
+audit doc's "do not check a REVERT box until that gate is green" rule); it
+is now MET, so the prove-then-flip procedure is unblocked on this axis. The
+Phase-2 world rebuild itself is still NOT executed by this change.)
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
 added at the end of Phase 1) at the newly-default `cross.*`/`musl`/`nix.wasm`
 — they already boot exclusively on `.#kernel-mmu-a2`, so THIS re-point itself
-needs no job wiring changes beyond the soak-flip precondition above; only what
+needs no job wiring changes beyond what's already landed; only what
 the substituted artifacts now contain changes. The NOMMU-facing jobs
 (`artifacts`, `nix-boot-smoke`, `boot-smoke`'s `signals` shard, `browser-smoke`)
 are UNTOUCHED in this phase — `.#kernel`/`.#linux-image` still point at the

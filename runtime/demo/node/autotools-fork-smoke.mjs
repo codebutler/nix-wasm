@@ -212,8 +212,9 @@ try {
   // its own documented 19-min worst case (Codex P2, 2026-08-12): a
   // slow-but-genuinely-fine run would time out and report a false CFGRC
   // failure. This still fits the step's overall time budget — see the
-  // `timeout-minutes` comment in nix-wasm.yml for the full arithmetic
-  // (install + CFGRC + MAKERC + boot/staging). Never rely on the generated
+  // `timeout-minutes: 200` comment on nix-wasm.yml's "Boot full nix system
+  // on MMU + ${{ matrix.shard }} smokes — hard gates" step for the full
+  // arithmetic (install + CFGRC + MAKERC + boot/staging). Never rely on the generated
   // script's shebang/exec bit (see autotools-fixture.nix); invoke via `sh`.
   console.log("  [./configure …]");
   const cfg = await run("sh ./configure 2>&1", "CFGRC", 1500000);
