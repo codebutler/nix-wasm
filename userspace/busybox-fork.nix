@@ -297,4 +297,11 @@ cross.stdenv.mkDerivation {
 
   dontStrip = true;
   dontFixup = true;
+
+  # nix-wasm#202 PR-1: process-model coherence marker — see kernel.nix's
+  # identical passthru for the full rationale. This is the real-fork
+  # (musl-fork + asyncify) guest; its counterpart is userspace/busybox.nix's
+  # "nommu-spawn". `passthru` does not affect the built derivation's content
+  # or store path.
+  passthru.processModel = "mmu-fork";
 }

@@ -18,7 +18,40 @@
 # artifacts the host bootloader mirrors after activate (G5 / pc-bootloader).
 { pkgs, busybox, etc, systemPath, passwd, group, inittab, activate
 , kernel, initramfs, kernelAbi, pcBootloader }:
-pkgs.runCommand "wasm-system" { } ''
+let
+  # nix-wasm#202 PR-1: the EARLIEST point that has all three of kernel,
+  # initramfs, and busybox in hand at once — so it is also the earliest point
+  # a mismatched process-model pairing can be caught, before even building the
+  # squashfs (userspace/base-squashfs.nix, which only ever sees `toplevel` and
+  # so can't itself compare kernel against busybox directly). A NOMMU kernel
+  # booting a real-fork busybox (or the reverse) corrupts the guest's own
+  # memory model at boot — see kernel.nix's passthru.processModel comment and
+  # docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md. This is
+  # belt-and-braces with userspace/linux-image.nix's OWN assert (item 4's
+  # "three members" gate on kernel/initramfs/squashfs): that one catches a
+  # mismatch introduced by mixing outputs from two DIFFERENT toplevel builds
+  # at the linux-image call site; this one catches a mismatch already present
+  # among THIS toplevel's own three inputs.
+  reqProcessModel = name: drv: drv.processModel or (throw
+    "userspace/toplevel.nix: the `${name}` derivation has no "
+    + "passthru.processModel — wire it before assembling a boot image");
+  kernelModel = reqProcessModel "kernel" kernel;
+  initramfsModel = reqProcessModel "initramfs" initramfs;
+  busyboxModel = reqProcessModel "busybox" busybox;
+  processModel =
+    if kernelModel == initramfsModel && initramfsModel == busyboxModel
+    then kernelModel
+    else throw ''
+      userspace/toplevel.nix: process-model MISMATCH assembling this boot
+      image: kernel=${kernelModel} initramfs=${initramfsModel} busybox=${busyboxModel}.
+      A NOMMU spawn-contract kernel paired with a real-fork userspace (or the
+      reverse) corrupts the guest's own memory model at boot. This assert
+      exists so a future attr-rename (e.g. pairing .#kernel-mmu-a2 with the
+      NOMMU busybox, or the reverse) fails at EVAL time instead of shipping a
+      silently-broken image.
+    '';
+in
+pkgs.runCommand "wasm-system" { passthru.processModel = processModel; } ''
   mkdir -p $out $out/boot
   # Real /etc = module-generated etc + our static passwd/group + profile inittab.
   # Preserve the store symlinks inside etc (resolved in-guest, /nix mounted).

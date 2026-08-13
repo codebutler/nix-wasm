@@ -739,13 +739,61 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   into an `env.*` import** — exactly how #36's removal of `fork` from musl became the
   #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
   #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
-  loudly. `.#nofork-linkcheck` is the gate; memory/table/base come from
+  loudly. `.#spawn-linkcheck` is the gate (renamed from `.#nofork-linkcheck`,
+  which is kept as a compat alias — #202 PR-1 parameterized it over the
+  nommu-spawn/mmu-fork profiles, see spikes/spawn-contract/check.nix); memory/table/base come from
   `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds
   guest-clang + nix.wasm + `.#userspace-busybox-fork` → the fork initramfs → the
   fork squashfs, since #131 slice-1 PR-2 wired `busybox-fork.nix`'s post-link
   `wasm-check-imports.py` check to consume the same generated file as an
   argument; the cross.* set is keyed on the byte-identical store path so it
   stays cached.)
+- **#202 PR-1 — the spawn-contract gate that must be green BEFORE the fork-
+  default flip** (`toolchain/musl.nix`'s planned `fork ? false` → `fork = true`).
+  The flip doesn't make fork() *work* — it makes it *link*: the engine provides
+  `env.capture_stack` to every module unconditionally
+  (`runtime/kernel-worker.js`), and its host implementation
+  (`runtime/asyncify.js`'s `makeCaptureStack`) calls
+  `inst.exports.asyncify_get_state()` on first use — present ONLY on a module
+  run through `wasm-opt --asyncify`. A capture_stack-importing, non-asyncified
+  module links and instantiates fine, then TypeErrors the first time fork()
+  actually runs — replacing today's loud link-time `undefined symbol: fork`
+  with a late, silent runtime crash. Two mechanical guards now exist for this,
+  both build-time-only (no boot needed): `scripts/wasm-check-imports.py
+  --fork-contract=PROFILE` (PROFILE ∈ `nommu-spawn`/`mmu-fork`) checks a
+  module's capture_stack import against the full Binaryen asyncify export ABI
+  it must carry if it imports the seam; `scripts/wasm-closure-sweep.py` +
+  `userspace/spawn-contract-sweep.nix` (`.#guest-spawn-contract-nommu` /
+  `.#guest-spawn-contract-fork`, wired into `nix-wasm.yml`'s cheap `contract`
+  job) run that check over EVERY real wasm module in a profile's guest
+  closure (busybox + every initramfs extraBin + the full toplevel system
+  closure — nix.wasm, galculator, the games, …), not just busybox. MEASURED
+  (not assumed) against the real already-built store: the mmu-fork closure
+  has EXACTLY 2 modules importing capture_stack today (busybox-wasm32-fork,
+  nix-wasm-fork), both correctly asyncify'd; the nommu-spawn closure has
+  zero, as its libc has no fork() symbol to reference the seam with — both
+  counts are pinned as regression guards (`expectCaptureStackCount` in
+  flake.nix). Also fixed en route, needed by the sweep to run on any C++
+  binary at all: `wasm-check-imports.py`'s import parser never handled wasm-EH
+  TAG imports (kind 4 — e.g. `env.__cpp_exception`, already on the shared
+  allow-list but never actually exercised by this parser before, since the
+  only prior caller was busybox, which has no C++), and crashed with
+  `SystemExit("unknown import kind 4")` the first time the sweep touched
+  nix-wasm-fork. **`.#nofork-linkcheck` → `.#spawn-linkcheck`** (compat alias
+  kept): `spikes/nofork/` → `spikes/spawn-contract/check.nix`, parameterized
+  over the same two profiles; its `mmu-fork` probe forces `muslFork`'s
+  `libc.a` first on the link line (mirrors `busybox-fork.nix`'s own
+  `CONFIG_EXTRA_LDFLAGS` technique) through the UNMODIFIED cc-wrapper (no new
+  local capture_stack extension idiom — `toolchain/wasm-host-imports.nix`'s
+  header names the two sanctioned ones and this probe deliberately uses
+  neither) and MEASURED (via `wasm-ld --why-extract`) that today, before
+  capture_stack is allow-listed, BOTH the fork() and posix_spawn() probes fail
+  to link — and on the exact same symbol, `capture_stack`, not `fork`: musl's
+  `__clone` (which posix_spawn uses directly) unconditionally references
+  `__post_Fork`, defined in the same object file as `_Fork()`'s own
+  capture_stack call, so pulling one drags the other in by object-file
+  granularity. PR-2 flips the expectation by editing one `expected` table
+  entry in `spikes/spawn-contract/check.nix`, not by rewriting the probe.
 - **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
   without `--export-all` MUST name every engine-called startup export** (#179; the
   mirror image of the allow-list entry above). The host bridge calls

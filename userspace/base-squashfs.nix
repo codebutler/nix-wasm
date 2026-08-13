@@ -17,7 +17,18 @@ let
   };
 in
 pkgs.runCommand "base-squashfs"
-  { nativeBuildInputs = [ pkgs.squashfsTools ]; }
+  {
+    nativeBuildInputs = [ pkgs.squashfsTools ];
+    # nix-wasm#202 PR-1: propagate the process-model coherence marker from
+    # `toplevel` (already coherence-checked against ITS OWN kernel/initramfs/
+    # busybox inputs by userspace/toplevel.nix). userspace/linux-image.nix
+    # reads this alongside its own `kernel`/`initramfs` args. Metadata-only —
+    # does not affect $out's content.
+    passthru.processModel = toplevel.processModel or (throw
+      "userspace/base-squashfs.nix: the `toplevel` derivation has no "
+      + "passthru.processModel — wire it in userspace/toplevel.nix before "
+      + "building a squashfs of otherwise-ambiguous process model");
+  }
   ''
     mkdir -p root/nix/store root/nix/var/nix/profiles
     # Copy the closure's store paths to their real /nix/store locations.

@@ -76,6 +76,14 @@ in
 pkgs.runCommand "wasm-initramfs"
   {
     nativeBuildInputs = [ pkgs.cpio pkgs.gzip ];
+    # nix-wasm#202 PR-1: propagate the process-model coherence marker from
+    # `busybox` (kernel.nix / userspace/busybox{,-fork}.nix's passthru;
+    # userspace/toplevel.nix cross-checks it against the paired kernel).
+    # `passthru` is metadata-only — it does not affect $out's content.
+    passthru.processModel = busybox.processModel or (throw
+      "userspace/initramfs.nix: the `busybox` derivation has no "
+      + "passthru.processModel — wire it in busybox.nix/busybox-fork.nix "
+      + "before building an initramfs of otherwise-ambiguous process model");
   }
   ''
     root=$(mktemp -d)

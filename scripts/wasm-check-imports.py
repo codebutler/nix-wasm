@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Assert that a wasm module's allow-list-governed imports are all on an
 allow-list (nix-wasm#131 slice-1 PR-2 — the busybox-fork `--import-undefined`
-hardening).
+hardening), OR run the Phase-2 spawn-contract sweep (--fork-contract).
 
     wasm-check-imports.py MODULE.wasm ALLOWLIST.txt [EXTRA_SYM ...]
+    wasm-check-imports.py --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]
 
 ALLOWLIST.txt is the one-name-per-line file toolchain/wasm-host-imports.nix
 generates (the shared no-undef contract, #52) — the SAME file every other
@@ -15,6 +16,49 @@ unwind seam) on top of the shared set.
 Exits 0 when every governed import is in (allowlist file ∪ extras), else
 prints the violating names (plus the full accepted set, so a typo is
 obvious) and exits 1.
+
+--fork-contract=PROFILE is the guest-closure-wide gate the fork-default flip
+(#202 PR-1) needs BEFORE it's safe to flip toolchain/musl.nix's default: it
+checks the two-sided capture_stack/asyncify contract described in the module
+docstring below, over one or more real shipped modules, in one of two
+profiles:
+
+  nommu-spawn — the profile that SHIPS today: NO module may import
+    `capture_stack` at all (the default guest libc has fork()/vfork()
+    removed at the symbol level — see toolchain/musl.nix's `fork ? false` —
+    so nothing should ever reference the asyncify seam).
+
+  mmu-fork — the #129/#131 real-fork guest (`.#kernel-mmu-a2` +
+    `.#wasm-initramfs-fork` / `.#wasm-base-squashfs-fork`): a module MAY
+    import `capture_stack` (musl-fork's `_Fork()` seam), but if it does it
+    MUST ALSO export the full Binaryen asyncify ABI the engine drives
+    (runtime/asyncify.js's `makeCaptureStack`/`isPendingUnwind`/
+    `stopUnwind`/`startRewind`): `asyncify_get_state`, `asyncify_start_unwind`,
+    `asyncify_stop_unwind`, `asyncify_start_rewind`, `asyncify_stop_rewind`.
+    A module that imports capture_stack WITHOUT that export set would
+    instantiate fine (wasm only wires the imports a module asks for) and
+    then crash with a TypeError the first time fork() actually runs — this
+    mode restores build-time loudness for exactly that failure mode. See
+    the "WHY THIS GATE EXISTS" note below for the full mechanism.
+
+WHY THIS GATE EXISTS (the finding it protects against — nix-wasm#202): Phase 2
+flips `toolchain/musl.nix`'s default from `fork ? false` to `fork = true`.
+That does not make fork() WORK — it makes it LINK. The engine provides
+`env.capture_stack` to every module unconditionally
+(runtime/kernel-worker.js's per-worker import object — "wasm wires only the
+imports a module asks for" is a real WebAssembly property, so providing it
+unconditionally is harmless for modules that never reference it). Its
+implementation (runtime/asyncify.js's `makeCaptureStack`) immediately calls
+`inst.exports.asyncify_get_state()` on the FIRST call — which exists ONLY on a
+module that was run through `wasm-opt --asyncify`. A module that imports
+capture_stack (because it links against musl-fork and calls fork()
+somewhere on its call graph) but was never asyncify'd links and instantiates
+fine, then TypeErrors the first time fork() actually executes — replacing
+today's loud link-time `undefined symbol: fork` with a late, silent runtime
+crash. This sweep is the mechanical guard that makes that impossible: run it
+over the WHOLE guest closure (every shipped .wasm module) in CI, in both
+profiles, so a future rebuild that produces a capture_stack-importing,
+non-asyncified module fails the BUILD, not a boot.
 
 WHY a build-time check exists at all: `busybox-fork.nix` links with the
 blanket `-Wl,--import-undefined` (never `--allow-undefined-file`) because the
@@ -28,11 +72,24 @@ directly, by checking the FINAL shipped binary (after asyncify, which may
 add/keep imports) against the same shared allow-list plus the one documented
 extra name.
 
-WHAT IS GOVERNED — two import shapes, not one:
+WHAT IS GOVERNED — three import shapes, not one:
 
   1. `env.<name>` FUNCTION imports — the classic case: an unresolved DIRECT
      CALL becomes an env function import.
-  2. `GOT.func.<name>` / `GOT.mem.<name>` imports — under `-shared` PIC (every
+  2. `env.<name>` TAG imports (wasm-EH, import kind 4 — e.g. `__cpp_exception`,
+     already on the shared allow-list) — a `-fwasm-exceptions` module IMPORTS
+     the exception tag it throws/catches with rather than defining it (every
+     C++ guest binary does this, so this shape is common, not exotic).
+     Governed exactly like a function import: found by name, `env.<name>`
+     bare or `<module>.<name>` qualified. Added for THIS gate — the
+     closure-wide sweep (#202 PR-1) is the first caller to run this parser
+     over real C++ binaries (nix.wasm and its `-fork` twin); every prior
+     caller only ever checked busybox, which has no C++ in it and so never
+     exercised this import kind. Without this case the parser raised
+     `SystemExit("unknown import kind 4 …")` on the very first C++ module it
+     saw — found by running the sweep against the real `nix-wasm-fork`
+     binary, not by inspection.
+  3. `GOT.func.<name>` / `GOT.mem.<name>` imports — under `-shared` PIC (every
      guest link, incl. this one) an unresolved symbol that is only
      ADDRESS-TAKEN, never called directly (busybox's `applet_main[]`
      function-pointer-table shape is exactly this), does NOT become an env
@@ -137,6 +194,9 @@ def parse_imports(b):
                     _, j = read_u32(b, j)
             elif kind == 3:  # global: valtype byte + mutability byte
                 j += 2
+            elif kind == 4:  # tag (wasm-EH): attribute byte (0=exception) + typeidx
+                j += 1
+                _, j = read_u32(b, j)
             else:
                 raise SystemExit(f"unknown import kind {kind} in {mod}.{name}")
             total += 1
@@ -146,9 +206,12 @@ def parse_imports(b):
                 # not dylink plumbing. The function-pointer form of the same
                 # no-undef contract — see the module docstring.
                 checked.add(name)
-            elif kind == 0:
-                # A FUNCTION import. env.* is the normal host-call surface
-                # (bare name, checked against the allow-list as-is);
+            elif kind in (0, 4):
+                # A FUNCTION (0) or TAG (4) import — both name a real host-
+                # provided symbol, not dylink plumbing (see the module
+                # docstring's "WHAT IS GOVERNED" case 2 for the tag case,
+                # e.g. env.__cpp_exception). env.* is the normal host-call
+                # surface (bare name, checked against the allow-list as-is);
                 # anything else is an unexpected import module and must not
                 # be silently exempt — qualify it so it reads clearly in an
                 # error and so it can never coincidentally collide with an
@@ -169,9 +232,136 @@ def parse_imports(b):
     return set(), 0
 
 
+# ---------------------------------------------------------------------------
+# --fork-contract=PROFILE (nix-wasm#202 PR-1). See the module docstring for
+# the full mechanism/rationale.
+
+# The exact Binaryen asyncify export names the ENGINE calls, verified against
+# runtime/asyncify.js (makeCaptureStack/isPendingUnwind/stopUnwind/
+# startRewind) — not written from memory. Keep this list and that file in
+# sync; a name here that drifts from what the engine actually calls would
+# make this gate pass a module that still TypeErrors at runtime.
+ASYNCIFY_EXPORTS = (
+    "asyncify_get_state",
+    "asyncify_start_unwind",
+    "asyncify_stop_unwind",
+    "asyncify_start_rewind",
+    "asyncify_stop_rewind",
+)
+
+FORK_CONTRACT_PROFILES = ("nommu-spawn", "mmu-fork")
+
+
+def _load_exported_funcs():
+    """Return wasm-check-exports.py's `exported_funcs`, loaded from the sibling
+    script file by path (not by `import` — the filename has a hyphen, so it
+    isn't a valid Python module name) rather than re-implementing a second
+    export-section parser here. Both scripts already duplicate the trivial
+    `read_u32` LEB128 reader (an established convention in this directory —
+    see wasm-strip-export.py too); the export-section WALK itself (name +
+    kind + index decoding, the part actually worth not tripling) is reused
+    for real via this loader instead.
+    """
+    import importlib.util
+    import os
+
+    sibling = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wasm-check-exports.py")
+    spec = importlib.util.spec_from_file_location("wasm_check_exports", sibling)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.exported_funcs
+
+
+def fork_contract_check(path, data, profile, exported_funcs):
+    """Check ONE module's data against `profile`. Returns a list of violation
+    strings (empty = the module is clean) plus a bool `has_capture_stack` for
+    the caller's summary."""
+    present, total = parse_imports(data)
+    if total == 0:
+        return (
+            [f"{path}: zero wasm import-section entries of ANY kind (parse failed?)"],
+            False,
+        )
+    has_capture_stack = "capture_stack" in present
+    violations = []
+    if profile == "nommu-spawn":
+        if has_capture_stack:
+            violations.append(
+                f"{path}: imports capture_stack, but the nommu-spawn profile's "
+                "guest libc has fork()/vfork() removed at the symbol level "
+                "(toolchain/musl.nix `fork ? false`) — nothing in this profile "
+                "should ever reference the asyncify fork seam. A module here "
+                "means either musl.nix's default flipped without this module "
+                "moving to the mmu-fork closure, or something references "
+                "capture_stack outside the fork seam entirely."
+            )
+    elif profile == "mmu-fork":
+        if has_capture_stack:
+            exported = exported_funcs(data)
+            missing = [n for n in ASYNCIFY_EXPORTS if n not in exported]
+            if missing:
+                violations.append(
+                    f"{path}: imports capture_stack but does NOT export the full "
+                    f"Binaryen asyncify ABI — missing: {' '.join(missing)}. "
+                    "This is exactly the #202 finding: the engine's capture_stack "
+                    "import (runtime/kernel-worker.js) calls "
+                    "inst.exports.asyncify_get_state() unconditionally on first "
+                    "use (runtime/asyncify.js's makeCaptureStack) — a module that "
+                    "imports the seam without having been run through "
+                    "`wasm-opt --asyncify` links and instantiates fine, then "
+                    "TypeErrors the first time fork() actually executes. Route "
+                    "this module's link through the asyncify pass (see "
+                    "userspace/busybox-fork.nix / userspace/asyncify-cc.nix / "
+                    "nix-wasm.nix's realFork) before shipping it in the mmu-fork "
+                    "closure."
+                )
+    return violations, has_capture_stack
+
+
+def run_fork_contract(profile, paths):
+    if profile not in FORK_CONTRACT_PROFILES:
+        raise SystemExit(
+            f"ERROR: --fork-contract profile must be one of {FORK_CONTRACT_PROFILES}, got {profile!r}"
+        )
+    if not paths:
+        raise SystemExit("usage: wasm-check-imports.py --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]")
+    exported_funcs = _load_exported_funcs()
+    all_violations = []
+    fork_users = []
+    for path in paths:
+        with open(path, "rb") as f:
+            data = f.read()
+        violations, has_capture_stack = fork_contract_check(path, data, profile, exported_funcs)
+        all_violations += violations
+        if has_capture_stack:
+            fork_users.append(path)
+        status = "capture_stack" if has_capture_stack else "-"
+        print(f"wasm-check-imports --fork-contract={profile}: {path}: {status}")
+    if all_violations:
+        print(
+            f"ERROR: --fork-contract={profile} spawn-contract VIOLATIONS "
+            f"({len(all_violations)} of {len(paths)} modules):",
+            file=sys.stderr,
+        )
+        for v in all_violations:
+            print(f"  {v}", file=sys.stderr)
+        return 1
+    print(
+        f"wasm-check-imports --fork-contract={profile}: {len(paths)} modules clean "
+        f"({len(fork_users)} import capture_stack: {' '.join(fork_users) if fork_users else '(none)'})"
+    )
+    return 0
+
+
 def main(argv):
+    if len(argv) >= 2 and argv[1].startswith("--fork-contract="):
+        profile = argv[1].split("=", 1)[1]
+        return run_fork_contract(profile, argv[2:])
     if len(argv) < 3:
-        raise SystemExit(f"usage: {argv[0]} MODULE.wasm ALLOWLIST.txt [EXTRA_SYM ...]")
+        raise SystemExit(
+            f"usage: {argv[0]} MODULE.wasm ALLOWLIST.txt [EXTRA_SYM ...]\n"
+            f"   or: {argv[0]} --fork-contract=PROFILE MODULE.wasm [MODULE.wasm ...]"
+        )
     path, allowlist_path = argv[1], argv[2]
     extra = argv[3:]
     with open(path, "rb") as f:

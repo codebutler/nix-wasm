@@ -670,4 +670,18 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
 
   dontFixup = true;
   dontStrip = true;
+
+  # nix-wasm#202 PR-1: the process-model coherence marker. A NOMMU (mmu=false,
+  # a2=false) kernel pairs ONLY with the posix_spawn-only "nommu-spawn" guest
+  # (fork()/vfork() removed at the musl symbol level); an MMU/A2 kernel pairs
+  # ONLY with the real-fork "mmu-fork" guest (musl-fork + the busybox-fork /
+  # nix-wasm realFork binaries) — booting the wrong pairing corrupts the
+  # guest's own memory model (the parent's address space under a NOMMU kernel
+  # has no per-process page table for a forked child to diverge into; see
+  # docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md). `passthru`
+  # is nixpkgs' documented "attach metadata without touching the derivation"
+  # mechanism — stdenv.mkDerivation strips it before building the actual
+  # derivation attrs, so this does NOT change vmlinux.wasm's content or store
+  # path. Consumed by userspace/linux-image.nix's coherence assert.
+  passthru.processModel = if (mmu || a2) then "mmu-fork" else "nommu-spawn";
 }
