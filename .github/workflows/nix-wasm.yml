@@ -1178,6 +1178,20 @@ jobs:
       # selftests). Move this to a `run_smoke` call in the hard-gates step
       # above once it has a green run on record.
       - name: Real-fork autotools acceptance smoke — soak (non-gating, first-ever boot)
+        # #192 (2026-08-12): the hard-gates step above fails DETERMINISTICALLY on
+        # a pre-existing kernel fragmentation bug (per-mm 57MB exec-image buffers +
+        # driver/cc1 concurrency — its own workstream, unrelated to this smoke),
+        # which by GitHub Actions' default `if: success()` PERMANENTLY skips this
+        # soak — so the first-ever CFGRC recording this cycle exists to collect
+        # could never happen. This soak boots FRESH and is otherwise entirely
+        # independent of the hard-gates step's outcome, so run it regardless of
+        # that step's result: `!cancelled()` (deliberately NOT `always()`) still
+        # skips if the JOB itself is cancelled, so a cancelled run doesn't spawn a
+        # doomed boot. Masks nothing — the hard-gates step still fails the job on
+        # #192. Once this soak is PROMOTED into the hard-gates step (its stated
+        # goal), this condition disappears with it — the promoted `run_smoke` call
+        # inherits the hard-gates step's own (unconditional-on-siblings) run.
+        if: ${{ !cancelled() }}
         continue-on-error: true
         # 60 (Codex P2, 2026-08-12): sized to the SUM of the smoke's own internal
         # per-step budgets — NIX_MAKE_TIMEOUT_MS install (10m) + CFGRC (25m) +
