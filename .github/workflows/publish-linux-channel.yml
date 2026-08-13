@@ -6,10 +6,10 @@ name: publish-linux-channel
 # version, then flip latest.json — see scripts/publish-linux-channel.sh and
 # vendor/linux-wasm/SOURCE.md §"Republish the guest".
 #
-# workflow_dispatch ONLY: a live-channel republish is a deliberate release step
-# (it must be ordered with the matching pc deploy when ENGINE_ABI/minEngine
-# moves), so it never fires automatically on push. Use the `dry_run` input to
-# build + print what WOULD upload without touching R2.
+# Deliberate release only — never on push. Two equivalent kicks:
+#   workflow_dispatch (Actions UI / `gh workflow run`) with optional dry_run
+#   repository_dispatch type `publish-linux-channel` (integrations with
+#   contents:write but not actions:write — same live publish, dry_run false)
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +17,8 @@ on:
         description: "Build + print the wrangler commands, but upload nothing"
         type: boolean
         default: false
+  repository_dispatch:
+    types: [publish-linux-channel]
 
 # Serialize channel writes so two dispatches can't interleave the latest.json flip.
 concurrency:
@@ -76,7 +78,7 @@ jobs:
       - name: Build + publish the linux channel to R2
         env:
           # DRY_RUN=true → the script builds + prints but uploads nothing.
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # linux.iso goes up via rclone (it is ~340 MiB; `wrangler r2 object
