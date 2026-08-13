@@ -22,16 +22,74 @@ copy and the child rewinds the identical image.
 
 Contract: docs/superpowers/specs/2026-06-20-fork-host-abi-v3.md.
 
+__post_Fork TU split (precedes the Phase-2 fork-default flip): __post_Fork()
+moves out of this file into a new src/process/post_Fork.c. Reason: musl upstream
+co-defines __post_Fork() in _Fork.c because upstream only ever reaches it via a
+real fork(). But src/linux/clone.c's clone_start() and clone() ALSO call
+__post_Fork (to mimic _Fork()'s bookkeeping for a CLONE_VM-less clone()), and our
+own harness patch (0000) additionally defines wasm's __clone() INSIDE clone.c
+(upstream gives __clone its own TU) — so posix_spawn.c and pthread_create.c,
+which reference __clone() and never fork(), pull in the WHOLE clone.lo object at
+link time, including clone()'s two references to __post_Fork. With __post_Fork
+still defined in _Fork.c, that reference dragged the entire _Fork.lo — and, in
+this musl-fork variant, its capture_stack import — into every spawn-only or
+thread-creating link, even though nothing on that path can ever call fork().
+--export-all (wasm-cross.nix) roots every defined symbol, so --gc-sections can't
+strip the now-unreachable-but-still-referenced _Fork/capture_stack import back
+out; the coupling is structural (a link-graph fact), not something dead-code
+elimination can fix. Left alone, this would mean "imports capture_stack" no
+longer implies "the binary was asyncify-instrumented for fork" once the
+Phase-2 default flip lands — a non-asyncified spawn/thread-only binary that
+happens to link posix_spawn or pthread_create would carry the import too, so a
+genuine, un-instrumented fork() call downstream would fail at RUNTIME with an
+opaque TypeError (missing host import) instead of at LINK time, defeating the
+whole point of gating fork on a link-time signal.
+
+The fix: __post_Fork (+ its dummy/__aio_atfork weak-alias companions) now lives
+in src/process/post_Fork.c. clone.lo's two __post_Fork references are satisfied
+by that small companion object instead, so posix_spawn.c/pthread_create.c's pull
+of __clone (hence clone.lo) no longer drags _Fork.lo along — _Fork.lo (and its
+capture_stack import) is now pulled in ONLY when something actually references
+_Fork()/fork(). This restores "imports capture_stack ⟺ can reach fork()" as a
+real link-time contract. capture_stack is deliberately NOT added to the shared
+--allow-undefined-file list in toolchain/wasm-host-imports.nix (the #52 no-undef
+contract) — doing so would be exactly the wrong fix: it would make ANY binary
+free to reference capture_stack without asyncify instrumentation, silently
+trading a loud link failure for the same class of runtime TypeError this split
+exists to prevent. A non-asyncified fork user must keep failing to link.
+
+Scoped to the musl-fork variant only (this patch, 0010, is applied only when
+`fork = true` in toolchain/musl.nix): in the default (fork = false) variant
+_Fork.c is unmodified by this patch, fork()'s body is deleted from fork.c
+(musl.nix postPatch), and _Fork() itself is called from nowhere else in the
+tree — so the pre-split coupling exists there too (clone.lo still references
+__post_Fork, defined in _Fork.c) but is inert: _Fork.c carries no capture_stack
+import in that variant, so pulling it into a spawn/thread link is harmless dead
+code, not a false "can fork" signal. The split is variant-independent in
+principle (post_Fork.c compiles unchanged either way) and could move to the base
+0000-0009 patch series later; it is kept here, scoped to fork = true, because
+this is the only variant where the coupling is actually load-bearing today.
+
+Duplicating a weak __aio_atfork fallback in post_Fork.c (alongside the existing
+one in fork.c) mirrors musl's own status quo: upstream already carries the
+identical dummy/weak_alias pair in BOTH fork.c and _Fork.c today, relying on
+ordinary weak-symbol linking (a real __aio_atfork elsewhere overrides every
+weak fallback). Moving the pair from _Fork.c to post_Fork.c keeps that same
+two-copy shape; it does not introduce a new duplicate-definition hazard in
+either variant.
+
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
 diff --git a/src/process/_Fork.c b/src/process/_Fork.c
-index ac59b14..f4ffac2 100644
+index ac59b14..2338318 100644
 --- a/src/process/_Fork.c
 +++ b/src/process/_Fork.c
-@@ -7,6 +7,23 @@
+@@ -7,24 +7,42 @@
  #include "aio_impl.h"
  #include "fork_impl.h"
- 
+
+-static void dummy(int x) { }
+-weak_alias(dummy, __aio_atfork);
 +/*
 + * Phase 2 (musl-fork variant only): real fork() over the asyncify double-return
 + * seam. The NOMMU wasm port cannot fork a running instance via SYS_clone, so
@@ -48,11 +106,45 @@ index ac59b14..f4ffac2 100644
 +extern int capture_stack(void *ctl);
 +static struct { unsigned cur, end; } __wasm_fork_ctl;
 +static char __wasm_fork_stack[16384] __attribute__((aligned(16)));
-+
- static void dummy(int x) { }
- weak_alias(dummy, __aio_atfork);
- 
-@@ -32,18 +49,20 @@ pid_t _Fork(void)
+
+-void __post_Fork(int ret)
+-{
+-	if (!ret) {
+-		pthread_t self = __pthread_self();
+-		self->tid = __syscall(SYS_set_tid_address, &__thread_list_lock);
+-		self->robust_list.off = 0;
+-		self->robust_list.pending = 0;
+-		self->next = self->prev = self;
+-		__thread_list_lock = 0;
+-		libc.threads_minus_1 = 0;
+-		if (libc.need_locks) libc.need_locks = -1;
+-	}
+-	UNLOCK(__abort_lock);
+-	if (!ret) __aio_atfork(1);
+-}
++/*
++ * __post_Fork() (+ its dummy/__aio_atfork weak-alias companions) used to be
++ * defined HERE, but now lives in its own TU (src/process/post_Fork.c). musl
++ * upstream co-defines them in this file because upstream's __post_Fork is
++ * only ever reached via a real fork() — but src/linux/clone.c's clone_start()
++ * and clone() ALSO call __post_Fork (to mimic _Fork()'s bookkeeping for a
++ * CLONE_VM-less clone()), and our own harness patch (0000) additionally
++ * defines wasm's __clone() INSIDE clone.c (upstream gives it its own TU) —
++ * so posix_spawn.c and pthread_create.c, which call __clone(), pull in the
++ * WHOLE clone.lo object, including clone()'s reference to __post_Fork. With
++ * __post_Fork still defined in THIS file, that reference dragged _Fork.lo —
++ * and, in the musl-fork variant, its capture_stack import — into every
++ * spawn-only or thread-creating link, even though nothing on that path ever
++ * calls fork()/_Fork(). Splitting __post_Fork into post_Fork.c means
++ * clone.lo now satisfies its __post_Fork reference from that small companion
++ * instead, and _Fork.lo (hence capture_stack) is only pulled in when
++ * something actually references _Fork()/fork(). See post_Fork.c's header for
++ * the rest of the rationale.
++ */
+
+ pid_t _Fork(void)
+ {
+@@ -32,18 +50,20 @@ pid_t _Fork(void)
  	sigset_t set;
  	__block_all_sigs(&set);
  	LOCK(__abort_lock);
@@ -85,3 +177,55 @@ index ac59b14..f4ffac2 100644
  	__post_Fork(ret);
  	__restore_sigs(&set);
  	return __syscall_ret(ret);
+diff --git a/src/process/post_Fork.c b/src/process/post_Fork.c
+new file mode 100644
+index 0000000..e5ebb26
+--- /dev/null
++++ b/src/process/post_Fork.c
+@@ -0,0 +1,46 @@
++#include <unistd.h>
++#include <signal.h>
++#include "syscall.h"
++#include "libc.h"
++#include "lock.h"
++#include "pthread_impl.h"
++#include "aio_impl.h"
++#include "fork_impl.h"
++
++/*
++ * Split out of _Fork.c (musl-fork variant, patch 0010) so that clone.c's two
++ * callers of __post_Fork() — clone_start() and clone() itself — can be
++ * satisfied WITHOUT pulling in _Fork.lo (and, on wasm, its capture_stack
++ * import). See the banner in _Fork.c for the full rationale: __clone() lives
++ * in clone.c too (our harness patch 0000 put it there), so posix_spawn.c and
++ * pthread_create.c — which reference __clone() and never fork() — used to
++ * drag capture_stack into their link purely via this symbol's old home.
++ *
++ * This TU is otherwise byte-identical to upstream's __post_Fork (content,
++ * not just behavior) — only its file changed. Duplicating a weak
++ * __aio_atfork fallback here (alongside the one in fork.c) mirrors musl's
++ * own existing practice: upstream already carries the identical pair in
++ * BOTH fork.c and _Fork.c (a real fork() build links harmless duplicate
++ * weak definitions, and the linker's own weak-symbol resolution is what
++ * lets a real __aio_atfork elsewhere override every one of them) — moving
++ * it from _Fork.c to post_Fork.c keeps that same two-copy shape, it just
++ * relocates one of the two copies.
++ */
++static void dummy(int x) { }
++weak_alias(dummy, __aio_atfork);
++
++void __post_Fork(int ret)
++{
++	if (!ret) {
++		pthread_t self = __pthread_self();
++		self->tid = __syscall(SYS_set_tid_address, &__thread_list_lock);
++		self->robust_list.off = 0;
++		self->robust_list.pending = 0;
++		self->next = self->prev = self;
++		__thread_list_lock = 0;
++		libc.threads_minus_1 = 0;
++		if (libc.need_locks) libc.need_locks = -1;
++	}
++	UNLOCK(__abort_lock);
++	if (!ret) __aio_atfork(1);
++}
