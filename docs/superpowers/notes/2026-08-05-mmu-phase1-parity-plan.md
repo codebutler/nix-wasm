@@ -381,9 +381,14 @@ those 19 promoted paths is hard-gating end to end — a Phase-2 regression on
 any of them fails the JOB, no soak step remains from that cycle to hide
 behind. (The `core` shard's later-added autotools acceptance soak — the
 "Real-fork autotools proof" item in the Phase-1 Remaining checklist above —
-is a separate, still-open, deliberately non-gating soak, not one of the 19;
-it does not weaken this precondition, since Phase 2's fork-default-flip does
-not depend on it.)
+is a separate, still-open, deliberately non-gating soak, not one of the 19.
+It does not weaken the 19/19 regression net described here — but it IS the
+one remaining Phase-2 precondition in its own right (the "only the autotools
+proof above remains" statement at the end of Phase 1, and the audit doc's
+"do not check a REVERT box until that gate is green" rule): the prove-then-
+flip procedure must NOT execute the Phase-2 world rebuild until that soak
+has been promoted to a green `run_smoke` hard gate, which is blocked by
+issue #192.)
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke

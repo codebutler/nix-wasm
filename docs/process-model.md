@@ -95,11 +95,15 @@ limit (musl's `longjmp` is an `abort()` stub, nix-wasm#188), not by fork
 itself.
 
 Boot-verified today: `fork()`+`wait()` returns twice with real COW
-divergence (`fork-smoke.mjs`, gated); the full `nix-boot-smoke-mmu` GTK +
-core smoke set (the same one-per-boot apps the NOMMU guest runs) all pass,
-hard-gated in CI (that job's *acceptance* soak, `autotools-fork-smoke.mjs`,
-added later and separate from those 19 hard gates, is deliberately still
-non-gating — see "Not yet closed" below); and hush itself is autoconf-capable — three independent,
+divergence (`fork-smoke.mjs`, gated); the promoted `nix-boot-smoke-mmu` GTK +
+core smoke set (the same one-per-boot apps the NOMMU guest runs) each
+recorded CI greens and hard-gate — a regression on any of them turns the job
+red. (Two caveats so this isn't read as "the MMU jobs are all green today":
+the `core` shard is currently RED on the pre-existing issue #192 — its
+in-guest compiler gates hit the exec-fragmentation bug deterministically —
+and that job's *acceptance* soak, `autotools-fork-smoke.mjs`, added later
+and separate from those promoted hard gates, is deliberately still
+non-gating — see "Not yet closed" below.) And hush itself is autoconf-capable — three independent,
 previously-unfixed-upstream hush bugs (the variable-fd redirect `>&$4`, the
 internally-opened-fd-0 misdetection on `N<&0`, and EXIT-trap bare-`exit`/`$?`
 status resumption) are fixed (`patches/busybox/0009`–`0011`) and HARD-GATED
