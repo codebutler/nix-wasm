@@ -30,14 +30,26 @@
  * SECOND SEND — a distinct payload, same two fds — to "commit" the drawn
  * buffer; this is the real wire shape (attach, draw, commit) and is what the
  * Node smoke's CONTENT check reads: a live host view captured AT THAT
- * SECOND SEND, after the write, never a re-view of a possibly-stale/freed
- * region after this process has exited.
+ * SECOND SEND, after the write.
+ *
+ * TWO EXIT PATHS, both deliberate:
+ *   - if the second SEND fails to even get issued (mmap/the read probe/the
+ *     write crashes this process first — the CURRENT, reproducible state,
+ *     see the smoke's own header for the exact signature), this process
+ *     simply dies to a fatal signal and the shell it was run from reports
+ *     that — nothing below this comment runs.
+ *   - if the second SEND DOES return successfully, this process prints
+ *     "WLSHM: held" and PARKS FOREVER with the fds still open, rather than
+ *     printing a RESULT line and exiting normally. See the comment at that
+ *     branch for why: kernel-worker.js's sendOut is an ASYNC postMessage of
+ *     {byteOffset,length} — not a copy — so the fds must stay open (backing
+ *     pages allocated) until the host has actually caught up and built its
+ *     view, or this process exiting/closing them would race the kernel
+ *     freeing/reusing that memory out from under the host.
  *
  * Every step prints a WLSHM: progress line and flushes stdout immediately,
  * so a fatal signal past mmap() leaves the preceding progress fully visible
- * to whatever waited on this process's stdout/exit status. (Empirically: the
- * read probe itself is already fatal on current code — see the smoke's own
- * header for what that means and why.)
+ * to whatever waited on this process's stdout/exit status.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -244,6 +256,32 @@ int main(void)
 		printf(" errno=%d", errno);
 	printf("\n");
 	fflush(stdout);
+
+	if (send2_ret == 0) {
+		/* RACE (see the smoke's own header for the full mechanism name and
+		 * the code sites): the SEND2 ioctl above already returned to us —
+		 * kernel-worker.js's sendOut posts only {byteOffset,length} for
+		 * these fds (NOT copies) via an ASYNC postMessage and completes the
+		 * ioctl immediately; kernel-host.js re-views the shared memory at
+		 * those offsets whenever it gets around to processing that message.
+		 * If THIS process now closed the fds (or just exited, which closes
+		 * them implicitly), the vfd's anon inode would drop its last
+		 * reference, the kernel would free the backing pages
+		 * (do_vfd_close), and the host could end up constructing its view
+		 * over freed/reused memory — wrong bytes, not a clean failure. So:
+		 * do NOT close, do NOT exit. Print a distinct witness and park with
+		 * the fds STILL OPEN, keeping the backing pages allocated and
+		 * untouched for as long as it takes the host to catch up. The Node
+		 * smoke kills this whole guest (not a real signal to this process)
+		 * once it has copied the bytes out, so parking forever here is
+		 * safe, not a leak — do NOT "simplify" this into an exit(0), and do
+		 * NOT re-derive a shorter sleep: the smoke's teardown, not a
+		 * timer here, is what ends this. */
+		printf("WLSHM: held\n");
+		fflush(stdout);
+		for (;;)
+			pause();
+	}
 
 	printf("RESULT wl_shm DONE ino_distinct=%d send1_ret=%d send2_ret=%d\n", distinct_inode,
 	       send1_ret, send2_ret);

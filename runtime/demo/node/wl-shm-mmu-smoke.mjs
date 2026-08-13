@@ -19,8 +19,29 @@
 // and issues a SECOND SEND (same two fds, a distinct payload) to "commit"
 // the drawn buffer. That two-SEND shape (attach, draw, commit) is the real
 // wire shape a client uses, and is what lets CONTENT (see below) read a
-// live host view captured AFTER the write, without ever re-reading a
-// possibly-stale/freed region once this process has exited.
+// live host view captured AFTER the write.
+//
+// THE HELD-OPEN RACE (why the C program does not just exit after that
+// second SEND): kernel-worker.js's `sendOut` posts only `{byteOffset,
+// length}` for the fds — NOT copies — via an ASYNC postMessage, and
+// completes the guest's SEND ioctl immediately; kernel-host.js re-views the
+// shared `memory.buffer` at those offsets whenever it gets around to
+// processing that message. If wl-shm-test exited (or closed the vfds) right
+// after the ioctl returned, the anon inode's last reference would drop, the
+// kernel would free the backing pages (do_vfd_close), and the host could
+// end up building its view over freed/reused memory — wrong bytes, not a
+// clean failure, and exactly the kind of thing that stays invisible while
+// CONTENT fails for an unrelated reason (today: the SIGBUS below) and starts
+// mattering the instant that reason goes away. So on a successful second
+// SEND, wl-shm-test does NOT exit: it prints a distinct "WLSHM: held"
+// witness and parks forever with the fds still open (see the comment at
+// that call site in wl-shm-test.c) — the backing pages stay allocated and
+// untouched until this smoke has copied the bytes out and torn the whole
+// guest down itself. Today this path is UNREACHABLE (the guest always dies
+// at the read probe before ever reaching the second SEND — see CONTENT
+// below), so it is documented but not exercised by any CI run yet; the
+// moment issue #203 is fixed, it is what makes CONTENT assert something
+// real instead of a race.
 //
 // It boots the REAL-FORK busybox (.#userspace-busybox-fork) as PID 1, same
 // shape as busybox-fork-smoke.mjs, and runs wl-shm-test as an ORDINARY CHILD
@@ -277,22 +298,34 @@ const s = await bootNode({
   },
 });
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let pass = false;
 let transcript = "";
 try {
-  // Fold the panic patterns INTO the wait regex so this returns as soon as
-  // EITHER the witness or a panic appears, instead of burning the full
-  // timeout on a panicked boot (waitForOutput never rejects — only
-  // waitForPrompt does — so a separate .catch(KERNEL_PANIC) branch here
-  // would be dead code). Anchored to a LINE START (^...$, multiline) so the
-  // witness can only match a real echoed OUTPUT line, never a substring
-  // inside busybox init's OWN "starting pid N, tty '': '<command>'"
-  // announcement of the inittab command line itself (the #96 hazard) — a
-  // survives-by-luck risk with an unanchored pattern, since that
-  // announcement embeds this script's full text and busybox's message()
-  // truncation is not a contract this smoke should depend on.
+  // Fold BOTH end-of-boot witnesses AND the panic patterns into ONE wait
+  // regex so this returns as soon as ANY of them appears, instead of
+  // burning the full timeout on a panicked (or held-open) boot
+  // (waitForOutput never rejects — only waitForPrompt does — so a separate
+  // .catch(KERNEL_PANIC) branch here would be dead code). Two DIFFERENT
+  // witnesses, not one, because wl-shm-test.c has two deliberate exit
+  // paths (see the HELD-OPEN RACE note above):
+  //   - `WLSHMBOOT: script done` — the shell's own echo AFTER wl-shm-test
+  //     returned (today's path: the child dies at the read probe, and the
+  //     shell's `$?` capture + script-done echo still run).
+  //   - `WLSHM: held` — wl-shm-test's OWN witness, printed BEFORE it parks
+  //     forever with the fds open. On this path the shell's `wl-shm-test`
+  //     invocation never returns, so `WLSHMBOOT: script done` (and
+  //     `WLSHMTEST_RC=`) are NEVER printed — this smoke must not wait for
+  //     them, and must not treat their absence as an error, on this path.
+  // Both are anchored to a LINE START (^...$, multiline) so neither can
+  // match a substring inside busybox init's OWN "starting pid N, tty '':
+  // '<command>'" announcement of the inittab command line itself (the #96
+  // hazard) — a survives-by-luck risk with an unanchored pattern, since
+  // that announcement embeds this script's full text and busybox's
+  // message() truncation is not a contract this smoke should depend on.
   const ok = await s.waitForOutput(
-    /^WLSHMBOOT: script done\r?$|Kernel panic|Aiee, killing interrupt handler/m,
+    /^WLSHMBOOT: script done\r?$|^WLSHM: held\r?$|Kernel panic|Aiee, killing interrupt handler/m,
     120000,
   );
   transcript = s.snapshot();
@@ -302,10 +335,28 @@ try {
     console.log(transcript.slice(-2000));
     process.exit(2);
   }
-  if (!ok || !/^WLSHMBOOT: script done\r?$/m.test(transcript)) {
-    console.log("[wl-shm-mmu-smoke] INCONCLUSIVE — shell never reached its witness line");
+  const held = /^WLSHM: held\r?$/m.test(transcript);
+  const scriptDone = /^WLSHMBOOT: script done\r?$/m.test(transcript);
+  if (!ok || (!held && !scriptDone)) {
+    console.log("[wl-shm-mmu-smoke] INCONCLUSIVE — shell never reached either witness line");
     console.log(transcript.slice(-2000));
     process.exit(2);
+  }
+  if (held) {
+    // The race this smoke exists to close (see the HELD-OPEN RACE note
+    // above): wl-shm-test's second SEND already returned by the time its
+    // OWN process printed "held" (single-threaded guest: ioctl return,
+    // THEN printf), and that SEND's postMessage — sent on the SAME
+    // worker→main channel, strictly earlier in program order — is
+    // therefore already enqueued ahead of the console byte we just
+    // observed. A short, BOUNDED settle delay here is cheap defense-in-
+    // depth against any remaining scheduling slack (e.g. a real
+    // compositor bridge wrapping sendOut in a Promise chain) — it does
+    // NOT replace the fds-still-open hold itself, which is what actually
+    // keeps the bytes correct; this is only about giving the already-
+    // enqueued message a moment to be drained before we read `sends`.
+    await sleep(500);
+    transcript = s.snapshot();
   }
 
   for (const line of transcript.split("\n")) {
@@ -313,9 +364,18 @@ try {
   }
 
   // --- guest-side child exit status ----------------------------------------
+  // On the HELD path wl-shm-test never returns to the shell, so
+  // WLSHMTEST_RC is NEVER printed — that is expected, not a missing-data
+  // failure, and must not be treated as one below.
   const rcMatch = transcript.match(/^WLSHMTEST_RC=(\S+?)\r?$/m);
   const testRc = rcMatch ? rcMatch[1] : undefined;
-  console.log(`GUEST_RC: wl-shm-test exited ${testRc ?? "<missing>"} (0 = clean exit)`);
+  if (held) {
+    console.log(
+      "GUEST_RC: n/a — wl-shm-test is HELD open (parked with its fds still open, per the HELD-OPEN RACE note); it never returns to the shell on this path",
+    );
+  } else {
+    console.log(`GUEST_RC: wl-shm-test exited ${testRc ?? "<missing>"} (0 = clean exit)`);
+  }
 
   // --- item 2: guest-observed distinct inode --------------------------------
   const inodeLine = transcript.match(/^WLSHM: ino0=\S+ ino1=\S+ distinct_inode=(\d)\r?$/m);
@@ -420,7 +480,7 @@ try {
       item3 ? 1 : 0
     } content=${content ? 1 : 0} known_sigbus_signature=${
       matchesKnownSigbusSignature ? 1 : 0
-    } guest_rc=${testRc ?? "?"}`,
+    } held=${held ? 1 : 0} guest_rc=${testRc ?? "?"}`,
   );
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + transcript.slice(-4000));
