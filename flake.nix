@@ -600,6 +600,54 @@
       # closure; also in extraBins for the /bin shortcut.
       wasmDltest = import ./userspace/dltest.nix { inherit cross; };
 
+      # ---- the app/X11 package set: SHARED between BOTH guest profiles ------
+      # (NOMMU `wasmSystem`, fork `wasmSystemFork`), one let-binding, 2026-08-13.
+      # History: commit 2327bc8 (2026-08-05) added this set to `wasmSystem`'s
+      # extraSystemPackages but left `wasmSystemFork`'s at just `[ wasmDltest ]`
+      # — the SECOND fork/NOMMU package-list drift in this repo (the first was
+      # the wasmAsh `toolchain` entry, fixed earlier in this same change; see
+      # wasmSystemFork below). Consequence, diagnosed + reproduced in the
+      # harness: the fork guest's `xwaylandLine` inittab respawn entry
+      # (userspace/init.nix) runs `sommelier -X` on every /dev/wl0-present
+      # cycle; Sommelier's compiled-in Xwayland store path
+      # (`-Dxwayland_path=${xwayland}/bin/Xwayland`, userspace/sommelier.nix)
+      # only resolves on the guest if something in environment.systemPackages'
+      # closure references it (Xwayland ships via systemPackages, never
+      # initramfs — see xwaylandApp's comment below), and on the fork guest
+      # nothing did — so every respawn hit posix_spawn ENOENT, Sommelier's own
+      # `sl_spawn_xwayland` assert(false)'d, SIGABRT, and the wrapping hush
+      # printed "Aborted" to the console forever (init respawns after 5s).
+      # None of these packages are process-model-specific (no fork/vfork/
+      # exec use of their own — they're passive Xvfb/X11-client/GTK2-test
+      # binaries built by the same crossSystem regardless of profile), so
+      # unifying is correct and not merely convenient; no member is
+      # deliberately profile-only.
+      #   M-X1 (XChat/X11 epic): xorg-server (Xvfb) + its x11-probe client
+      #   proof. systemPackages, not initramfs extraBins — Xvfb's mesonFlags
+      #   bake in absolute store paths for xkbcomp (spawned at runtime to
+      #   compile the XKB keymap) and xkeyboard-config's XKB data tree; those
+      #   derivations only enter the served squashfs closure if something in
+      #   environment.systemPackages' closure references them, exactly like
+      #   galculator/l3afpad's baked share-dir paths above.
+      #   M-X2: the first real X clients — xeyes/xwd/xdpyinfo — same
+      #   systemPackages-not-extraBins reasoning (they're PATH-looked-up by
+      #   x11-apps-smoke.mjs from /run/current-system/sw/bin).
+      #   M-X3: Xwayland — systemPackages so its store path (and xkbcomp/
+      #   xkeyboard-config/etc closure) actually rides the served squashfs;
+      #   see xwaylandApp's comment below and userspace/sommelier.nix's
+      #   `-Dxwayland_path=` mesonFlag, which bakes the exact matching path
+      #   into Sommelier's own binary.
+      #   M-X4: gtk2Hello moved OFF initramfsExtraBins to here. The initramfs
+      #   is UNEVICTABLE tmpfs, so a big statically-linked GTK2 binary sitting
+      #   in it permanently costs guest RAM -- the gcalctool tmpfs lesson. It
+      #   pushed unevictable to ~270 MB, and the in-guest `nix` substitution
+      #   of the 57 MB guest-clang then died on a page-allocation failure
+      #   ("4352896 from process 137 (nix) failed"), which nix surfaces as
+      #   the misleading "no substituter that can build it" -- see nix system
+      #   smoke (core). Every gtk2 smoke boots nix:true, so the squashfs copy
+      #   is on PATH and is evictable.
+      sharedAppPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2Hello ];
+
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
@@ -608,31 +656,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        # M-X1 (XChat/X11 epic): xorg-server (Xvfb) + its x11-probe client
-        # proof. systemPackages, not initramfs extraBins — Xvfb's mesonFlags
-        # bake in absolute store paths for xkbcomp (spawned at runtime to
-        # compile the XKB keymap) and xkeyboard-config's XKB data tree; those
-        # derivations only enter the served squashfs closure if something in
-        # environment.systemPackages' closure references them, exactly like
-        # galculator/l3afpad's baked share-dir paths above.
-        # M-X2: the first real X clients — xeyes/xwd/xdpyinfo — same
-        # systemPackages-not-extraBins reasoning (they're PATH-looked-up by
-        # x11-apps-smoke.mjs from /run/current-system/sw/bin).
-        # M-X3: Xwayland — systemPackages so its store path (and xkbcomp/
-        # xkeyboard-config/etc closure) actually rides the served squashfs;
-        # see xwaylandApp's comment above and userspace/sommelier.nix's
-        # `-Dxwayland_path=` mesonFlag, which bakes the exact matching path
-        # into Sommelier's own binary.
-        # M-X4: gtk2Hello moved OFF initramfsExtraBins to here. The initramfs is
-        # UNEVICTABLE tmpfs, so a big statically-linked GTK2 binary sitting in it
-        # permanently costs guest RAM -- the gcalctool tmpfs lesson. It pushed
-        # unevictable to ~270 MB, and the in-guest `nix` substitution of the
-        # 57 MB guest-clang then died on a page-allocation failure ("4352896
-        # from process 137 (nix) failed"), which nix surfaces as the misleading
-        # "no substituter that can build it" -- see nix system smoke (core).
-        # Every gtk2 smoke boots nix:true, so the squashfs copy is on PATH and
-        # is evictable.
-        extraSystemPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2Hello ];
+        extraSystemPackages = sharedAppPackages;
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -790,7 +814,12 @@
         # audit.md's slice-1 REVERT list.
         toolchain = [ nixWasmForkClean ];
         nixPackage = nixWasmForkClean;
-        extraSystemPackages = [ wasmDltest ];
+        # Shared app/X11 package set (sharedAppPackages, defined above) — was
+        # `[ wasmDltest ]` alone, the drift that caused the fork guest's
+        # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
+        # sharedAppPackages' comment above for the full diagnosis). Fixed
+        # 2026-08-13.
+        extraSystemPackages = sharedAppPackages;
       };
       wasmPasswdFork = import ./userspace/passwd.nix {
         lib = cross.lib;
