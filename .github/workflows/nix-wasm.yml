@@ -315,8 +315,12 @@ jobs:
     # panic-retries, mmu ~90 min across its 6 fork/grandfork/deepfork smokes,
     # mmu-devices' own step keeps its 150-min step-level timeout) plus setup
     # overhead — see that step's own comment for why it keeps a step-level bound
-    # even inside a bigger job.
-    timeout-minutes: 400
+    # even inside a bigger job. Capped at 355 (not the ~320 raw sum) to match
+    # this file's existing `toolchain` job precedent of staying under GitHub
+    # Actions' 360-min job timeout ceiling — 400 here was a bug (#205 review):
+    # a job `timeout-minutes` above 360 makes the value meaningless/invalid
+    # rather than actually extending the job's real runtime budget.
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
