@@ -1,0 +1,16 @@
+--- a/sommelier.cc
++++ b/sommelier.cc
+@@ -4220,6 +4220,13 @@
+   args[i++] = "-nolisten";
+   args[i++] = "tcp";
+   args[i++] = "-rootless";
++  // Standing X server (patch 0004): Xwayland 24.1 defaults to `-terminate`
++  // (exit ~1s after the last X client disconnects). Ctrl-C of a foreground
++  // xeyes then races a reconnect into a dying server ("X connection to :1
++  // broken") and the next attempt is "Can't open display: :1" until inittab
++  // respawns sommelier (~5s) — which is why a *new* terminal tab works.
++  // `-noreset` keeps DISPLAY=:1 up; do not pass `-terminate`.
++  args[i++] = "-noreset";
+   // Use software rendering unless we have a DRM device and glamor is
+   // enabled.
+   if (!ctx->drm_device || !glamor || !strcmp(glamor, "0")) {

@@ -76,6 +76,10 @@ let
   # answer (the first attempt passed a bogus `x11-unused`, whose failed exec
   # asserted and killed X: `Assertion failed: …display_ready_event`, leaving
   # only `sommelier --parent` in the guest's `ps`).
+  # 0005 passes `-noreset` to the Xwayland sommelier spawns. Without it,
+  # Xwayland 24.1's default `-terminate` exits ~1s after the last X client
+  # disconnects, sommelier hangup-exits on the WM fd, and this line's
+  # trailing `sleep 5` is the "open a new tab and it works again" delay.
   xwaylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier -X --x-display=1 >>/var/log/sommelier-x.log 2>&1; sleep 5'";
   # ninepd: the read-only 9P rootfs server behind pc's /Linux mount (pc#472).
   # Dials OUT to the host on vsock 1025 and serves the LIVE guest filesystem —

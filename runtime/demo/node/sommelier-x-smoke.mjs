@@ -15,6 +15,7 @@
 //       daemon, running from the exact cross-built store path
 //       (deps-overlay.nix's "Xwayland" section) — i.e. Sommelier's
 //       posix_spawn of Xwayland (patches/sommelier/0001, sl_spawn_xwayland)
+//       with `-noreset` (patch 0005 — Xwayland 24.1 defaults to `-terminate`).
 //       genuinely succeeds on this guest.
 //   DOES NOT pass headlessly (confirmed, not just "untried"):
 //     - `DISPLAY=:1 xdpyinfo` HANGS indefinitely — it never returns, not

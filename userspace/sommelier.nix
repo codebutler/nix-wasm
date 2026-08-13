@@ -98,6 +98,14 @@ cross.stdenv.mkDerivation {
     # server-only a first-class mode is the honest fix, and it is generic:
     # nothing here knows or cares which X app connects.
     ../patches/sommelier/0004-xwayland-server-only-mode.patch
+    # 0005: pass `-noreset` when spawning Xwayland. 0004 made sommelier's
+    # process model a standing server (no session-leader client holding the
+    # display), but Xwayland 24.1 still defaults to `-terminate` — exit ~1s
+    # after the last X client disconnects. Ctrl-C of xeyes then kills
+    # DISPLAY=:1; sommelier's X WM connection hangup-exits; inittab's
+    # `sleep 5` + respawn is why a *new* terminal tab "fixes" it. `-noreset`
+    # is what a standing :1 actually needs; do not pass `-terminate`.
+    ../patches/sommelier/0005-xwayland-noreset.patch
   ];
 
   nativeBuildInputs = [
