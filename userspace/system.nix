@@ -237,17 +237,20 @@ let
         environment.variables.XCURSOR_PATH = "/run/current-system/sw/share/icons";
         environment.variables.XCURSOR_THEME = "Adwaita";
         environment.variables.XCURSOR_SIZE = "24";
-        # DISPLAY so an X11 app "just runs" at the prompt — the whole point of
-        # the standing X server (sommelier -X + Xwayland on :1, autostarted from
-        # init.nix's xwaylandLine). Without it a bare `xeyes` fails with the
-        # empty-DISPLAY error "Can't open display:" (seen in the live deployment)
-        # — the server is up, but the login shell never learned where it is. Set
-        # here (→ /etc/set-environment → /etc/profile, same path as XCURSOR_*/
-        # FONTCONFIG_FILE) so every interactive shell exports it. Matches the
-        # `--x-display=1` in xwaylandLine. A client that starts before Xwayland
-        # has finished coming up just gets "Can't open display: :1" and can retry
-        # — the standard X startup-race behaviour, not a misconfiguration.
+        # DISPLAY so an X11 app "just runs" at the prompt — the standing X server
+        # is sommelier -X + Xwayland on :1 (init.nix xwaylandLine). Without this
+        # a bare `xeyes`/`xchat` fails "Can't open display:" even though the
+        # server is up. GDK_USE_XSHM=0 / QT_X11_NO_MITSHM=1: the kernel has no
+        # SysV IPC, so MIT-SHM's shmget is ENOSYS and GDK treats that as a fatal
+        # X IO error (11) rather than falling back to PutImage. These MUST live
+        # here (→ /etc/set-environment → /etc/profile) AND as explicit exports
+        # in environment.etc."profile".text below. FORBIDDEN: the host typing
+        # `export DISPLAY=…` into an hvc to paper over a missing image line
+        # (pc `.claude/rules/linux.md`). A stale published ISO is a
+        # publish-linux-channel republish, not a keystroke.
         environment.variables.DISPLAY = ":1";
+        environment.variables.GDK_USE_XSHM = "0";
+        environment.variables.QT_X11_NO_MITSHM = "1";
 
         # TLS trust anchors for everything openssl-linked. security/ca.nix (in
         # the module list above) installs the bundle at the canonical
@@ -282,6 +285,9 @@ let
           export PATH=/root/.nix-profile/bin:/run/current-system/sw/bin:/bin:/sbin
           export WAYLAND_DISPLAY=wayland-0
           export XDG_RUNTIME_DIR=/tmp
+          export DISPLAY=:1
+          export GDK_USE_XSHM=0
+          export QT_X11_NO_MITSHM=1
           [ -r /etc/set-environment ] && . /etc/set-environment
           PS1='\[\033[1;32m\]\u@\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
         '';

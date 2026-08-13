@@ -154,6 +154,19 @@ pkgs.stdenv.mkDerivation {
     # (populate-everything, unchecked) build carries the export but a fork
     # there would write through shared pages — fork is exercised under a2.
     ./patches/kernel/0026-wasm-mmu-fork.patch
+    # #192: a refcounted per-inode cache of the exec image buffer
+    # (arch/wasm/mm/exec_image.c). Without it, every single exec of the SAME
+    # on-disk binary (an autoconf `configure` loop re-invoking the ~57 MB
+    # clang.wasm dozens of times) alloc_pages_exact()s + kernel_read()s a
+    # FRESH buffer, and the churn fragments this arch's buddy heap until an
+    # alloc fails outright — an Nth-exec cliff. Applied after 0026 (fork
+    # needs its own explicit arch_dup_mmap() ref-copy of the cached image,
+    # which this patch also adds — see the patch header for the latent
+    # fork use-after-free it closes). Kernel-internal only: bin_start/
+    # bin_end (now image->buf/image->buf_size) stays a single contiguous
+    # kernel byte range from the engine's point of view — no ENGINE_ABI
+    # change, no runtime/ edit, no sync-to-pc.sh.
+    ./patches/kernel/0030-wasm-mmu-exec-image-cache.patch
   ] ++ pkgs.lib.optionals a2 [
     # #128 A2: drop the A1 full-populate so the checked translate demand-pages.
     ./patches/kernel/0024-wasm-mmu-a2-demand-paging.patch
@@ -331,6 +344,88 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
     grep -q 'extern int wasm_load_executable' arch/wasm/include/asm/wasm.h || {
       echo "ERROR: #179 exec-reject wiring missing (return type)" >&2; exit 1; }
     echo "#179 exec-reject wiring OK (wasm_load_executable returns a status; start_thread kills on reject)"
+  '' + pkgs.lib.optionalString mmu ''
+    # ---- #192 hardening: the exec-image cache must actually be wired in ----
+    #
+    # Patch 0030 rewrites the SAME fs/binfmt_wasm.c region 0023/0024 own (the
+    # CONFIG_MMU exec-image alloc/attach block, and — for 0024 — the exact
+    # lines it deletes), which is precisely the silent-fuzzy-apply hazard the
+    # 0017-0020 entry above documents: `patch` can mis-apply a stacked hunk
+    # here with NO reject and NO error, leaving a kernel that still compiles
+    # but silently reverted to one-buffer-per-exec (the #192 regression this
+    # patch exists to fix) or, worse, a half-applied mix of old/new field
+    # names. Assert the post-patch source unconditionally, in patchPhase,
+    # rather than discovering it only via the exec-churn boot smoke.
+    echo "== #192 exec-image cache wiring (post-patch) =="
+
+    # 1) The cache lookup/attach must be present in fs/binfmt_wasm.c's
+    #    CONFIG_MMU exec path (a fuzzy 0030 apply could drop the insertion
+    #    entirely while leaving the surrounding ifdef intact).
+    grep -q 'wasm_exec_image_get(' fs/binfmt_wasm.c || {
+      echo "ERROR: fs/binfmt_wasm.c is missing the wasm_exec_image_get() lookup" \
+           "— patch 0030 applied with fuzz and dropped the cache lookup." >&2
+      exit 1; }
+    grep -q 'current->mm->context.image = image;' fs/binfmt_wasm.c || {
+      echo "ERROR: fs/binfmt_wasm.c is missing the mm->context.image attach" \
+           "— patch 0030 applied with fuzz and dropped the cache attach." >&2
+      exit 1; }
+
+    # 1b) ORDER matters, not just presence (P1-1/#192 review): the lookup MUST
+    #     precede begin_new_exec() — that's what turns a load failure into a
+    #     clean execve() == -error instead of the post-point-of-no-return task
+    #     kill every other failure past that call needs. A fuzzy apply could
+    #     leave both snippets present but reordered (e.g. stacked backwards),
+    #     which the presence-only checks above would NOT catch. The first
+    #     `ret = begin_new_exec(bprm);` in the file is textually inside the
+    #     CONFIG_MMU block (the #else branch's copy comes later in the file),
+    #     so comparing line numbers against the FIRST occurrence is sufficient.
+    img_get_line=$(grep -n 'wasm_exec_image_get(' fs/binfmt_wasm.c | head -1 | cut -d: -f1)
+    begin_exec_line=$(grep -n 'ret = begin_new_exec(bprm);' fs/binfmt_wasm.c | head -1 | cut -d: -f1)
+    if [ -z "$img_get_line" ] || [ -z "$begin_exec_line" ] || [ "$img_get_line" -ge "$begin_exec_line" ]; then
+      echo "ERROR: fs/binfmt_wasm.c does not call wasm_exec_image_get() BEFORE" \
+           "begin_new_exec() — patch 0030 applied with fuzz and reordered the" \
+           "cache lookup past bprm's point of no return (img_get_line=$img_get_line," \
+           "begin_exec_line=$begin_exec_line)." >&2
+      exit 1
+    fi
+
+    # 2) No bare alloc_pages_exact() may remain in binfmt_wasm.c: the ONLY
+    #    allocator of exec-image buffers is now arch/wasm/mm/exec_image.c's
+    #    cache (a per-exec alloc_pages_exact() back in binfmt_wasm.c is
+    #    exactly the one-buffer-per-exec regression #192 exists to remove,
+    #    and a fuzzy revert could reintroduce it silently).
+    if grep -q 'alloc_pages_exact' fs/binfmt_wasm.c; then
+      echo "ERROR: fs/binfmt_wasm.c still calls alloc_pages_exact() directly" \
+           "— the exec-image cache (arch/wasm/mm/exec_image.c) must be the" \
+           "ONLY allocator; patch 0030 did not fully replace the old block." >&2
+      exit 1
+    fi
+
+    # 3) The fork use-after-free fix: arch_dup_mmap() must take an explicit
+    #    reference on the child's copy of the cached image (mmu_context.h).
+    grep -q 'arch_dup_mmap arch_dup_mmap' arch/wasm/include/asm/mmu_context.h || {
+      echo "ERROR: arch/wasm/include/asm/mmu_context.h is missing the explicit" \
+           "arch_dup_mmap() override — patch 0030 applied with fuzz; a forked" \
+           "child would silently go back to the #192 fork use-after-free." >&2
+      exit 1; }
+    grep -q 'wasm_exec_image_ref(oldmm->context.image)' arch/wasm/include/asm/mmu_context.h || {
+      echo "ERROR: arch_dup_mmap() is not taking a reference on the parent's" \
+           "cached exec image — patch 0030 applied with fuzz." >&2
+      exit 1; }
+
+    # 4) The shrinker must be registered — best-effort BACKGROUND reclaim only
+    #    (the synchronous evict-and-retry on an alloc failure, and the
+    #    insert-time byte cap, are what actually bound this cache; see the
+    #    file-level design comment in arch/wasm/mm/exec_image.c). Still a real
+    #    regression if a fuzzy apply drops it.
+    grep -q 'shrinker_register' arch/wasm/mm/exec_image.c || {
+      echo "ERROR: arch/wasm/mm/exec_image.c is missing shrinker_register()" \
+           "— patch 0030 applied with fuzz and dropped the reclaim path." >&2
+      exit 1; }
+
+    echo "#192 exec-image cache wiring OK (lookup precedes begin_new_exec," \
+         "no bare alloc_pages_exact in binfmt_wasm.c, arch_dup_mmap ref-copy" \
+         "present, shrinker registered)"
   '';
 
   nativeBuildInputs = [

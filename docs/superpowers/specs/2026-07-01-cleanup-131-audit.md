@@ -20,9 +20,9 @@ Parent: `2026-07-01-software-mmu-asyncify-design.md` (#126), issue #131.
 
 | Slice | Gate | Track status | Can execute here? |
 |---|---|---|---|
-| 1 — fork/spawn | Track B real `fork()` (#129) | mechanism recovered + engine tested; muslFork re-integration + COW pending (world build) | No — needs muslFork + boot |
+| 1 — fork/spawn | Track B real `fork()` (#129) | **mechanism DONE + BOOT-VERIFIED** (musl/kernel/engine fork+COW; `fork-smoke` passes; the fork guest's `/bin/sh` (hush) is autoconf-capable, host-proven + hard-gated, and the in-guest autotools acceptance gate is now green too — see the 2026-08-13 updates below). Slice-1 *retirement*: the `wasmAsh`-from-fork-profile REVERT is DONE (2026-08-13); the rest (musl fork/vfork restoration, the forkshell-ash accommodation, the busybox fork-patch reverts, the per-package triage, the link-contract relax) has **not started**. | Yes for the first REVERT (executed); the remaining slice-1 REVERTs are each their own world-rebuild-scale edit, now unblocked (the in-guest autotools gate that used to precondition them is green) but not yet executed |
 | 2 — dlopen | Track C GModule (#130) | **LANDED + BOOT-VERIFIED** (loader + musl 0009 + dynsym seam + libffi codegen; `dlopen-smoke` passes in a booted guest, galculator carries `cb.dynsym`) | Yes — being executed |
-| 3 — NOMMU memory | Track A real MMU (#128) | pass done+measured; kernel arch layer pending (world/kernel build) | No — needs CONFIG_MMU=y boot |
+| 3 — NOMMU memory | Track A real MMU (#128) | **mechanism DONE + BOOT-VERIFIED** (both A1 — `.#kernel-mmu`, `mmu-smoke.mjs` — and A2 demand-paging/COW — `.#kernel-mmu-a2`, `mmu-smoke-a2.mjs` — boot and are hard-gated in CI). Slice-3 *retirement* itself (the accommodations below) has **not started**, and each item there still needs its own CONFIG_MMU=y boot to verify per-item, not just the mechanism. | Partially — the CONFIG_MMU=y boot the row used to require now exists and is gated; executing the slice-3 retirement items still needs the box |
 
 ## Slice 2 — dlopen accommodations (gated on #130, LANDED)
 
@@ -88,17 +88,107 @@ Each is a REVERT of a fork-removal accommodation, safe only once a real package
 forks through the seam (`toolchain/wasm-fork-stdenv.nix`) AND COW (Track A2)
 makes it cheap. Specified for the box:
 
+**Status update (2026-08-13):** the fork *mechanism* (musl's `fork = true`
+variant, the kernel's software-MMU COW, the engine's `capture_stack`/
+`run_user_entry` fork loop) is DONE and boot-verified (`fork-smoke.mjs`,
+gated — see `docs/process-model.md`'s 2026-08-13 update and the "Track B"
+entry in `CLAUDE.md`). Two more pieces of groundwork have also landed since
+this audit was written, both narrowly scoped and **not** a start on the
+checklist below: (1) the fork guest's `/bin/sh` — **stock busybox hush**, not
+stock ash (ash was tried and found blocked by an orthogonal `longjmp` bug,
+nix-wasm#188, so the plan below's "stock ash with real fork" item is
+superseded — hush is the shell autoconf is validated against on this guest)
+— is now autoconf-capable: three independent, previously-unfixed-upstream
+hush bugs are fixed (`patches/busybox/0009`–`0011`) and HARD-GATED on the
+host, hermetically, by `.#autotools-fixture-hush-check` (including a
+sabotaged-compiler negative case). (2) `userspace/busybox-fork.nix`'s
+post-link build now runs `scripts/wasm-check-imports.py` against the shared
+generated allow-list, the same import-contract discipline the NOMMU build
+already had, so a stray `env.*` import in the fork initramfs fails the build
+loudly instead of shipping silently. **Neither of these is a slice-1
+checklist item** — they make the fork guest's shell layer trustworthy, they
+do not revert any `posix_spawn`-only accommodation.
+
+**UPDATE (2026-08-13, same day, later commit): the IN-GUEST autotools proof
+gate that used to hold every REVERT box below UNCHECKED is now GREEN.**
+Issue #192 (the kernel exec-image-buffer fragmentation bug that killed
+`configure`'s conftest compiles around the 6th large exec) is fixed
+(PR #199, `patches/kernel/0030`); `autotools-fork-smoke.mjs` recorded its
+first green CFGRC (workflow run 31697211801) and is now a `run_smoke` hard
+gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu` `core` shard — see CLAUDE.md
+and `docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s
+"Real-fork autotools proof" item. This unblocks slice-1 REVERTs whose
+correctness that gate was standing in for. The FIRST one has been executed
+in this same change — see the `wasmAsh`-from-fork-profile box above, now
+checked. The remaining REVERT boxes below (musl fork/vfork restoration,
+the forkshell-ash accommodation itself, the busybox fork-patch reverts, the
+per-package fork triage, the link-contract relax) are each their own
+world-rebuild-scale edit and are each still UNSTARTED — this gate going
+green does not itself execute them, it only removes the precondition that
+was blocking their execution. Per this audit's own DoD ("each box checked
+OR explicitly decided 'keep, because <reason>'"), a **KEEP-with-reason**
+disposition is a valid closure on its own terms independent of this gate:
+two items originally on this list were adjudicated KEEP on 2026-08-13
+(codebutler/nix-wasm#131 comment
+[5278756088](https://github.com/codebutler/nix-wasm/issues/131#issuecomment-5278756088))
+and moved to "Explicitly KEPT" below instead of staying REVERT checkboxes
+here.
+
 - [ ] `toolchain/musl.nix` — restore `fork`/`vfork` (drop the symbol-removal
   postPatch). **Couples to** re-integrating PR #20's `muslFork` seam patch
   against master's current musl patch series (0007/0008 differ) — a `--fuzz=0`
-  merge on the box.
-- [ ] `userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*` — retire
-  forkshell ash; stock ash with real fork.
+  merge on the box. (NOTE: `.#musl-fork` already exists and builds today as
+  the CI-gated MMU variant's musl — this item is about promoting it to the
+  flake's *default* `musl` attr, not building it for the first time.)
+- [x] **`flake.nix` `wasmSystemFork` — drop `wasmAsh` from the fork profile's
+  `toolchain` list. DONE (2026-08-13).** The narrow, closure-weight-only
+  sub-piece of the box below: `wasmSystemFork`'s `toolchain` was
+  `[ nixWasmForkClean wasmAsh ]` even though hush, not ash, is `/bin/sh` on
+  the fork guest — `bootstrap.nix`'s forkshell-ash `/bin/sh` promotion is
+  unconditionally skipped in forkMode
+  (`pkgs.lib.optionalString (!forkMode) ...`), and nothing in the fork boot
+  path (`userspace/busybox-fork.nix`'s stock hush applet, `initramfsExtraBins`,
+  the fork bootstrap script) references `ash`/`wasmAsh` — it rode along in
+  `environment.systemPackages` as pure unused closure weight. Changed to
+  `toolchain = [ nixWasmForkClean ]`. **Citation precision:** workflow run
+  31697211801 (`nix-boot-smoke-mmu` `core`) predates this edit (it ran on
+  49a2e95, before `wasmAsh` was dropped) — it proves hush is `/bin/sh` on
+  this profile and that `ash` is unreferenced by anything in the fork boot
+  path, which is the evidence this REVERT relies on; it does NOT itself
+  boot-verify the ash-less squashfs. Boot verification of the post-removal
+  squashfs is this change's OWN `nix-boot-smoke-mmu` run (the PR's CI) —
+  and that run is doing double duty: this same change ALSO promotes the
+  autotools acceptance smoke from a soak to a `run_smoke` hard gate (see
+  the parity-plan doc's "Real-fork autotools proof" item) on the very
+  artifact this REVERT changes, so the PR's CI run is deliberately the
+  proving run for both at once. Verified fork-profile-only: `wasmSystem` (NOMMU,
+  `flake.nix` line ~609) and the `guest-ash` flake output (line ~923, a
+  standalone `nix build .#guest-ash` package attr, not wired into any system)
+  are BOTH untouched — forkshell ash remains the NOMMU guest's `/bin/sh`.
+  `nix path-info --derivation` confirms `.#wasm-initramfs`/
+  `.#wasm-base-squashfs` (NOMMU) are unaffected by this edit while
+  `.#wasm-initramfs-fork`/`.#wasm-base-squashfs-fork` change (the closure
+  shrinks by the ash package + its unique deps). This is a REVERT of the
+  narrowest possible slice of the item below — it does not touch
+  `userspace/ash.nix`/`ash-cb-guest.c`/`patches/busybox/ash/*` themselves,
+  which remain load-bearing for NOMMU and are unstarted work, tracked
+  separately in the next box.
+- [ ] `userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*` — drop
+  the forkshell-ash accommodation ENTIRELY (i.e. retire it as a NOMMU
+  accommodation too, once #131 slice 1 flips the default guest off NOMMU).
+  **Superseded direction (see status update above):** stock ash is blocked by
+  nix-wasm#188 (musl `longjmp` is an `abort()` stub, unrelated to fork), so
+  the guest's post-retirement `/bin/sh` is stock hush (already promoted on
+  the `-fork` variant today), not stock ash as this item originally
+  specified. The narrow `wasmAsh`-from-fork-profile sub-piece this item used
+  to also describe is DONE — see the box immediately above; this box is now
+  scoped to the NOMMU-only forkshell-ash accommodation itself, unstarted.
 - [ ] `patches/busybox/0001,0003–0007`, fork part of `0008` — revert to stock
   busybox fork.
-- [ ] `patches/glib/0001` + `deps-overlay.nix` glib — drop the forced
-  `posix_spawn` path + `child_setup` rejection; stock `g_spawn`.
-- [ ] `patches/pkg-config/0001` — drop.
+- [x] `patches/glib/0001` + `deps-overlay.nix` glib — **KEEP** (moved to
+  "Explicitly KEPT" below; see the 2026-08-13 disposition).
+- [x] `patches/pkg-config/0001` — **KEEP** (moved to "Explicitly KEPT" below;
+  see the 2026-08-13 disposition).
 - [ ] `deps-overlay.nix` per-package fork triage — re-enable openssl CLI, pcre2
   callout-fork, ncurses test-demos, busybox IFUP/IFDOWN/TELNETD.
 - [ ] `toolchain/wasm-host-imports.nix` + `.#nofork-linkcheck` — relax the
@@ -136,6 +226,26 @@ Per #131's own list, unchanged by this epic:
   `-fvisibility=hidden`, the libffi raw backend's STATIC fast path (the runtime
   codegen is a FALLBACK, not a replacement), etc. — general wasm-target link
   plumbing.
+
+**Slice-1 items adjudicated KEEP, not REVERT (2026-08-13, codebutler/nix-wasm#131
+comment [5278756088](https://github.com/codebutler/nix-wasm/issues/131#issuecomment-5278756088)),
+per this audit's DoD — "each box checked OR explicitly decided 'keep, because
+<reason not one of the three walls>'":**
+- **`patches/glib/0001-posix-spawn-only-wasm-nommu.patch` + the glib override —
+  KEEP.** Dropping it on the fork guest would recompile glib's raw fork/exec
+  branch into `libglib` for EVERY GTK app, and none of those binaries is
+  asyncified — so the failure mode moves from today's clean `GError`
+  ("child_setup … not supported") to a `TypeError` out of `capture_stack`.
+  Stock glib's spawn takes the same `posix_spawn` fast path the patch forces
+  anyway, so keeping it costs no capability. Revisit only if a guest consumer
+  actually needs `child_setup`/`envp`-PATH semantics. Caveat: no CI gate
+  currently exercises `g_spawn` on either guest, so a future retirement
+  attempt would need to add that coverage first.
+- **`patches/pkg-config/0001-bundled-glib-no-fork-wasm-nommu.patch` — KEEP.**
+  pkg-config is a build-time tool whose bundled-glib fork path is dead code on
+  our builds (`deps-overlay.nix`'s `pkg-config-unwrapped` override). Zero
+  guest-visible benefit to retiring, and dropping it would force a shared
+  rebuild of every meson/autoconf consumer in the `cross.*` world for nothing.
 
 ## DoD
 

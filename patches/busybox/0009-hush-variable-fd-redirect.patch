@@ -1,0 +1,273 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] hush: support variable fd duplication redirects (>&$fd)
+
+Applies on top of pristine busybox-1.36.1 (independent of 0001/0003/0006 —
+none of those touch shell/hush.c's redirect-parsing code, see the scope note
+at the end of this header).
+
+PROBLEM: every autoconf-generated `configure` script fails under hush at
+PARSE time. autoconf 2.7x's `as_fn_error()` helper does:
+
+    as_fn_error () {
+      ...
+      printf '%s\n' "$as_me:${as_lineno-$LINENO}: error: $2" >&$4
+      ...
+    }
+
+`>&$4` is a *variable* fd duplication — the target of the dup isn't a
+literal digit or "-", it's a word ($4, the function's positional arg) that
+must be expanded first. hush's `parse_redir_right_fd()` (shell/hush.c) only
+understands `&N` / `&-` at PARSE time, by literally peeking/getching
+characters straight off the input stream — anything else, including the
+first character of a variable reference like `$4`, is rejected on the spot
+with "ambiguous redirect" (REDIRFD_SYNTAX_ERR), which aborts parsing the
+whole script ("hush: syntax error at 'fi'" as the parser then desyncs).
+
+POSIX requires the word following a redirection operator to undergo the
+same expansions as any other word (parameter expansion, command
+substitution, ...); bash, dash, and ash all accept `>&$fd`. hush's
+rejection is a real non-conformance, not a deliberate restriction, and it
+means NO real autoconf `configure` script can run under hush as-is.
+
+UPSTREAM: as of this writing, busybox git (mirror/busybox @ master,
+shell/hush.c `parse_redir_right_fd()`) has the exact same parse-time
+rejection with no fix and no open patch for this. This is an ORIGINAL fix,
+not a backport.
+
+FIX: `parse_redir_right_fd()` cannot itself expand a word — it only sees
+one PEEKed character at a time, not a fully-scanned/expanded word. So when
+the character after '&' is not EOF, not whitespace, and not a digit/'-',
+defer: return a new sentinel `REDIRFD_TO_FD_VAR` instead of erroring.
+Nothing has been consumed from the input at that point (the character is
+still un-getch'd), so `parse_redirect()` and the ordinary word-scanning
+/ done_word() machinery pick it up exactly like a plain ">file" target
+word and stash it (unexpanded) into `redir->rd_filename`, with
+`redir->rd_dup` recording REDIRFD_TO_FD_VAR so `setup_redirects()` can
+tell "open filename as a file" and "resolve word as a dup fd" apart.
+
+`setup_redirects()` (run at actual redirect-setup time, after the rest of
+the command line's words have all been parsed) expands that word via the
+normal `expand_string_to_string()` and resolves it exactly as bash does:
+all-digits -> dup2 semantics identical to a literal `N>&M`; "-" -> close,
+identical to a literal `N>&-`; anything else (including empty/unset) ->
+"ambiguous redirect", raised at RUN time (matching bash, which also only
+discovers this at redirect-setup time, not parse time) via `bb_error_msg`
++ "return 1" — the SAME shape as this function's other runtime redirect
+failures (the "fd#%d is not open" / dup2() checks a few lines below): only
+the current command fails to run, the rest of the script continues, same
+as bash's actual behavior for a bad redirect target (verified both
+interactively and non-interactively — see the verification notes below;
+an earlier draft used `syntax_error()` here, which is wrong on both
+counts: non-interactively it kills the WHOLE script instead of just the
+one command, and interactively it lets the command run anyway with the
+bad redirect silently dropped).
+
+A dangling/absent target word (e.g. "cmd >&" at EOF, "cmd >& <file" where
+the 2nd redirect starts too early, or "cmd >&<x" / "cmd >&>x" / "cmd >&#c"
+where the character right after '&' isn't a word character at all and so
+terminates an effectively-empty word) leaves `rd_filename` NULL exactly
+like the sibling REDIRFD_TO_FILE case a few lines above in the same
+function — `setup_redirects()` guards for that identically (a NULL check
+before calling `expand_string_to_string()`, which would otherwise
+dereference NULL and crash).
+
+Literal `&N` / `&-` (the ok=1 digit-loop path in parse_redir_right_fd) are
+completely untouched — same code, same return, same behavior. Out of
+scope (deliberately, to keep the diff minimal and upstreamable): bash's
+fd-move suffix (`>&$fd-`) — autoconf's generated scripts never use it.
+Also deliberately NOT touched: the pre-existing unbounded `d = d*10 + ...`
+digit accumulation in the LITERAL `&N` path above (parse_redir_right_fd) —
+that overflow (e.g. a redirect with enough digits to wrap `int`) is a
+separate, upstream-shared bug across every hush release, not introduced
+or fixed here. The NEW path this patch adds (in setup_redirects) bounds
+its own equivalent accumulation instead of copying that flaw forward.
+
+NOMMU note: this patch does not touch nommu_addchr()/`ctx->as_string`
+tracking at all — the new parse-time branch returns before consuming or
+recording any characters, so the raw-text reconstruction used for the
+NOMMU vfork-workalike re-exec is unaffected either way (BB_MMU or not).
+
+SCOPE: this patch applies with `patch -p1 --fuzz=0` cleanly both standalone
+against pristine busybox-1.36.1 AND on top of the full NOMMU hush patch
+stack (0001-wasm-arch-and-clone-spawn.patch + 0003-hush-cmdsub-clone.patch
++ 0006-hush-heredoc-clone.patch, userspace/busybox.nix's order) and the
+ash.nix hush.c state (0001-wasm-arch-and-clone-spawn.patch alone) — none of
+those patches touch the redirect-parsing functions this patch edits. Wired
+into both userspace/busybox-fork.nix (the fork/MMU guest's /bin/sh) and
+userspace/busybox.nix + userspace/ash.nix (the NOMMU builds also compile
+hush.c). All three derivations' postPatch asserts `REDIRFD_TO_FD_VAR` is
+present in the patched shell/hush.c, so a stacked patch apply that
+silently drops this hunk (the exact hazard patches/kernel's 0017-0020
+zero-fuzz lesson documents) fails the BUILD loudly instead of shipping a
+guest whose hush silently regresses to the parse-time rejection.
+
+diff -ruN a/shell/hush.c b/shell/hush.c
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -614,7 +614,9 @@
+ 	struct redir_struct *next;
+ 	char *rd_filename;          /* filename */
+ 	int rd_fd;                  /* fd to redirect */
+-	/* fd to redirect to, or -3 if rd_fd is to be closed (n>&-) */
++	/* fd to redirect to, or -3 if rd_fd is to be closed (n>&-),
++	 * or -4 (REDIRFD_TO_FD_VAR) if the dup target is an unexpanded
++	 * word (rd_filename) to be resolved at redirect-setup time */
+ 	int rd_dup;
+ 	smallint rd_type;           /* (enum redir_type) */
+ 	/* note: for heredocs, rd_filename contains heredoc delimiter,
+@@ -634,6 +636,12 @@
+ 	REDIRFD_CLOSE      = -3,
+ 	REDIRFD_SYNTAX_ERR = -2,
+ 	REDIRFD_TO_FILE    = -1,
++	/* "N>&WORD" where WORD isn't a literal fd number or "-" at parse
++	 * time (e.g. the autoconf-generated ">&$4"): rd_filename carries
++	 * the unexpanded word, and setup_redirects() resolves it to a real
++	 * fd (or REDIRFD_CLOSE, or an "ambiguous redirect" error) after
++	 * expansion, at redirect-setup time. */
++	REDIRFD_TO_FD_VAR  = -4,
+ 	/* otherwise, rd_fd is redirected to rd_dup */
+
+ 	HEREDOC_SKIPTABS = 1,
+@@ -4357,6 +4365,29 @@
+ 	}
+ 	if (ok) return d;
+
++	if (ch != EOF && !isspace(ch)) {
++		/* "N>&WORD" where WORD is not a literal fd number or "-"
++		 * (e.g. ">&$fd"). POSIX requires the word following a
++		 * redirection operator to undergo the normal expansions
++		 * (parameter expansion, command substitution, ...); we
++		 * can't resolve it here at PARSE time (ch is only PEEKed,
++		 * not a fully-expanded word yet). Defer: fall through to
++		 * the ordinary filename-word parsing path (like a plain
++		 * ">file" redirect) via REDIRFD_TO_FD_VAR, and resolve the
++		 * expanded word to a real fd (or "-", or an "ambiguous
++		 * redirect" error) at redirect-setup time, in
++		 * setup_redirects(). Nothing has been consumed from the
++		 * input yet (ch is still un-getch'd), so the normal word
++		 * scanner picks up exactly where a filename word would
++		 * start — including producing a NULL rd_filename via
++		 * done_word() if what follows isn't actually a word at all
++		 * (e.g. ">&<x", ">&>x", ">&#c", or ">&" at EOF/newline) —
++		 * setup_redirects() must and does guard for that, same as
++		 * the sibling REDIRFD_TO_FILE case.
++		 */
++		return REDIRFD_TO_FD_VAR;
++	}
++
+ //TODO: this is the place to catch ">&file" bashism (redirect both fd 1 and 2)
+
+ 	bb_simple_error_msg("ambiguous redirect");
+@@ -4418,13 +4449,20 @@
+ 				redir_table[style].descrip);
+
+ 	redir->rd_dup = dup_num;
+-	if (style != REDIRECT_HEREDOC && dup_num != REDIRFD_TO_FILE) {
++	if (style != REDIRECT_HEREDOC && dup_num != REDIRFD_TO_FILE
++	 && dup_num != REDIRFD_TO_FD_VAR
++	) {
+ 		/* Erik had a check here that the file descriptor in question
+ 		 * is legit; I postpone that to "run time"
+ 		 * A "-" representation of "close me" shows up as a -3 here */
+ 		debug_printf_parse("duplicating redirect '%d>&%d'\n",
+ 				redir->rd_fd, redir->rd_dup);
+ 	} else {
++		/* dup_num == REDIRFD_TO_FD_VAR: like REDIRFD_TO_FILE, the
++		 * next parsed word is the redirect's target word (done_word()
++		 * stashes it into rd_filename); setup_redirects() tells the
++		 * two apart via rd_dup and expands+resolves the WORD case as
++		 * a duplicated fd instead of opening it as a file. */
+ #if 0		/* Instead we emit error message at run time */
+ 		if (ctx->pending_redirect) {
+ 			/* For example, "cmd > <file" */
+@@ -8092,6 +8130,90 @@
+ 				*sqp = add_squirrel_closed(*sqp, newfd);
+ 				debug_printf_redir("redir to previously closed fd %d\n", newfd);
+ 			}
++		} else if (redir->rd_dup == REDIRFD_TO_FD_VAR) {
++			/* "rd_fd>&WORD" case, WORD not a literal fd number/"-"
++			 * at parse time (e.g. ">&$fd"). Mirrors the
++			 * REDIRFD_TO_FILE case just above: done_word() leaves
++			 * rd_filename NULL for a dangling/absent target word
++			 * (e.g. "cmd >&" at EOF, "cmd >& <file" — the 2nd
++			 * redirect starts too early, or the '&' is followed by
++			 * something that isn't a word character at all, like
++			 * "cmd >&<x", "cmd >&>x", "cmd >&#c" — each of those
++			 * terminates the word instantly). Same guard, same
++			 * diagnostic class ("invalid redirect": no target word
++			 * was actually given, as opposed to "ambiguous
++			 * redirect" below, where a target word WAS given but
++			 * didn't expand to a usable fd) — expand_string_to_string(NULL)
++			 * would otherwise SIGSEGV (strchr(NULL, ...)).
++			 */
++			char *p;
++			char *s;
++			unsigned d;
++			int ok;
++
++			if (redir->rd_filename == NULL) {
++				bb_error_msg("invalid redirect");
++				return 1;
++			}
++			/* Expand WORD now (same as a filename word) and
++			 * resolve it at redirect-setup time: all-digits dups
++			 * like a literal "N>&M", "-" closes like "N>&-",
++			 * anything else (incl. empty/unset) is "ambiguous
++			 * redirect" — classified and timed like bash (bash
++			 * also only discovers a bad ">&WORD" target at
++			 * redirect-setup time, not parse time), and now also
++			 * matching bash's EFFECT: reported via bb_error_msg +
++			 * "return 1" so only the CURRENT command fails to run
++			 * (the script continues) — not syntax_error(), whose
++			 * die_if_script() aborts the whole script
++			 * non-interactively and, interactively, still lets the
++			 * command run with the bad redirect silently dropped.
++			 * This mirrors the OTHER runtime failures already in
++			 * this function (the "fd#%d is not open"/dup2() checks
++			 * a few lines below), which use the same bb_error_msg +
++			 * "return 1" shape.
++			 */
++			p = expand_string_to_string(redir->rd_filename,
++				EXP_FLAG_ESC_GLOB_CHARS, /*unbackslash:*/ 1);
++			if (LONE_DASH(p)) {
++				newfd = REDIRFD_CLOSE;
++				free(p);
++			} else {
++				ok = (p[0] != '\0');
++				d = 0;
++				for (s = p; ok && *s; s++) {
++					if (!isdigit((unsigned char)*s)) {
++						ok = 0;
++						break;
++					}
++					/* Bound the accumulation instead of
++					 * replicating the LITERAL "&N" path's
++					 * unbounded "d = d*10 + ..." loop
++					 * (parse_redir_right_fd() above) — that
++					 * loop's overflow (e.g. a >4294967295-
++					 * digit fd wrapping into a negative
++					 * sentinel value) is a separate,
++					 * pre-existing upstream bug shared by
++					 * every hush release; not introduced
++					 * or fixed by this patch, deliberately
++					 * left alone here (out of scope) — but
++					 * this NEW path has no such excuse, so
++					 * cap it. INT_MAX is an arbitrary but
++					 * real ceiling no genuine fd reaches.
++					 */
++					if (d > (unsigned)(INT_MAX - 9) / 10) {
++						ok = 0;
++						break;
++					}
++					d = d*10 + (unsigned)(*s - '0');
++				}
++				free(p);
++				if (!ok) {
++					bb_error_msg("ambiguous redirect");
++					return 1;
++				}
++				newfd = (int)d;
++			}
+ 		} else {
+ 			/* "rd_fd>&rd_dup" or "rd_fd>&-" case */
+ 			newfd = redir->rd_dup;

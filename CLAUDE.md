@@ -32,6 +32,17 @@ Hard-won corollaries (each was a real mistake; don't repeat them):
 4. **If disk runs out (ENOSPC), STOP and ask for more disk — do NOT `nix store
    gc`.** GC forces re-realizing derivations (slow recompiles).
 5. Report progress, not questions. Once the correct path is clear, execute.
+6. **Guest login-shell env and daemons belong in this image, never in the host
+   typing into a console.** `DISPLAY`, `GDK_USE_XSHM`, `QT_X11_NO_MITSHM`,
+   `WAYLAND_DISPLAY`, Sommelier — `userspace/system.nix` + `userspace/init.nix`.
+   pc `kernel-service.ts` writing `export DISPLAY=…` onto an hvc, waiting for a
+   `# ` prompt to inject keystrokes, or appending `/root/.profile` is
+   **forbidden** (pc `.claude/rules/linux.md`). A stale published ISO is a
+   `publish-linux-channel` republish, not a keystroke. If a login shell doesn't
+   have it, the image is wrong. Same for Xwayland's `-noreset`: 24.1 defaults
+   to `-terminate` (exit ~1s after the last X client), which is why Ctrl-C of
+   `xeyes` used to take `:1` down until inittab respawned. That flag is
+   `patches/sommelier/0005-xwayland-noreset.patch`, not a typed restart.
 
 ## Workflow
 
@@ -176,6 +187,21 @@ auto-redeploy on a push to `infra/preview-worker/**` on master; it runs the
 Worker unit tests (`src/index.test.js`) before `bunx wrangler deploy`. Boot
 artifacts only — the guest `nix-cache/` catalog tree stays #2's concern. Setup
 runbook: `infra/preview-worker/README.md`.
+
+**PR CI boots the MERGE REF (branch + master merged), not the branch tip —
+a parallel master commit can change what an open PR's own boot-smoke sees**
+(#193/#194). PR #194 baked `DISPLAY=:1` into `/etc/profile` (the "GDK_USE_XSHM"
+learnings entry below) and landed on master while PR #193 was still open;
+#193's next CI run built the merge of its own branch + that master commit,
+so its `gtk2-smoke` — a display-free `--selftest` gate that assumes no
+`DISPLAY` is set — inherited a real `DISPLAY` from the now-merged environment
+and hung in `gtk_init_check` waiting for a compositor that was never going to
+answer. Nothing in #193's own diff caused this. Fixed by making the smoke
+itself robust (`env -u DISPLAY` before invoking the selftest, `c80e08d`)
+rather than trying to pin CI off the merge ref — the lesson is to write
+display-free smokes so they don't *inherit* ambient guest env from whatever
+else happens to be on master at merge time, since that environment is not
+under the PR's control.
 
 Run these from the **runtime/** directory:
 
@@ -360,22 +386,79 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `bootstrap.nix`. Six forkshell/spawn/shell fixes made autoconf's preamble,
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
-history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11):
+history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11,
+UPDATED 2026-08-12, 2026-08-13):
 this milestone was a HAND-RUN session (its record was `docs/STATUS.md`, since
-deleted) — there is no autotools smoke in `runtime/demo/node/` on ANY guest, so
-nothing regression-gates it. Two things were measured on the MMU/fork guest while
-scoping that gate, both worth knowing before touching shells: (1) "hush isn't
-POSIX-enough" is a NOMMU statement, not a hush statement — the fork guest's STOCK
-hush handles every autoconf idiom cited as broken,
-including the exact `{ …; echo >&5; } >out` "ambiguous redirect" and multi-line
-`if/fi` "syntax error at fi" cases, with correct exit statuses and zero aborts;
-(2) stock busybox **ash** cannot replace forkshell ash on wasm at all — not for
+deleted). Two things were measured on the MMU/fork guest while scoping a
+regression gate for it, both worth knowing before touching shells: (1) stock
+busybox **ash** cannot replace forkshell ash on wasm at all — not for
 fork reasons but because the wasm musl's `longjmp` is an `abort()` stub
 (`patches/musl/0000-harness-wasm-arch.patch` → `src/setjmp/wasm/longjmp.S`), and
 ash unwinds through `longjmp` on its normal path, so every `$()`/subshell child
 dies SIGABRT and reports exit status 134 while still printing correct stdout
 (nix-wasm#188). So #131 slice 1 retires forkshell ash in favor of HUSH, not stock
-ash.**
+ash. (2) **"hush isn't POSIX-enough" is a NOMMU statement, not a hush
+statement — but the original #189 measurement matrix's "every autoconf idiom
+clean" claim was ITSELF too broad, corrected here.** The matrix tested every
+idiom against LITERAL fds only (`{ …; echo >&5; } >out` — a literal `>&5`) and
+found the fork guest's stock hush clean on all of them. A REAL autoconf-generated
+`configure`'s own `as_fn_error` diagnostic-logging helper redirects to a
+**VARIABLE** fd instead (`>&$4` — the fd number is a shell variable), which
+hush's parser does NOT accept — and THIS, not anything NOMMU-specific, is the
+actual, reproducible source of the classic "hush: ambiguous redirect" / "hush:
+syntax error at 'fi'" failures. Confirmed two ways: (a) a real generated
+`configure` (`userspace/autotools-fixture.nix`, added 2026-08-12) hits it in its
+own preamble under stock busybox hush, hermetically, on the HOST — see
+`userspace/autotools-fixture-hush-check.nix`; (b) the same generated
+`configure`'s in-guest run (`runtime/demo/node/autotools-fork-smoke.mjs`, also
+added 2026-08-12 — **the first automated autotools regression gate on ANY
+guest**, closing the "nothing regression-gates it" gap this caveat used to cite)
+hit its CFGRC step with the identical signature. **RESOLVED in the same
+change** (`patches/busybox/0009-hush-variable-fd-redirect.patch` +
+`0010-hush-internally-opened-fd0.patch` — the second an independent,
+still-unfixed-upstream `<&0` bug found while verifying the first against a
+real `configure`; full record in the "hush can't run a real autoconf
+`configure` at all without three independent fixes" learnings entry below):
+`.#autotools-fixture-hush-check` is now a HARD gate (native, ~2 min, wired
+into `nix-wasm.yml` alongside `.#autotools-fixture`) asserting the full
+`configure`/`config.status`/`make`/`./prog` chain succeeds under exactly this
+hush. The host-side proof is the NECESSARY half — it confirms the hush.c fix
+itself, in isolation — but the shell risk this item existed to retire is only
+fully retired once the in-guest `autotools-fork-smoke.mjs` soak (the
+2026-08-05 parity-plan doc's "Real-fork autotools proof" item) records its
+own green CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising
+the booted guest's full 9P-staging + in-guest cc/make path the host build
+never touches — see the two UPDATEs below: the first (2026-08-13, #193) found
+one more hush bug the soak's own first run surfaced, and the second
+(2026-08-13, same day, PR #199) records that once that bug and an unrelated
+kernel bug (#192) were both fixed, the soak recorded its first-ever green
+CFGRC and was promoted to a hard gate — closing this claim in full.
+**UPDATE (2026-08-13, #193): that first
+in-guest soak found a THIRD hush bug** the host-side gate's happy-path-only
+checks could not have caught — a genuinely fatal `configure` (hit an
+unrelated in-guest cc bug, #192) still reported `CFGRC=0` to the harness,
+because a bare `exit` run from inside autoconf's universal `ac_exit_trap`
+EXIT-trap handler resumed the trap body's own last exit status (0, from a
+successful cleanup `rm`) instead of the real, pending one. Fixed by
+`patches/busybox/0011-hush-exit-trap-status.patch` (merged via PR #197; full
+record in the learnings entry below); `.#autotools-fixture-hush-check` gained
+a hard NEGATIVE case (a sabotaged always-failing compiler) so this class of
+bug is now gated on the host side too, not just discoverable by an in-guest
+soak. **This closes the SHELL half of the item for good** — no known hush
+defect stands between autoconf and this guest's `/bin/sh` any more. **UPDATE
+(2026-08-13, same day, PR #199): the compiler/#192 half is closed too.**
+Issue #192 (a kernel exec-image-buffer fragmentation bug — large repeated
+execs, e.g. clang's driver+cc1, failed around the 6th with `page allocation
+failure: order:14`) is fixed by a refcounted per-inode exec-image cache
+(`patches/kernel/0030`). The very next `autotools-fork-smoke.mjs` boot
+recorded the first-ever green CFGRC (workflow run 31697211801) and the smoke
+is now a `run_smoke` hard gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu`
+`core` shard — no soak step remains for it. **This closes the item in
+full: no known blocker stands between autoconf and the real-fork MMU guest.**
+Full record (compaction-hypothesis refutation, the per-inode-cache fix,
+the fixture-`configure` data point, the CI promotion):
+`docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s "Real-fork
+autotools proof" item.
 
 **#43 is done** (2026-06-24): the guest `/nix` is now a squashfs image served over
 a read-only virtio-blk device (`base.squashfs` → `.#wasm-base-squashfs`); the
@@ -634,9 +717,12 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
   #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
   loudly. `.#nofork-linkcheck` is the gate; memory/table/base come from
-  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds only
-  guest-clang + nix.wasm; the cross.* set is keyed on the byte-identical store path so
-  it stays cached.)
+  `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds
+  guest-clang + nix.wasm + `.#userspace-busybox-fork` → the fork initramfs → the
+  fork squashfs, since #131 slice-1 PR-2 wired `busybox-fork.nix`'s post-link
+  `wasm-check-imports.py` check to consume the same generated file as an
+  argument; the cross.* set is keyed on the byte-identical store path so it
+  stays cached.)
 - **Startup-export contract = the shared `toolchain/wasm-host-exports.nix`; a link
   without `--export-all` MUST name every engine-called startup export** (#179; the
   mirror image of the allow-list entry above). The host bridge calls
@@ -1103,6 +1189,206 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (DEAD-END: the first 0008 only stopped the parent-argv mutation — necessary but not
   sufficient; the watcher-side getopt order was the real bug, found via an in-guest
   `TMODBG` argv trace over the ~3-min Cachix-substituted boot-smoke CI loop.)
+- **hush can't run a real autoconf `configure` at all without three
+  independent fixes** (`patches/busybox/0009-hush-variable-fd-redirect.patch`
+  + `0010-hush-internally-opened-fd0.patch` + `0011-hush-exit-trap-status.patch`;
+  all three wired into FOUR consumers — `busybox-fork.nix`, `busybox.nix`,
+  `ash.nix`, AND `userspace/autotools-fixture-hush-check.nix` (the host-side,
+  hermetic native-busybox proof itself, not a wasm consumer — see its own
+  header) — for source-tree consistency, but only TWO of the four
+  derivations actually COMPILE `shell/hush.c` into their shipped/tested
+  binary as `/bin/sh`-relevant hush: `busybox-fork.nix` (hush is its
+  `/bin/sh`) and `autotools-fixture-hush-check.nix` (a native, non-cross
+  busybox built purely to run this hush through a real `configure`
+  hermetically on the host). `busybox.nix` (NOMMU) also compiles
+  `shell/hush.c` — hush is present there as the `hush` applet even though
+  forkshell ash is the guest's actual `/bin/sh` (see `bootstrap.nix`) — so it
+  is a THIRD derivation that genuinely builds hush.c, just not as the
+  default shell. `ash.nix` builds via `allnoconfig` + an ASH-only enable list
+  that never sets `CONFIG_SHELL_HUSH=y` (only `ASH`/`SHELL_ASH`/`SH_IS_ASH`),
+  and busybox's `shell/Kbuild` gates `hush.o` behind exactly that symbol
+  (`lib-$(CONFIG_SHELL_HUSH) += hush.o ...`) — so `ash.nix`'s copy of
+  `shell/hush.c` is patched (the postPatch guards below still run and still
+  catch a dropped hunk) but never actually compiled into that derivation's
+  busybox binary; it's wired there purely to keep the source tree — and the
+  guard machinery — identical across all four. (A dropped hunk in ANY of the
+  four would go unnoticed by the other three's guards — this is why the
+  count matters: a future agent touching only `busybox-fork.nix`'s patch list
+  and forgetting `autotools-fixture-hush-check.nix` would silently desync the
+  host-side hard gate from the guest it's supposed to be proving.) All
+  three fixes are ORIGINAL fixes for still-unfixed-upstream bugs (confirmed
+  against `mirror/busybox @ master`, commit
+  `371fe9f71d445d18be28c82a2a6d82115c8af19d` as checked 2026-08-13 for 0011 —
+  see its patch header), found while making the fork/MMU guest's default
+  `/bin/sh` (stock hush) capable of autoconf — the earlier "hush isn't
+  POSIX-enough" framing (see the Current-state autotools caveat) turned out
+  to be THREE specific, narrow hush bugs, not a general conformance gap:
+  1. **0009 — parse-time rejection of variable fd redirects (`>&$fd`).**
+     autoconf's `as_fn_error()` does `printf ... >&$4` (a *variable* dup
+     target — `$4`, a function arg — not a literal digit/`-`). hush's
+     `parse_redir_right_fd()` resolves `&N`/`&-` by peeking raw characters
+     off the input stream at PARSE time; anything else (incl. the first
+     char of a `$var`) was a hard "ambiguous redirect" parse error that
+     desyncs the rest of the parse ("syntax error at 'fi'") — so NO real
+     generated `configure` could even be parsed. POSIX requires the
+     redirect target word to undergo the same expansions as any other word;
+     bash/dash/ash all accept this. Fix: defer via a new `REDIRFD_TO_FD_VAR`
+     sentinel — nothing is consumed at parse time, so the ordinary
+     word-scanner picks up the target as a normal (unexpanded) redirect
+     word, and `setup_redirects()` expands + resolves it at redirect-SETUP
+     time (all-digits → dup like a literal `N>&M`; `-` → close; anything
+     else → "ambiguous redirect", now raised at RUN time like bash).
+  2. **0010 — `<&0` (dup FROM stdin) misfires even on a plain, valid stdin.**
+     Found immediately after 0009, from the SAME real-configure run:
+     autoconf's universal preamble `exec 7<&0 </dev/null` failed with a
+     bogus `can't duplicate file descriptor`, before ever reaching the
+     `>&$4` construct 0009 fixes. Root cause: `internally_opened_fd()`
+     tests `fd == G_interactive_fd` with no guard for `G_interactive_fd`'s
+     "not interactive" SENTINEL value of 0 — so any non-interactive `N<&0`
+     (script/`-c`/shebang execution, i.e. every autoconf run) is
+     misidentified as touching hush's own interactive tty fd. The sibling
+     `save_fd_on_redirect()` a few lines above already carries the correct
+     `fd != 0` guard (with a comment naming this exact ambiguity); the fix
+     just mirrors it into `internally_opened_fd()`. Does NOT change (and
+     correctly still traps) `sh < ./configure` — there fd 0 genuinely IS
+     the script being read (`fd_in_HFILEs`, a different mechanism).
+  3. **0011 — a bare `exit` inside the EXIT (`trap ... 0`) handler, AND a
+     `$?` read anywhere inside that handler's body, both resume/reflect the
+     WRONG status (#193; completed in a follow-up review pass, P2-1).**
+     Found by #193's first in-guest autotools soak: the fixture `configure`,
+     under 0009+0010-patched hush, hit a genuinely fatal error mid-run
+     (`cannot compute suffix of executables: cannot compile and link` — an
+     unrelated in-guest cc bug, #192), printed the error correctly, stopped
+     — and the harness still captured `CFGRC=0`. Root cause: every autoconf
+     `configure` installs `trap 'ac_exit_trap $?' 0`, and `ac_exit_trap`
+     deliberately does `exit_status=` (left empty) then `... && exit
+     $exit_status` — word-splitting drops the empty word, so this is a
+     completely bare `exit`. POSIX/bash/dash give a bare `exit` run FROM
+     INSIDE a trap a special meaning: resume the status that was PENDING
+     before the trap fired (here, `as_fn_exit`'s real status, e.g. 77), NOT
+     the status of whatever the trap body's own commands (a successful `rm
+     -f -r ...`) last left in `$?`. hush already implements this correctly
+     for every ORDINARY signal trap, and does so in TWO halves —
+     `check_and_run_traps()` both saves `G.last_exitcode` into
+     `G.pre_trap_exitcode` AND leaves `G.last_exitcode` itself holding that
+     pending value before invoking the trap, so `builtin_exit()`'s no-arg
+     path can prefer `G.pre_trap_exitcode` (`>= 0`) for the bare-`exit` case
+     AND a `$?` read from the very first statement of the trap body already
+     reflects the pending status — but the EXIT pseudo-trap (signal 0) is
+     run by a SEPARATE code path, `hush_exit()` itself, which calls
+     `builtin_eval()` directly and (before this fix) touched NEITHER half —
+     so `G.pre_trap_exitcode` stayed at its startup -1 sentinel (breaking
+     bare `exit`) and `G.last_exitcode` stayed whatever the pre-exit command
+     left it at (breaking a `$?` read, e.g. the equally common `trap
+     'rc=$?; cleanup; exit $rc' 0` idiom — autoconf's own `config.status`
+     generates exactly this shape, coincidentally unaffected today only
+     because `as_fn_exit` happens to pre-arrange a matching `$?`, not
+     because the bug doesn't apply). CONFIRMED pre-existing, NOT introduced
+     by 0009/0010 — both minimal repros (`trap 'ac_exit_trap $?' 0; exit 5`
+     with a bare `exit`, and `trap 'exit_status=$?; exit $exit_status' 0;
+     exit 77` reading `$?` first) reproduce byte-for-byte on PRISTINE,
+     unpatched busybox-1.36.1 hush too (no variable-fd redirect or `<&0`
+     involved at all), and are still present, unfixed, in busybox git as of
+     2026-08-13 (`github.com/mirror/busybox` commit
+     `371fe9f71d445d18be28c82a2a6d82115c8af19d`, fetched and checked directly
+     in-session). Fix: `hush_exit()` sets BOTH `G.pre_trap_exitcode` AND
+     `G.last_exitcode` to `exitcode & 0xff` (its own real, precise argument)
+     immediately before invoking the EXIT trap's `builtin_eval()`, mirroring
+     `check_and_run_traps()`'s own two-field precedent; no restore needed
+     (`hush_exit()` never returns). Verified host-side (native, hermetic)
+     against a full matrix cross-checked with bash/dash ground truth: both
+     minimal repros; the real fixture `configure` against a sabotaged
+     always-failing `cc`/`gcc` (CFGRC=0 pre-fix -> 77 post-fix, matching
+     bash/dash exactly) and against a working compiler (0 throughout); the
+     P1 dangling-redirect negative probe; a trap body whose last command
+     FAILS before its own bare `exit` (resumes the real pending status, not
+     the failing command's); an EXIT trap calling `exit N` explicitly; a
+     script with no EXIT trap; explicit `exit 9`/`exit -2` (->254); an EXIT
+     trap that itself fails without calling exit (pending status wins); and
+     fall-off-end / EOF-after-`false` / `set -e` (all unaffected). Also
+     recorded (not designed, a consequence of fork() copying hush's global
+     state): a bare `exit` in a CHILD spawned FROM the trap body (`$()`,
+     pipeline, subshell) now inherits the outer pending status too — matches
+     both bash and dash for `$()`/pipeline children, and matches dash (not
+     bash, a pre-existing bash/dash divergence, not something this patch
+     invents) for a `(cmd; exit)` subshell child; this inheritance is a
+     property of a REAL fork() and does NOT apply to the NOMMU
+     busybox.nix/ash.nix guest's re-exec'd subshells (a fresh process image,
+     not copied memory — confirmed structurally, no `!BB_MMU` code path
+     touches `pre_trap_exitcode`), though ash.nix's `/bin/sh` is ash, not
+     hush, either way. Full matrix + patch text: the 0011 patch header.
+     `.#autotools-fixture-hush-check` gained a hard NEGATIVE case (sabotaged
+     `cc`/`gcc` on PATH, `unset CC CXX`) asserting a genuinely-failing
+     `./configure` exits EXACTLY 77 (not merely nonzero — a regression
+     elsewhere, e.g. in 0009's own `>&$4` handling, could fail configure
+     early with some OTHER nonzero and this gate would still wrongly declare
+     the exit-trap fix "holds") AND that the captured output names "C
+     compiler cannot create executables", so a pass is attributable
+     specifically to the compiler-probe -> as_fn_error -> exit-trap path —
+     every check before it only proved the happy path, which could not have
+     caught this class of bug; the new case fails loudly (as expected) when
+     0011 is reverted, confirmed by temporarily dropping it and re-running
+     the gate. All FOUR consumers' postPatch guards are similarly
+     tightened: they check the two assignment lines' positions PRECEDE
+     `hush_exit()`'s `builtin_eval(argv)` call (not merely that they're
+     present somewhere in the function), so a fuzzy stacked-patch apply that
+     landed them AFTER it (a no-op position — the trap body has already run
+     by then) fails the build loudly too; verified by manufacturing that
+     exact mis-apply and confirming the tightened guard (and not the
+     original bare-presence one) catches it.
+  **The P1 lesson (from review, worth generalizing):** the FIRST version of
+  0009 was verified only against the constructs it was DESIGNED to fix — it
+  omitted the same `rd_filename == NULL` guard its sibling REDIRFD_TO_FILE
+  branch in `setup_redirects()` starts with, so a dangling/malformed target
+  (`>&<x`, `>&>x`, `>&#c`, or `cmd >&` at EOF — none of them exotic, any one
+  reachable by a typo) SIGSEGV'd the shell (`expand_string_to_string(NULL)`
+  → `strchr(NULL,...)`), and inside `$(...)` the crash was invisible —
+  the substitution silently returned empty with rc=0. **A new redirect-
+  parsing code path needs its NEGATIVE-space cases (dangling/malformed
+  target, not just the happy path) in the verification matrix from the
+  start, not discovered after merge.** A second review pass also caught
+  the initial error-handling shape being wrong on BOTH axes at once:
+  `syntax_error()`+`continue` let the bad command run anyway with the
+  redirect silently dropped (interactively) while killing the WHOLE script
+  on the very first ambiguous redirect (non-interactively) — backwards from
+  bash (which fails only the one command, script continues, in both modes).
+  Fixed to the `bb_error_msg(...); return 1;` shape this function's other
+  runtime redirect failures (the "fd#%d is not open"/`dup2()` checks) were
+  already using — matching a shape upstream itself later converged on
+  elsewhere in `setup_redirects()`, just not (yet) here.
+- **`wasm_error()` must bail out BEFORE touching a V8 termination exception,
+  and its guard must never RESOLVE the `.catch()` it's installed as**
+  (#196, commit `705e832`). TRIGGER: `worker.terminate()` mid-wasm —
+  `kernel-host.js`'s `kill_task`/`stop_secondary` (`stop_secondary` terminates
+  a secondary-CPU worker UNCONDITIONALLY, mid-`_start_secondary` if need be —
+  the strongest in-engine repro) and the test harness's hard-kill teardown
+  (`runtime/demo/node/web-shims.mjs`'s `terminateAllWorkers()`, which every
+  smoke's `s.kill()` drives) can land a V8 "termination exception" on
+  whichever promise chain is in flight — seen 2× in CI **on the GTK shard**
+  (not the autotools soak, and not a step timeout: a normal, deliberate
+  worker-kill during teardown). FAILURE: a termination exception has no real
+  JS representation; `wasm_error()` used to touch it further
+  (`describe_cpp_exception()`'s `WebAssembly.Exception` probes,
+  `console.error()`'s stringification), which **aborted the isolate outright**
+  — SIGTRAP, node exit 133 — AFTER the smoke had already printed PASS, turning
+  a green run red. FIX, two load-bearing parts, both worth stating explicitly
+  because a future "simplify this" pass could break either: (a) a structural
+  allow-list — `error instanceof Error || error instanceof
+  WebAssembly.Exception` — checked BEFORE touching `error` any further, so
+  the termination exception is never inspected at all; (b) on that guard's
+  bail-out path, `return new Promise(() => {})` — a Promise that never
+  settles — NOT a bare `return`. `wasm_error` is used directly as a
+  `.catch()` handler (`.catch(wasm_error).then(user_executable_chain)`), and
+  pre-fix it always threw, so that `.then()` was never reached on the error
+  path; a bare `return` makes the `.catch()` RESOLVE instead, firing the
+  trailing `.then()` and starting a FRESH `user_executable_chain()` inside an
+  isolate that is already terminating (concrete repro: `stop_secondary()`
+  lands directly on this chain). The odd-looking never-settling Promise IS
+  the fix, not incidental scaffolding. Engine-only change — no `ENGINE_ABI`
+  bump (no import added, removed, or retyped) — but it IS a
+  `kernel-worker.js` edit, so it carries the standing `runtime/sync-to-pc.sh
+  <pc-checkout>` obligation before any pc deploy, same as every other
+  engine-file change (see the ABI-BUMP RULE above).
 - **9P read-only mounts MUST be `cache=loose,ignoreqv`** (`bootstrap.nix`). Default
   `cache=none` → netfs *unbuffered* reads → `get_user_pages` on the user buffer
   (unsupported on NOMMU/wasm) → `rc=-14`. Loose = buffered page-cache + `copy_to_user`.
@@ -1119,6 +1405,15 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
+- **X11 MIT-SHM is ENOSYS — export `GDK_USE_XSHM=0` (and `QT_X11_NO_MITSHM=1`)
+  in the image, never from the host.** The kernel has no SysV IPC, so `shmget`
+  returns ENOSYS. GDK does **not** fall back to core-protocol PutImage: after
+  the GTK "running as root" warning it dies with `Fatal IO error 11 on X
+  server :1`. `DISPLAY=:1` (sommelier `-X --x-display=1`) plus those two flags
+  belong in `userspace/system.nix` `environment.variables` **and** the explicit
+  `environment.etc."profile".text` exports (login ash sources `/etc/profile`).
+  FORBIDDEN: pc typing `export DISPLAY=:1 GDK_USE_XSHM=0` into a user Terminal
+  or hidden hvc to paper over a stale ISO. Republish the linux channel.
 - **GTK cursors: a theme on disk is necessary but the real blocker is musl's
   `posix_fallocate`** (`toolchain/musl.nix` + `userspace/gtk-assets.nix` +
   `system.nix`). GTK's `Gdk-Message: Unable to load <name> from the cursor theme`
@@ -1435,10 +1730,16 @@ CI / the linux box, per the design's "ship what works" scope):
   untranslated (see the "Host imports that take USER pointers" learnings
   entry above; engine fix `runtime/mmu-uaccess.js`); PR #186's soak recorded
   its post-fix CI green and it took the last promotion. NO soak step remains
-  in the MMU jobs — every smoke hard-gates, and a regression on any of them
-  turns the JOB red (the soak idiom's rationale lives in git history +
+  from THAT promotion cycle — all 19 hard-gate, and a regression on any of
+  them turns the JOB red (the soak idiom's rationale lives in git history +
   pr-preview.yml's MMU-preview step comment for the next first-ever-boot
-  shard that needs it). That shard verifies issue #11 item
+  shard that needs it). (One soak WAS added to the same `core` shard later,
+  2026-08-12: `autotools-fork-smoke.mjs`'s acceptance soak, non-gating until
+  issue #192 was fixed — see the autotools caveat above and the 2026-08-05
+  parity-plan note. It postdated this 19/19 flip and was not one of the 19;
+  it was itself promoted to a `run_smoke` hard gate on 2026-08-13 once #192
+  was fixed, so no soak step remains in this job at all now.) That shard
+  verifies issue #11 item
   1 ONLY — device models still work
   when USER pages are translated (the kernel's soft uaccess walk + the
   instrumented user binary's own buffer accesses); the vring/pfn addressing

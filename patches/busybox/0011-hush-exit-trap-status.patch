@@ -1,0 +1,283 @@
+From: nix-wasm <eric@codebutler.com>
+Subject: [PATCH] hush: a bare "exit" inside the EXIT (trap 0) handler, and "$?" read at the top of that handler, must reflect the PENDING exit status, not whatever the trap body's own commands left in $?
+
+Applies on top of 0009-hush-variable-fd-redirect.patch +
+0010-hush-internally-opened-fd0.patch (independent fix, same file,
+unrelated code path — hush_exit()/builtin_exit(), not the redirect-
+parsing functions those two touch; applies zero-fuzz with or without
+them, see SCOPE below).
+
+PROBLEM: found while root-causing a #193 in-guest MMU/fork soak finding.
+The fixture's generated `configure`, run under the patched (0009+0010)
+hush on the real booted guest, hit a genuinely fatal error mid-run
+("configure: error: cannot compute suffix of executables: cannot compile
+and link" — an unrelated in-guest cc kernel bug, #192), printed the error
+correctly, and stopped — yet the harness's `sh ./configure; echo
+CFGRC=$?` captured **CFGRC=0**. Under bash and dash, the identical
+`./configure` run (same fixture, same sabotaged-compiler setup) exits
+NONZERO (77, from `as_fn_error 77 "C compiler cannot create
+executables"`). A configure script whose real fatal failure is reported
+to callers as exit 0 is exactly the "universally-broken-exit-status"
+class this repo already spent effort eliminating for #009/#010's own
+gaps (#188/#189/#190) — it would false-pass any script/CI/Makefile that
+only checks `$?` after running configure.
+
+ROOT CAUSE: every autoconf-generated `configure` installs a trap that
+runs on ordinary shell exit (signal 0), to flush config.log:
+
+    ac_exit_trap ()
+    {
+      exit_status=
+      ...
+      eval "rm -f $ac_clean_CONFIG_STATUS core *.core core.conftest.*" &&
+        rm -f -r conftest* confdefs* conf$$* $ac_clean_files &&
+        exit $exit_status
+    }
+    trap 'ac_exit_trap $?' 0
+
+`exit_status` is deliberately left UNSET/empty inside the function (this
+is standard, correct autoconf code, not a bug in the generated script);
+`exit $exit_status` therefore expands, after word-splitting drops the
+empty word, to a completely bare `exit` with NO argument. POSIX and every
+real shell (bash, dash) give a bare `exit` run from *inside* a trap
+handler a special meaning: it does NOT mean "exit with the status of the
+last command I, the trap body, happened to run" (which here would be 0,
+from the successful `rm -f -r ...` right before it) — it means "finish
+exiting with whatever exit status was already PENDING before this trap
+started running" (i.e. the real, intended exit status: e.g. `as_fn_exit
+77`'s 77). This is exactly the mechanism that makes autoconf's
+`ac_exit_trap` idiom work at all: it is bookkeeping (flush config.log,
+clean up temp files) bolted onto the *real* configure exit without
+disturbing it.
+
+hush already implements this "pending status" behavior CORRECTLY for
+every ordinary signal trap, and it does so in TWO parts:
+`check_and_run_traps()` (shell/hush.c) both (a) saves `G.last_exitcode`
+into `G.pre_trap_exitcode` AND (b) leaves `G.last_exitcode` itself
+holding that same pending value, before invoking a trap's
+`builtin_eval()` — so `$?` read anywhere in the trap body, from the very
+first statement, already reflects the pending status, and
+`builtin_exit()`'s no-argument path explicitly prefers
+`G.pre_trap_exitcode` when it is set (`>= 0`) for the "bare exit resumes
+it" half:
+
+    G.pre_trap_exitcode = save_rcode = G.last_exitcode;   /* both halves, before the trap body runs */
+    builtin_eval(argv);
+    ...
+    if (G.pre_trap_exitcode >= 0) /* "exit" in trap uses $? from before the trap */
+        hush_exit(G.pre_trap_exitcode);
+    hush_exit(G.last_exitcode);
+
+But `trap ... 0` (the EXIT pseudo-trap) is NOT run through
+`check_and_run_traps()` at all — it is run by `hush_exit()` itself, at
+the moment the shell is actually terminating, via a SEPARATE,
+independently-written code path that calls `builtin_eval(argv)` directly
+and (before this patch) touched NEITHER half of that state:
+
+    if (G.exiting <= 0 && G_traps && G_traps[0] && G_traps[0][0]) {
+        char *argv[3];
+        argv[1] = xstrdup(G_traps[0]);
+        argv[2] = NULL;
+        G.exiting = 1; /* prevent EXIT trap recursion */
+        builtin_eval(argv);
+    }
+
+`G.pre_trap_exitcode` is initialized once, at shell startup, to the
+sentinel -1 ("not currently inside a trap") and (before this patch) was
+otherwise touched only by `check_and_run_traps()`. So when a bare `exit`
+ran inside the EXIT trap body, `builtin_exit()`'s `G.pre_trap_exitcode >=
+0` test saw the untouched -1 sentinel, fell through to
+`hush_exit(G.last_exitcode)`, and `G.last_exitcode` by then held whatever
+the trap body's OWN commands last set it to (the successful `rm -f -r
+...`'s 0) — not the real exit status (77) that was pending when the trap
+fired. Two independent, inconsistent implementations of "what a trap
+handler is" inside the same file — the EXIT (signal 0) trap and every
+other signal trap — for what should be exactly the same "before the
+trap" contract.
+
+SECOND, INDEPENDENT SYMPTOM OF THE SAME ROOT CAUSE (review finding,
+P2-1): because `G.last_exitcode` itself (not just `G.pre_trap_exitcode`)
+went unset, it is not only the bare-`exit` idiom that was wrong — a `$?`
+READ anywhere inside the EXIT trap body, even before any command of its
+own runs, was ALSO wrong (still the pre-exit command's status, not the
+real exit code). This breaks the equally common
+`trap 'rc=$?; cleanup; exit $rc' 0` idiom (which autoconf itself
+generates inside `config.status`'s own trap, coincidentally masked there
+today only because `as_fn_exit` happens to pre-arrange a matching `$?` —
+luck, not correctness):
+
+    $ cat > t2.sh <<'EOF'
+    trap 'exit_status=$?; exit $exit_status' 0
+    exit 77
+    EOF
+    $ bash t2.sh; echo $?     # 77 (correct)
+    $ dash t2.sh; echo $?     # 77 (correct)
+    $ hush t2.sh; echo $?     # 0  (WRONG, with only the pre_trap_exitcode-only fix)
+
+CONFIRMED PRE-EXISTING, NOT introduced by 0009/0010: both symptoms
+reproduce byte-for-byte on PRISTINE busybox-1.36.1 (no patches at all —
+the minimal repros involve no variable-fd redirect and no `<&0` at all,
+so they exercise neither 0009's nor 0010's changed code). Minimal repro
+of the bare-`exit` symptom (works under `hush -c`/`hush script`, no
+configure/autoconf needed):
+
+    $ cat > t.sh <<'EOF'
+    ac_exit_trap ()
+    {
+      exit_status=
+      rm -f -r /tmp/nonexistent 2>/dev/null &&
+        exit $exit_status
+    }
+    trap 'ac_exit_trap $?' 0
+    exit 5
+    EOF
+    $ bash t.sh; echo $?     # 5  (correct: bare exit-in-trap resumes 5)
+    $ dash t.sh; echo $?     # 5  (correct)
+    $ hush t.sh; echo $?     # 0  (WRONG, on both pristine and 0009+0010-patched hush)
+
+UPSTREAM: confirmed still present, unfixed, in busybox git as of
+2026-08-13 (checked against `github.com/mirror/busybox`, commit
+`371fe9f71d445d18be28c82a2a6d82115c8af19d` — `git ls-remote`'d and its
+`shell/hush.c` fetched directly in this session; `hush_exit()` there is
+byte-for-byte the pristine 1.36.1 code shown above, neither half of this
+fix present). Original fix, mirroring `check_and_run_traps()`'s own
+precedent for every other trap.
+
+FIX: set BOTH `G.pre_trap_exitcode` AND `G.last_exitcode` from the REAL,
+precise exit status (`hush_exit()`'s own `exitcode` parameter — the value
+the shell is actually about to terminate with, e.g. `as_fn_exit`'s `exit
+$1`, or a plain top-of-script `exit N`, or `set -e`'s errexit path)
+immediately before invoking the EXIT trap's `builtin_eval()`, exactly
+mirroring `check_and_run_traps()`'s own `G.pre_trap_exitcode = save_rcode
+= G.last_exitcode;` for ordinary signal traps — the difference being that
+here `G.last_exitcode` is not ALREADY the right value going in (as it is
+in `check_and_run_traps()`, which merely records what's already current),
+so both fields must be written explicitly from `exitcode`. `exitcode` is
+in fact a STRICTLY BETTER "before" value than reusing `G.last_exitcode`
+would be here (the value `check_and_run_traps()` uses for signal traps,
+where there is no associated exit-code argument to be more precise with)
+— it is the exact argument `hush_exit()` was called with, not a proxy for
+it. No restore is needed afterward (unlike `check_and_run_traps()`, which
+returns to normal execution): `hush_exit()` never returns, so nothing
+downstream ever reads the values this overwrites. Both masked with
+`& 0xff` to match the 0-255 range every other exit-status field in this
+file uses (`G.last_exitcode` is `smalluint`; `hush_exit()`'s own final
+`sigexit(-(exitcode & 0xff))` / `_exit(exitcode)` call already implicitly
+narrows the same way). `#if ENABLE_HUSH_TRAP` guards the whole block,
+matching every other `G.pre_trap_exitcode` reference in the file (the
+field does not exist when HUSH_TRAP is disabled) — busybox's standard
+defconfig, and every wasm-guest defconfig in this repo, enables
+`CONFIG_HUSH_TRAP=y`, so this is unconditionally live in every consumer.
+
+VERIFIED (host-side, hermetic, native x86_64, no wasm involved): rebuilt
+a native busybox with 0009+0010+this two-line fix and re-ran the FULL
+matrix against bash/dash ground truth. Every row below is the shell's
+raw exit status ($?) unless noted; "hush" = the 0009+0010+0011-patched
+native build.
+
+  Original repro + adjacent cases:
+    trap 'ac_exit_trap $?' 0 (rm && bare exit); exit 5     bash=5   dash=5   hush=5
+    (as_fn_exit-style; exit 0/1/77 via as_fn_set_status)   bash/dash/hush all match per-code (0, 1, 77)
+    real fixture ./configure, working compiler              bash/dash/hush all 0
+    real fixture ./configure, sabotaged always-failing cc    bash=77  dash=77  hush=77  (was hush=0 pre-fix)
+    P1 dangling-redirect negative probe (`echo hi >&<x`)     hush=1 (unaffected — different function)
+    trap body's LAST command fails (`false`) then bare exit  bash=5   hush=5   (resumes the real pending 5, not false's 1)
+    EXIT trap calls `exit 33` explicitly                     bash=33  hush=33  (unaffected — never reads pre_trap_exitcode)
+    no EXIT trap at all, `exit 42`                            bash=42  hush=42  (unaffected — block is gated on G_traps[0])
+
+  P2-1 review addition — "$?" read INSIDE the trap body (the
+  `rc=$?; ...; exit $rc` idiom), and the surrounding exit-status
+  matrix the review asked to be re-run in full against this idiom's
+  fix too, to prove it didn't regress anything the first cut got right:
+    trap "echo dollar=\$?; exit" 0; true; exit 7    bash: dollar=7 rc=7   hush (pre-fix): dollar=0 rc=7   hush (post-fix): dollar=7 rc=7
+    trap 'exit_status=$?; exit $exit_status' 0; exit 77   bash=77  dash=77  hush (pre-fix)=0  hush (post-fix)=77
+    explicit `exit 9` (harmless EXIT trap present)          bash=9   hush=9
+    EXIT trap body itself fails (`false`, no explicit exit); `exit 6`   bash=6   hush=6   (POSIX: trap not calling exit -> pending 6 wins over the trap's own failing last command)
+    fall off end of script (no exit, last cmd `true`)        bash=0   hush=0
+    fall off end of script, last cmd `false` (EOF)            bash=1   hush=1
+    `set -e`; `false`                                          bash=1   hush=1
+    `exit -2`                                                   bash=254 hush=254
+
+  P3-2 review addition — subprocess-inheritance corner cases (a real
+  fork() copies hush's global state, including the now-set
+  G.pre_trap_exitcode, so a bare "exit" run in a CHILD spawned FROM
+  inside the EXIT trap body also resumes the outer pending status —
+  this was not designed, it falls out of fork()'s COW semantics, and
+  is worth recording since it's now user-visible):
+    trap 'v=$(exit); echo rc=$?' 0; exit 5           ($() child)      bash=5   dash=5   hush=5   (all agree)
+    trap 'true | (exit); echo rc=$?' 0; exit 5        (pipeline child) bash=5   dash=5   hush=5   (all agree)
+    trap '(false; exit); echo rc=$?' 0; exit 5        (subshell child) bash=1   dash=5   hush=5   (bash DISAGREES with dash here -- bash's subshell resumes its OWN last command (false=1), not the outer pending status; dash's subshell inherits the outer pending status and a bare exit there resumes IT. hush, having no independent concept of "am I a subshell descended from a trap" beyond the inherited memory state, now behaves like dash. This is a pre-existing bash/dash divergence in what a forked subshell's own pre_trap_exitcode state means, not something this patch invents; noted here because it is now empirically true of hush too, not verified before this patch (hush's own pre_trap_exitcode was always -1 before now, so no such inheritance could occur).
+  NOMMU note: this inheritance is a property of a REAL fork() copying
+  process memory (true on this native host build, and true of the
+  fork/MMU guest variant's busybox-fork.nix). It does NOT apply to the
+  NOMMU busybox.nix/ash.nix guest's own subshell/`$()`/pipeline
+  mechanism (busybox's `!BB_MMU` "forkshell" re-exec path,
+  `re_execute_shell()` etc.): a re-exec'd child there is a FRESH
+  `main()` invocation of a new process image, not a copy of the
+  parent's memory, so `G.pre_trap_exitcode` resets to its compiled-in
+  -1 startup default in the child regardless of what the parent held
+  (confirmed structurally: no `!BB_MMU` re-exec/serialization code path
+  in shell/hush.c references `pre_trap_exitcode` at all). The headline
+  `ac_exit_trap` path this patch exists for is a plain, non-forking
+  function call either way, so this divergence does not affect it.
+
+SCOPE: applies with `patch -p1 --fuzz=0` cleanly on top of pristine
+busybox-1.36.1 with 0009+0010 already applied (this repo's actual stacking
+order in busybox.nix/busybox-fork.nix/ash.nix) AND standalone against
+pristine busybox-1.36.1 with NEITHER 0009 nor 0010 applied (verified
+both ways) — `hush_exit()`/`builtin_exit()` share no lines with the
+redirect-parsing functions 0009/0010 touch. Wired into all three
+derivations whose source tree carries shell/hush.c (busybox-fork.nix,
+busybox.nix, ash.nix), each gaining a postPatch guard asserting the
+shipped `hush_exit()` carries the `G.pre_trap_exitcode = exitcode &
+0xff;` assignment BEFORE its `builtin_eval(argv);` call (not merely
+present somewhere in the function body — a fuzzy apply that landed the
+assignment AFTER `builtin_eval` would be a no-op that this stricter check
+catches and a bare presence check would not), so a stacked patch apply
+that silently drops or misplaces this hunk (the exact hazard
+patches/kernel's 0017-0020 zero-fuzz lesson documents) fails the BUILD
+loudly instead of shipping a hush whose EXIT-trap-guarded `configure`
+runs silently regress to reporting success on failure. NOTE: ash.nix's
+own `/bin/sh` is ash, not hush, and its `allnoconfig`-based .config never
+sets `CONFIG_SHELL_HUSH=y` (only the `ASH_*`/`SHELL_ASH` family) — so
+`shell/hush.c` is patched there (the source tree carries it, and the
+postPatch guard above still runs) but never actually COMPILED into that
+derivation's busybox binary. The patch and its guard are wired there for
+source-tree consistency across all three busybox derivations, not
+because ash.nix's own shell exercises this fix at runtime.
+
+diff -ruN a/shell/hush.c b/shell/hush.c
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -2091,6 +2091,31 @@
+ 		argv[1] = xstrdup(G_traps[0]); /* copy, since EXIT trap handler may modify G_traps[0] */
+ 		argv[2] = NULL;
+ 		G.exiting = 1; /* prevent EXIT trap recursion */
++#if ENABLE_HUSH_TRAP
++		/* Mirror what check_and_run_traps() does for every OTHER trap
++		 * (SIGINT etc): record the exit status that is "pending"
++		 * before the trap body runs, so that (a) a bare "exit" (no
++		 * argument) executed FROM WITHIN the trap body resumes THIS
++		 * status (POSIX: a trap that does not itself call exit with
++		 * an explicit status leaves the shell to exit with the
++		 * status that was already pending) instead of whatever
++		 * G.last_exitcode drifts to from ordinary commands the trap
++		 * body runs first (e.g. autoconf's ac_exit_trap: "rm -f -r
++		 * ... && exit $exit_status" with $exit_status empty -> bare
++		 * "exit" -> must resume the real exit code, not rm's 0), and
++		 * (b) "$?" read anywhere in the trap body -- even before the
++		 * trap runs any command of its own -- also reflects it (the
++		 * equally common "trap 'rc=$?; cleanup; exit $rc' 0" idiom).
++		 * Without this, builtin_exit()'s "G.pre_trap_exitcode >= 0"
++		 * check sees the -1 "not in a trap" sentinel (only
++		 * check_and_run_traps() ever sets it) and falls through to
++		 * hush_exit(G.last_exitcode) -- the wrong value; and a bare
++		 * "$?" read stays whatever the pre-exit command left it at.
++		 * hush_exit() never returns, so nothing downstream reads the
++		 * values this overwrites. */
++		G.pre_trap_exitcode = exitcode & 0xff;
++		G.last_exitcode = exitcode & 0xff;
++#endif
+ 		/* Note: G_traps[0] is not cleared!
+ 		 * "trap" will still show it, if executed
+ 		 * in the handler */
