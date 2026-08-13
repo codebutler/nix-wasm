@@ -25,8 +25,35 @@ try {
   if (!reached) throw new Error("no prompt");
   s.send("gtk2-hello --selftest\n");
   pass = await s.waitForOutput(/GTK2-SELFTEST: .* OK/, 180000);
+  // #193: this smoke has failed with a COMPLETELY EMPTY transcript after the
+  // command — no echo, no "not found", no GTK/GDK error, nothing — which is
+  // consistent with at least two very different root causes that a bare
+  // timeout can't tell apart: (a) the shell never received/ran the command at
+  // all (a boot-log false-positive prompt match — waitForPrompt matches ANY
+  // trailing `#`/`$` in the whole accumulated transcript, so a transient boot
+  // line could in principle satisfy it before the real login shell is up,
+  // swallowing the command into pre-login output), vs (b) the shell DID run
+  // it and gtk2-hello itself hung before its first printf (e.g. inside
+  // gtk_init_check()'s X connection attempt — this smoke is the only one that
+  // invokes an X11-linked binary without an explicit `DISPLAY=` on the
+  // command line, unlike xdpyinfo/xeyes in x11-apps-smoke.mjs). A short,
+  // separately-budgeted liveness probe on failure distinguishes them for the
+  // next occurrence instead of leaving a bare empty tail to guess from.
+  if (!pass) {
+    s.send("echo GTK2_LIVENESS_PROBE=$?\n");
+    const alive = await s.waitForOutput(/GTK2_LIVENESS_PROBE=\d+/, 15000);
+    console.log(
+      "\n[gtk2-smoke] post-timeout liveness probe: " +
+        (alive
+          ? "shell responded — gtk2-hello --selftest itself produced no matching marker (hung or wrong output)"
+          : "console unresponsive — the selftest command likely never reached a live shell (transport/boot race)"),
+    );
+  }
 } finally {
-  if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-2000));
+  if (!pass) {
+    const tail = s.snapshot();
+    console.log(`\n── transcript tail (${tail.length} bytes total) ──\n` + tail.slice(-2000));
+  }
   s.kill();
 }
 console.log("\n[gtk2-smoke] " + (pass ? "PASS" : "FAIL"));
