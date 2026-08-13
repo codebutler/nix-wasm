@@ -230,7 +230,8 @@ surface already exist; Phase 1 only widens what boots on top of it).
   `CFGRC` now fails *honestly* (a genuine nonzero status once a conftest
   compile dies to #192) instead of the pre-0011 failure mode where a masked
   EXIT-trap bug could silently report `CFGRC=0` on a run that had actually
-  died fatally — but it still fails, so this checkbox stays OPEN and the
+  died fatally — but it still fails, so (historical, superseded by the
+  closing UPDATE below) this checkbox stays OPEN and the
   soak stays a soak (do NOT promote to `run_smoke`) until #192 is fixed
   and a green CFGRC is on record. Full record: `docs/process-model.md`'s
   2026-08-13 update, and the "hush can't run a real autoconf `configure`"

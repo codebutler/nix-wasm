@@ -384,7 +384,7 @@ make && ./prog` runs end-to-end in the guest. The guest `/bin/sh` is busybox's
 `$()`/subshell/pipeline, and `config.status` work (full record in the
 `userspace/ash.nix` postPatch comments + the `patches/busybox/ash/*` patches + git
 history). The old "hush isn't POSIX-enough" gap is closed. **Caveat (2026-08-11,
-UPDATED 2026-08-12):
+UPDATED 2026-08-12, 2026-08-13):
 this milestone was a HAND-RUN session (its record was `docs/STATUS.md`, since
 deleted). Two things were measured on the MMU/fork guest while scoping a
 regression gate for it, both worth knowing before touching shells: (1) stock
@@ -425,8 +425,12 @@ fully retired once the in-guest `autotools-fork-smoke.mjs` soak (the
 2026-08-05 parity-plan doc's "Real-fork autotools proof" item) records its
 own green CFGRC on the real MMU/fork guest: that CLOSES the claim, exercising
 the booted guest's full 9P-staging + in-guest cc/make path the host build
-never touches — see the UPDATE below for why that soak still hasn't recorded
-one, even with the shell fully fixed. **UPDATE (2026-08-13, #193): that first
+never touches — see the two UPDATEs below: the first (2026-08-13, #193) found
+one more hush bug the soak's own first run surfaced, and the second
+(2026-08-13, same day, PR #199) records that once that bug and an unrelated
+kernel bug (#192) were both fixed, the soak recorded its first-ever green
+CFGRC and was promoted to a hard gate — closing this claim in full.
+**UPDATE (2026-08-13, #193): that first
 in-guest soak found a THIRD hush bug** the host-side gate's happy-path-only
 checks could not have caught — a genuinely fatal `configure` (hit an
 unrelated in-guest cc bug, #192) still reported `CFGRC=0` to the harness,

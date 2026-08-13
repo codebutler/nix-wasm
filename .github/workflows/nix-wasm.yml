@@ -617,9 +617,11 @@ jobs:
       # the promotion rule in the parity plan each moves from the soak step's
       # `check` call to a real `run_smoke` hard gate. The soak-idiom rationale
       # (continue-on-error bounds FAILURE, step timeout-minutes bounds WALL
-      # CLOCK, never a return-0 helper) lives on in nix-boot-smoke-mmu's gtk
-      # soak step, which still hosts this job set's one remaining soak smoke.
-      # The step-level timeout stays even though the step now gates: a hang
+      # CLOCK, never a return-0 helper) lives in git history and
+      # pr-preview.yml's MMU-preview step comment (nix-boot-smoke-mmu no longer
+      # has a soak step of its own — its one remaining soak smoke,
+      # autotools-fork-smoke.mjs, was itself promoted to a hard gate on
+      # 2026-08-13). The step-level timeout stays even though the step now gates: a hang
       # here should fail THIS step at a bounded point with its own name on it,
       # not surface as an anonymous job-level cancellation.
       - name: MMU device + async-signal smokes (#131, gating)
@@ -1050,6 +1052,19 @@ jobs:
       # no separate soak step remains.
       - name: Boot full nix system on MMU + ${{ matrix.shard }} smokes — hard gates
         working-directory: runtime
+        # 200: a promoted step keeps its own step-level wall-clock bound (the
+        # convention this file follows elsewhere, e.g. the "MMU device +
+        # async-signal smokes" step above) so a hang fails with ITS name on
+        # it, not an anonymous job-level cancellation at 240. Sized to the
+        # `core` shard's worst case: autotools-fork-smoke.mjs alone budgets
+        # up to 3 panic-retries at ~47m each internal budget (NIX_MAKE_TIMEOUT_MS
+        # install 10m + CFGRC 25m + MAKERC 10m + boot/staging ~2m, per its own
+        # comment history) ≈ 141m, plus the seven other `core` smokes (smoke,
+        # build-from-source-e2e, selftests-batch, profile-install-e2e,
+        # wrapperless-cc-e2e, exec-churn-smoke, rsvg-smoke) at a conservative
+        # ~3m each ≈ 20m ⇒ ≈161m worst case — under the 240 job-level budget
+        # and comfortably inside 200.
+        timeout-minutes: 200
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
           # The software-MMU guest runs the substitute+unpack ~2-3x slower than
@@ -1153,8 +1168,8 @@ jobs:
             # (`CFGRC=0`, `MAKERC=0`, `AUTOTOOLS_FIXTURE_OK`, `RUNRC=0`) —
             # this hard-gates now, and the dedicated soak step is gone.
             run_smoke demo/node/autotools-fork-smoke.mjs
-            # and the GNOME-games tier render (rsvg-convert → libcroco →
-            # librsvg → pango/cairo → cairo-png, headless).
+            # The GNOME-games tier render (rsvg-convert → libcroco → librsvg →
+            # pango/cairo → cairo-png, headless).
             run_smoke demo/node/rsvg-smoke.mjs
           else
             # The HEAVY GTK selftests (issue #88) on the MMU/fork guest —

@@ -98,7 +98,7 @@ Boot-verified today: `fork()`+`wait()` returns twice with real COW
 divergence (`fork-smoke.mjs`, gated); the promoted `nix-boot-smoke-mmu` GTK +
 core smoke set (the same one-per-boot apps the NOMMU guest runs), plus
 `autotools-fork-smoke.mjs`'s in-guest autotools acceptance smoke (promoted
-2026-08-13, see "Not yet closed" below for its history), each recorded CI
+2026-08-13, see "Now closed" below for its history), each recorded CI
 greens and hard-gate — a regression on any of them turns the job red. The
 `core` shard is fully green as of 2026-08-13 (issue #192, the exec-image
 fragmentation bug that used to hit its in-guest compiler gates, is fixed —

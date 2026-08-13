@@ -141,19 +141,27 @@ here.
   the CI-gated MMU variant's musl — this item is about promoting it to the
   flake's *default* `musl` attr, not building it for the first time.)
 - [x] **`flake.nix` `wasmSystemFork` — drop `wasmAsh` from the fork profile's
-  `toolchain` list. DONE + BOOT-VERIFIED (2026-08-13).** The narrow,
-  closure-weight-only sub-piece of the box below: `wasmSystemFork`'s
-  `toolchain` was `[ nixWasmForkClean wasmAsh ]` even though hush, not ash,
-  is `/bin/sh` on the fork guest — `bootstrap.nix`'s forkshell-ash `/bin/sh`
-  promotion is unconditionally skipped in forkMode
+  `toolchain` list. DONE (2026-08-13).** The narrow, closure-weight-only
+  sub-piece of the box below: `wasmSystemFork`'s `toolchain` was
+  `[ nixWasmForkClean wasmAsh ]` even though hush, not ash, is `/bin/sh` on
+  the fork guest — `bootstrap.nix`'s forkshell-ash `/bin/sh` promotion is
+  unconditionally skipped in forkMode
   (`pkgs.lib.optionalString (!forkMode) ...`), and nothing in the fork boot
   path (`userspace/busybox-fork.nix`'s stock hush applet, `initramfsExtraBins`,
   the fork bootstrap script) references `ash`/`wasmAsh` — it rode along in
   `environment.systemPackages` as pure unused closure weight. Changed to
-  `toolchain = [ nixWasmForkClean ]`. Gate green as of workflow run
-  31697211801 (`nix-boot-smoke-mmu` `core`, the same run that first recorded
-  a green autotools CFGRC — the run that most directly exercises this
-  profile's `/bin/sh`). Verified fork-profile-only: `wasmSystem` (NOMMU,
+  `toolchain = [ nixWasmForkClean ]`. **Citation precision:** workflow run
+  31697211801 (`nix-boot-smoke-mmu` `core`) predates this edit (it ran on
+  49a2e95, before `wasmAsh` was dropped) — it proves hush is `/bin/sh` on
+  this profile and that `ash` is unreferenced by anything in the fork boot
+  path, which is the evidence this REVERT relies on; it does NOT itself
+  boot-verify the ash-less squashfs. Boot verification of the post-removal
+  squashfs is this change's OWN `nix-boot-smoke-mmu` run (the PR's CI) —
+  and that run is doing double duty: this same change ALSO promotes the
+  autotools acceptance smoke from a soak to a `run_smoke` hard gate (see
+  the parity-plan doc's "Real-fork autotools proof" item) on the very
+  artifact this REVERT changes, so the PR's CI run is deliberately the
+  proving run for both at once. Verified fork-profile-only: `wasmSystem` (NOMMU,
   `flake.nix` line ~609) and the `guest-ash` flake output (line ~923, a
   standalone `nix build .#guest-ash` package attr, not wired into any system)
   are BOTH untouched — forkshell ash remains the NOMMU guest's `/bin/sh`.
