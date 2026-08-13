@@ -28,6 +28,9 @@ let
   # GUEST-owned autostart (issue #31) so EVERY host/embedder gets the Wayland proxy
   # without JS-side startup choreography (previously pc's kernel-service.js
   # ensureWaylandProxy / the web demo's main.js wrote the launch to a hidden hvc).
+  # FORBIDDEN to reintroduce that: do not type `sommelier` / `waylandproxyd` /
+  # `export WAYLAND_DISPLAY` onto an hvc from the host. Daemons belong here;
+  # login-shell env belongs in userspace/system.nix.
   # Sommelier --parent binds $XDG_RUNTIME_DIR/wayland-0 for guest GUI clients and
   # bridges the Wayland wire protocol to the host compositor over /dev/wl0 (virtwl).
   # INITRAMFS-absolute paths (/bin/sh, /bin/sommelier): sommelier ships in the

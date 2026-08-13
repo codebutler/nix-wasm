@@ -32,6 +32,14 @@ Hard-won corollaries (each was a real mistake; don't repeat them):
 4. **If disk runs out (ENOSPC), STOP and ask for more disk — do NOT `nix store
    gc`.** GC forces re-realizing derivations (slow recompiles).
 5. Report progress, not questions. Once the correct path is clear, execute.
+6. **Guest login-shell env and daemons belong in this image, never in the host
+   typing into a console.** `DISPLAY`, `GDK_USE_XSHM`, `QT_X11_NO_MITSHM`,
+   `WAYLAND_DISPLAY`, Sommelier — `userspace/system.nix` + `userspace/init.nix`.
+   pc `kernel-service.ts` writing `export DISPLAY=…` onto an hvc, waiting for a
+   `# ` prompt to inject keystrokes, or appending `/root/.profile` is
+   **forbidden** (pc `.claude/rules/linux.md`). A stale published ISO is a
+   `publish-linux-channel` republish, not a keystroke. If a login shell doesn't
+   have it, the image is wrong.
 
 ## Workflow
 
@@ -1119,6 +1127,15 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   ("Hello, GTK on wasm!"); same fix unblocks galculator/widget-factory (identical
   gdk shm path). Rebuilds only the initramfs. (`memfd_create` is still ENOSYS — a
   future kernel could implement it as the more standard primary path.)
+- **X11 MIT-SHM is ENOSYS — export `GDK_USE_XSHM=0` (and `QT_X11_NO_MITSHM=1`)
+  in the image, never from the host.** The kernel has no SysV IPC, so `shmget`
+  returns ENOSYS. GDK does **not** fall back to core-protocol PutImage: after
+  the GTK "running as root" warning it dies with `Fatal IO error 11 on X
+  server :1`. `DISPLAY=:1` (sommelier `-X --x-display=1`) plus those two flags
+  belong in `userspace/system.nix` `environment.variables` **and** the explicit
+  `environment.etc."profile".text` exports (login ash sources `/etc/profile`).
+  FORBIDDEN: pc typing `export DISPLAY=:1 GDK_USE_XSHM=0` into a user Terminal
+  or hidden hvc to paper over a stale ISO. Republish the linux channel.
 - **GTK cursors: a theme on disk is necessary but the real blocker is musl's
   `posix_fallocate`** (`toolchain/musl.nix` + `userspace/gtk-assets.nix` +
   `system.nix`). GTK's `Gdk-Message: Unable to load <name> from the cursor theme`
