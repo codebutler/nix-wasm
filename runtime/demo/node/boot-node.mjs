@@ -29,6 +29,14 @@ export async function bootNode(opts = {}) {
     // smoke can attach a recorder (device.setSink({ onPcm, … })) via
     // snd.onReady(device). Absent for boots that don't exercise audio.
     snd: opts.snd,
+    // #11 items 2/3/5: the Wayland compositor bridge hook (worker→main
+    // Greenfield shape: sendOut(clientId, buffer, fds), fds are live
+    // Uint8Array VIEWS over guest memory resolved by the host WlDevice's
+    // _resolveShmFd — see runtime/virtio/wl-device.js). Passed straight
+    // through so a smoke can assert on the exact bytes a VFD_SEND's attached
+    // shm vfds resolve to, without a real compositor. Absent for boots that
+    // don't exercise this (falls back to the in-process WlServer stub).
+    wayland: opts.wayland,
   });
 
   const transcripts = new Map();

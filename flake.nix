@@ -193,6 +193,18 @@
         busyboxKernelHeaders = wasmBusyboxKernelHeaders;
       };
 
+      # #11 items 2/3/5 parity-plan close-out: a userspace test binary that
+      # drives virtio_wl's NEW_ALLOC/anon-inode/SEND-fds wl_shm path so
+      # runtime/demo/node/wl-shm-mmu-smoke.mjs can run it (as an ordinary
+      # child of the fork busybox shell, not PID-1 — a fatal signal in the
+      # mmap content step must kill only this process) on .#kernel-mmu-a2 and
+      # assert the host device model's per-vfd resolution bit-exact. See
+      # userspace/wl-shm-test.c.
+      wasmWlShmTest = import ./userspace/wl-shm-test.nix {
+        inherit pkgs cross;
+        busyboxKernelHeaders = wasmBusyboxKernelHeaders;
+      };
+
       # Wayland Phase 1 (1d M2): the STOCK-libwayland registry-handshake client —
       # the Phase 1 deliverable. Links the cross libwayland-client and runs the
       # canonical wl_display_connect → get_registry → roundtrip → enumerate
@@ -972,6 +984,10 @@
 
         # Wayland Phase 1 (1b M3): /dev/wl0 round-trip self-test guest binary.
         wltest = wasmWlTest;
+
+        # #11 items 2/3/5: userspace test driving the virtio_wl wl_shm
+        # NEW_ALLOC/SEND path for the MMU parity smoke (wl-shm-mmu-smoke.mjs).
+        wl-shm-test = wasmWlShmTest;
 
         # Wayland Phase 1 (1d M2): the stock-libwayland registry-handshake client.
         wlhandshake = wasmWlHandshake;

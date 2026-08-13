@@ -558,6 +558,72 @@ jobs:
           run_smoke demo/node/busybox-fork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin"
 
+      # #11 items 2/3/5 (wl_shm-on-MMU) parity check — the 2026-08-05 parity
+      # plan's "Remaining" item, closing the gap the `gtk` shard's
+      # display-free `--selftest`s can't reach: no compositor in the Node
+      # harness means `gtk_init_check` returns FALSE and `wl_shm` is never
+      # allocated (see nix-boot-smoke-mmu's own header comment on this exact
+      # gap — "#11 items 2/3/5 ... stay unverified on MMU"). Boots the
+      # real-fork busybox + a small bespoke test binary
+      # (userspace/wl-shm-test.c) that drives the virtio_wl NEW_ALLOC/anon-
+      # inode/SEND-fds sequence directly — no compositor needed — and checks
+      # the host device model's resolution via a `wayland.sendOut` bridge
+      # hook (already-shipped API, no engine change). Full design + findings
+      # in wl-shm-mmu-smoke.mjs's own header.
+      #
+      # NON-GATING BY DESIGN — not "first boot, unproven, wait for a soak
+      # cycle to promote it": two of the three checks (ITEM2_INODE,
+      # ITEM3_ADDR — the anon-inode + pfn-addressing wire-level
+      # accommodations) reliably PASS, confirmed on repeat local boots, but
+      # the third (CONTENT — does a guest mmap of the shm vfd actually reach
+      # the SAME physical page the host's pfn-derived view reads) reliably
+      # FAILS: virtwl_vfd_mmap / virtwl_vfd_get_unmapped_area
+      # (patches/kernel/0013) were written for NOMMU's do_mmap
+      # direct-mapping and were never given real MMU page-fault semantics
+      # (no vm_ops, no remap_pfn_range, no VM_PFNMAP) when patch 0023 merely
+      # relaxed their CONFIG_MMU compile guards. Confirmed by BOOTING: the
+      # guest gets a clean "Bus error" (SIGBUS) on the very first access into
+      # the mapped region, and the test process (deliberately NOT PID 1, for
+      # exactly this reason) dies with exit 135 while the shell survives.
+      # This step exists to make that known, real gap a standing, VISIBLE
+      # (red but non-blocking) CI signal instead of an untracked claim —
+      # promote it into the "MMU smokes" step above as a `run_smoke` hard
+      # gate once CONTENT starts passing (i.e. once virtwl_vfd_mmap is
+      # ported for real MMU semantics), per the soak idiom: continue-on-error
+      # bounds FAILURE at the STEP level (an MMU-mmap regression elsewhere
+      # still fails the job via the gating steps around it), timeout-minutes
+      # bounds WALL CLOCK, and the smoke's own real exit code is what
+      # continue-on-error catches — never a return-0 helper (full rationale
+      # in git history and pr-preview.yml's MMU-preview step comment).
+      # `if: !cancelled()` so this still runs even though the gating "MMU
+      # smokes" step above it is a hard gate.
+      - name: wl_shm-on-MMU parity check (issue #11 items 2/3/5, non-gating)
+        if: matrix.shard == 'mmu' && !cancelled()
+        continue-on-error: true
+        timeout-minutes: 20
+        working-directory: runtime
+        run: |
+          set -euo pipefail
+          A2K="$(cd .. && nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)"
+          BBF="$(cd .. && nix build -L '.#userspace-busybox-fork' --no-link --print-out-paths)"
+          WST="$(cd .. && nix build -L '.#wl-shm-test' --no-link --print-out-paths)"
+          rc=2
+          for attempt in 1 2 3; do
+            echo "::group::wl-shm-mmu-smoke.mjs (attempt $attempt)"
+            set +e
+            env MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin" \
+              WL_SHM_TEST="$WST/bin/wl-shm-test" node demo/node/wl-shm-mmu-smoke.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            if [ "$rc" -ne 2 ]; then break; fi
+            echo "wl-shm-mmu-smoke.mjs inconclusive (boot panic) — retrying"
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::wl-shm-mmu-smoke.mjs rc=$rc — see this step's own comment: CONTENT failing is a KNOWN, tracked finding (issue #11 items 2/3/5), not new breakage, until virtwl_vfd_mmap gets real-MMU semantics."
+          fi
+          exit "$rc"
+
       # mmu-devices shard: substitute the software-MMU kernel + fork initramfs
       # (same pair nix-boot-smoke-mmu boots, but busybox-only — no squashfs/
       # nix-cache needed for any smoke in this shard).
