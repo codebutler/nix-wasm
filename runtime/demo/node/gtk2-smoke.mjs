@@ -23,6 +23,11 @@ try {
     throw e;
   }
   if (!reached) throw new Error("no prompt");
+  // Snapshot length RIGHT BEFORE sending the command, so the failure-path
+  // diagnostics below can scope their checks to "everything received after
+  // this command was sent" — a pre-command prompt (or anything else already
+  // in the transcript) can't false-positive into the post-command checks.
+  const cmdOffset = s.snapshot().length;
   s.send("gtk2-hello --selftest\n");
   pass = await s.waitForOutput(/GTK2-SELFTEST: .* OK/, 180000);
   // #193: this smoke has failed with a COMPLETELY EMPTY transcript after the
@@ -38,60 +43,84 @@ try {
   // invokes an X11-linked binary without an explicit `DISPLAY=` on the
   // command line, unlike xdpyinfo/xeyes in x11-apps-smoke.mjs).
   //
-  // A bare post-timeout `echo` can't tell these apart, because
-  // `gtk2-hello --selftest` runs in the FOREGROUND: the shell doesn't even
-  // read the echo's command line until the selftest itself returns. So if
-  // the selftest is genuinely hung, a follow-up echo stays silent EITHER
-  // WAY (indistinguishable from a dead console) — and if the echo DOES
-  // answer, all that proves is the selftest already exited (not that it
-  // "hung", the opposite of what a naive reading suggests). Send Ctrl-C
-  // FIRST to force any still-running foreground job to terminate, THEN
-  // probe: the probe's captured $? separates the cases — 128+SIGINT (130)
-  // means something was still alive in the foreground and ^C killed it (a
-  // real hang); anything else means the shell was already idle (the
-  // selftest had already returned on its own, silently, before our ^C —
-  // wrong/missing output, not a hang). If the probe never answers even
-  // after ^C, the console/transport itself is unresponsive.
+  // Round 1 (Bugbot, correct): a bare post-timeout `echo` can't tell these
+  // apart, because `gtk2-hello --selftest` runs in the FOREGROUND — the shell
+  // doesn't even read the echo's command line until the selftest returns. So
+  // send Ctrl-C first to force any still-running foreground job out.
+  //
+  // Round 2 (Bugbot, correct): the PROBE'S $? IS NOT A RELIABLE CLASSIFIER,
+  // even with the ^C. busybox ash/hush (like bash) also report 130 for ^C
+  // received at an already-IDLE prompt (there is no live foreground job to
+  // kill; the shell's own interrupted read still yields a 128+SIGINT-shaped
+  // status for the NEXT command's $?) — so "$?=130" fires for both "a job
+  // was alive and got killed" and "the shell was already sitting idle",
+  // which is exactly the hung-vs-exited distinction this probe exists to
+  // make. $? cannot discriminate the two cases; do not re-promote it to one.
+  //
+  // The only thing that DOES discriminate is the TRANSCRIPT, scoped to the
+  // region after cmdOffset:
+  //   Bit A — did the command's own echo show up at all? (console received
+  //           the input in the first place)
+  //   Bit B — did a NEW shell prompt appear after that echo, before the
+  //           180s timeout expired? (the foreground job had already
+  //           finished on its own, before we ever touched ^C)
+  //   Bit C — does the post-^C liveness probe answer at all? (the shell/
+  //           console is responsive RIGHT NOW, after ^C)
+  // Verdicts: !A → console never took the input (transport/boot race).
+  // A && B → the selftest already exited silently on its own; ^C is
+  // irrelevant. A && !B && C → the selftest was genuinely HUNG in the
+  // foreground and ^C freed the shell. A && !B && !C → hung AND the
+  // console/transport is now wedged too (or the guest died). The raw probe
+  // $? is still printed, but purely as supplementary data, never as the
+  // classifier.
   if (!pass) {
-    const preCtrlC = s.snapshot();
+    const region = s.snapshot().slice(cmdOffset);
+    const echoed = region.includes("gtk2-hello --selftest"); // Bit A
+    const newPromptAfterCmd = /[#$]\s*$/.test(region.trimEnd()); // Bit B, scoped past cmdOffset
     s.send("\x03"); // Ctrl-C: SIGINT whatever is in the foreground, if anything
     await new Promise((r) => setTimeout(r, 1000));
     s.send("echo GTK2_LIVENESS_PROBE=$?\n");
-    const alive = await s.waitForOutput(/GTK2_LIVENESS_PROBE=\d+/, 15000);
-    if (!alive) {
+    const probeAnswered = await s.waitForOutput(/GTK2_LIVENESS_PROBE=\d+/, 15000); // Bit C
+    const m = /GTK2_LIVENESS_PROBE=(\d+)/.exec(s.snapshot());
+    const rc = m ? m[1] : "n/a";
+
+    console.log(
+      `\n[gtk2-smoke] post-timeout diagnosis: echoed=${echoed} newPromptAfterCmd=${newPromptAfterCmd} ` +
+        `probeAnsweredAfterCtrlC=${probeAnswered} (raw probe $?=${rc})`,
+    );
+    if (!echoed) {
       console.log(
-        "\n[gtk2-smoke] post-timeout diagnosis: console unresponsive even after ^C — " +
-          "the selftest command likely never reached a live shell (transport/boot race), " +
-          "or the whole guest is wedged.",
+        "  -> the command's own echo never appeared in the transcript at all: the console " +
+          "never took the input — consistent with a transport/boot race (e.g. waitForPrompt's " +
+          "whole-transcript `#`/`$` match firing on a transient boot-log line before the real " +
+          "login shell was up), not with gtk2-hello itself.",
+      );
+    } else if (newPromptAfterCmd) {
+      console.log(
+        "  -> a fresh shell prompt appeared AFTER the command echo, before the 180s timeout — " +
+          "the foreground job (gtk2-hello --selftest) had already EXITED ON ITS OWN, silently, " +
+          "without ever printing the expected 'GTK2-SELFTEST: ... OK' marker. The ^C/probe that " +
+          "followed is irrelevant; the shell was already idle.",
+      );
+    } else if (probeAnswered) {
+      console.log(
+        "  -> no fresh prompt appeared after the command echo within the timeout, but the " +
+          "post-^C probe answered — a foreground job was still running when ^C arrived and got " +
+          "freed by it: gtk2-hello --selftest was genuinely HUNG.",
       );
     } else {
-      const m = /GTK2_LIVENESS_PROBE=(\d+)/.exec(s.snapshot());
-      const rc = m ? Number(m[1]) : NaN;
-      const sawSelftestOutput = preCtrlC.includes("GTK2-SELFTEST:");
-      const signaled = rc >= 128 && rc < 160; // 128+N convention; 130 = SIGINT
       console.log(
-        `\n[gtk2-smoke] post-timeout diagnosis: shell responded to ^C + probe ` +
-          `(captured $?=${rc}, pre-^C transcript ${sawSelftestOutput ? "DOES" : "does NOT"} contain "GTK2-SELFTEST:").`,
+        "  -> no fresh prompt appeared after the command echo, AND the probe never answered " +
+          "even after ^C: gtk2-hello --selftest was hung AND the console/transport is now " +
+          "unresponsive too (or the whole guest died).",
       );
-      if (signaled) {
-        console.log(
-          `  -> $?=${rc} looks signal-like (128+N; 130=SIGINT): a foreground job was ` +
-            "still running when ^C arrived and was killed by it — consistent with " +
-            "gtk2-hello --selftest being genuinely HUNG" +
-            (sawSelftestOutput ? " after printing partial output." : " before its first printf."),
-        );
-      } else {
-        console.log(
-          `  -> $?=${rc} is not a SIGINT-shaped exit code: the shell was already idle ` +
-            "when ^C arrived — consistent with gtk2-hello --selftest having already " +
-            "returned/exited on its own " +
-            (sawSelftestOutput
-              ? "(it printed something, but never the expected 'OK' marker)."
-              : "(completely silently, with no output at all — e.g. it never even " +
-                "started, or exited before its first printf)."),
-        );
-      }
     }
+    console.log(
+      "  -> NOTE: the raw probe $? above is supplementary only, not a classifier — busybox " +
+        "ash/hush report the same 128+SIGINT-shaped code (130) for ^C at an already-idle prompt " +
+        "as for ^C killing a live foreground job, so it can't distinguish hung-vs-exited by " +
+        "itself (Bugbot round 2); the echoed/newPromptAfterCmd bits above are what decide it.",
+    );
   }
 } finally {
   if (!pass) {
