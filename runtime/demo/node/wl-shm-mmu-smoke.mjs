@@ -1,18 +1,26 @@
-// wl-shm-mmu-smoke.mjs — issue #11 items 2/3/5 parity check: does the
+// wl-shm-mmu-smoke.mjs — issue #11 items 2/3 parity check: does the
 // virtio_wl wl_shm path (per-vfd anon inode + the host device model's
 // pfn->host-offset resolution) still work under the software MMU
 // (.#kernel-mmu-a2 + the fork-variant toolchain, per the 2026-08-05 parity
-// plan's "Remaining" item)?
+// plan's "Remaining" item)? Item 5 (waylandproxyd's mmap+copy resync) is NOT
+// covered here — that logic lives in the Sommelier Wayland-client bridge
+// path, unreached without a real compositor boot (see the bottom of this
+// header).
 //
 // Every existing GTK smoke is display-free (no compositor in the Node
 // harness -> gtk_init_check fails -> wl_shm is never allocated), so nothing
 // has ever driven a REAL wl_shm allocation under CONFIG_MMU=y before this.
 // This smoke drives one directly, without needing a compositor:
 // userspace/wl-shm-test.c opens /dev/wl0, creates a ctx, allocates TWO shm
-// vfds (VIRTWL_IOCTL_NEW_ALLOC), attaches both to the ctx via ONE
+// vfds (VIRTWL_IOCTL_NEW_ALLOC), attaches both to the ctx via a FIRST
 // VIRTWL_IOCTL_SEND (the wire shape a real wl_shm_create_pool takes:
 // message bytes + an out-of-band fd list) — BEFORE touching mmap at all —
-// then mmaps each and writes a distinct deterministic byte pattern into it.
+// then mmaps each, writes a distinct deterministic byte pattern into it,
+// and issues a SECOND SEND (same two fds, a distinct payload) to "commit"
+// the drawn buffer. That two-SEND shape (attach, draw, commit) is the real
+// wire shape a client uses, and is what lets CONTENT (see below) read a
+// live host view captured AFTER the write, without ever re-reading a
+// possibly-stale/freed region once this process has exited.
 //
 // It boots the REAL-FORK busybox (.#userspace-busybox-fork) as PID 1, same
 // shape as busybox-fork-smoke.mjs, and runs wl-shm-test as an ORDINARY CHILD
@@ -27,12 +35,14 @@
 //
 // The Node side registers a `wayland.sendOut` bridge hook — already-shipped
 // API (runtime/boot.js / kernel-host.js), no engine change — which receives
-// the EXACT fds the host WlDevice's `_resolveShmFd` produced for that SEND:
+// the EXACT fds the host WlDevice's `_resolveShmFd` produced for EACH SEND:
 // live Uint8Array VIEWS over the shared guest memory at the pfn-derived
-// offset (runtime/virtio/wl-device.js). This is the SAME code path a real
-// Greenfield compositor would receive; the smoke just intercepts it instead
-// of feeding a compositor, so it is a genuine exercise of the accommodation,
-// not a call directly into wl-device.js's internals.
+// offset (runtime/virtio/wl-device.js), copied out synchronously inside the
+// hook (so nothing races the vfd's teardown once the guest process exits).
+// This is the SAME code path a real Greenfield compositor would receive;
+// the smoke just intercepts it instead of feeding a compositor, so it is a
+// genuine exercise of the accommodation, not a call directly into
+// wl-device.js's internals.
 //
 // Three independent checks, reported separately (a mmap-content failure must
 // not hide a wire-level pass, and vice versa):
@@ -41,38 +51,65 @@
 //     shared global inode was the pre-fix bug: two shm pools would alias).
 //     Pure VFS/anon-inode correctness, independent of whether guest mmap
 //     actually reaches the right physical page under a real MMU.
-//   ITEM3_ADDR — host-side: does the SEND's fds array have the right SHAPE —
-//     exactly 2 entries, each 4096 bytes, at DISTINCT byteOffsets? This is
-//     _resolveShmFd's pfn*4096 arithmetic actually running and finding two
-//     separate regions, which only requires the NEW_ALLOC wire messages to
-//     have carried distinct pfns — independent of mmap, and exercised
-//     BEFORE the guest even calls mmap (see wl-shm-test.c's ordering).
-//   CONTENT — bit-exact: do the host-observed bytes match the pattern the
-//     guest wrote via mmap? This needs the guest's userspace mmap of the shm
-//     vfd to ACTUALLY reach the same physical buffer the host's pfn-derived
-//     view reads. virtwl_vfd_mmap / virtwl_vfd_get_unmapped_area
-//     (patches/kernel/0013, only fops-guarded for CONFIG_MMU by patch 0023 —
-//     never given real MMU semantics: no vm_ops, no remap_pfn_range, no
-//     VM_PFNMAP) are documented in their own comments as NOMMU-only ("do_mmap
-//     already pointed the region at the guest buffer via ...
-//     NOMMU_MAP_DIRECT"). This check is EXPECTED, on current code, to FAIL —
-//     confirmed empirically while building this smoke, two ways: (1) an
-//     earlier PID-1 variant of wl-shm-test reached "WLSHM: mmap ok" (the
-//     mmap() syscall itself succeeds) and then died to a FATAL SIGNAL (guest
-//     exit_code 0x07 = SIGBUS) on the first ACCESS into the mapped region,
-//     taking the whole guest down with "Attempted to kill init!" — which is
-//     why this smoke runs the test as an ordinary child instead; (2) with
-//     that fixed, the guest console shows a plain "Bus error" and
-//     wl-shm-test exits 135 (128+SIGBUS) at the SAME point — the read probe,
-//     even before any write — with the shell surviving cleanly. That failure
-//     IS the valuable finding this smoke exists to pin down (PRIME
-//     DIRECTIVE: report what's real, don't fake a pass). If CONTENT (or the
-//     child's exit status) ever starts passing, someone ported the mmap
-//     path for real MMU semantics — promote this smoke.
+//   ITEM3_ADDR — host-side, sourced from the FIRST send (payload SHMPING!,
+//     issued before mmap/write): does the SEND's fds array have the right
+//     SHAPE — exactly 2 entries, each 4096 bytes, at DISTINCT byteOffsets
+//     that don't overlap (|offset0 - offset1| >= 4096) and both within the
+//     guest memory's current bounds? This is _resolveShmFd's pfn*4096
+//     arithmetic actually running and finding two separate, valid regions,
+//     which only requires the NEW_ALLOC wire messages to have carried
+//     distinct pfns — independent of mmap.
+//   CONTENT — bit-exact, sourced from the SECOND send (payload SHMDONE!,
+//     issued after the pattern write): do the host-observed bytes match the
+//     pattern the guest wrote via mmap? This needs the guest's userspace
+//     mmap of the shm vfd to ACTUALLY reach the same physical buffer the
+//     host's pfn-derived view reads.
+//
+//     The kernel code for this (patches/kernel/0013's virtwl_vfd_mmap /
+//     virtwl_vfd_get_unmapped_area) was written for NOMMU's do_mmap
+//     direct-mapping and was never given real (page-fault-driven) MMU
+//     semantics. Precisely: patch 0023 ADDS an `#ifndef CONFIG_MMU` guard
+//     around `virtwl_vfd_mmap_capabilities` and its fops slot — compiling
+//     that NOMMU-only direct-map capability hook OUT under CONFIG_MMU —
+//     while `.mmap` (virtwl_vfd_mmap) and `.get_unmapped_area`
+//     (virtwl_vfd_get_unmapped_area) stay REGISTERED UNCHANGED; nothing was
+//     "relaxed" for MMU, a guard was added around the one hook that can't
+//     even exist there (fs.h only defines that struct field under
+//     !CONFIG_MMU). Neither surviving hook does anything MMU-correct:
+//     `.mmap` never sets `vma->vm_ops` and never calls remap_pfn_range (so
+//     no page table entries are ever installed for the mapping), and
+//     `.get_unmapped_area` returns `(unsigned long)vfd->shm_buf` — a KERNEL
+//     address — as if it were the USER mapping address, which is not what
+//     that hook means under a real MMU (a hint for a FREE user VA range,
+//     not literally where the backing pages live). Filed as issue #203
+//     (both corrections above were posted there) with these findings, which
+//     this smoke reproduces on every boot: an earlier PID-1 variant of
+//     wl-shm-test reached "WLSHM: mmap ok" (mmap() itself succeeds) and then
+//     died to a FATAL SIGNAL (guest exit_code 0x07 = SIGBUS) on the first
+//     ACCESS into the mapped region, taking the whole guest down with
+//     "Attempted to kill init!"; with the test running as an ordinary child
+//     instead, the guest console shows a plain "Bus error" and wl-shm-test
+//     exits 135 (128+SIGBUS) at the SAME point — the read probe, even
+//     before any write — with the shell surviving cleanly. See the
+//     KNOWN_SIGBUS_SIGNATURE check below: this smoke asserts that EXACT,
+//     reproduced signature so any OTHER outcome (a different signal, a
+//     clean exit with wrong bytes, a hang) is flagged loudly as something
+//     that needs a human, not silently absorbed as "still failing".
+//
+// PROMOTION: this step runs non-gating (continue-on-error) in CI for now.
+// The next commit is expected to flip it to a hard XFAIL gate inside the
+// existing `run_smoke` sequence — a ONE-LINE change to the `pass` line
+// below, from `item2 && item3 && content` to
+// `item2 && item3 && (content || matchesKnownSigbusSignature)` — once
+// ITEM2/ITEM3 have recorded a green run in CI (see the workflow step's own
+// comment for the exact criterion). If CONTENT ever starts passing for
+// real, that is itself the interesting event (someone ported
+// virtwl_vfd_mmap for real MMU semantics) — see the "#203 appears FIXED"
+// message below.
 //
 // Exit: 0 all three checks PASS / 1 boot completed but >=1 check failed (a
-// real finding — see CONTENT above) / 2 inconclusive (no boot, panic, or the
-// shell never reached its witness line — re-run).
+// real, tracked finding — see CONTENT above) / 2 inconclusive (no boot,
+// panic, or the shell never reached its witness line — re-run).
 import {
   mkdtempSync,
   readFileSync,
@@ -98,7 +135,8 @@ if (!vmlinuxPath || !bbDir || !testPath) {
 }
 
 const SHM_SIZE = 4096;
-const SEND_PAYLOAD = "SHMPING!";
+const SEND1_PAYLOAD = "SHMPING!"; // attach (before the buffer is drawn) -> ITEM3_ADDR
+const SEND2_PAYLOAD = "SHMDONE!"; // commit (after the buffer is drawn) -> CONTENT
 // Mirrors userspace/wl-shm-test.c's pattern_byte(): two distinct deterministic
 // formulas so the two allocations are distinguishable from each other AND
 // from an untouched (GFP_ZERO) buffer.
@@ -162,8 +200,8 @@ function cpioNewc(entries) {
 // and never a substring of another marker. A killing signal shows up here as
 // 128+signum (POSIX shell convention; busybox hush follows it) — e.g. 135 for
 // SIGBUS(7), 139 for SIGSEGV(11) — so this is also the guest-side half of the
-// CONTENT finding: a nonzero/killed status here, with the RESULT line missing,
-// means the write step did not survive.
+// CONTENT finding: a nonzero/killed status here, with the second SEND's
+// marker missing, means the write step did not survive.
 const initScript = [
   "exec >/dev/console 2>&1",
   'echo "WLSHMBOOT: init alive pid=$$"',
@@ -215,8 +253,10 @@ writeFileSync(join(dir, "vmlinux.wasm"), readFileSync(vmlinuxPath));
 writeFileSync(join(dir, "initramfs.cpio.gz"), gzipSync(cpio));
 
 // Every VFD_SEND the guest issued, with the exact fds the host WlDevice
-// resolved (live Uint8Array views — copy them out immediately since the
-// underlying SharedArrayBuffer keeps changing).
+// resolved (live Uint8Array views — copy the BYTES out immediately since the
+// underlying SharedArrayBuffer keeps changing; also record the memory's
+// CURRENT total size at hook-fire time for the bounds check below, since
+// memory.grow() would otherwise make a later comparison meaningless).
 const sends = [];
 const s = await bootNode({
   nix: false,
@@ -229,6 +269,7 @@ const s = await bootNode({
         fds: fds.map((v) => ({
           byteOffset: v.byteOffset,
           byteLength: v.byteLength,
+          memoryByteLength: v.buffer.byteLength,
           bytes: v.slice(), // copy out now
         })),
       });
@@ -239,18 +280,29 @@ const s = await bootNode({
 let pass = false;
 let transcript = "";
 try {
-  const ok = await s.waitForOutput(/WLSHMBOOT: script done/, 120000).catch((e) => {
-    if (e && e.message === "KERNEL_PANIC") return "panic";
-    return false;
-  });
+  // Fold the panic patterns INTO the wait regex so this returns as soon as
+  // EITHER the witness or a panic appears, instead of burning the full
+  // timeout on a panicked boot (waitForOutput never rejects — only
+  // waitForPrompt does — so a separate .catch(KERNEL_PANIC) branch here
+  // would be dead code). Anchored to a LINE START (^...$, multiline) so the
+  // witness can only match a real echoed OUTPUT line, never a substring
+  // inside busybox init's OWN "starting pid N, tty '': '<command>'"
+  // announcement of the inittab command line itself (the #96 hazard) — a
+  // survives-by-luck risk with an unanchored pattern, since that
+  // announcement embeds this script's full text and busybox's message()
+  // truncation is not a contract this smoke should depend on.
+  const ok = await s.waitForOutput(
+    /^WLSHMBOOT: script done\r?$|Kernel panic|Aiee, killing interrupt handler/m,
+    120000,
+  );
   transcript = s.snapshot();
 
-  if (ok === "panic" || /Kernel panic|Aiee, killing interrupt handler/i.test(transcript)) {
+  if (/Kernel panic|Aiee, killing interrupt handler/i.test(transcript)) {
     console.log("[wl-shm-mmu-smoke] INCONCLUSIVE — kernel panic on boot; re-run");
     console.log(transcript.slice(-2000));
     process.exit(2);
   }
-  if (!ok) {
+  if (!ok || !/^WLSHMBOOT: script done\r?$/m.test(transcript)) {
     console.log("[wl-shm-mmu-smoke] INCONCLUSIVE — shell never reached its witness line");
     console.log(transcript.slice(-2000));
     process.exit(2);
@@ -272,34 +324,56 @@ try {
     `ITEM2_INODE: ${item2 ? "PASS" : "FAIL"} (${inodeLine ? inodeLine[0] : "no distinct_inode line"})`,
   );
 
+  // --- guest-side SEND ioctl status (distinct from host-side resolution:
+  // a guest ioctl failure here would otherwise surface only as "no matching
+  // SEND observed" below, which reads like a HOST bug) --------------------
+  const send1RcMatch = transcript.match(/^WLSHM: send1_ret=(-?\d+)/m);
+  const send1Rc = send1RcMatch ? send1RcMatch[1] : undefined;
+  if (send1Rc !== "0") {
+    console.log(
+      `GUEST_SEND1_RC: FAIL — wl-shm-test's first SEND ioctl returned ${
+        send1Rc ?? "<missing>"
+      } (a GUEST-side failure, not a host resolution failure)`,
+    );
+  } else {
+    console.log("GUEST_SEND1_RC: OK (0)");
+  }
+
   // --- item 3: host-observed addressing shape --------------------------------
-  const send = sends.find((e) => dec.decode(e.data) === SEND_PAYLOAD);
+  const send1 = sends.find((e) => dec.decode(e.data) === SEND1_PAYLOAD);
   let item3 = false;
-  let item3Detail = "no matching SEND observed";
-  if (send) {
-    const [f0, f1] = send.fds;
-    if (send.fds.length !== 2) {
-      item3Detail = `expected 2 fds, got ${send.fds.length}`;
+  let item3Detail = "no matching first SEND observed";
+  if (send1) {
+    const [f0, f1] = send1.fds;
+    if (send1.fds.length !== 2) {
+      item3Detail = `expected 2 fds, got ${send1.fds.length}`;
     } else if (f0.byteLength !== SHM_SIZE || f1.byteLength !== SHM_SIZE) {
       item3Detail = `wrong byteLength: ${f0.byteLength}, ${f1.byteLength}`;
-    } else if (f0.byteOffset === f1.byteOffset) {
-      item3Detail = `both fds resolved to the SAME offset 0x${f0.byteOffset.toString(16)} (aliasing)`;
+    } else if (f0.byteOffset < 0 || f0.byteOffset + f0.byteLength > f0.memoryByteLength) {
+      item3Detail = `pool0 offset 0x${f0.byteOffset.toString(16)}+${f0.byteLength} is out of bounds of guest memory (${f0.memoryByteLength}B)`;
+    } else if (f1.byteOffset < 0 || f1.byteOffset + f1.byteLength > f1.memoryByteLength) {
+      item3Detail = `pool1 offset 0x${f1.byteOffset.toString(16)}+${f1.byteLength} is out of bounds of guest memory (${f1.memoryByteLength}B)`;
+    } else if (Math.abs(f0.byteOffset - f1.byteOffset) < SHM_SIZE) {
+      item3Detail = `pools OVERLAP: offsets 0x${f0.byteOffset.toString(16)} / 0x${f1.byteOffset.toString(16)} are closer than ${SHM_SIZE}B apart`;
     } else {
       item3 = true;
-      item3Detail = `2 fds, 4096B each, offsets 0x${f0.byteOffset.toString(16)} / 0x${f1.byteOffset.toString(16)}`;
+      item3Detail = `2 fds, 4096B each, non-overlapping in-bounds offsets 0x${f0.byteOffset.toString(16)} / 0x${f1.byteOffset.toString(16)} (memory ${f0.memoryByteLength}B)`;
     }
   }
   console.log(`ITEM3_ADDR: ${item3 ? "PASS" : "FAIL"} (${item3Detail})`);
 
-  // --- content: bit-exact guest-write -> host-read round trip ---------------
+  // --- content: bit-exact guest-write -> host-read round trip, read from the
+  // SECOND send (issued after the pattern write) -----------------------------
+  const send2 = sends.find((e) => dec.decode(e.data) === SEND2_PAYLOAD);
   let content = false;
   let contentDetail = "n/a";
   if (!item3) {
     contentDetail = "n/a (item 3 failed first)";
-  } else if (testRc !== "0") {
-    contentDetail = `n/a (wl-shm-test did not exit cleanly: rc=${testRc ?? "<missing>"} — see CONTENT note in the file header)`;
+  } else if (!send2) {
+    contentDetail =
+      "no second SEND observed — matches the known SIGBUS state (see CONTENT in the file header); distinct from a second SEND with wrong bytes";
   } else {
-    const [f0, f1] = send.fds;
+    const [f0, f1] = send2.fds;
     const m0 = bytesEqual(f0.bytes, EXPECTED[0]);
     const m1 = bytesEqual(f1.bytes, EXPECTED[1]);
     content = m0 && m1;
@@ -309,11 +383,44 @@ try {
   }
   console.log(`CONTENT: ${content ? "PASS" : "FAIL"} (${contentDetail})`);
 
+  // --- the exact, reproduced SIGBUS signature (issue #203) ------------------
+  // The current, EXPECTED state on unfixed code: mmap() succeeds, then the
+  // very first ACCESS (even a read) into the region raises SIGBUS, printed
+  // by the shell as a bare "Bus error", with wl-shm-test exiting
+  // 128+SIGBUS=135 and no read_probe/pattern-written/second-SEND line past
+  // "WLSHM: mmap ok". Checking this EXACT signature (not just "content
+  // failed") is what makes the eventual XFAIL promotion (see the file
+  // header) meaningful: any OTHER outcome — a different signal, a clean exit
+  // with wrong bytes, a hang — must be flagged loudly, not silently treated
+  // as "still the known failure".
+  const mmapOk = /^WLSHM: mmap ok\r?$/m.test(transcript);
+  const readProbeSeen = /^WLSHM: read_probe0=/m.test(transcript);
+  const busError = /Bus error/.test(transcript);
+  const matchesKnownSigbusSignature = mmapOk && !readProbeSeen && busError && testRc === "135";
+
+  if (matchesKnownSigbusSignature && !content) {
+    console.log("XFAIL(#203) wl_shm mmap SIGBUS — expected, tracked");
+  } else if (content) {
+    console.log(
+      '#203 appears FIXED — promote this XFAIL to a hard CONTENT assertion (drop the "|| matchesKnownSigbusSignature" fallback below once this is confirmed on more than one run)',
+    );
+  } else {
+    console.log(
+      `UNEXPECTED — outcome matches neither the known SIGBUS signature nor a clean content pass ` +
+        `(mmapOk=${mmapOk} readProbeSeen=${readProbeSeen} busError=${busError} testRc=${testRc ?? "?"}); needs investigation, not just a re-run`,
+    );
+  }
+
+  // One-line flip point for the future hard-gate promotion (see the file
+  // header's PROMOTION note): today `pass` requires content===true; the
+  // promoted XFAIL gate instead requires (content || matchesKnownSigbusSignature).
   pass = item2 && item3 && content;
   console.log(
     `RESULT wl_shm_mmu ${pass ? "PASS" : "FAIL"} item2_inode=${item2 ? 1 : 0} item3_addr=${
       item3 ? 1 : 0
-    } content=${content ? 1 : 0} guest_rc=${testRc ?? "?"}`,
+    } content=${content ? 1 : 0} known_sigbus_signature=${
+      matchesKnownSigbusSignature ? 1 : 0
+    } guest_rc=${testRc ?? "?"}`,
   );
 } finally {
   if (!pass) console.log("\n── transcript tail ──\n" + transcript.slice(-4000));

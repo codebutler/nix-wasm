@@ -315,6 +315,20 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/resize-smoke.mjs
 # Also wired into nix-wasm.yml boot-smoke (gating).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/snd-smoke.mjs
 
+# #11 items 2/3 (wl_shm-on-MMU) parity check (issue #203; busybox-fork boot on
+# .#kernel-mmu-a2, no compositor needed): userspace/wl-shm-test.c drives
+# virtio_wl's NEW_ALLOC/anon-inode/SEND-fds path directly; a `wayland.sendOut`
+# bridge hook captures the host device model's resolution bit-exact.
+# ITEM2_INODE/ITEM3_ADDR reliably PASS (the wire-level accommodations work);
+# CONTENT reliably FAILS with a reproducible SIGBUS (virtwl_vfd_mmap was never
+# given real MMU semantics — tracked as issue #203, not a regression). Wired
+# into nix-wasm.yml boot-smoke's `mmu` shard as a non-gating step (see its own
+# comment for the promotion criterion).
+MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm \
+  BUSYBOX_FORK=$(nix build .#userspace-busybox-fork --print-out-paths)/bin \
+  WL_SHM_TEST=$(nix build .#wl-shm-test --print-out-paths)/bin/wl-shm-test \
+  node demo/node/wl-shm-mmu-smoke.mjs
+
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
 # Headless Playwright smoke (asserts WEB_OK):
@@ -1746,13 +1760,37 @@ CI / the linux box, per the design's "ship what works" scope):
   itself runs in kernel/driver context, identity-mapped under CONFIG_MMU=y, so
   it was never actually "under translation" — NOT the Wayland/`wl_shm` half of
   #11: every gtk-shard smoke is a display-free `--selftest` (no compositor in
-  the node harness → `wl_shm` is never allocated), so #11 items 2/3/5 (the
-  virtio_wl per-vfd/shm-fd/proxy accommodations) stay unverified on MMU — and
-  items 4 (the dropped upstream `vmalloc`/`find_vm_area` large-buffer-send
-  branch) and 6 (waylandproxyd's single-process/no-fork design) aren't
-  addressed by this shard set at all (a restore-or-keep call and a
-  Track-B-fork follow-on, respectively — full six-item disposition in the
-  parity-plan doc's close-out map). Every same-repo PR preview also now
+  the node harness → `wl_shm` is never allocated), so items 2/3/5 (the
+  virtio_wl per-vfd/shm-fd/proxy accommodations) stayed unverified on MMU from
+  THIS shard's evidence alone. **UPDATE (issue #203): items 2 and 3 are now
+  verified**, by a dedicated non-compositor smoke
+  (`runtime/demo/node/wl-shm-mmu-smoke.mjs`, `boot-smoke`'s `mmu` shard,
+  non-gating) that drives virtio_wl's NEW_ALLOC/anon-inode/SEND-fds sequence
+  directly against a bespoke test binary (`userspace/wl-shm-test.c`) — no
+  compositor needed. Item 2 (per-vfd anon inode) and item 3 (the host device
+  model's pfn→host-offset `_resolveShmFd` resolution) both PASS reliably.
+  A THIRD thing this smoke found while proving that: the mmap CONTENT
+  round-trip (can the guest actually WRITE into the vfd and have the host
+  read the same bytes) reliably FAILS with a clean SIGBUS — `virtwl_vfd_mmap`
+  /`virtwl_vfd_get_unmapped_area` (`patches/kernel/0013`) were written for
+  NOMMU's `do_mmap` direct-mapping and were never given real MMU page-fault
+  semantics; patch 0023 only ADDED an `#ifndef CONFIG_MMU` guard around the
+  NOMMU-only `virtwl_vfd_mmap_capabilities` hook (compiling it OUT under
+  CONFIG_MMU, since that fops field doesn't exist there at all) while
+  `.mmap`/`.get_unmapped_area` stay registered unchanged and un-ported (no
+  `vm_ops`, no `remap_pfn_range`; `get_unmapped_area` returns the shm
+  buffer's KERNEL address as if it were a valid USER mapping address). Filed
+  as **issue #203**, tracked as a real, reproducible kernel gap (not part of
+  this smoke's own scope to fix) — the smoke's CONTENT check and the CI
+  step's XFAIL design document the exact signature so a future fix is
+  provably detected. Item 5 (waylandproxyd's mmap+copy resync) is STILL
+  unverified — that logic lives in the Sommelier Wayland-client bridge path,
+  unreached without a real compositor boot. Items 4 (the dropped upstream
+  `vmalloc`/`find_vm_area` large-buffer-send branch) and 6 (waylandproxyd's
+  single-process/no-fork design) aren't addressed by this shard set at all (a
+  restore-or-keep call and a Track-B-fork follow-on, respectively — full
+  six-item disposition in the parity-plan doc's close-out map). Every
+  same-repo PR preview also now
   publishes a SECOND artifact set (`pr-preview.yml` + `runtime/demo/web/
   main.js`'s `?variant=mmu`), so a human CAN boot the MMU/fork guest in a real
   browser from any PR — the closest thing to a wl_shm-on-MMU check today, and

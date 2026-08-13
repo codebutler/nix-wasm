@@ -1,5 +1,6 @@
 /*
- * wl-shm-test.c — issue #11 items-2/3/5 wl_shm-on-MMU exercise.
+ * wl-shm-test.c — issue #11 items-2/3 wl_shm-on-MMU exercise (tracked as
+ * issue #203 once mmap content is at stake — see below).
  *
  * A plain userspace program (run as an ordinary child from a shell, NOT PID
  * 1 — a fatal signal here must kill only this process, never the guest,
@@ -11,22 +12,32 @@
  * on the two returned fds proves the per-vfd-unique-inode fix (a shared
  * global inode would collide both st_ino values).
  *
- * Both shm vfds are attached to the ctx via ONE VIRTWL_IOCTL_SEND — the wire
- * shape a real wl_shm_create_pool takes (message bytes + an out-of-band fd
- * list) — BEFORE any mmap/write is attempted, so the host device model's
- * per-SEND `_resolveShmFd` pfn->host-offset resolution (issue #11 item 3;
- * runtime/virtio/wl-device.js) is exercised and observable even if the
- * mmap/write step below turns out to be unsafe on this kernel.
+ * Both shm vfds are attached to the ctx via a FIRST VIRTWL_IOCTL_SEND — the
+ * wire shape a real wl_shm_create_pool takes (message bytes + an
+ * out-of-band fd list) — BEFORE any mmap/write is attempted, so the host
+ * device model's per-SEND `_resolveShmFd` pfn->host-offset resolution
+ * (issue #11 item 3; runtime/virtio/wl-device.js) is exercised and
+ * observable even if the mmap/write step below turns out to be unsafe on
+ * this kernel. This first SEND's fds are what the Node smoke uses for its
+ * ITEM3_ADDR shape check — deliberately BEFORE the pattern is written, so
+ * that check can never accidentally pass by reading post-write bytes.
  *
  * Only THEN does it mmap each vfd, do a single-byte READ probe (to tell a
  * read-fault from a write-fault if this crashes), and write a distinct
  * deterministic byte pattern into it — the only userspace-visible way to
  * place known bytes into the vfd's kernel backing (there is no write() path
- * onto shm_buf, only mmap). Every step prints a WLSHM: progress line and
- * flushes stdout immediately, so a fatal signal past mmap() leaves the
- * preceding progress fully visible to whatever waited on this process's
- * stdout/exit status. (Empirically: the read probe itself is already fatal
- * on current code — see the smoke's own header for what that means.)
+ * onto shm_buf, only mmap). If (and only if) that succeeds, it issues a
+ * SECOND SEND — a distinct payload, same two fds — to "commit" the drawn
+ * buffer; this is the real wire shape (attach, draw, commit) and is what the
+ * Node smoke's CONTENT check reads: a live host view captured AT THAT
+ * SECOND SEND, after the write, never a re-view of a possibly-stale/freed
+ * region after this process has exited.
+ *
+ * Every step prints a WLSHM: progress line and flushes stdout immediately,
+ * so a fatal signal past mmap() leaves the preceding progress fully visible
+ * to whatever waited on this process's stdout/exit status. (Empirically: the
+ * read probe itself is already fatal on current code — see the smoke's own
+ * header for what that means and why.)
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -76,11 +87,21 @@ struct virtwl_ioctl_txn {
 	uint8_t data[0];
 };
 
+/* A union, not a bare byte buffer, so the compiler guarantees the buffer is
+ * aligned for `struct virtwl_ioctl_txn`'s `int`/`uint32_t` members before we
+ * alias it via a pointer cast (a plain `unsigned char[]` gives no such
+ * guarantee). */
+union txn_buf {
+	struct virtwl_ioctl_txn txn;
+	unsigned char raw[sizeof(struct virtwl_ioctl_txn) + 8];
+};
+
 #define VIRTWL_IOCTL_NEW _VIRTWL_IOWR(0x00, struct virtwl_ioctl_new)
 #define VIRTWL_IOCTL_SEND _VIRTWL_IOR(0x01, struct virtwl_ioctl_txn)
 
 #define SHM_SIZE 4096
-#define SEND_PAYLOAD "SHMPING!"
+#define SEND1_PAYLOAD "SHMPING!" /* attach, before the buffer is drawn */
+#define SEND2_PAYLOAD "SHMDONE!" /* commit, after the buffer is drawn */
 #define SEND_PAYLOAD_LEN 8
 
 /* Deterministic per-buffer pattern; the Node smoke computes the SAME formula
@@ -90,6 +111,25 @@ struct virtwl_ioctl_txn {
 static unsigned char pattern_byte(int which, unsigned i)
 {
 	return (unsigned char)(which == 0 ? (i * 3 + 7) : (i * 5 + 11));
+}
+
+/* Build + issue one VIRTWL_IOCTL_SEND attaching both shm fds, with `payload`
+ * as the message bytes. Returns the ioctl's return value (0 on success; a
+ * negative virtwl_resp_err()-translated value on a guest-side SEND failure
+ * — NOT the same axis as a host-side resolution failure, so callers must
+ * check this explicitly rather than inferring failure from what the host
+ * observed). */
+static int send_both(int ctx_fd, int shm_fd0, int shm_fd1, const char *payload)
+{
+	union txn_buf b;
+	memset(&b, 0, sizeof(b));
+	for (int i = 0; i < VIRTWL_SEND_MAX_ALLOCS; i++)
+		b.txn.fds[i] = -1;
+	b.txn.fds[0] = shm_fd0;
+	b.txn.fds[1] = shm_fd1;
+	b.txn.len = SEND_PAYLOAD_LEN;
+	memcpy(b.raw + sizeof(struct virtwl_ioctl_txn), payload, SEND_PAYLOAD_LEN);
+	return ioctl(ctx_fd, VIRTWL_IOCTL_SEND, &b);
 }
 
 int main(void)
@@ -133,34 +173,35 @@ int main(void)
 	fflush(stdout);
 
 	/* Item 2: each vfd must land on its OWN anon inode (anon_inode_create_getfd,
-	 * not the aliasing anon_inode_getfd) so two shm pools don't collide. */
+	 * not the aliasing anon_inode_getfd) so two shm pools don't collide. Print
+	 * with %llu (not %lu — ino_t is 64-bit even on this wasm32 target, and a
+	 * %lu/`unsigned long` cast would silently truncate the printed value; the
+	 * != comparison above is unaffected since it compares the full-width
+	 * st_ino fields directly). */
 	struct stat st0, st1;
 	if (fstat(shm_fd[0], &st0) || fstat(shm_fd[1], &st1)) {
 		printf("RESULT wl_shm FAIL fstat errno=%d\n", errno);
 		return 1;
 	}
 	int distinct_inode = st0.st_ino != st1.st_ino;
-	printf("WLSHM: ino0=0x%lx ino1=0x%lx distinct_inode=%d\n", (unsigned long)st0.st_ino,
-	       (unsigned long)st1.st_ino, distinct_inode);
+	printf("WLSHM: ino0=0x%llx ino1=0x%llx distinct_inode=%d\n",
+	       (unsigned long long)st0.st_ino, (unsigned long long)st1.st_ino, distinct_inode);
 	fflush(stdout);
 
-	/* Item 3: attach BOTH shm vfds to the ctx in one SEND — the wire shape
-	 * wl_shm_create_pool takes (message bytes + an out-of-band fd list). The
-	 * host's _resolveShmFd runs on this SEND regardless of whether a
-	 * compositor bridge is wired (runtime/virtio/wl-device.js _handle()).
-	 * Deliberately done BEFORE any mmap/write below, so this evidence is on
-	 * the wire even if the mmap content step turns out to be unsafe. */
-	unsigned char buf[sizeof(struct virtwl_ioctl_txn) + SEND_PAYLOAD_LEN];
-	struct virtwl_ioctl_txn *t = (struct virtwl_ioctl_txn *)buf;
-	for (int i = 0; i < VIRTWL_SEND_MAX_ALLOCS; i++)
-		t->fds[i] = -1;
-	t->fds[0] = shm_fd[0];
-	t->fds[1] = shm_fd[1];
-	t->len = SEND_PAYLOAD_LEN;
-	memcpy(buf + sizeof(struct virtwl_ioctl_txn), SEND_PAYLOAD, SEND_PAYLOAD_LEN);
-
-	int sret = ioctl(ctx_fd, VIRTWL_IOCTL_SEND, buf);
-	printf("WLSHM: send_ret=%d\n", sret);
+	/* Item 3: attach BOTH shm vfds to the ctx (the wire shape wl_shm_create_pool
+	 * takes: message bytes + an out-of-band fd list). The host's
+	 * _resolveShmFd runs on this SEND regardless of whether a compositor
+	 * bridge is wired (runtime/virtio/wl-device.js _handle()). Deliberately
+	 * done BEFORE any mmap/write below, so this evidence is on the wire even
+	 * if the mmap content step turns out to be unsafe. A negative return here
+	 * is a GUEST-side ioctl failure (bad fds, host RESP_ERR, …) — print errno
+	 * so it reads as that, not as "the host never resolved anything" (which
+	 * is a different, host-side failure the Node smoke reports separately). */
+	int send1_ret = send_both(ctx_fd, shm_fd[0], shm_fd[1], SEND1_PAYLOAD);
+	printf("WLSHM: send1_ret=%d", send1_ret);
+	if (send1_ret < 0)
+		printf(" errno=%d", errno);
+	printf("\n");
 	fflush(stdout);
 
 	/* From here on is the part that needs guest mmap to actually reach the
@@ -193,7 +234,19 @@ int main(void)
 	printf("WLSHM: pattern written\n");
 	fflush(stdout);
 
-	printf("RESULT wl_shm DONE ino_distinct=%d send_ret=%d\n", distinct_inode, sret);
+	/* Second SEND — the "commit" the smoke's CONTENT check reads: captured by
+	 * the host AFTER the pattern write, on the SAME two fds. See the file
+	 * header for why this (not a re-view of send1's fds, and not a fresh
+	 * SEND after the process exits) is the correct place to read from. */
+	int send2_ret = send_both(ctx_fd, shm_fd[0], shm_fd[1], SEND2_PAYLOAD);
+	printf("WLSHM: send2_ret=%d", send2_ret);
+	if (send2_ret < 0)
+		printf(" errno=%d", errno);
+	printf("\n");
+	fflush(stdout);
+
+	printf("RESULT wl_shm DONE ino_distinct=%d send1_ret=%d send2_ret=%d\n", distinct_inode,
+	       send1_ret, send2_ret);
 	fflush(stdout);
 	return 0;
 }

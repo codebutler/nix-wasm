@@ -1,4 +1,6 @@
-# .#wl-shm-test — issue #11 items-2/3/5 wl_shm-on-MMU exercise
+# .#wl-shm-test — issue #11 items-2/3 wl_shm-on-MMU exercise (item 5,
+# waylandproxyd's mmap+copy resync, needs a real compositor boot and is NOT
+# covered here — see the smoke's own header)
 # (runtime/demo/node/wl-shm-mmu-smoke.mjs). Same recipe as wltest.nix — a
 # plain cross.stdenv build, no fork/asyncify seam (this program never forks;
 # it runs as an ordinary child under busybox-fork's shell). See

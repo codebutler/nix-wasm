@@ -256,24 +256,42 @@ surface already exist; Phase 1 only widens what boots on top of it).
   Phase-1 precondition blocking Phase 2's fork-default-flip on this axis.
   (Phase 2 itself is NOT started by this change — see the Phase 2 section
   below for its own remaining preconditions.)
-- [ ] **#11's Wayland/`wl_shm` half (close-out items 2/3/5) — no MMU compositor
-  boot exists yet.** The Landed `mmu-devices` shard above proves #11 item 1
+- [x] **#11's Wayland/`wl_shm` half, items 2/3 (item 5 still open) — DONE via
+  issue #203.** The Landed `mmu-devices` shard above proves #11 item 1
   (vring/pfn addressing is untouched by CONFIG_MMU=y — the kernel stays
   identity-mapped; see the close-out map below), but `nix-boot-smoke-mmu`'s
-  `gtk` shard does NOT reach the user-mapping half of #11: virtio_wl's per-vfd
-  anon inode, `_resolveShmFd`'s pfn→host-offset `Uint8Array` view
-  (`runtime/virtio/wl-device.js`), and waylandproxyd's mmap+copy resync are
-  exercised only when a real `wl_shm` pool is allocated — and every smoke in
-  that shard runs the display-free `--selftest` path (`gtk_init_check`
-  returns FALSE with no compositor in the node harness, so `wl_shm_pool`
-  creation never happens; see the M3b entry in CLAUDE.md). The MMU
-  browser-preview variant (`?variant=mmu`, Landed above) makes a MANUAL check
-  possible for the first time, but nothing GATES it in CI. Close this by
-  either promoting a `?variant=mmu` Playwright boot to a CI gate, or adding a
-  dedicated wl-text/sommelier smoke on `.#kernel-mmu-a2` + the fork squashfs
-  that actually allocates a `wl_shm` buffer. Until this lands, the ticket
-  close-out map's #11 entry (below) can only claim item 1, not the ticket as a
-  whole — do not close #11 on the `gtk` shard's evidence alone.
+  `gtk` shard did NOT reach the user-mapping half of #11: every smoke in that
+  shard runs the display-free `--selftest` path (`gtk_init_check` returns
+  FALSE with no compositor in the node harness, so `wl_shm_pool` creation
+  never happens; see the M3b entry in CLAUDE.md). Closed WITHOUT a compositor
+  boot: `runtime/demo/node/wl-shm-mmu-smoke.mjs` (boot-smoke's `mmu` shard,
+  non-gating) boots the real-fork busybox + a bespoke test binary
+  (`userspace/wl-shm-test.c`) that drives `/dev/wl0`'s NEW_ALLOC/anon-inode/
+  SEND-fds sequence directly, and registers the already-shipped
+  `wayland.sendOut` bridge hook to observe virtio_wl's per-vfd anon inode
+  (item 2) and `_resolveShmFd`'s pfn→host-offset `Uint8Array` view (item 3;
+  `runtime/virtio/wl-device.js`) without any engine change. Both reliably
+  PASS. Proving that also found a THIRD thing: the mmap CONTENT round-trip
+  (does a guest write into the vfd land in the SAME physical page the host's
+  pfn-derived view reads) reliably FAILS with a clean, reproducible SIGBUS —
+  `virtwl_vfd_mmap`/`virtwl_vfd_get_unmapped_area` (`patches/kernel/0013`)
+  were written for NOMMU's `do_mmap` direct-mapping and were never given real
+  MMU page-fault semantics (patch 0023 only ADDS an `#ifndef CONFIG_MMU`
+  guard around the NOMMU-only `virtwl_vfd_mmap_capabilities` hook — compiling
+  it out under CONFIG_MMU, since that fops field doesn't build there at all —
+  while `.mmap`/`.get_unmapped_area` stay registered unchanged and un-ported:
+  no `vm_ops`, no `remap_pfn_range`, and `get_unmapped_area` returns the shm
+  buffer's KERNEL address as if it were a valid USER mapping address). Filed
+  as **issue #203**, a real, tracked kernel-driver gap — porting
+  `virtwl_vfd_mmap` for real MMU semantics is out of THIS item's scope. **Item
+  5 (waylandproxyd's mmap+copy resync) is STILL open**: that logic lives in
+  the Sommelier Wayland-client bridge path, unreached without a real
+  compositor boot — the `?variant=mmu` Playwright-promotion or a dedicated
+  compositor smoke idea below still applies to item 5 specifically. So the
+  ticket close-out map's #11 entry (below) can now claim items 1/2/3, not the
+  ticket as a whole — do not close #11 without item 5 (and, separately,
+  without #203's CONTENT gap being resolved or explicitly accepted as
+  out-of-scope for #11).
 - [x] **(DONE, 19/19) Move every soak-step `check` call up to the hard-gates
   step's `run_smoke` once it has a green run on record.** PR #184's first
   soak cycle recorded first-attempt greens for 18 of the 19 soak invocations
@@ -692,17 +710,38 @@ or no-dlopen — do not touch them in this cleanup.
     since the PR #184 promotion cycle — a real regression in
     vsock/resize/snd/blk-rw now fails the JOB. Item 1 is answered by the
     argument AND CI-protected.
-  - **Items 2/3/5 (the Wayland/`wl_shm` user-mapping accommodations) are NOT
-    answered yet, despite `nix-boot-smoke-mmu`'s `gtk` shard running real GTK
-    binaries.** Every smoke in that shard is the display-free `--selftest`
-    path — no compositor in the node harness means `gtk_init_check` returns
-    FALSE, no `GdkDisplay`, so no `wl_shm` pool is ever allocated — so
-    virtio_wl's per-vfd anon inode, `_resolveShmFd`'s pfn→host-offset
-    `Uint8Array` view (`runtime/virtio/wl-device.js`), and waylandproxyd's
-    mmap+copy resync never run under CONFIG_MMU=y anywhere in CI today. This
-    is Phase 1's still-open Remaining item (above): closing it needs an actual
-    wl_shm-allocating MMU boot (a gated `?variant=mmu` Playwright check, or a
-    dedicated wl-text/sommelier smoke on `.#kernel-mmu-a2`), which does not
+  - **Items 2/3 (virtio_wl's per-vfd anon inode + `_resolveShmFd`'s
+    pfn→host-offset resolution) are ANSWERED — issue #203, via a
+    non-compositor smoke, not the `gtk` shard.** `nix-boot-smoke-mmu`'s `gtk`
+    shard never got there itself: every smoke in that shard is the
+    display-free `--selftest` path — no compositor in the node harness means
+    `gtk_init_check` returns FALSE, no `GdkDisplay`, so no `wl_shm` pool is
+    ever allocated there. Instead, `runtime/demo/node/wl-shm-mmu-smoke.mjs`
+    (boot-smoke's `mmu` shard, non-gating) drives `/dev/wl0`'s
+    NEW_ALLOC/anon-inode/SEND-fds sequence directly with a bespoke test
+    binary (`userspace/wl-shm-test.c`) and the already-shipped
+    `wayland.sendOut` bridge hook — no compositor, no engine change needed.
+    Item 2 (distinct `fstat` inodes per vfd) and item 3 (the host's
+    `_resolveShmFd`, `runtime/virtio/wl-device.js`, resolving 2 correctly
+    sized, non-overlapping, in-bounds regions) both PASS reliably on repeat
+    boots. **A third finding fell out of proving that**: the mmap CONTENT
+    round-trip — does a guest WRITE into the vfd land where the host's
+    pfn-derived view reads — reliably FAILS with a reproducible SIGBUS.
+    `virtwl_vfd_mmap`/`virtwl_vfd_get_unmapped_area` (`patches/kernel/0013`)
+    are NOMMU-only code that patch 0023 never ported: it only ADDS an
+    `#ifndef CONFIG_MMU` guard around the NOMMU-only
+    `virtwl_vfd_mmap_capabilities` hook (that fops field doesn't build under
+    CONFIG_MMU at all), while `.mmap`/`.get_unmapped_area` stay registered,
+    unchanged, and un-ported — no `vm_ops`, no `remap_pfn_range`, and
+    `get_unmapped_area` returns the shm buffer's KERNEL address as if it were
+    a valid USER mapping address. This is now **issue #203**, a tracked,
+    reproducible kernel-driver gap — closing it is out of THIS item's scope
+    (it needs a real mmap port, not a test). **Item 5 (waylandproxyd's
+    mmap+copy resync) is still open**: that logic lives in the Sommelier
+    Wayland-client bridge path, which the non-compositor smoke above
+    deliberately never reaches. Closing item 5 still needs an actual
+    wl_shm-allocating MMU boot THROUGH a compositor (a gated `?variant=mmu`
+    Playwright check, or a dedicated wl-text/sommelier smoke), which does not
     exist yet.
   - **Item 4 (the dropped upstream `vmalloc`+`find_vm_area` large-buffer send
     branch) is UNASSESSED by this plan.** #131's own slice-3 table
@@ -711,9 +750,10 @@ or no-dlopen — do not touch them in this cleanup.
     covers them, but nothing in that audit or this plan actually picks item 4
     up. It is a restore-or-keep call (the ticket's own words: "with MMU + a
     real DMA path, the upstream scatter/vmalloc branch could be restored"),
-    not something a display-free `--selftest` answers — deciding it needs a
-    `wl_shm` send that exceeds a single scatter entry, which depends on the
-    same still-missing wl_shm-allocating MMU boot as items 2/3/5.
+    not something a display-free `--selftest` (or the non-compositor items
+    2/3 smoke above) answers — deciding it needs a `wl_shm` send that exceeds
+    a single scatter entry, which depends on the same still-missing
+    wl_shm-THROUGH-a-compositor MMU boot as item 5.
     Disposition: **keep the current kvmalloc/single-`sg_init_one` NOMMU port
     until that boot exists**, then re-evaluate — restoring the upstream branch
     may not even buy anything, since item 1's identity-vring argument shows
@@ -728,16 +768,21 @@ or no-dlopen — do not touch them in this cleanup.
     Disposition: **keep the single-process design** — neither Phase 2's #131
     slice-1 edit set (musl/ash/busybox/glib/pkg-config, listed above) nor
     anything else in this plan touches `waylandproxyd`, so there is no
-    motivation here to rewrite it. Whoever eventually picks up items 2/3/4/5
-    on a real wl_shm-allocating boot should record this decision explicitly
+    motivation here to rewrite it. Items 2/3 are picked up above (issue
+    #203); whoever eventually picks up items 4/5 on a real
+    wl_shm-THROUGH-a-compositor boot should record this decision explicitly
     rather than leaving item 6 silently unaddressed.
   **#11 as a whole still cannot close on Phase 1's current CI evidence, even
-  though item 1 is now fully answered** (structural argument AND hard-gated
-  CI, both above) **— items 2/3/4/5 all need
-  a wl_shm-allocating MMU boot that does not exist yet, and item 6's
-  keep-as-is disposition above still needs recording on the ticket itself.**
-  Do not close the ticket, and do not cite the `gtk` shard as "real wl_shm"
-  evidence, until the Remaining items above land.
+  though items 1/2/3 are now fully answered** (item 1's structural argument
+  AND hard-gated CI; items 2/3 via the non-compositor `wl-shm-mmu-smoke.mjs`
+  and issue #203, both above) **— items 4/5 still need a wl_shm-allocating
+  MMU boot THROUGH A COMPOSITOR that does not exist yet, item 6's keep-as-is
+  disposition above still needs recording on the ticket itself, and #203's
+  CONTENT gap is itself a new, separate, tracked issue that should probably
+  gate #11's OWN closure too (not just be noted) — that's a call for whoever
+  closes #11, not this plan.** Do not close the ticket, and do not cite the
+  `gtk` shard OR the items-2/3 smoke's CONTENT failure as "real wl_shm"
+  evidence, until item 5 (and #203) land.
 - **#131** closes when slice 1 (Phase 2), slice 2 (Phase 4, three items), and
   slice 3 (Phase 4, six items) are ALL resolved (deleted-and-verified or
   kept-with-reason) — i.e. at the end of Phase 4.
