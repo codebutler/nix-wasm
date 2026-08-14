@@ -29,6 +29,14 @@ export async function bootNode(opts = {}) {
     // smoke can attach a recorder (device.setSink({ onPcm, … })) via
     // snd.onReady(device). Absent for boots that don't exercise audio.
     snd: opts.snd,
+    // #11 items 2/3/5: the Wayland compositor bridge hook (worker→main
+    // Greenfield shape: sendOut(clientId, buffer, fds), fds are live
+    // Uint8Array VIEWS over guest memory resolved by the host WlDevice's
+    // _resolveShmFd — see runtime/virtio/wl-device.js). Passed straight
+    // through so a smoke can assert on the exact bytes a VFD_SEND's attached
+    // shm vfds resolve to, without a real compositor. Absent for boots that
+    // don't exercise this (falls back to the in-process WlServer stub).
+    wayland: opts.wayland,
   });
 
   const transcripts = new Map();
@@ -84,8 +92,12 @@ export async function bootNode(opts = {}) {
 // harness can't reach. So each nix smoke primes a USER-level nix.conf that
 // overrides the substituter back to the local 9P cache (still mounted at
 // /nix-cache for the catalogs) — the standard "give the offline test a local
-// cache" shape, with NO change to the baked (Cachix-only) system config. Call
-// AFTER waitForPrompt(), before any nix command.
+// cache" shape, with NO change to the baked (Cachix-only) system config. Keep
+// `always-allow-substitutes = true` in this override: `guest-cc`/`guest-cxx` are
+// trivial builders with `allowSubstitutes = false`, and without this setting the
+// guest tries to build them locally (platform mismatch / std::bad_alloc) instead
+// of substituting the cached outputs.
+// Call AFTER waitForPrompt(), before any nix command.
 export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
   // Write via $HOME, NOT ~. The MMU/fork boot's /bin/sh is busybox hush, built
   // WITHOUT CONFIG_HUSH_TILDE, so it does NOT expand `~` — `~/.config/nix` would
@@ -97,7 +109,10 @@ export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
   session.send(
     "mkdir -p $HOME/.config/nix && " +
       "printf 'substituters = file:///nix-cache\\n" +
-      "trusted-substituters = file:///nix-cache\\nrequire-sigs = false\\n' " +
+      "trusted-substituters = file:///nix-cache\\n" +
+      "require-sigs = false\\n" +
+      "substitute = true\\n" +
+      "always-allow-substitutes = true\\n' " +
       "> $HOME/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
   );
   const ok = await session.waitForOutput(/LOCAL_NIX_CACHE_READY=0/, timeoutMs);

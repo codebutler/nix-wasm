@@ -544,6 +544,41 @@ jobs:
           BBF="$(cd .. && nix build -L '.#userspace-busybox-fork' --no-link --print-out-paths)"
           run_smoke demo/node/busybox-fork-smoke.mjs \
             MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin"
+          # #11 items 2/3 (wl_shm-on-MMU) parity check — the 2026-08-05 parity
+          # plan's "Remaining" item, closing the gap the `gtk` shard's
+          # display-free `--selftest`s can't reach: no compositor in the Node
+          # harness means `gtk_init_check` returns FALSE and `wl_shm` is never
+          # allocated. Boots the real-fork busybox + a small bespoke test
+          # binary (userspace/wl-shm-test.c) that drives the virtio_wl
+          # NEW_ALLOC/anon-inode/SEND-fds sequence directly — no compositor
+          # needed — and checks the host device model's resolution via a
+          # `wayland.sendOut` bridge hook (already-shipped API, no engine
+          # change). Full design + findings in wl-shm-mmu-smoke.mjs's own
+          # header. Item 5 (waylandproxyd's mmap+copy resync) is NOT covered —
+          # that needs a real compositor boot.
+          #
+          # GATING (#203 FIXED): all three checks — ITEM2_INODE (per-vfd anon
+          # inode), ITEM3_ADDR (the host's pfn->offset resolution), and
+          # CONTENT (a guest mmap of the shm vfd reaches the SAME physical
+          # page the host's pfn-derived view reads) — now PASS. This used to
+          # be a non-gating step: virtwl_vfd_mmap/virtwl_vfd_get_unmapped_area
+          # (patches/kernel/0013) were written for NOMMU's do_mmap
+          # direct-mapping and had never been given real MMU page-fault
+          # semantics, so CONTENT reliably SIGBUS'd (issue #203). Fixed by
+          # completing patch 0023's own (until-now partial) CONFIG_MMU port of
+          # virtio_wl.c: virtwl_vfd_mmap() now remap_pfn_range()s the vfd's
+          # physically-contiguous buffer into the vma (MAP_SHARED only —
+          # MAP_PRIVATE is rejected, loudly, since this driver has no
+          # struct-page tracking to support real COW and silently mapping it
+          # would risk stale/aliased data), and
+          # virtwl_vfd_get_unmapped_area()/virtwl_vfd_mmap_capabilities() are
+          # NOMMU-only now (the generic mm->get_unmapped_area is correct under
+          # a real MMU). Promoted to a hard `run_smoke` gate (retries on
+          # rc==2, like every other smoke in this step) — a regression here
+          # now fails the job.
+          WST="$(cd .. && nix build -L '.#wl-shm-test' --no-link --print-out-paths)"
+          run_smoke demo/node/wl-shm-mmu-smoke.mjs \
+            MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin" WL_SHM_TEST="$WST/bin/wl-shm-test"
 
       # mmu-devices group: substitute the software-MMU kernel + fork initramfs
       # (same pair nix-boot-smoke-mmu boots, but busybox-only — no squashfs/
