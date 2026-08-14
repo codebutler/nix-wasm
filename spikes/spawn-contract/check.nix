@@ -1,16 +1,16 @@
 # nix-wasm#202 PR-1: the spawn-contract link probe, parameterized over which
-# profile's libc it checks against. Was spikes/nofork/ (flake attr
-# `.#nofork-linkcheck`, kept as a compat alias in flake.nix — see its own
-# comment) — renamed because a single hardcoded "fork must be absent"
+# profile's libc it checks against. Was spikes/nofork/; renamed because a
+# single hardcoded "fork must be absent"
 # assertion stops being an accurate name the moment a SECOND profile (real
 # fork, #129/#131) exists to probe too. See docs/process-model.md for the two
 # process-model shapes this now checks.
 #
-# nommu-spawn (today's DEFAULT, unparameterized musl — toolchain/musl.nix's
-# `fork ? false`): compiles a fork() user and a posix_spawn() user through the
-# plain cross cc-wrapper. Contract: fork=ABSENT (wasm-ld reports `undefined
-# symbol: fork` — musl.nix's postPatch deletes the symbol body), spawn=LINKED.
-# This is what SHIPS today; PR-2's world-rebuild flip is what changes it.
+# nommu-spawn (the still-published NOMMU image, now built with the promoted
+# fork-capable libc): compiles a fork() user and a posix_spawn() user through
+# the plain, non-asyncifying cross cc-wrapper. Contract: a genuine fork caller
+# fails specifically on capture_stack while posix_spawn links. capture_stack
+# remains deliberately absent from the shared allow-list, so promoting the libc
+# cannot turn an ordinary non-asyncified package into a late runtime TypeError.
 #
 # mmu-fork (the #129/#131 real-fork musl, `muslFork`): relinks the SAME two
 # probes with muslFork's libc.a forced FIRST on the link line (mirrors
@@ -28,9 +28,9 @@
 #
 # WHAT "muslFork forced first" DOES AND DOES NOT PROVE (raised in review):
 # this is a HYBRID link — muslFork's libc.a is placed first, but the
-# cc-wrapper still appends the DEFAULT (nommu) sysroot's own `-lc` after it,
-# so any symbol muslFork's forced-in objects don't happen to pull still
-# resolves from the plain no-fork musl, not from muslFork. This is NOT a
+# cc-wrapper still appends the default sysroot's own `-lc` after it. Since the
+# default is now fork-capable too, the explicit archive is redundant for
+# contents but preserves the profile probe's established link shape. This is NOT a
 # probe-specific shortcut — it is EXACTLY the same hybrid-link technique both
 # real shipped mmu-fork binaries use for the identical reason (verified by
 # reading their own recipes, not assumed): userspace/busybox-fork.nix's own
@@ -119,7 +119,7 @@ let
   lib = cross.lib;
   profiles = [ "nommu-spawn" "mmu-fork" ];
   expected = {
-    "nommu-spawn" = { fork = "ABSENT"; spawn = "LINKED"; };
+    "nommu-spawn" = { fork = "NEEDS_CAPTURE_STACK"; spawn = "LINKED"; };
     # POST-SPLIT contract, now that the `__post_Fork` TU split has landed (it
     # ships in this same change): a spawn/thread-only program no longer drags
     # in `_Fork.c`, so it LINKS; only a genuine fork() caller still needs

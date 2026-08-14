@@ -1,8 +1,8 @@
 { cross, muslFork }:
 # muslFork link-contract gate (P2-2, review of commit 99e7a73's __post_Fork TU
 # split): asserts the asymmetry the split exists to preserve, against the
-# FORK-CAPABLE libc (muslFork), not the default fork-removed one
-# (nofork-linkcheck, the sibling in this directory, covers that variant).
+# FORK-CAPABLE libc (muslFork). The default libc is now the same fork-capable
+# shape; this focused check remains as a direct regression gate for the seam.
 #
 # Reuses the same two probe .c files verbatim (uses-fork.c / uses-spawn.c).
 # The cross cc-wrapper's default `-lc` still resolves to the DEFAULT musl
@@ -37,7 +37,7 @@ cross.stdenv.mkDerivation {
   name = "musl-fork-linkcheck";
   dontUnpack = true;
   # Prepend muslFork's libc.a so the linker resolves fork()/_Fork()/vfork()
-  # from it in preference to the default (fork-removed) sysroot libc — the
+  # from it explicitly ahead of the now-identical default sysroot libc — the
   # exact mechanism toolchain/wasm-fork-stdenv.nix's forkLib/enableForkFor use.
   NIX_LDFLAGS = "${muslFork}/lib/libc.a";
   buildPhase = ''

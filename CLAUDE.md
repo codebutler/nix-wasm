@@ -79,13 +79,16 @@ definitions then cross-compile.
   (`patches/kernel/0008-0012`) — there is **no fake-llvm wrapper** (deleted).
 - **Guest userspace** = `userspace/*.nix`: a curated `lib.evalModules` NixOS
   closure (no systemd/perl/python) + a patched busybox (`userspace/busybox.nix`:
-  clone-with-fn spawn — the default toolchain is `posix_spawn`-only) built via the `cross`
+  clone-with-fn spawn — ordinary NOMMU binaries use `posix_spawn`) built via the `cross`
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
   mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
   lowerdir and hands off to busybox-init.
-- **Process model** = single shared NOMMU arena + a **`posix_spawn`-only spawn
-  contract**; `fork`/`vfork` are **removed at the libc level** (`toolchain/musl.nix`)
-  so callers fail to **link** (loud build error) rather than SIGILL/abort at runtime.
+- **Process model** = the published image remains a single shared NOMMU arena
+  where ordinary binaries use `posix_spawn`. The default libc now contains the
+  real-fork `fork`/`vfork` seam, but `capture_stack` is deliberately excluded
+  from the shared allow-list, so a plain non-asyncified fork caller still fails
+  to **link** loudly. Real fork binaries opt into asyncify and require the
+  software-MMU+COW kernel.
   Holdouts are handled by one documented rule (don't-build an unused CLI / port a
   real library to `posix_spawn` / compile out an unused return-twice symbol) — never
   a stub. See **`docs/process-model.md`**. Per-process Memory is a *measured*
@@ -743,8 +746,8 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   into an `env.*` import** — exactly how #36's removal of `fork` from musl became the
   #50 dangling `env.fork` LinkError instead of a build failure. The allow-list restores
   #36's "callers fail to link" contract: a stray `fork`/`exec`/`system` fails the link
-  loudly. `.#spawn-linkcheck` is the gate (renamed from `.#nofork-linkcheck`,
-  which is kept as a compat alias — #202 PR-1 parameterized it over the
+  loudly. `.#spawn-linkcheck` is the gate (renamed from the retired
+  `.#nofork-linkcheck`; #202 PR-1 parameterized it over the
   nommu-spawn/mmu-fork profiles, see spikes/spawn-contract/check.nix); memory/table/base come from
   `--import-memory`/`--import-table`, NOT this list. (Editing the list rebuilds
   guest-clang + nix.wasm + `.#userspace-busybox-fork` → the fork initramfs → the
@@ -752,9 +755,9 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   `wasm-check-imports.py` check to consume the same generated file as an
   argument; the cross.* set is keyed on the byte-identical store path so it
   stays cached.)
-- **#202 PR-1 — the spawn-contract gate that must be green BEFORE the fork-
-  default flip** (`toolchain/musl.nix`'s planned `fork ? false` → `fork = true`).
-  The flip doesn't make fork() *work* — it makes it *link*: the engine provides
+- **#202 PR-1 — the spawn-contract gate guarding the promoted fork-capable
+  libc default.** The promotion doesn't make fork() work in every binary: the
+  engine provides
   `env.capture_stack` to every module unconditionally
   (`runtime/kernel-worker.js`), and its host implementation
   (`runtime/asyncify.js`'s `makeCaptureStack`) calls
@@ -775,7 +778,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   (not assumed) against the real already-built store: the mmu-fork closure
   has EXACTLY 2 modules importing capture_stack today (busybox-wasm32-fork,
   nix-wasm-fork), both correctly asyncify'd; the nommu-spawn closure has
-  zero, as its libc has no fork() symbol to reference the seam with — both
+  zero, because no module in that closure genuinely calls fork — both
   counts are pinned as regression guards (`expectCaptureStackCount` in
   flake.nix). Also fixed en route, needed by the sweep to run on any C++
   binary at all: `wasm-check-imports.py`'s import parser never handled wasm-EH
@@ -783,8 +786,9 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   allow-list but never actually exercised by this parser before, since the
   only prior caller was busybox, which has no C++), and crashed with
   `SystemExit("unknown import kind 4")` the first time the sweep touched
-  nix-wasm-fork. **`.#nofork-linkcheck` → `.#spawn-linkcheck`** (compat alias
-  kept): `spikes/nofork/` → `spikes/spawn-contract/check.nix`, parameterized
+  nix-wasm-fork. **`.#nofork-linkcheck` → `.#spawn-linkcheck`** (old alias
+  retired with the default promotion): `spikes/nofork/` →
+  `spikes/spawn-contract/check.nix`, parameterized
   over the same two profiles; its `mmu-fork` probe forces `muslFork`'s
   `libc.a` first on the link line (mirrors `busybox-fork.nix`'s own
   `CONFIG_EXTRA_LDFLAGS` technique) through the UNMODIFIED cc-wrapper (no new
@@ -1877,8 +1881,8 @@ CI / the linux box, per the design's "ship what works" scope):
 - **Track B — REAL fork() BOOTS on the software MMU (returns twice + COW).**
   The MMU-native fork is DONE and boot-verified — NOT PR #20's retired NOMMU
   per-process-Memory model. Three parts: (1) **musl** — the fork-asyncify seam
-  (`_Fork`→`capture_stack`) as `patches/musl/0010`, a `fork ? false` variant of
-  `musl.nix` (`.#musl-fork`); (2) **kernel** — `patches/kernel/0026-wasm-mmu-fork
+  (`_Fork`→`capture_stack`) as `patches/musl/0010`, now the fork-capable default
+  of `musl.nix` (also exposed as `.#musl-fork`); (2) **kernel** — `patches/kernel/0026-wasm-mmu-fork
   .patch` (applied with 0023): `wasm_fork_current(user_sp,user_tls,fork_ctl)`
   stamps the fork-time SP/TLS into pt_regs (fork bypasses syscall entry), arms
   `fork_ctl` on `current`'s switch_stack (copy_thread's copy carries it to the

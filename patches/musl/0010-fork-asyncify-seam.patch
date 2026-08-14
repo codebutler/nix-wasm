@@ -58,8 +58,9 @@ free to reference capture_stack without asyncify instrumentation, silently
 trading a loud link failure for the same class of runtime TypeError this split
 exists to prevent. A non-asyncified fork user must keep failing to link.
 
-Scoped to the musl-fork variant only (this patch, 0010, is applied only when
-`fork = true` in toolchain/musl.nix): in the default (fork = false) variant
+Scoped to the fork-capable libc (this patch, 0010, is applied when
+`fork = true` in toolchain/musl.nix, now the default): in the explicit legacy
+`fork = false` variant
 _Fork.c is unmodified by this patch, fork()'s body is deleted from fork.c
 (musl.nix postPatch), and _Fork() itself is called from nowhere else in the
 tree — so the pre-split coupling exists there too (clone.lo still references

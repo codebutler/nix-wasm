@@ -9,8 +9,7 @@
 # relocations (a real wasm limitation, not a shortcut). The meson config probes
 # are fixed in postPatch (the versioned replacement for the old shell build's sed).
 # realFork (#175): OFF by default → the shipped NOMMU guest's nix.wasm (clone-
-# vfork spawn, sysroot musl, no asyncify — byte-identical to before, so cross.*
-# and the default squashfs stay cached). ON → the software-MMU fork variant
+# vfork spawn, promoted fork-capable sysroot musl, no asyncify). ON → the software-MMU fork variant
 # (.#nix-wasm-fork): upstream startProcess `fork()` (WASM_REAL_FORK defines out
 # the CLONE_VM|CLONE_VFORK hack that SIGSEGV'd under the software MMU), linked
 # against muslFork's asyncify _Fork seam + a whole-module wasm-opt --asyncify.
@@ -22,7 +21,11 @@ let
   bt = llvm.bintools-unwrapped;
   clang = "${llvm.clang-unwrapped}/bin/clang";
   clangxx = "${llvm.clang-unwrapped}/bin/clang++";
-  wasmld = "${bt}/bin/wasm-ld";
+  # Use the same ELF/GNU-ld flag filter as the cross cc-wrapper. This custom
+  # raw-clang link used to point directly at stock wasm-ld, bypassing the
+  # filter and failing on meson's --start-group/--end-group flags (#209).
+  filteredWasmLd = import ./toolchain/wasm-ld-filter.nix { inherit pkgs; };
+  wasmld = "${filteredWasmLd}/bin/wasm-ld";
   builtins_a = "${compilerRt}/lib/wasm32-unknown-unknown/libclang_rt.builtins.a";
 
   # Shared no-undef allow-list (#52): the host-provided imports the nix.wasm link
@@ -36,8 +39,8 @@ let
   # extend the SHARED list LOCALLY rather than editing the shared file (which is
   # baked into the cross cc-wrapper's store path → adding it there would force a
   # full cross.* world rebuild for a symbol nix.wasm alone needs, per that file's
-  # header note). The DEFAULT build uses the shared list verbatim (byte-identical
-  # to before → stays cached). Every other undefined stays a loud link error.
+  # header note). The DEFAULT build uses the shared list verbatim. Every other
+  # undefined stays a loud link error.
   allowUndefinedBase = import ./toolchain/wasm-host-imports.nix { inherit pkgs; };
   allowUndefined =
     if realFork then

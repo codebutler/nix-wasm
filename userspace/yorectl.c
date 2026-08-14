@@ -10,9 +10,8 @@
  * It opens a SOCK_STREAM AF_VSOCK socket, connects to the host
  * (VMADDR_CID_HOST = 2) on CTL_PORT, sends one length-prefixed request, reads the
  * one length-prefixed reply, and exits. No fork, no threads — just
- * socket/connect/read/write/close, so it links clean under the NOMMU
- * posix_spawn-only musl (the `fork`/`vfork` symbols are removed at the libc
- * level; nothing here references them).
+ * socket/connect/read/write/close, so it links clean under the NOMMU profile;
+ * nothing here references the fork seam.
  *
  * WIRE PROTOCOL (authoritative definition: pc `js/linux/ctl-vsock.js`):
  *   request : "<VERB> <payloadLen>\n" + <payloadLen> bytes payload

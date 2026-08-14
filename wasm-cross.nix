@@ -40,41 +40,10 @@ let
       # fork/exec/system reference then fails the link loudly.
       allowUndefined = import ./toolchain/wasm-host-imports.nix { pkgs = native; };
 
-      filteredLd = native.writeShellScriptBin "wasm-ld" ''
-        args=(); skip=; has_r=
-        for a in "$@"; do
-          case "$a" in -r) has_r=1;; esac
-        done
-        for a in "$@"; do
-          if [ -n "$skip" ]; then skip=; continue; fi
-          case "$a" in
-            --undefined-version|--no-undefined-version) continue;;
-            --version-script=*|--dynamic-list=*|-soname=*|--soname=*) continue;;
-            --version-script|--dynamic-list|-soname|--soname) skip=1; continue;;
-            --build-id|--build-id=*|--eh-frame-hdr|--hash-style=*) continue;;
-            --compress-debug-sections=*) continue;;
-            --compress-debug-sections) skip=1; continue;;
-            --warn-shared-textrel|-z) skip=1; continue;;
-            -z*) continue;;
-            # -r (partial/relocatable link) is incompatible with --shared-memory:
-            # busybox uses -r to produce built-in.o; wasm-ld rejects the combo.
-            # Drop --shared-memory when -r is present (it's harmless for partial
-            # links — the final dylink module still gets --shared-memory via its
-            # own link step).
-            --shared-memory) if [ -n "$has_r" ]; then continue; fi;;
-            # GNU ld archive-group flags: wasm-ld doesn't implement them
-            # (they're no-ops in lld anyway — it doesn't need group ordering).
-            --start-group|--end-group) continue;;
-            # GNU ld-only diagnostic flags that wasm-ld rejects.
-            --warn-common) continue;;
-            # GNU ld ELF-DSO dependency pruning: meaningless for a static wasm
-            # link and rejected by wasm-ld (libcanberra's Makefile passes it).
-            --as-needed|--no-as-needed) continue;;
-          esac
-          args+=("$a")
-        done
-        exec ${llvm.bintools-unwrapped}/bin/wasm-ld "''${args[@]}"
-      '';
+      # One shared filter for both the cross cc-wrapper and custom raw-clang
+      # links (notably nix-wasm.nix). Keeping a private copy here let the latter
+      # bypass the already-correct --start-group/--end-group handling (#209).
+      filteredLd = import ./toolchain/wasm-ld-filter.nix { pkgs = native; };
 
       # nixpkgs' bintools-wrapper only symlinks tools it finds under the TARGET
       # PREFIX (`wasm32-unknown-linux-musl-ar`, …), but stock LLVM binutils ship

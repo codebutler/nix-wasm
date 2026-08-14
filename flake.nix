@@ -29,10 +29,11 @@
       # against it.
       compilerRt = import ./toolchain/compiler-rt.nix { inherit pkgs; };
       musl = import ./toolchain/musl.nix { inherit pkgs compilerRt; };
-      # #129 Track B: the fork variant of musl — fork() over the asyncify
-      # double-return seam (patch 0010). Userspace half of real fork() on the
-      # software MMU + COW; consumed by toolchain/wasm-fork-stdenv.nix (forkStdenv).
-      muslFork = import ./toolchain/musl.nix { inherit pkgs compilerRt; fork = true; };
+      # #129 Track B: compatibility/intent name for the fork-capable musl.
+      # Fork support is now the default, so this is the exact same derivation;
+      # forkStdenv consumers retain the explicit name to show that they also
+      # asyncify the final program and require the software-MMU+COW runtime.
+      muslFork = musl;
       kernelHeaders = import ./toolchain/kernel-headers.nix { inherit pkgs; };
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
@@ -947,8 +948,9 @@
         # covering the busybox/toplevel/initramfs-extraBins portion of this
         # root set — busybox-wasm32-nommu, nix-wasm, ash, and every
         # environment.systemPackages app): zero modules import capture_stack,
-        # as the nommu-spawn profile requires by construction (toolchain/
-        # musl.nix's default has no fork() symbol to reference it with). The
+        # as the nommu-spawn profile requires. The promoted default libc now
+        # contains the fork seam, but no ordinary NOMMU closure module calls
+        # fork(), and capture_stack remains outside the shared allow-list. The
         # toolchain/nixpkgs-catalog roots added by review were NOT separately
         # re-measured against a from-scratch nommu build (guest-clang etc.
         # don't call fork() and were already confirmed capture_stack-free in
@@ -1010,25 +1012,14 @@
         # from a symlink farm, so the on-disk FILE name is what a sweep
         # observes, not either package's derivation/attr name.
         expectCaptureStackNames = [ "busybox" "nix" ];
-        # NO expectMinModules pin here (unlike the nommu profile above),
-        # documented rather than silently omitted: a real, from-scratch
-        # `nix build .#guest-spawn-contract-fork` in this session could not
-        # reach the sweep step at all — it failed earlier, at nix-wasm-fork's
-        # own `libnixutil.so` link, on `wasm-ld: error: unknown argument:
-        # --start-group`/`--end-group` (meson's default archive-cycle-
-        # breaking link-group flags, ELF-only, apparently not yet in the
-        # wasm-ld flag filter). This is a REAL, reproducible build break, but
-        # it is UNRELATED to this review pass's six P1/P2 findings (nothing
-        # here touches nix-wasm.nix, wasm-cross.nix, or the wasm-ld flag
-        # filter) and fixing it is out of scope for this change — filed as a
-        # separate observation rather than guessed at or silently worked
-        # around. Without a real full-closure build, there is no MEASURED
-        # total to pin a floor against (the count that already sits above,
-        # 2, WAS independently confirmed — see its own comment — against the
-        # real busybox-wasm32-fork/nix-wasm-fork binaries directly, which
-        # doesn't need this closure-wide build). Add expectMinModules here
-        # once a from-scratch `.#guest-spawn-contract-fork` build succeeds
-        # and reports its real swept-module count.
+        # The same conservative floor as the NOMMU sweep. The two profiles
+        # traverse the same catalog/toolchain roots and parallel image roots;
+        # the exact totals may differ, but either falling below 190 means the
+        # sweep stopped seeing a material part of the guest world. #209's
+        # shared wasm-ld filter fix removes the --start-group/--end-group
+        # build break that previously prevented this guard from running from
+        # scratch; CI now proves both the link fix and this closure floor.
+        expectMinModules = 190;
       };
         in
         {
@@ -1229,23 +1220,17 @@
         # served /nix closure.
         galculator = cross.galculator;
 
-        # Task 1 clean-NOMMU probe, now parameterized (nix-wasm#202 PR-1; was
-        # spikes/spawn-contract/): verifies fork=ABSENT / spawn=LINKED for the DEFAULT
-        # (nommu-spawn) guest libc, and separately verifies the #129/#131
-        # mmu-fork libc's MEASURED today-contract (both fail on capture_stack,
-        # not fork) — see spikes/spawn-contract/check.nix's header for the full
-        # rationale + the wasm-ld --why-extract trace that justifies it. Always
-        # builds (link results written to $out/result).
+        # The parameterized link contract (nix-wasm#202): the promoted default
+        # libc contains the fork seam, but a plain non-asyncified fork caller
+        # must fail specifically on capture_stack while posix_spawn links. The
+        # same pair is pinned for the MMU fork profile; only its explicitly
+        # asyncified program links extend the import contract. Always builds
+        # (link results written to $out/result).
         spawn-linkcheck = spawnLinkcheck;
         spawn-linkcheck-fork = spawnLinkcheckFork;
-        # Compat alias — docs/process-model.md + CLAUDE.md's no-undef contract
-        # entry both name `.#nofork-linkcheck` in prose; keep the old name
-        # resolving to the (now-renamed, but semantically identical) default-
-        # profile check rather than breaking it.
-        nofork-linkcheck = spawnLinkcheck;
 
-        # nix-wasm#202 PR-1: the closure-wide sweep that must be green BEFORE
-        # Phase 2 can flip toolchain/musl.nix's default to `fork = true` — see
+        # nix-wasm#202: the closure-wide sweep that guards the promoted
+        # fork-capable libc default — see
         # userspace/spawn-contract-sweep.nix's header for why this is a
         # SEPARATE check derivation (not wired into the image builds
         # themselves) and scripts/wasm-check-imports.py's module docstring for
@@ -1258,8 +1243,8 @@
         guest-spawn-contract-nommu = guestSpawnContractNommu;
         guest-spawn-contract-fork = guestSpawnContractFork;
 
-        # P2-2 (review of commit 99e7a73's __post_Fork TU split): the muslFork-variant
-        # sibling of nofork-linkcheck above. Asserts the asymmetry the split exists to
+        # P2-2 (review of commit 99e7a73's __post_Fork TU split): the focused
+        # muslFork link check. Asserts the asymmetry the split exists to
         # preserve — against the FORK-CAPABLE libc: posix_spawn() still LINKS (the
         # split keeps clone.o's __post_Fork references from dragging in _Fork.lo), and
         # a non-asyncified fork() FAILS to link specifically on `capture_stack` (not

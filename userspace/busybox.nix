@@ -241,8 +241,9 @@ cross.stdenv.mkDerivation {
   dontFixup = true;
 
   # nix-wasm#202 PR-1: process-model coherence marker — see kernel.nix's
-  # identical passthru for the full rationale. This is the posix_spawn-only,
-  # clone-with-fn guest (fork()/vfork() removed at the musl symbol level);
+  # identical passthru for the full rationale. This is the NOMMU,
+  # clone-with-fn guest (ordinary programs use posix_spawn; a direct fork
+  # caller cannot link without the deliberately excluded capture_stack seam);
   # its counterpart is userspace/busybox-fork.nix's "mmu-fork". `passthru`
   # does not affect the built derivation's content or store path.
   passthru.processModel = "nommu-spawn";

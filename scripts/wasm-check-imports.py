@@ -17,8 +17,8 @@ Exits 0 when every governed import is in (allowlist file ∪ extras), else
 prints the violating names (plus the full accepted set, so a typo is
 obvious) and exits 1.
 
---fork-contract=PROFILE is the guest-closure-wide gate the fork-default flip
-(#202 PR-1) needs BEFORE it's safe to flip toolchain/musl.nix's default: it
+--fork-contract=PROFILE is the guest-closure-wide gate that guards the
+fork-capable libc default (#202 PR-1): it
 checks the two-sided capture_stack/asyncify contract described in the module
 docstring below, over one or more real shipped modules, in one of two
 profiles. --exports-script=PATH (REQUIRED in this mode) is the path to
@@ -28,9 +28,8 @@ THIS file into the store (busybox-fork.nix's existing call does exactly
 that for the OTHER mode), which would leave no sibling to find:
 
   nommu-spawn — the profile that SHIPS today: NO module may import
-    `capture_stack` at all (the default guest libc has fork()/vfork()
-    removed at the symbol level — see toolchain/musl.nix's `fork ? false` —
-    so nothing should ever reference the asyncify seam).
+    `capture_stack` at all. Its libc contains the fork seam, but the NOMMU
+    closure must not call it: real fork requires the software-MMU+COW profile.
 
   mmu-fork — the #129/#131 real-fork guest (`.#kernel-mmu-a2` +
     `.#wasm-initramfs-fork` / `.#wasm-base-squashfs-fork`): a module MAY
@@ -45,9 +44,9 @@ that for the OTHER mode), which would leave no sibling to find:
     mode restores build-time loudness for exactly that failure mode. See
     the "WHY THIS GATE EXISTS" note below for the full mechanism.
 
-WHY THIS GATE EXISTS (the finding it protects against — nix-wasm#202): Phase 2
-flips `toolchain/musl.nix`'s default from `fork ? false` to `fork = true`.
-That does not make fork() WORK — it makes it LINK. The engine provides
+WHY THIS GATE EXISTS (the finding it protects against — nix-wasm#202): making
+the fork-capable libc the default does not make fork() work in every program.
+The engine provides
 `env.capture_stack` to every module unconditionally
 (runtime/kernel-worker.js's per-worker import object — "wasm wires only the
 imports a module asks for" is a real WebAssembly property, so providing it
@@ -304,11 +303,9 @@ def fork_contract_check(path, data, profile, exported_funcs):
         if has_capture_stack:
             violations.append(
                 f"{path}: imports capture_stack, but the nommu-spawn profile's "
-                "guest libc has fork()/vfork() removed at the symbol level "
-                "(toolchain/musl.nix `fork ? false`) — nothing in this profile "
-                "should ever reference the asyncify fork seam. A module here "
-                "means either musl.nix's default flipped without this module "
-                "moving to the mmu-fork closure, or something references "
+                "must not execute the asyncify fork seam: real fork requires "
+                "the software-MMU+COW profile. A module here means either a "
+                "fork caller entered the NOMMU closure, or something references "
                 "capture_stack outside the fork seam entirely."
             )
     elif profile == "mmu-fork":
