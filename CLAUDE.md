@@ -1786,6 +1786,17 @@ CI / the linux box, per the design's "ship what works" scope):
   inline arm or an out-of-line `__mmu_translate_ck` call — 147 → 100.4 B per
   access. MEASURED: `nix.wasm` `instrument()` peak 603 → 227.6 MiB (−62%),
   output 149.9 → 111.0 MB (5.39× → 3.99×).
+  **BROWSER-VERIFIED WITHOUT CDP (2026-08-14; #202/#215 closed):** direct
+  Chrome 151, no Playwright/remote-debugging/DevTools client, booted both
+  immutable PR-#212 artifact sets and completed a shell-verified
+  `nix --version`. NOMMU peaked at 2587 MiB renderer / 3077 MiB whole Chrome;
+  MMU peaked at 3437 MiB / 3967 MiB (about +850 MiB renderer), completed the
+  first exec in 8.69 s, reclaimed memory, and stayed healthy through 182 s.
+  A separate idle NOMMU control fell from a 2983 MiB post-prompt peak to a
+  flat 1496 MiB; the earlier 8–10 GiB runaway does not reproduce without a
+  DevTools client and was a measurement-path artifact, not a product leak.
+  Full method and caveats: the final addendum in
+  `docs/superpowers/notes/2026-08-14-202-aot-instrumentation-design.md`.
   **THE CRUX — why the unconditional level-2 read is safe, and which operand
   actually matters** (a review corrected this twice, so it is written down):
   when `pgd_e == 0` the level-2 address is `idx*4`, always inside page 0, so it
@@ -2029,9 +2040,8 @@ CI / the linux box, per the design's "ship what works" scope):
   proof → #131 slice-1 default-flip, a batched world rebuild → the ship flip
   with its MANDATORY `ENGINE_ABI` bump + ordered `sync-to-pc.sh`→pc-deploy
   →`publish-linux-channel` rollout → #131 slices 2/3 cleanup), the #11/#131/#126
-  ticket close-out map, and the two open risks (browser instrument-at-load
-  memory for `nix.wasm` — the `-lg`-runner OOM lesson from #175 — and the
-  permanent ~2-3× per-access-walk cost): `docs/superpowers/notes/
+  ticket close-out map, the now-closed browser instrument-at-load memory risk,
+  and the accepted permanent ~2-3× per-access-walk cost): `docs/superpowers/notes/
   2026-08-05-mmu-phase1-parity-plan.md`.
 
 The new `runtime/*.js` modules (`dylink.js`, `ffi-codegen.js`, `softmmu-pass.js`,
