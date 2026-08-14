@@ -10,7 +10,7 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
+import { ByteSink, NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -1136,4 +1136,198 @@ describe("concatBytes — code-section assembly must not use Array.flat", () => 
   // (JavaScriptCore), which has a different/higher ceiling, so the crash can
   // only be reproduced end-to-end by the Node boot smoke (mmu prove-then-flip);
   // asserting `.flat()` throws here would be a false engine-specific gate.
+});
+
+describe("ByteSink — #202 streaming encoder", () => {
+  // Local LEB128 decoders mirroring softmmu-pass.js's internal (unexported)
+  // readU/readS, so these tests can read back what ByteSink wrote without
+  // depending on module internals — same technique the checked-translate
+  // fixture builder above already uses for leb_u/leb_s.
+  function decodeU(b, i = 0) {
+    let r = 0,
+      sh = 0,
+      x;
+    do {
+      x = b[i++];
+      r += (x & 0x7f) * 2 ** sh;
+      sh += 7;
+    } while (x & 0x80);
+    return [r >>> 0, i];
+  }
+
+  test("push (variadic, Array.push-compatible) + toUint8Array", () => {
+    const sink = new ByteSink();
+    sink.push(1, 2, 3);
+    sink.push(4);
+    expect([...sink.toUint8Array()]).toEqual([1, 2, 3, 4]);
+    expect(sink.len).toBe(4);
+  });
+
+  test("pushBytes accepts both number[] and Uint8Array sources", () => {
+    const sink = new ByteSink();
+    sink.pushBytes([1, 2, 3]);
+    sink.pushBytes(new Uint8Array([4, 5]));
+    sink.pushBytes([]); // empty is a no-op
+    sink.pushBytes(new Uint8Array([]));
+    expect([...sink.toUint8Array()]).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test("grows past its initial capacity (doubling) without losing or corrupting bytes", () => {
+    const sink = new ByteSink(4); // deliberately tiny — forces several doublings
+    const n = 10_000;
+    for (let k = 0; k < n; k++) sink.push(k & 0xff);
+    const out = sink.toUint8Array();
+    expect(out.length).toBe(n);
+    for (let k = 0; k < n; k++) expect(out[k]).toBe(k & 0xff);
+  });
+
+  test("reserve() returns the pre-reservation offset and leaves room for later content", () => {
+    const sink = new ByteSink();
+    sink.push(0xaa);
+    const off = sink.reserve(5);
+    expect(off).toBe(1);
+    expect(sink.len).toBe(6);
+    sink.push(0xbb);
+    expect(sink.len).toBe(7);
+    expect(sink.toUint8Array()[6]).toBe(0xbb);
+  });
+
+  test("truncating .len (the discard-and-retry pattern #164's fallback uses) drops already-written bytes", () => {
+    // Mirrors instrument()'s "emit inline, discover it's too big, roll back to
+    // just past the reserved size field, re-emit via the helper path" dance —
+    // the exact mechanism that lets a single shared sink replace the old
+    // per-function number[] + a second whole-body re-emission on overflow.
+    const sink = new ByteSink();
+    const off = sink.reserve(5);
+    const bodyStart = sink.len;
+    sink.push(1, 2, 3, 4, 5); // "inline" attempt — too big, discard it
+    expect(sink.len).toBe(bodyStart + 5);
+    sink.len = bodyStart; // roll back
+    sink.push(9, 9); // "helper" attempt — smaller, kept
+    sink.patch5(off, sink.len - bodyStart);
+    const out = sink.toUint8Array();
+    expect(out.length).toBe(5 + 2);
+    expect([...out.subarray(5)]).toEqual([9, 9]);
+    expect(decodeU(out, off)[0]).toBe(2);
+  });
+
+  // #202: "V8 was directly verified to accept padded 5-byte LEBs for section
+  // size, body size, and vector count" — these boundary values are exactly
+  // where a MINIMAL LEB128 encoding changes byte-length (1→2 bytes at 128,
+  // 2→3 at 16384, 3→4 at 2097152, 4→5 at 268435456), so a decoder that only
+  // ever saw minimal encodings could plausibly special-case the byte count.
+  // patch5 always emits exactly 5 bytes regardless of which side of a
+  // boundary `value` falls on; assert both the padded WIDTH (always 5) and
+  // that decoding round-trips to the exact original value on every one of
+  // these boundaries, plus 0 and the full 32-bit max.
+  const LEB_BOUNDARY_VALUES = [
+    0, // minimal 1 byte (all-zero case)
+    1,
+    127, // last value a minimal 1-byte LEB can hold
+    128, // first value that NEEDS a minimal 2nd byte
+    16383, // last minimal-2-byte value
+    16384, // first minimal-3-byte value
+    2097151, // last minimal-3-byte value
+    2097152, // first minimal-4-byte value
+    268435455, // last minimal-4-byte value
+    268435456, // first minimal-5-byte value (padded and minimal coincide here)
+    0xffffffff, // full 32-bit max (minimal encoding is ALSO 5 bytes here)
+  ];
+
+  test("patch5: padded 5-byte LEB round-trips every value across every LEB byte-length boundary", () => {
+    for (const v of LEB_BOUNDARY_VALUES) {
+      const sink = new ByteSink();
+      const off = sink.reserve(5);
+      sink.patch5(off, v);
+      const bytes = sink.toUint8Array();
+      expect(bytes.length).toBe(5);
+      // padded: the first 4 bytes carry the continuation bit UNCONDITIONALLY,
+      // the 5th never does — this is what distinguishes "padded" from
+      // "minimal" and is exactly what #202 verified V8 accepts.
+      for (let k = 0; k < 4; k++) expect(bytes[k] & 0x80).toBe(0x80);
+      expect(bytes[4] & 0x80).toBe(0);
+      const [decoded, next] = decodeU(bytes, 0);
+      expect(decoded).toBe(v >>> 0);
+      expect(next).toBe(5);
+    }
+  });
+
+  test("pushPadded5 (reserve+patch5 for an already-known value) matches manual reserve/patch5", () => {
+    for (const v of [0, 128, 16384, 268435456, 0xffffffff]) {
+      const a = new ByteSink();
+      a.pushPadded5(v);
+      const b = new ByteSink();
+      const off = b.reserve(5);
+      b.patch5(off, v);
+      expect([...a.toUint8Array()]).toEqual([...b.toUint8Array()]);
+    }
+  });
+
+  test("reserve+write-real-content+patch5 round-trips (declared length == actual content length), at every SMALL/MEDIUM boundary", () => {
+    // The actual USE pattern instrument() relies on: reserve 5, write N REAL
+    // bytes of content, patch the reserved field with N — proven here with
+    // genuine content (not just a patched-in number) at every 1-, 2-, and
+    // 3-byte-LEB boundary from the list above. (The 4-/5-byte boundaries
+    // (2097152+) are covered by the pure patch5 round-trip test above, where
+    // writing that many real bytes would defeat the point of this fast unit
+    // test; the end-to-end "instrument() output" test below additionally
+    // proves a REAL, much larger code section's declared size is consistent.)
+    for (const n of [0, 1, 127, 128, 16383, 16384]) {
+      const sink = new ByteSink();
+      const off = sink.reserve(5);
+      const start = sink.len;
+      for (let k = 0; k < n; k++) sink.push(k & 0xff);
+      const bodyLen = sink.len - start;
+      expect(bodyLen).toBe(n);
+      sink.patch5(off, bodyLen);
+      const out = sink.toUint8Array();
+      const [decodedLen, afterLen] = decodeU(out, off);
+      expect(decodedLen).toBe(n);
+      // and the declared length really does span exactly the written content
+      expect(out.length - afterLen).toBe(n);
+      for (let k = 0; k < n; k++) expect(out[afterLen + k]).toBe(k & 0xff);
+    }
+  });
+
+  test("instrument() output: the code section's declared size and every function's declared body size read back exactly (real pass, real fixture)", () => {
+    // End-to-end proof that the padded fields instrument() ACTUALLY emits
+    // (not just the ByteSink primitive in isolation) decode correctly and are
+    // internally consistent: the code section's own size must equal its true
+    // byte content, and the sum of (5-byte size field + body) over every
+    // vector entry must exactly fill it — i.e. no drift between what was
+    // reserved/patched and what was actually written.
+    const out = instrument(prog, { exportControls: true });
+    expect(out[0]).toBe(0x00);
+    expect(out[1]).toBe(0x61); // "wasm" magic, sanity
+    let i = 8;
+    let codeSecStart = -1;
+    let codeSecBodyLen = -1;
+    while (i < out.length) {
+      const id = out[i++];
+      const [size, next] = decodeU(out, i);
+      i = next;
+      if (id === 10) {
+        codeSecStart = i;
+        codeSecBodyLen = size;
+      }
+      i += size;
+    }
+    expect(codeSecStart).toBeGreaterThan(0);
+    expect(codeSecStart + codeSecBodyLen).toBeLessThanOrEqual(out.length);
+    // walk the code section's own function vector and confirm each declared
+    // body size is consistent (sum of size-field-relative body lengths does
+    // not run past the section's own declared end).
+    let j = codeSecStart;
+    const [nFuncs, afterCount] = decodeU(out, j);
+    j = afterCount;
+    let seen = 0;
+    const sectionEnd = codeSecStart + codeSecBodyLen;
+    while (j < sectionEnd) {
+      const [bodyLen, afterLen] = decodeU(out, j);
+      j = afterLen + bodyLen;
+      seen++;
+    }
+    expect(j).toBe(sectionEnd); // no drift: bodies exactly fill the section
+    expect(seen).toBe(nFuncs);
+  });
 });

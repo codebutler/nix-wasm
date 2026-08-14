@@ -528,6 +528,121 @@ export function concatBytes(chunks) {
   return out;
 }
 
+/**
+ * A growable byte buffer for SINGLE-PASS streaming wasm emission (#202).
+ *
+ * WHY: `rewriteFuncBody` used to accumulate into a plain JS `number[]`
+ * (`out.push(byte)` per emitted byte). On a Node build without pointer
+ * compression that costs ~24 bytes of process RSS per emitted byte (an 8-byte
+ * `PACKED_SMI_ELEMENTS` FixedArray slot × ~2-3× for geometric array growth +
+ * the old backing store still live mid-grow + GC lag) — measured: ONE 1.4 MB
+ * function of `nix.wasm` produced a 12.6 MB rewritten body and moved peak RSS
+ * by ~298 MiB by itself. `instrument()` then held the whole instrumented
+ * module THREE TIMES OVER at final assembly (`newCodeEntries` — one Uint8Array
+ * per function — then `newCodeBody = concatBytes(newCodeEntries)`, then the
+ * final `bytesOut`). A `ByteSink` fixes both: it is an ordinary
+ * doubling-growth `Uint8Array` (the same ~1-2× transient any typed-array
+ * accumulator pays, NOT 24×-per-byte), and `instrument()` now streams the
+ * ENTIRE module — including every function body — into ONE shared sink,
+ * eliminating `newCodeEntries` and `newCodeBody` outright (two of the three
+ * whole-module copies; only the sink's own backing buffer remains).
+ *
+ * PADDED-LEB BACKPATCH: a function body's final byte length (and the code
+ * section's own total byte length) are not known until every byte has been
+ * written — including the rare case where an over-limit function is
+ * re-emitted via the helper-call fallback (#164), which must be able to
+ * DISCARD an in-progress inline emission and retry from the same offset. The
+ * `reserve`/`patch5` pair lets a caller reserve a FIXED 5-byte field, write
+ * the (variable-length) content, then backpatch the field once the true
+ * length is known — no separate size-measuring pre-pass, no second body copy.
+ * A 5-byte field is always big enough: standard LEB128 allows non-minimal
+ * ("padded") encodings up to `ceil(N/7)` bytes for an N-bit value, and 5×7=35
+ * bits covers every 32-bit wasm length/count field with room to spare. This
+ * padded form was verified directly against V8 (Node 22,
+ * `new WebAssembly.Module(...)`): section sizes, function-body sizes, and
+ * vector counts all load fine whether minimal or padded.
+ *
+ * SCOPE (deliberately narrow — see the `instrument()` call sites): only the
+ * per-function body-size field and the code section's own outer size field
+ * use the padded/backpatch form, because those are the only two values that
+ * are genuinely unknown until after they are written. Every other
+ * length/count in the module (the module header, the type/func/global/export
+ * sections' bodies and outer sizes, the appended fixed helper bodies' length
+ * prefixes, the code section's function-count vector) is fully computable
+ * BEFORE it is written, so those keep the plain minimal `u()`/`s()` LEB
+ * encoding unchanged — this bounds the wire-format delta from the pre-#202
+ * pass to exactly the two categories that need it, rather than repadding the
+ * whole module.
+ */
+export class ByteSink {
+  constructor(initialCapacity = 1 << 16) {
+    this.buf = new Uint8Array(Math.max(initialCapacity, 64));
+    this.len = 0;
+  }
+
+  /** Grow the backing store (geometric doubling) so `extra` more bytes fit. */
+  _ensure(extra) {
+    if (this.len + extra <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < this.len + extra) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf.subarray(0, this.len));
+    this.buf = next;
+  }
+
+  /** Append one or more raw bytes — drop-in replacement for `Array.push`. */
+  push(...byteArgs) {
+    this._ensure(byteArgs.length);
+    this.buf.set(byteArgs, this.len);
+    this.len += byteArgs.length;
+    return this.len;
+  }
+
+  /** Append every byte of an array-like (`number[]` or `Uint8Array`), no spread. */
+  pushBytes(bytesArrayLike) {
+    const n = bytesArrayLike.length;
+    this._ensure(n);
+    this.buf.set(bytesArrayLike, this.len);
+    this.len += n;
+    return this.len;
+  }
+
+  /** Reserve `n` raw placeholder bytes (uninitialized-value = 0), return their offset. */
+  reserve(n) {
+    this._ensure(n);
+    const off = this.len;
+    this.len += n;
+    return off;
+  }
+
+  /**
+   * Backpatch a PADDED 5-byte unsigned LEB128 at `offset` (from a prior
+   * `reserve(5)`) with `value`. Always exactly 5 bytes: the first four bytes
+   * carry the continuation bit UNCONDITIONALLY (regardless of whether more
+   * significant bits remain), and the fifth never does — see the class doc
+   * comment for why this is spec-legal and V8-verified.
+   */
+  patch5(offset, value) {
+    let v = value >>> 0;
+    for (let k = 0; k < 4; k++) {
+      this.buf[offset + k] = 0x80 | (v & 0x7f);
+      v >>>= 7;
+    }
+    this.buf[offset + 4] = v & 0x7f;
+  }
+
+  /** Reserve 5 bytes and immediately patch them — for a value known up-front. */
+  pushPadded5(value) {
+    const off = this.reserve(5);
+    this.patch5(off, value);
+  }
+
+  /** The written portion as a Uint8Array VIEW (no copy) — call once, at the end. */
+  toUint8Array() {
+    return this.buf.subarray(0, this.len);
+  }
+}
+
 /** Split a module into [{id, body}] (body excludes id + size). */
 function splitSections(bytes) {
   if (bytes[0] !== 0 || bytes[1] !== 0x61) throw new Error("not wasm");
@@ -767,7 +882,18 @@ function skipAtomic(b, i) {
  *   correct two (non-adjacent) physical frames. In helper mode a width>=2 access
  *   ALWAYS takes the byte helper (no inline fast path — keeps the over-limit
  *   function compact). Null (unit-test direct calls) = pre-fix raw access.
- * @returns {number[]}
+ * @param {ByteSink} sink #202: the byte sink to APPEND this function's rewritten
+ *   body into (local-decl vec + instructions, no size prefix — the caller owns
+ *   framing/backpatching the size field). Callers stream every function
+ *   directly into ONE shared whole-module sink (see `instrument()`), so this
+ *   is REQUIRED (not defaulted — a trailing param after three optional ones
+ *   needs a default expression to satisfy `tsc -p jsconfig.json`'s checkJs,
+ *   so the default is `undefined` and this throws immediately if omitted,
+ *   rather than silently writing into nothing), not owned/returned by this
+ *   function — measure what was written via `sink.len` before/after the call
+ *   (this replaced the old `number[]` return value; see the #202 ByteSink
+ *   doc comment for why).
+ * @returns {void}
  */
 export function rewriteFuncBody(
   code,
@@ -777,7 +903,9 @@ export function rewriteFuncBody(
   checked = null,
   helper = null,
   splitFns = null,
+  sink = undefined,
 ) {
+  if (!sink) throw new Error("softmmu: rewriteFuncBody requires a ByteSink `sink` argument");
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -811,10 +939,14 @@ export function rewriteFuncBody(
   const PGD_E = base + 7;
   const PTE = base + 8;
 
-  const out = [];
+  // #202: `out` is the caller's shared ByteSink (the whole module streams into
+  // ONE sink — see `instrument()`), not a fresh accumulator per call. Every
+  // `out.push(...)` call below is UNCHANGED from the pre-#202 number[] version
+  // — ByteSink.push is a drop-in, Array.push-compatible variadic append.
+  const out = sink;
   // new local-decl vec: existing 6 groups + 1 more (pgd_e+pte) when checked
   out.push(...u(nLocals + 6 + (checked ? 1 : 0)));
-  for (let k = localsStart; k < localsEnd; k++) out.push(code[k]);
+  out.pushBytes(code.subarray(localsStart, localsEnd));
   out.push(...u(2), VT.i32); // ea + val_i32
   out.push(...u(1), VT.i64); // val_i64
   out.push(...u(1), VT.f32); // val_f32
@@ -1056,7 +1188,7 @@ export function rewriteFuncBody(
       if (!a) {
         // atomic.fence or an unmodeled atomic — copy the whole instr verbatim.
         const next = skipInstr(code, i);
-        for (let k = i; k < next; k++) out.push(code[k]);
+        out.pushBytes(code.subarray(i, next));
         i = next;
         continue;
       }
@@ -1107,10 +1239,12 @@ export function rewriteFuncBody(
       }
     }
     const next = skipInstr(code, i);
-    for (let k = i; k < next; k++) out.push(code[k]);
+    out.pushBytes(code.subarray(i, next));
     i = next;
   }
-  return out;
+  // #202: nothing to return — `out` IS the caller's shared sink (see the
+  // `sink` param doc above); the caller measures what this call wrote via
+  // `sink.len` before/after, not a return value.
 }
 
 // ---- module surgery ---------------------------------------------------------
@@ -1808,46 +1942,8 @@ export function instrument(bytes, opts = {}) {
   const inlineLimit = opts.inlineLimit ?? 6_000_000;
   const helperFns = { translateFunc, checkedTranslateFunc };
   const cb = codeSec.body;
-  let ci = 0;
-  let nCode;
-  [nCode, ci] = readU(cb, 0);
-  const newCodeEntries = [];
-  for (let f = 0; f < nCode; f++) {
-    let size;
-    [size, ci] = readU(cb, ci);
-    const body = cb.subarray(ci, ci + size);
-    ci += size;
-    const numParams = paramCounts[defTypes[f]] ?? 0;
-    let rewritten = rewriteFuncBody(
-      body,
-      numParams,
-      ptBaseGlobal,
-      bulkFns,
-      checkedCtx,
-      null,
-      splitFns,
-    );
-    if (rewritten.length > inlineLimit) {
-      const viaHelper = rewriteFuncBody(
-        body,
-        numParams,
-        ptBaseGlobal,
-        bulkFns,
-        checkedCtx,
-        helperFns,
-        splitFns,
-      );
-      // Not a silent cap (per #128's boot-debuggability ethos): announce the
-      // fallback + both sizes so a boot log shows exactly which function and why.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `softmmu: function #${f} inline body ${rewritten.length}B ` +
-          `exceeds ${inlineLimit}B — using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
-      );
-      rewritten = viaHelper;
-    }
-    newCodeEntries.push(concatBytes([u(rewritten.length), rewritten]));
-  }
+  const nCode = readU(cb, 0)[0];
+
   // append the translate helper body (RAW loads — it IS the translate):
   //   translate(va): pt_base + ((u32[pt_base + (va>>>12<<2)]) not inlined here)
   const translateBody = [
@@ -1895,34 +1991,91 @@ export function instrument(bytes, opts = {}) {
     0x6a, // +
     0x0b,
   ];
-  newCodeEntries.push(concatBytes([u(translateBody.length), translateBody]));
-  for (const body of [
-    memcpyHelperBody(translateFunc, checkedTranslateFunc),
-    memfillHelperBody(translateFunc, checkedTranslateFunc),
-    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
-  ]) {
-    newCodeEntries.push(concatBytes([u(body.length), body]));
-  }
-  if (checkedCtx) {
-    const ckBody = checkedTranslateBody(ptBaseGlobal, checkedCtx);
-    newCodeEntries.push(concatBytes([u(ckBody.length), ckBody]));
-  }
-  // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
-  // checked translate). Each translates every byte's page separately.
-  {
-    const lb = loadBytesHelperBody(translateFunc, checkedTranslateFunc);
-    const sb = storeBytesHelperBody(translateFunc, checkedTranslateFunc);
-    newCodeEntries.push(concatBytes([u(lb.length), lb]));
-    newCodeEntries.push(concatBytes([u(sb.length), sb]));
-  }
-  // Assemble the code section as a Uint8Array via a summed byte copy, NOT
-  // `newCodeEntries.flat()` + spread: the flattened number array of a large
-  // instrumented binary (nix.wasm, hundreds of MB) exceeds V8's Array.flat
-  // ceiling → `RangeError: Invalid array length` (see concatBytes).
-  const newCodeBody = concatBytes([
-    u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes
-    ...newCodeEntries,
-  ]);
+
+  // #202: the code section used to be assembled via TWO extra whole-module
+  // copies — `newCodeEntries` (one length-prefixed Uint8Array per function,
+  // via `concatBytes`) and then `newCodeBody = concatBytes(newCodeEntries)`.
+  // Both are gone: `emitCodeSectionBody` streams the function-count vector,
+  // every rewritten function body, and every appended helper body DIRECTLY
+  // into the caller's shared whole-module `ByteSink` (see the final assembly
+  // below), so the code section — by far the largest part of a real guest
+  // binary — now exists as bytes exactly ONCE (inside that one sink), not
+  // three times over. `sink` is the SAME sink the rest of the module streams
+  // into; this function does not allocate a section-sized buffer of its own.
+  const emitCodeSectionBody = (sink) => {
+    // function-count vector: fully known BEFORE any function is written (nCode
+    // from the original module + the fixed appended-helper count), so it stays
+    // a plain MINIMAL LEB — no backpatch needed (unlike the two fields below).
+    sink.push(...u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2)); // +2: load_bytes/store_bytes
+    let ci = 0;
+    [, ci] = readU(cb, 0); // skip the original function-count field (== nCode)
+    for (let f = 0; f < nCode; f++) {
+      let size;
+      [size, ci] = readU(cb, ci);
+      const body = cb.subarray(ci, ci + size);
+      ci += size;
+      const numParams = paramCounts[defTypes[f]] ?? 0;
+
+      // Padded backpatch: this function's rewritten byte length is unknown
+      // until it has been fully emitted (and, on overflow, re-emitted via the
+      // helper fallback), so reserve the field, write, then patch — the SAME
+      // pattern #164's "measure then decide" used, just without a second
+      // whole-body copy to measure from (see the ByteSink doc comment).
+      const sizeOff = sink.reserve(5);
+      const bodyStart = sink.len;
+      rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      let bodyLen = sink.len - bodyStart;
+      if (bodyLen > inlineLimit) {
+        // Discard the inline attempt (truncate back to just past the reserved
+        // size field) and re-emit via the helper-call translate into the SAME
+        // sink at the SAME offset — semantically identical to the old
+        // "build both, keep the smaller", but the discarded inline bytes were
+        // never materialised as their own retained copy.
+        sink.len = bodyStart;
+        rewriteFuncBody(
+          body,
+          numParams,
+          ptBaseGlobal,
+          bulkFns,
+          checkedCtx,
+          helperFns,
+          splitFns,
+          sink,
+        );
+        const viaHelperLen = sink.len - bodyStart;
+        // Not a silent cap (per #128's boot-debuggability ethos): announce the
+        // fallback + both sizes so a boot log shows exactly which function and why.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `softmmu: function #${f} inline body ${bodyLen}B ` +
+            `exceeds ${inlineLimit}B — using helper-call translate (${viaHelperLen}B) to stay under V8's max function size`,
+        );
+        bodyLen = viaHelperLen;
+      }
+      sink.patch5(sizeOff, bodyLen);
+    }
+    // Appended helper bodies: each one's length is fully known BEFORE it is
+    // written (no retry possible — these are fixed, hand-built bodies), so
+    // they keep the plain minimal-LEB length-prefix form, unchanged from
+    // before #202.
+    const appendFixed = (body) => {
+      sink.push(...u(body.length));
+      sink.pushBytes(body);
+    };
+    appendFixed(translateBody);
+    appendFixed(memcpyHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(memfillHelperBody(translateFunc, checkedTranslateFunc));
+    for (const seg of unhandled.initSegs) {
+      appendFixed(meminitHelperBody(translateFunc, checkedTranslateFunc, seg));
+    }
+    if (checkedCtx) {
+      appendFixed(checkedTranslateBody(ptBaseGlobal, checkedCtx));
+    }
+    // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
+    // checked translate). Each translates every byte's page separately.
+    appendFixed(loadBytesHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(storeBytesHelperBody(translateFunc, checkedTranslateFunc));
+  };
 
   // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
   // only) (i32,i32)->i32 -------------------------------------------------
@@ -2011,14 +2164,18 @@ export function instrument(bytes, opts = {}) {
   const newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
 
   // --- reassemble (insert sections that were absent, in canonical order) -----
-  // Section bodies are number[] except the code section (newCodeBody), which is
-  // a Uint8Array (assembled via concatBytes to dodge Array.flat's ceiling).
-  /** @type {Map<number, number[]|Uint8Array>} */
+  // Section bodies are number[] except the code section, which is represented
+  // by the CODE_SECTION_STREAM sentinel — its real bytes are never assembled
+  // as a standalone value at all (see the final assembly below and the
+  // ByteSink doc comment for why: #202 streams it directly into the shared
+  // output sink instead of building a separate whole-section copy first).
+  const CODE_SECTION_STREAM = Symbol("softmmu:code-section-stream");
+  /** @type {Map<number, number[]|Uint8Array|typeof CODE_SECTION_STREAM>} */
   const replaced = new Map();
   replaced.set(1, newTypeBody);
   replaced.set(3, newFuncBody);
   replaced.set(6, newGlobalBody);
-  replaced.set(10, newCodeBody);
+  replaced.set(10, CODE_SECTION_STREAM);
   if (newExportBody) replaced.set(7, newExportBody);
   const present = new Set(secs.map((x) => x.id));
 
@@ -2038,21 +2195,28 @@ export function instrument(bytes, opts = {}) {
   }
   emitMissingBefore(11);
 
-  // Assemble WITHOUT push(...spread): spreading a whole section's bytes as
-  // call arguments blows V8's argument-count limit on large binaries (a full
-  // musl-linked program is ~0.5 MB; the 22 KB test inits never tripped it).
-  /** @type {Uint8Array[]} */
-  const parts = [new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])];
+  // #202: stream the WHOLE module into one growable ByteSink, instead of
+  // building a `parts` array of section-sized Uint8Arrays and copying them
+  // all into a final `bytesOut` at the end. Every section's outer size field
+  // uses the padded/backpatch form uniformly (reserve 5, write the body,
+  // patch) — for the small sections the body length is already known, so
+  // this is a trivial reserve-then-immediately-known-value patch; only the
+  // code section's write in between is genuinely streamed (see
+  // `emitCodeSectionBody`). Pre-size the sink from the measured expansion
+  // ratio (busybox/nix-wasm: 5.4-6.9×, #202 §6.1) so it doesn't have to
+  // double-and-copy its own backing store on the way there.
+  const out = new ByteSink(Math.max(bytes.length * 7, 1 << 16));
+  out.pushBytes([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
   for (const sec of outSecs) {
-    parts.push(new Uint8Array([sec.id, ...u(sec.body.length)]));
-    parts.push(sec.body instanceof Uint8Array ? sec.body : new Uint8Array(sec.body));
+    out.push(sec.id);
+    const szOff = out.reserve(5);
+    const bodyStart = out.len;
+    if (sec.body === CODE_SECTION_STREAM) {
+      emitCodeSectionBody(out);
+    } else {
+      out.pushBytes(sec.body);
+    }
+    out.patch5(szOff, out.len - bodyStart);
   }
-  const total = parts.reduce((a, p) => a + p.length, 0);
-  const bytesOut = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    bytesOut.set(p, off);
-    off += p.length;
-  }
-  return bytesOut;
+  return out.toUint8Array();
 }
