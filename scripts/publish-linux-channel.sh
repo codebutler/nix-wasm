@@ -40,6 +40,13 @@
 # builds, hashes, and prints the wrangler commands + the latest.json it WOULD
 # write, then exits 0 — uploading nothing.
 #
+# PRECONDITION (nix-wasm#123): nix-wasm.yml's `artifacts` job must already have
+# pushed this commit's .#linux-image + .#wasm-binary-cache to Cachix. The
+# artifact-provenance gate below asserts that in seconds and fails fast if not,
+# so a publish raced against an in-flight (or cancelled) artifacts run can no
+# longer quietly build and ship an image CI never vetted. ALLOW_UNPUBLISHED=true
+# overrides, deliberately and loudly.
+#
 # IMPORTANT — --remote is MANDATORY on `wrangler r2 object put`. Without it
 # wrangler 4.x writes to the local simulator and the live URL 404s.
 #
@@ -66,6 +73,12 @@ WRANGLER=wrangler@4.119.0
 
 NIX_CMD="${NIX_CMD:-nix}"
 NIX="$NIX_CMD --extra-experimental-features 'nix-command flakes'"
+# The binary cache nix-wasm.yml pushes every built artifact to, and the one the
+# artifact-provenance gate below queries. See CLAUDE.md §Caching.
+CACHIX_URL="${CACHIX_URL:-https://nix-wasm.cachix.org}"
+# Escape hatch for the gate (workflow input `allow_unpublished`). Only for a
+# DELIBERATE publish of artifacts CI has not built — see the gate's own header.
+ALLOW_UNPUBLISHED="${ALLOW_UNPUBLISHED:-false}"
 # The dedicated disc-packages bucket (pc#416). The linux channel image + pointer
 # live here, NOT in pc-previews (which now only holds the site preview overlay).
 BUCKET="${PACKAGES_BUCKET:-pc-packages}"
@@ -99,16 +112,125 @@ echo "    rclone   $(rclone version 2>/dev/null | head -1)"
 echo "    wrangler $_wr"
 echo "    credentials present"
 
+# ---- ARTIFACT-PROVENANCE GATE (nix-wasm#123) ------------------------------
+# The publish must ship the artifacts nix-wasm.yml BUILT AND PUSHED for this
+# exact source -- never bytes this runner made up on its own.
+#
+# The hazard is real and recurring, not hypothetical. nix-wasm.yml's `artifacts`
+# job pushes .#linux-image + .#wasm-binary-cache to Cachix, but it takes tens of
+# minutes AND its concurrency group cancels it when a newer master commit lands.
+# So at any given moment "the artifacts for HEAD are in Cachix" is simply not
+# guaranteed. Dispatch a publish inside that window and `nix build` silently
+# falls back to BUILDING locally: an hour+ on this runner, and it ships an image
+# no CI job ever built or boot-smoked. That is the #121 incident, and it is
+# still visible in the run history -- the publish at ef7e64dc (2026-08-14
+# 20:53) was dispatched 6 min after its nix-wasm.yml started, that run was
+# CANCELLED, and the publish built `wasm-binary-cache` itself, pushed it, and
+# went green.
+#
+# So: evaluate the store paths (pure eval, no build, seconds) and assert both are
+# already in the cache. Missing -> fail HERE, in seconds, with the remedy --
+# instead of an hour into a build whose output nobody vetted. The build below
+# then runs --max-jobs 0 (substitute-only), which turns any residual gap between
+# this check and the build into an immediate hard failure rather than a silent
+# local rebuild. Runs in DRY_RUN too: `dry_run: true` is exactly how you check
+# whether a real publish would be safe right now.
+#
+# SCOPE, stated honestly: this proves the artifacts were BUILT BY CI, not that
+# HEAD is the newest master. A publish from a genuinely STALE checkout finds its
+# (older, CI-built) paths present and passes -- so the version-unchanged NOTICE
+# after the flip remains the guard for that axis. Closing it properly means
+# chaining the publish off a successful nix-wasm.yml run (#123 option 2).
+echo "==> artifact-provenance gate ($CACHIX_URL) …"
+echo "    commit: $(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo '<not a git checkout>')"
+# Reachability first, so "cache says absent" and "cache unreachable" can never be
+# reported as the same thing (they have completely different remedies).
+if ! curl -fsS -o /dev/null --max-time 30 --retry 3 --retry-delay 2 "$CACHIX_URL/nix-cache-info"; then
+  echo "ERROR: cannot reach the binary cache $CACHIX_URL." >&2
+  echo "       This is a network/cache-availability problem, NOT a missing artifact." >&2
+  exit 1
+fi
+
+# --max-jobs 0 unless the gate is explicitly overridden (see below).
+NIX_BUILD_MODE="--max-jobs 0"
+GATE_MISSING=""
+for _attr in linux-image wasm-binary-cache; do
+  # Pure evaluation: `.outPath` needs no build, so a missing artifact costs
+  # seconds here rather than an hour of `nix build`.
+  # shellcheck disable=SC2086
+  _path=$(eval "$NIX eval --raw '.#$_attr.outPath'") || {
+    echo "ERROR: could not evaluate .#$_attr — the flake does not evaluate here." >&2
+    exit 1
+  }
+  # /nix/store/<32-char nixbase32 hash>-<name> → the narinfo key is the hash.
+  _base="${_path#/nix/store/}"
+  _hash="${_base%%-*}"
+  # No -f: a 404 is a real ANSWER (absent), not a transport failure, so let curl
+  # exit 0 and branch on the status code.
+  _code=$(curl -sS -o /dev/null -w '%{http_code}' -I --max-time 30 --retry 3 --retry-delay 2 \
+    "$CACHIX_URL/$_hash.narinfo" 2>/dev/null || true)
+  case "$_code" in
+    200) echo "    PRESENT  .#$_attr → $_path" ;;
+    404)
+      echo "    MISSING  .#$_attr → $_path"
+      GATE_MISSING="$GATE_MISSING
+  .#$_attr → $_path"
+      ;;
+    "")
+      echo "ERROR: the request for $CACHIX_URL/$_hash.narinfo (.#$_attr) failed outright" >&2
+      echo "       (no HTTP status after retries). Transport problem, not a missing artifact." >&2
+      exit 1
+      ;;
+    *)
+      echo "ERROR: unexpected HTTP $_code for $CACHIX_URL/$_hash.narinfo (.#$_attr)." >&2
+      echo "       Neither present nor absent — refusing to guess. Re-run once the cache is healthy." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -n "$GATE_MISSING" ]; then
+  if [ "$ALLOW_UNPUBLISHED" = "true" ]; then
+    echo ""
+    echo "==> WARNING: artifacts are NOT in $CACHIX_URL, and ALLOW_UNPUBLISHED=true."
+    echo "    This runner will BUILD them itself (expect hours) and publish bytes that"
+    echo "    no CI job built or boot-smoked. Proceeding because you asked for it."
+    echo "    Missing:$GATE_MISSING"
+    echo ""
+    NIX_BUILD_MODE=""
+  else
+    echo "" >&2
+    echo "ERROR: this checkout's artifacts are not published yet — refusing to build them here." >&2
+    echo "" >&2
+    echo "  missing:$GATE_MISSING" >&2
+    echo "" >&2
+    echo "  Building them on this runner would take hours and would ship an image no CI" >&2
+    echo "  job ever built or boot-smoked (nix-wasm#121 / #123)." >&2
+    echo "" >&2
+    echo "  FIX: let nix-wasm.yml's \`artifacts\` job COMPLETE on this exact commit — it" >&2
+    echo "       pushes both paths to $CACHIX_URL — then re-run this publish. If that run" >&2
+    echo "       was cancelled (a newer master push cancels it) or skipped, re-run it first." >&2
+    echo "" >&2
+    echo "  OVERRIDE (deliberate publish of un-CI'd artifacts): ALLOW_UNPUBLISHED=true," >&2
+    echo "       or the workflow's \`allow_unpublished\` input." >&2
+    exit 1
+  fi
+fi
+
 echo "==> Building .#linux-image …"
+# --max-jobs 0 (unless overridden above): substitute-only. The gate just proved
+# both outputs are in the cache, so nothing legitimately needs building — and if
+# anything does, that means the premise changed under us and a hard failure is
+# the correct outcome, not an unvetted local rebuild.
 # shellcheck disable=SC2086
-IMG_STORE=$(eval "$NIX build .#linux-image --print-out-paths --no-link")
+IMG_STORE=$(eval "$NIX build .#linux-image $NIX_BUILD_MODE --print-out-paths --no-link")
 # make-iso9660-image emits the iso under $out/iso/; locate it robustly.
 ISO=$(find "$IMG_STORE" -name linux.iso -type f | head -1)
 [ -n "$ISO" ] && [ -f "$ISO" ] || { echo "ERROR: linux.iso not found under $IMG_STORE" >&2; exit 1; }
 
 echo "==> Building .#wasm-binary-cache …"
 # shellcheck disable=SC2086
-CACHE=$(eval "$NIX build .#wasm-binary-cache --print-out-paths --no-link")
+CACHE=$(eval "$NIX build .#wasm-binary-cache $NIX_BUILD_MODE --print-out-paths --no-link")
 
 # ---------------------------------------------------------------------------
 # 2. Version (= image content hash) + minEngine (from runtime/abi.js)
