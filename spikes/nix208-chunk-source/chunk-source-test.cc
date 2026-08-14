@@ -1,48 +1,61 @@
 // #208 — host-native (non-Nix, non-wasm) portability check for the ChunkSource
-// adapter added to `sourceToSink()` in patches/nix-2.34.7-wasm32-port.patch
-// (src/libutil/serialise.cc).
+// adapter shared by `sourceToSink()` and `sinkToSource()` in
+// patches/nix-2.34.7-wasm32-port.patch (src/libutil/serialise.cc).
 //
-// WHY THIS EXISTS: the wasm32 port of nix's sourceToSink() can't use upstream's
-// boost stackful coroutine (no fcontext backend on wasm), so it buffers every
-// pushed chunk and replays it through a Source at finish() instead. The first
-// cut of that buffer was a single contiguous std::string (`buffer.append(in)`);
-// because libc++'s basic_string grows by exact doubling, appending a ~128 MiB
-// compressed NAR (e.g. guest-clang's download) eventually issues ONE allocation
-// sized to the whole buffer so far — an order-16 buddy-block request the NOMMU
-// guest routinely can't satisfy, throwing std::bad_alloc that nix then
-// misreports as "no substituter that can build it". The fix keeps each pushed
-// chunk as its own std::string in a std::deque (never relocated on push_back)
-// and reads them back through ChunkSource, which walks the chunk list
-// sequentially — so no single allocation on the download path exceeds one HTTP
-// chunk (tens of KB).
+// WHY THIS EXISTS: the wasm32 port of nix's sourceToSink()/sinkToSource() can't
+// use upstream's boost stackful coroutine (no fcontext backend on wasm), so
+// both buffer everything pushed and replay it through a Source once fully
+// collected. The first cut of BOTH buffers was a single contiguous std::string
+// (`buffer.append(in)` / `StringSink::s`); because libc++'s basic_string grows
+// by exact doubling, appending a large payload eventually issues ONE
+// reallocation sized to the whole buffer so far — a high-order buddy-block
+// request. For issue #208 (substituting `guest-clang`) that request was
+// 134,352,896 B (order-16, needs a 256 MiB block), and it's `sinkToSource`'s
+// buffer — the DECOMPRESSED NAR, ~100.9 MB for that package — that produced
+// it, not `sourceToSink`'s compressed-download buffer (~23 MB, peaks around
+// 32-34 MB): see the two functions' own comments in the real patch for the
+// growth-simulation math that pins this down. Both got the identical fix
+// regardless, since both scale with their respective payload size. The fix
+// keeps each pushed chunk as its own std::string in a std::deque (never
+// relocated on push_back) and reads them back through ChunkSource, which
+// walks (and, as chunks are consumed, pop_front()s) the chunk list
+// sequentially — so no single allocation on either path exceeds one pushed
+// chunk.
 //
 // ChunkSource itself has no wasm-specific code and no nix-specific
-// dependencies beyond the Source/EndOfFile shapes it's written against, so its
-// logic — the actual bug class this file exists to catch (off-by-one at chunk
-// boundaries, short reads, a read whose `len` spans or exceeds a chunk, empty/
-// zero-length chunks) — can be verified with a plain host compiler. This file
-// is NOT part of the cross build or any Nix derivation; it mirrors the real
-// adapter byte-for-byte (see the comment above the class below) purely as a
+// dependencies beyond the Source/Sink/EndOfFile shapes it's written against,
+// so its logic — the actual bug class this file exists to catch (off-by-one
+// at chunk boundaries, short reads, a read whose `len` spans or exceeds a
+// chunk, empty/zero-length chunks, and — for the sourceToSink/sinkToSource
+// wrappers below — first-call-only side effects and exhausted-Source EOF
+// semantics) — can be verified with a plain host compiler. This file is NOT
+// part of the cross build or any Nix derivation; it mirrors the real code
+// byte-for-byte (see the comment above each mirrored piece) purely as a
 // standalone regression/portability check, run by hand:
 //
 //   c++ -std=c++20 -O1 -Wall -Wextra -o /tmp/chunk-source-test spikes/nix208-chunk-source/chunk-source-test.cc
 //   /tmp/chunk-source-test
 //
-// If this file and the ChunkSource in serialise.cc ever drift, re-sync them —
-// this is a mirror, not a #include of the real one (the real one lives inside
-// a patch file, not a compiled header, and depends on nix's actual Source /
-// EndOfFile / fun<> types).
+// If this file and serialise.cc ever drift, re-sync them — this is a mirror,
+// not a #include of the real one (the real one lives inside a patch file, not
+// a compiled header, and depends on nix's actual Source/Sink/EndOfFile/fun<>
+// types; here fun<Sig> is stood in for by std::function<Sig>, a faithful
+// enough substitute for exercising the control flow — fun<Sig> is itself just
+// a non-nullable wrapper around std::function, per src/libutil/include/nix/
+// util/fun.hh).
 
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-// ---- Minimal stand-ins for the two nix types ChunkSource depends on. ----
+// ---- Minimal stand-ins for the nix types this file's mirrors depend on. ----
 
 struct EndOfFile : std::runtime_error
 {
@@ -62,13 +75,44 @@ struct Source
     virtual size_t read(char * data, size_t len) = 0;
 };
 
+struct Sink
+{
+    virtual ~Sink() = default;
+    virtual void operator()(std::string_view data) = 0;
+};
+
+struct FinishSink : virtual Sink
+{
+    virtual void finish() = 0;
+};
+
+struct LambdaSink : Sink
+{
+    using data_t = std::function<void(std::string_view)>;
+    data_t dataFun;
+
+    explicit LambdaSink(data_t dataFun)
+        : dataFun(std::move(dataFun))
+    {
+    }
+
+    void operator()(std::string_view data) override
+    {
+        dataFun(data);
+    }
+};
+
+[[noreturn]] static void unreachable()
+{
+    std::abort();
+}
+
 // ---- Byte-for-byte mirror of ChunkSource in
 //      patches/nix-2.34.7-wasm32-port.patch (src/libutil/serialise.cc). ----
 
 struct ChunkSource : Source
 {
     std::deque<std::string> & chunks;
-    size_t idx = 0;
     size_t pos = 0;
 
     explicit ChunkSource(std::deque<std::string> & chunks)
@@ -78,19 +122,94 @@ struct ChunkSource : Source
 
     size_t read(char * data, size_t len) override
     {
-        // Skip past exhausted chunks (this also skips zero-length ones
-        // outright, since `pos == chunks[idx].size()` is `0 == 0`).
-        while (idx < chunks.size() && pos == chunks[idx].size()) {
-            idx++;
+        // Drop each chunk once fully consumed (rather than merely stepping
+        // an index past it) so its memory is freed as we go. This also
+        // skips zero-length chunks outright, since `pos ==
+        // chunks.front().size()` is `0 == 0` for one.
+        while (!chunks.empty() && pos == chunks.front().size()) {
+            chunks.pop_front();
             pos = 0;
         }
-        if (idx == chunks.size())
+        if (chunks.empty())
             throw EndOfFile("end of chunked buffer reached");
-        size_t n = chunks[idx].copy(data, len, pos);
+        size_t n = chunks.front().copy(data, len, pos);
         pos += n;
         return n;
     }
 };
+
+// ---- Byte-for-byte mirror of sourceToSink()/sinkToSource() themselves
+//      (patches/nix-2.34.7-wasm32-port.patch, src/libutil/serialise.cc) —
+//      exercises the wrapper plumbing (first-call-only side effects, EOF
+//      dispatch to a caller-supplied `eof()`), not just ChunkSource in
+//      isolation. ----
+
+static std::unique_ptr<FinishSink> sourceToSink(std::function<void(Source &)> reader)
+{
+    struct SourceToSink : FinishSink
+    {
+        std::function<void(Source &)> reader;
+        std::deque<std::string> chunks;
+
+        explicit SourceToSink(std::function<void(Source &)> reader)
+            : reader(std::move(reader))
+        {
+        }
+
+        void operator()(std::string_view in) override
+        {
+            if (in.empty())
+                return;
+            chunks.emplace_back(in);
+        }
+
+        void finish() override
+        {
+            ChunkSource source(chunks);
+            reader(source);
+        }
+    };
+
+    return std::make_unique<SourceToSink>(std::move(reader));
+}
+
+static std::unique_ptr<Source> sinkToSource(std::function<void(Sink &)> writer, std::function<void()> eof)
+{
+    struct SinkToSource : Source
+    {
+        std::function<void(Sink &)> writer;
+        std::function<void()> eof;
+        std::deque<std::string> chunks;
+        std::unique_ptr<ChunkSource> chunkSource;
+
+        SinkToSource(std::function<void(Sink &)> writer, std::function<void()> eof)
+            : writer(std::move(writer))
+            , eof(std::move(eof))
+        {
+        }
+
+        size_t read(char * data, size_t len) override
+        {
+            if (!chunkSource) {
+                LambdaSink sink([&](std::string_view data) {
+                    if (!data.empty())
+                        chunks.emplace_back(data);
+                });
+                writer(sink);
+                chunkSource = std::make_unique<ChunkSource>(chunks);
+            }
+
+            try {
+                return chunkSource->read(data, len);
+            } catch (EndOfFile &) {
+                eof();
+                unreachable();
+            }
+        }
+    };
+
+    return std::make_unique<SinkToSource>(std::move(writer), std::move(eof));
+}
 
 // ---- Test harness ----
 
@@ -325,16 +444,179 @@ int main()
         fuzzTrial(rng, /*numChunks=*/50, /*maxChunkLen=*/4096, /*maxReadLen=*/16384);
     }
 
+    // ==== sourceToSink() / sinkToSource() wrapper tests (the actual #208
+    //      site is inside sinkToSource — see the header comment) ====
+
+    // sourceToSink: push several chunks, then finish() with a reader that
+    // reads everything back via the blocking form. Exercises the real
+    // operator()/finish() plumbing, not just ChunkSource standalone.
+    {
+        auto sink = sourceToSink([](Source & source) {
+            char buf[64];
+            readExact(source, buf, 11);
+            check(std::string(buf, 11) == "hello world", "sourceToSink: reader got wrong bytes");
+            bool threw = false;
+            try {
+                source.read(buf, 1);
+            } catch (EndOfFile &) {
+                threw = true;
+            }
+            check(threw, "sourceToSink: reader must see EOF after the pushed bytes");
+        });
+        (*sink)("hello ");
+        (*sink)("world");
+        (*sink)(""); // empty pushes must be silently ignored, mirroring upstream
+        sink->finish();
+    }
+
+    // sourceToSink: finish() with nothing ever pushed — reader must see EOF
+    // immediately, not crash or hang.
+    {
+        bool reached = false;
+        auto sink = sourceToSink([&](Source & source) {
+            reached = true;
+            char buf[8];
+            bool threw = false;
+            try {
+                source.read(buf, 1);
+            } catch (EndOfFile &) {
+                threw = true;
+            }
+            check(threw, "sourceToSink: empty push history must EOF immediately");
+        });
+        sink->finish();
+        check(reached, "sourceToSink: reader must still run on an empty push history");
+    }
+
+    // sinkToSource: `writer` pushes chunks (including some empty ones, which
+    // must be filtered exactly like sourceToSink's operator() does); drive
+    // the returned Source to EOF via a custom `eof` callback (mirrors real
+    // call sites like copyStorePath's, which throw a specific error type —
+    // not necessarily EndOfFile) and check the drained bytes plus that
+    // `writer` ran exactly once no matter how many read() calls it took.
+    {
+        struct DoneMarker : std::exception
+        {
+        };
+
+        int writerCalls = 0;
+        auto source = sinkToSource(
+            [&](Sink & sink) {
+                writerCalls++;
+                sink("foo");
+                sink("");
+                sink("bar");
+                sink("");
+                sink("");
+                sink("baz");
+            },
+            [] { throw DoneMarker{}; });
+
+        std::string got;
+        char buf[2]; // deliberately tiny to force many short reads
+        bool sawDone = false;
+        for (;;) {
+            try {
+                size_t n = source->read(buf, sizeof buf);
+                got.append(buf, n);
+            } catch (DoneMarker &) {
+                sawDone = true;
+                break;
+            }
+        }
+        check(got == "foobarbaz", "sinkToSource: drained bytes != what writer pushed (minus empties)");
+        check(sawDone, "sinkToSource: caller's eof() must be the thing that ends the read loop");
+        check(writerCalls == 1, "sinkToSource: writer must run exactly once regardless of read() call count");
+
+        // Reading again past EOF must keep invoking the custom eof(), not
+        // resurrect data or silently return 0.
+        bool sawDoneAgain = false;
+        try {
+            source->read(buf, 1);
+        } catch (DoneMarker &) {
+            sawDoneAgain = true;
+        }
+        check(sawDoneAgain, "sinkToSource: read() past EOF must keep calling eof(), not go quiet");
+    }
+
+    // sinkToSource: writer pushes nothing at all — first read() must hit
+    // eof() immediately (mirrors StringSink's `pos(0) >= buffer.size()(0)`
+    // pre-fix behavior).
+    {
+        bool eofCalled = false;
+        auto source = sinkToSource([](Sink &) { /* pushes nothing */ }, [&] {
+            eofCalled = true;
+            throw EndOfFile("nothing was ever pushed");
+        });
+        char buf[8];
+        bool threw = false;
+        try {
+            source->read(buf, sizeof buf);
+        } catch (EndOfFile &) {
+            threw = true;
+        }
+        check(threw && eofCalled, "sinkToSource: empty writer must EOF on the very first read()");
+    }
+
+    // sinkToSource: randomized fuzzing through the FULL wrapper (writer
+    // pushes randomly-sized chunks, including empties; reads are
+    // randomly-sized too), the sinkToSource counterpart of fuzzTrial above.
+    for (int t = 0; t < 500; t++) {
+        std::uniform_int_distribution<size_t> numChunksDist(0, 15);
+        std::uniform_int_distribution<size_t> chunkLenDist(0, 50);
+        std::uniform_int_distribution<size_t> readLenDist(1, 50);
+        std::uniform_int_distribution<int> byteDist(0, 255);
+
+        size_t numChunks = numChunksDist(rng);
+        std::vector<std::string> pieces;
+        std::string expected;
+        for (size_t i = 0; i < numChunks; i++) {
+            size_t len = chunkLenDist(rng);
+            std::string piece;
+            for (size_t j = 0; j < len; j++)
+                piece.push_back(static_cast<char>(byteDist(rng)));
+            pieces.push_back(piece);
+            expected += piece;
+        }
+
+        auto src = sinkToSource(
+            [&](Sink & sink) {
+                for (auto & p : pieces)
+                    sink(p);
+            },
+            [] { throw EndOfFile("fuzz sentinel"); });
+
+        std::string got;
+        std::vector<char> buf(readLenDist(rng)); // fixed per-trial, still varies trial-to-trial
+        for (;;) {
+            size_t want = readLenDist(rng);
+            if (buf.size() < want)
+                buf.resize(want);
+            size_t n;
+            try {
+                n = src->read(buf.data(), want);
+            } catch (EndOfFile &) {
+                break;
+            }
+            check(n > 0 && n <= want, "sinkToSource fuzz: read() violated the >0,<=len contract");
+            got.append(buf.data(), n);
+        }
+        check(got == expected, "sinkToSource fuzz: drained bytes != concatenation of non-empty pushes");
+    }
+
     if (failures) {
         std::fprintf(stderr, "\n%d CHECK(S) FAILED\n", failures);
         return 1;
     }
     std::printf(
-        "OK: explicit edge cases passed (empty input, single zero-length "
-        "chunk, interspersed zero-length chunks, 1-byte boundary-straddling "
-        "reads, len > remaining-chunk reads, multi-chunk-spanning readExact, "
-        "adversarial fixed-length sweep) + %d small fuzz trials + 20 large "
-        "fuzz trials, all bit-exact against the concatenation.\n",
+        "OK: ChunkSource edge cases (empty input, single zero-length chunk, "
+        "interspersed zero-length chunks, 1-byte boundary-straddling reads, "
+        "len > remaining-chunk reads, multi-chunk-spanning readExact, "
+        "adversarial fixed-length sweep) + %d small + 20 large ChunkSource "
+        "fuzz trials + sourceToSink()/sinkToSource() wrapper tests (push/"
+        "finish plumbing, empty-history EOF, custom eof() dispatch, "
+        "writer-runs-exactly-once, empty writer, 500 sinkToSource fuzz "
+        "trials), all bit-exact against the concatenation.\n",
         numTrials);
     return 0;
 }
