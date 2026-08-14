@@ -47,7 +47,7 @@
 // pkgs.nix + paths.nix) and base.squashfs carries nix.conf with `substitute=true`.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
-import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 
@@ -153,7 +153,11 @@ try {
 
   pass = checks.every((c) => c.ok);
 } finally {
-  if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-4000));
+  if (!pass) {
+    const oom = describeGuestOom(s.snapshot());
+    if (oom) console.log(`\n[profile-install-e2e] ${oom}`);
+    console.log("\n── transcript tail ──\n" + s.snapshot().slice(-4000));
+  }
   s.kill();
 }
 

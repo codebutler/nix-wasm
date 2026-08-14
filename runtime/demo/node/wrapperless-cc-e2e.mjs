@@ -12,7 +12,7 @@
 //
 // LINUX_WASM_ARTIFACTS points at vmlinux.wasm/initramfs.cpio.gz/base.squashfs/
 // nix-cache (the .#wasm-binary-cache built from the #3 branch). Exit 0/1/2.
-import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 const checks = [];
@@ -86,7 +86,11 @@ try {
 
   pass = checks.every(Boolean);
 } finally {
-  if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
+  if (!pass) {
+    const oom = describeGuestOom(s.snapshot());
+    if (oom) console.log(`\n[wrapperless-cc-e2e] ${oom}`);
+    console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3000));
+  }
   s.kill();
 }
 console.log("\n[wrapperless-cc-e2e] " + (pass ? "PASS" : "FAIL"));

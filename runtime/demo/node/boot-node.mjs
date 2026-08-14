@@ -95,9 +95,46 @@ export async function bootNode(opts = {}) {
 // cache" shape, with NO change to the baked (Cachix-only) system config. Keep
 // `always-allow-substitutes = true` in this override: `guest-cc`/`guest-cxx` are
 // trivial builders with `allowSubstitutes = false`, and without this setting the
-// guest tries to build them locally (platform mismatch / std::bad_alloc) instead
-// of substituting the cached outputs.
+// guest tries to build them locally (platform mismatch) instead of substituting
+// the cached outputs.
 // Call AFTER waitForPrompt(), before any nix command.
+// #208: a SEPARATE, intermittent guest-substitution failure whose console
+// signature is
+// misleading. The NOMMU buddy allocator's contiguous-allocation failure
+// (`nommu: Allocation of length … failed`) throws `std::bad_alloc` inside the
+// in-guest `nix`, which nix then reports as "no substituter that can build it"
+// — reading exactly like a real cache miss even though the cache is fine and
+// the guest just couldn't find a free contiguous block big enough. The buffer
+// is `sinkToSource`'s in patches/nix-2.34.7-wasm32-port.patch, which holds the
+// whole UNCOMPRESSED NAR: guest-clang's is 100,902,552 B, and libc++'s growth
+// policy lands its final reallocation on 134,348,800 B — matching the observed
+// 134,352,896 B failure. (NOT `sourceToSink`'s compressed buffer, the first
+// diagnosis: at 23,250,672 B compressed that path peaks at 33,587,200 B, an
+// order-13/14 request the buddy allocator satisfies.) A smoke that only prints the raw
+// transcript tail on failure leaves that misleading nix error as the whole
+// story, so any smoke that substitutes in-guest should call this in its
+// failure path and print the result ALONGSIDE (not instead of) the transcript
+// — this is purely a diagnostic-message improvement, it never changes a
+// smoke's pass/fail verdict.
+const GUEST_ALLOC_FAIL_RE = /nommu: Allocation of length (\d+) from process \d+ \(([^)]+)\) failed/;
+export function describeGuestOom(transcript) {
+  const allocMatch = GUEST_ALLOC_FAIL_RE.exec(transcript);
+  if (allocMatch) {
+    const bytes = Number(allocMatch[1]);
+    return (
+      `guest OOM (contiguous alloc of ${bytes.toLocaleString()} bytes failed in ` +
+      `"${allocMatch[2]}") — NOT a cache miss, see #208`
+    );
+  }
+  if (/std::bad_alloc/.test(transcript)) {
+    // The kernel's buddy-allocator log line scrolled out of the captured
+    // transcript tail (or was never emitted), but the guest process still
+    // threw std::bad_alloc — same failure class, less precise evidence.
+    return "guest OOM (std::bad_alloc, no buddy-allocator log line captured) — NOT a cache miss, see #208";
+  }
+  return null;
+}
+
 export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
   // Write via $HOME, NOT ~. The MMU/fork boot's /bin/sh is busybox hush, built
   // WITHOUT CONFIG_HUSH_TILDE, so it does NOT expand `~` — `~/.config/nix` would

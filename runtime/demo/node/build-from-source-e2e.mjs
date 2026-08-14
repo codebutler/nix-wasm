@@ -24,7 +24,7 @@
 // + paths.nix). Wired into the nix-wasm.yml `nix-boot-smoke` CI job.
 //
 // Exit 0 pass / 1 fail / 2 inconclusive (kernel panic — re-run).
-import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
 
 const s = await bootNode({ nix: true });
 let pass = true;
@@ -147,7 +147,11 @@ try {
 
   console.log("\n[build-from-source-e2e] " + (pass ? "PASS" : "FAIL"));
 } finally {
-  if (!pass) console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3500));
+  if (!pass) {
+    const oom = describeGuestOom(s.snapshot());
+    if (oom) console.log(`\n[build-from-source-e2e] ${oom}`);
+    console.log("\n── transcript tail ──\n" + s.snapshot().slice(-3500));
+  }
   s.kill();
 }
 process.exit(pass ? 0 : 1);
