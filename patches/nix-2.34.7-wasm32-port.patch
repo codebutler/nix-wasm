@@ -235,35 +235,94 @@ index 71bea97..800663a 100644
  # put in `deps_other`.
  deps_other += boost
 diff --git a/src/libutil/serialise.cc b/src/libutil/serialise.cc
-index 22b3565..d975dca 100644
+index 22b3565..2831667 100644
 --- a/src/libutil/serialise.cc
 +++ b/src/libutil/serialise.cc
-@@ -9,8 +9,6 @@
+@@ -8,9 +8,8 @@
+ #include <cstring>
  #include <cerrno>
  #include <memory>
++#include <deque>
  
 -#include <boost/coroutine2/coroutine.hpp>
 -#include <boost/coroutine2/protected_fixedsize_stack.hpp>
  
  #ifdef _WIN32
  #  include <fileapi.h>
-@@ -307,57 +305,31 @@ CompressedSource::CompressedSource(RestartableSource & source, CompressionAlgo c
+@@ -307,57 +306,90 @@ CompressedSource::CompressedSource(Resta
  
  std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
  {
+-    struct SourceToSink : FinishSink
 +    /* wasm32 port (#139): the upstream implementation uses a boost stackful
 +       coroutine so `reader` can pull lazily as data is pushed. wasm has no
-+       fcontext stack-switch backend, so we buffer all pushed bytes and run
-+       `reader` over the complete buffer at finish(). Loses streaming (the whole
-+       input is held in memory) but is functionally equivalent for a consumer
-+       that reads to EOF. */
-     struct SourceToSink : FinishSink
++       fcontext stack-switch backend, so we still buffer everything pushed and
++       run `reader` over it at finish() rather than lazily. Loses streaming
++       (the whole input is held in memory for the life of this object) but is
++       functionally equivalent for a consumer that reads to EOF.
++
++       #208: that buffer must NOT be one contiguous std::string, as the first
++       cut of this port had it (`buffer.append(in)`). Every `narFromPath`
++       download (binary-cache-store.cc) funnels through here for every
++       compression method except none/br (compression.cc's
++       makeDecompressionSink) — i.e. every real cache NAR — with
++       filetransfer.cc pushing one HTTP-chunk-sized `std::string_view` at a
++       time and no `reserve()`. libc++'s basic_string grows by exact doubling
++       (max(2*old_cap, new_size)), so appending a ~128 MiB compressed payload
++       (e.g. guest-clang's NAR) eventually issues ONE reallocation whose
++       request size is the whole buffer so far — a single, non-power-of-two,
++       order-16-buddy-block request (observed 134,352,896 B). The guest's
++       NOMMU allocator routinely has five 128 MiB blocks free and zero 256 MiB
++       ones, so that single alloc throws std::bad_alloc, and nix reports the
++       failure as "no substituter that can build it" — nothing about that
++       message points at an allocator failure three layers down. This is not
++       "unlucky sizing" either: the request size scales with the artifact, so
++       it recurs for every dependency around this size, not just this one.
++
++       Fix: keep each pushed chunk as its own `std::string` in a
++       `std::deque` — a deque never relocates existing elements when you
++       push/pop at an end, so appending never copies or grows a big prior
++       allocation — and give `finish()` a `ChunkSource` (below) that walks
++       the chunk list to serve `reader`'s `Source::read` calls one chunk (or
++       partial chunk) at a time: same bytes, same order, same EOF semantics
++       as a `StringSource` over the concatenation, but the largest single
++       allocation on this path is now one HTTP chunk (tens of KB), never the
++       whole compressed payload. Do not "simplify" this back to a single
++       `std::string buffer` — that reintroduces exactly the order-16
++       allocation this exists to avoid. */
++    struct ChunkSource : Source
      {
 -        typedef boost::coroutines2::coroutine<bool> coro_t;
--
++        std::deque<std::string> & chunks;
++        size_t idx = 0;
++        size_t pos = 0;
++
++        ChunkSource(std::deque<std::string> & chunks)
++            : chunks(chunks)
++        {
++        }
++
++        size_t read(char * data, size_t len) override
++        {
++            // Skip past exhausted chunks (this also skips zero-length ones
++            // outright, since `pos == chunks[idx].size()` is `0 == 0`).
++            while (idx < chunks.size() && pos == chunks[idx].size()) {
++                idx++;
++                pos = 0;
++            }
++            if (idx == chunks.size())
++                throw EndOfFile("end of chunked buffer reached");
++            size_t n = chunks[idx].copy(data, len, pos);
++            pos += n;
++            return n;
++        }
++    };
+ 
++    struct SourceToSink : FinishSink
++    {
          fun<void(Source &)> reader;
 -        std::optional<coro_t::push_type> coro;
-+        std::string buffer;
++        std::deque<std::string> chunks;
  
          SourceToSink(fun<void(Source &)> reader)
              : reader(reader)
@@ -274,8 +333,8 @@ index 22b3565..d975dca 100644
 -
          void operator()(std::string_view in) override
          {
--            if (in.empty())
--                return;
+             if (in.empty())
+                 return;
 -            cur = in;
 -
 -            if (!coro) {
@@ -303,19 +362,19 @@ index 22b3565..d975dca 100644
 -            if (!cur.empty()) {
 -                (*coro)(false);
 -            }
-+            buffer.append(in);
++            chunks.emplace_back(in);
          }
  
          void finish() override
          {
 -            if (coro && *coro)
 -                (*coro)(true);
-+            StringSource source(buffer);
++            ChunkSource source(chunks);
 +            reader(source);
          }
      };
  
-@@ -366,13 +338,16 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
+@@ -366,13 +398,16 @@ std::unique_ptr<FinishSink> sourceToSink
  
  std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
  {
@@ -335,7 +394,7 @@ index 22b3565..d975dca 100644
  
          SinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
              : writer(writer)
-@@ -380,49 +355,23 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
+@@ -380,49 +415,23 @@ std::unique_ptr<Source> sinkToSource(fun
          {
          }
  
@@ -354,13 +413,8 @@ index 22b3565..d975dca 100644
 -                        });
 -                        writer(sink);
 -                    });
-+            if (!produced) {
-+                StringSink sink;
-+                writer(sink);
-+                buffer = std::move(sink.s);
-+                produced = true;
-             }
- 
+-            }
+-
 -            if (cur.empty()) {
 -                if (hasCoro && *coro) {
 -                    (*coro)();
@@ -372,8 +426,13 @@ index 22b3565..d975dca 100644
 -                    eof();
 -                    unreachable();
 -                }
--            }
--
++            if (!produced) {
++                StringSink sink;
++                writer(sink);
++                buffer = std::move(sink.s);
++                produced = true;
+             }
+ 
 -            size_t n = cur.copy(data, len);
 -            cur.remove_prefix(n);
 -
