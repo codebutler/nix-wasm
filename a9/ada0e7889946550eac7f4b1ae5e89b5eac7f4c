@@ -1,0 +1,74 @@
+userspace/yorectl.c
+  s_5c319dde45a577::t_c861b55bc4e9e3 13-14
+spikes/spawn-contract/check.nix
+  s_5c319dde45a577::t_c861b55bc4e9e3 2-3,31-33
+  s_5c319dde45a577::t_035985d5328a62 8-13,122
+toolchain/wasm-ld-filter.nix
+  s_5c319dde45a577::t_035985d5328a62 1-39
+wasm-cross.nix
+  s_5c319dde45a577::t_035985d5328a62 43-46
+userspace/spawn-contract-sweep.nix
+  s_5c319dde45a577::t_c861b55bc4e9e3 3
+userspace/busybox.nix
+  s_5c319dde45a577::t_c861b55bc4e9e3 244-246
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_0237739e26bfbf 473-474,483-484
+  s_5c319dde45a577::t_233f66249c631b 364-368,482,506,516
+  s_5c319dde45a577::t_0a052deeac4cc8 352-353,418-419
+patches/musl/0008-wasm-unmapself-no-stack-switch.patch
+  s_5c319dde45a577::t_fe83e191dfcc41 11
+spikes/spawn-contract/check-fork.nix
+  s_5c319dde45a577::t_ab196ea2a995ab 40
+  s_5c319dde45a577::t_c861b55bc4e9e3 4-5
+flake.nix
+  s_5c319dde45a577::t_c861b55bc4e9e3 951-953,1015-1022,1223-1228,1231-1233,1246-1247
+  s_5c319dde45a577::t_5c2efdc6e02778 32-36
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_c861b55bc4e9e3 219,283-286
+toolchain/wasm-host-imports.nix
+  s_5c319dde45a577::t_47e8d2fdf739c3 28-29,39
+nix-wasm.nix
+  s_5c319dde45a577::t_83f3e088098ce7 12,42-43
+  s_5c319dde45a577::t_035985d5328a62 24-28
+toolchain/musl.nix
+  s_5c319dde45a577::t_0237739e26bfbf 213-214
+  s_5c319dde45a577::t_035985d5328a62 12,20-23,67-71,291-302
+  s_5c319dde45a577::t_c861b55bc4e9e3 59,63
+kernel.nix
+  s_5c319dde45a577::t_0237739e26bfbf 676-677
+  s_5c319dde45a577::t_c861b55bc4e9e3 675
+scripts/wasm-check-imports.py
+  s_5c319dde45a577::t_c861b55bc4e9e3 20-21,31-32,47-49,306-308
+CLAUDE.md
+  s_5c319dde45a577::t_d9b4a2b522d2b4 82,86-91,749-750,758,781,789,1884-1885
+  s_5c319dde45a577::t_0237739e26bfbf 759-760,790-791
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_db107ad03453b2 136-141,193-195,205-206
+  s_5c319dde45a577::t_a69b2b68dd252e 123-125
+patches/musl/0010-fork-asyncify-seam.patch
+  s_5c319dde45a577::t_83f3e088098ce7 61-63
+userspace/asyncify-cc.nix
+  s_5c319dde45a577::t_0237739e26bfbf 17-18
+  s_5c319dde45a577::t_47e8d2fdf739c3 15-16
+docs/process-model.md
+  s_5c319dde45a577::t_dc249f0a2a7044 57,60,66-68,73-76,78,80-82,84-89
+  s_5c319dde45a577::t_0237739e26bfbf 146-147
+  s_5c319dde45a577::t_c5131f4ab8dfe4 1,3,14,16,29-30,32-34,38-42,46-49,53-55
+  s_5c319dde45a577::t_c030528e1fcb2f 94-95,145
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a9ada0e7889946550eac7f4b1ae5e89b5eac7f4c",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
