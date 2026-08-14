@@ -25,8 +25,8 @@
 # port (patches/musl/0009).
 #
 # capture_stack (#129 Track B, ENGINE_ABI 10) is deliberately, PERMANENTLY NOT
-# here — this is not a "not yet". Do NOT add it in the Phase-2 fork-default
-# flip (or any other PR), and do not read the muslFork/`fork = true` promotion
+# here — this is not a "not yet". It was intentionally excluded during the
+# Phase-2 fork-default promotion; do not read that promotion
 # as license to add it. Adding it to this SHARED allow-list would let ANY
 # guest binary reference capture_stack without being asyncify-instrumented —
 # a plain posix_spawn/pthread_create link would then still LINK (silently
@@ -36,7 +36,7 @@
 # machine and throws a TypeError at instantiation/call time — exactly the
 # opaque-runtime-failure class the #52 no-undef contract exists to convert
 # into a loud link-time failure. Concretely: `toolchain/musl.nix`'s
-# `fork = true` variant (muslFork) DEFINES fork()/_Fork(), and commit
+# fork-capable default (also exposed as muslFork) DEFINES fork()/_Fork(), and commit
 # 99e7a73 (see `patches/musl/0010-fork-asyncify-seam.patch`'s header) split
 # `__post_Fork` into its own TU precisely so that a plain posix_spawn/
 # pthread_create link against muslFork does NOT pull in `_Fork.lo` (hence

@@ -1,7 +1,6 @@
 # .#guest-spawn-contract-nommu / .#guest-spawn-contract-fork (nix-wasm#202 PR-1).
 #
-# The closure-wide gate that must be green BEFORE Phase 2 can flip
-# toolchain/musl.nix's default from `fork ? false` to `fork = true`: it runs
+# The closure-wide gate that guards the promoted fork-capable libc default: it runs
 # scripts/wasm-closure-sweep.py (--fork-contract=PROFILE, wasm-check-imports.py's
 # per-module check) over EVERY real wasm module reachable from a profile's guest
 # roots — not just busybox (the one binary the pre-existing hardening in

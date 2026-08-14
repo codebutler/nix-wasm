@@ -216,7 +216,7 @@ jobs:
             '.#deepfork-exec-init' \
             '.#deepfork-sig-child' \
             '.#userspace-busybox-fork' \
-            '.#nofork-linkcheck' \
+            '.#spawn-linkcheck' \
             '.#musl-fork-linkcheck' \
             --print-out-paths --no-link 2>&1 | tee build.log
 
@@ -280,10 +280,10 @@ jobs:
         run: nix build -L --rebuild '.#nix-wasm' --no-link
 
   # --- contract: the spawn-contract gate (nix-wasm#202 PR-1) ------------------
-  # Must be green BEFORE Phase 2 can flip toolchain/musl.nix's default from
-  # `fork ? false` to `fork = true` — see scripts/wasm-check-imports.py's module
-  # docstring for the capture_stack/asyncify-TypeError mechanism this whole gate
-  # exists to catch at BUILD time instead of at boot. Substitutes everything it
+  # Guards the promoted fork-capable libc default — see
+  # scripts/wasm-check-imports.py's module docstring for the
+  # capture_stack/asyncify-TypeError mechanism this whole gate exists to catch
+  # at BUILD time instead of at boot. Substitutes everything it
   # needs (the cross cc-wrapper, musl-fork, busybox-fork, nix-wasm-fork, and
   # every extraBin/systemPackage app) from Cachix once `toolchain`/`artifacts`
   # have pushed them, so this stays a cheap, no-boot job — no runtime/ harness,

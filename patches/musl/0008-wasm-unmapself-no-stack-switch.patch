@@ -8,9 +8,7 @@
  static void *unmap_base;
  static size_t unmap_size;
  static char shared_stack[256];
-@@ -13,12 +14,27 @@
- 	__syscall(SYS_munmap, unmap_base, unmap_size);
- 	__syscall(SYS_exit);
+@@ -15,10 +16,25 @@
  }
 +#endif
  

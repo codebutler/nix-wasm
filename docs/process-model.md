@@ -1,6 +1,6 @@
-# Guest process model (clean NOMMU)
+# Guest process model
 
-The wasm guest is a **single-shared-arena NOMMU system**: one
+The currently published wasm guest is a **single-shared-arena NOMMU system**: one
 `WebAssembly.Memory`, `mm/nommu.c` loads each process at its `data_start`
 offset (the runtime wires `data_start → __memory_base` in
 `runtime/kernel-worker.js`), soft isolation only, `MAP_SHARED` works, and it
@@ -11,9 +11,9 @@ This document is the authoritative description of the **spawn contract**. Its
 purpose: the busybox/ash/glib spawn patches are **one documented platform port**,
 not a pile of ad-hoc per-package hacks.
 
-## Spawn contract — `posix_spawn` by default, fork() as a per-binary opt-in
+## Spawn contract — fork-capable libc, `posix_spawn` for ordinary binaries
 
-wasm cannot implement `fork()`/`vfork()` **on the plain toolchain**. "Return
+wasm cannot execute `fork()`/`vfork()` **in a plain, non-asyncified module**. "Return
 twice" requires re-entering a call frame mid-execution — a **multi-shot
 continuation**. No shipped wasm engine provides one natively: WasmFX and JSPI
 are **one-shot** (verified empirically in `spikes/stackswitch/` — a 2nd
@@ -26,76 +26,73 @@ therefore always a **fresh instance running a function** — which is precisely
 `clone(CLONE_VM, fn)` / `posix_spawn`, the one spawn primitive that needs no
 return-twice.
 
-So the platform is **`posix_spawn`-only**, defined once at three layers:
+The default libc now contains the real-fork seam, but that does not make every
+binary fork-capable. The contract is defined at three layers:
 
-- **Kernel:** `clone(CLONE_VM|CLONE_VFORK|SIGCHLD, fn)` is the spawn primitive
-  (the same `clone()`-with-a-function `pthread_create` uses). Already on master.
+- **Published NOMMU kernel:** `clone(CLONE_VM|CLONE_VFORK|SIGCHLD, fn)` is the
+  ordinary spawn primitive (the same `clone()`-with-a-function
+  `pthread_create` uses).
 - **musl:** `posix_spawn` rides that primitive; `system()` and `popen()` route
   through `posix_spawn` (upstream musl 1.2.5 already does — `src/process/system.c`
   and `src/stdio/popen.c` call `posix_spawn`, and `src/process/posix_spawn.c` uses
-  `__clone(…, CLONE_VM|CLONE_VFORK|SIGCHLD, …)`). The **`fork`/`vfork` symbols are
-  removed** (`toolchain/musl.nix` postPatch: delete `fork()`'s body keeping
-  fork.c's weak aliases; empty `vfork.c`). A caller then fails to **link** in its
-  Nix build — loud, early, traceable — instead of master's old runtime SIGILL/abort
-  stub. autoconf also correctly detects no-fork.
+  `__clone(…, CLONE_VM|CLONE_VFORK|SIGCHLD, …)`). The default libc also defines
+  `fork`/`vfork` through `_Fork`'s `capture_stack` seam. `capture_stack` is
+  deliberately absent from the shared host-import allow-list, so a plain caller
+  fails to **link** specifically on that symbol — loud, early, traceable. Only a
+  per-binary fork build both admits that import and runs Binaryen asyncify.
 - **Ports:** a program that hard-codes `fork`/`vfork`+exec is handled **once**, per
   the rules below — never with a runtime stub.
 
-The link-behavior is pinned by a probe: `spikes/spawn-contract/` (flake attr
-`.#spawn-linkcheck`, formerly `spikes/nofork/`/`.#nofork-linkcheck` — kept as a
-compat alias; #202 PR-1 parameterized it over the nommu-spawn/mmu-fork
-profiles) compiles a `fork()` user and a `posix_spawn()` user through the
-cross cc-wrapper and records `fork=ABSENT` / `spawn=LINKED` in its output for
-this (nommu-spawn) profile. The SAME two probes, plus a closure-wide sweep
+The link behavior is pinned by `spikes/spawn-contract/` (`.#spawn-linkcheck`),
+which compiles a `fork()` user and a `posix_spawn()` user through the plain
+cross cc-wrapper and records `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` for
+the `nommu-spawn` profile. The SAME two probes, plus a closure-wide sweep
 (`scripts/wasm-check-imports.py --fork-contract=PROFILE` +
 `userspace/spawn-contract-sweep.nix`, `.#guest-spawn-contract-nommu` /
 `.#guest-spawn-contract-fork`) over every real shipped wasm module, are what
-Phase 2 must keep green before flipping the default — see CLAUDE.md's "#202
-PR-1" learnings entry for the full mechanism (the capture_stack/asyncify
-TypeError this exists to catch at build time instead of at boot).
+remain standing gates for the promoted default — see CLAUDE.md's "#202 PR-1"
+learnings entry for the full mechanism (the capture_stack/asyncify TypeError
+this catches at build time instead of at boot).
 
-## Real `fork()` — the asyncify seam (per-binary opt-in)
+## Real `fork()` — the asyncify + software-MMU profile
 
 Real fork-without-exec **exists and passes acceptance** (PR #20): the
-`forkSeam` musl variant (`toolchain/musl.nix`), the `cc-fork` driver
+fork-capable musl (`toolchain/musl.nix`), the `cc-fork` driver
 (`toolchain/guest-cc-fork.nix`), and `userspace/asyncify-cc.nix` build a
 binary whose live stack asyncify can serialize into copyable linear memory —
 so the child genuinely returns twice, gets private memory, and is reaped
 correctly (8 `fork-*` acceptance programs). It was shelved (#32/#25/#29) when
 every fork paid an eager whole-RSS copy; **Track A's software-MMU COW removed
-that cliff**, and **#129 (Track B)** is generalizing the seam into a
-cross-stdenv flag so opting a package into real `fork()` is a build option,
-not a bespoke derivation. The plan confines the asyncify tax to fork-using
+that cliff**, and **#129 (Track B)** generalized the seam into a cross-stdenv
+flag so opting a package into real `fork()` is a build option, not a bespoke
+derivation. The design confines the asyncify tax to fork-using
 binaries (shells, `make`, daemons) — everything else stays `posix_spawn` and
 pays nothing — and then retires the forkshell `ash` and the
 `posix_spawn`-only accommodations below.
 
-Until #129 lands, the **default** toolchain remains `posix_spawn`-only and the
-holdout rules below apply. Do not describe `fork()` as impossible on this
-platform — it is an opt-in with a per-binary cost.
+The libc default is now fork-capable, but an executable still opts into the
+fork build pipeline, and it must run with the software-MMU+COW kernel. Do not
+describe `fork()` as impossible on this platform — it is an opt-in with a
+per-binary cost and a kernel-profile requirement.
 
-## 2026-08-13 update — two process-model shapes now coexist
+## Current profiles
 
-As of this date the repo builds (CI-gated, **not** the published image) a
-second, complete process-model shape alongside the one this document
-specifies as the default. Both are real and both boot; this document's spawn
-contract remains the accurate description of shape (i) — the one that
-actually ships — until issue #131's slice-1 default-flip (Phase 2 of the MMU
-ship plan) lands and rewrites this document, per that plan's own item 9.
+The repo builds two CI-gated process-model shapes. The libc promotion is
+shared by both, but the published kernel/image remains NOMMU until the final
+MMU channel promotion.
 
-**(i) Shipped NOMMU guest — `posix_spawn`-only, unchanged, still the
-default.** Everything above this section describes it: `fork`/`vfork`
-removed at the musl symbol level (`toolchain/musl.nix`), the busybox/ash/glib
-spawn-port patches, `.#spawn-linkcheck`'s `fork=ABSENT / spawn=LINKED`
-contract (plus, since #202 PR-1, `.#guest-spawn-contract-nommu`'s closure-wide
-confirmation that NO shipped module imports the asyncify seam). This is what
-`.#linux-image`/`.#kernel` publish today.
+**(i) Shipped NOMMU guest.** It retains the busybox/ash/glib spawn-port
+accommodations and ordinary programs use `posix_spawn`. Its default libc has
+the fork symbols, but no shipped module may import `capture_stack`;
+`.#spawn-linkcheck` pins the loud link failure for a plain fork caller and
+`.#guest-spawn-contract-nommu` confirms the closure contains zero seam
+importers. This is what `.#linux-image`/`.#kernel` publish today.
 
 **(ii) Software-MMU / real-fork guest — `.#kernel-mmu-a2` + the
 `-fork`-suffixed initramfs/squashfs (Track B of #126, issue #131 slice 1).**
 A parallel, CI-gated build (never shipped) where real `fork()`+COW works:
-`toolchain/musl.nix`'s `fork = true` variant (`.#musl-fork`, patch 0010)
-restores the symbols, the kernel's software-MMU page tables
+the program is linked through the fork stdenv and asyncified, the kernel's
+software-MMU page tables
 (`patches/kernel/0023`/`0024`/`0026`) give a forked child a genuinely
 isolated, copy-on-write address space (Track A2's demand-paging + COW,
 boot-verified), and the engine's asyncify-based `capture_stack`/
@@ -145,7 +142,9 @@ hush/#192 entries in the root `CLAUDE.md`.
 
 ## Handling a fork/vfork holdout — the decision rule
 
-When a package fails to link with `undefined symbol: fork`/`vfork`, pick exactly
+When a package fails to link because it calls fork without the asyncify seam
+(historically `undefined symbol: fork`; now `undefined symbol: capture_stack`),
+pick exactly
 one of these — in order of preference — and **never** add a stub that links:
 
 1. **It's an unused CLI/tool/feature/demo → don't build it.** The library the

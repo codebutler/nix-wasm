@@ -672,8 +672,9 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
   dontStrip = true;
 
   # nix-wasm#202 PR-1: the process-model coherence marker. A NOMMU (mmu=false,
-  # a2=false) kernel pairs ONLY with the posix_spawn-only "nommu-spawn" guest
-  # (fork()/vfork() removed at the musl symbol level); the A2 kernel (a2=true
+  # a2=false) kernel pairs ONLY with the "nommu-spawn" guest, whose ordinary
+  # programs use posix_spawn and never import the fork seam; the A2 kernel
+  # (a2=true
   # — demand paging + COW, patches 0023/0024/0026) pairs ONLY with the
   # real-fork "mmu-fork" guest (musl-fork + the busybox-fork / nix-wasm
   # realFork binaries) — booting the wrong pairing corrupts the guest's own

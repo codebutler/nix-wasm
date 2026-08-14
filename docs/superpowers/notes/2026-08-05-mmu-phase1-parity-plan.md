@@ -349,8 +349,8 @@ attrs"; Phase 3 is "pc downloads this by default."
 
 (`docs/superpowers/specs/2026-07-01-cleanup-131-audit.md`)
 
-1. **`toolchain/musl.nix`** — the default `musl` derivation (currently
-   `fork = false`, symbols removed) is REPLACED by today's `muslFork`
+1. **DONE (2026-08-14) — `toolchain/musl.nix`.** The default `musl`
+   derivation is now the existing `muslFork`
    settings (`fork = true`, patch 0010 applied) as the flake's default `musl`
    attr consumed by `wasm-cross.nix`. This is a **shared-crossSystem fix**
    (PRIME DIRECTIVE corollary 1) — `musl` is a single override point every
@@ -361,6 +361,11 @@ attrs"; Phase 3 is "pc downloads this by default."
    re-verification that patch 0010 still applies against master's current
    0007/0008 series (they may have drifted since the `-fork` variant was last
    rebuilt), not a from-scratch port.
+   The same batch closes the two blockers found while proving that rebuild:
+   all musl patches now apply with `--fuzz=0` and patch 0008 has current
+   context (#207), while `wasm-cross.nix` and `nix-wasm.nix` now import one
+   shared wasm-ld flag filter that removes Meson's GNU archive-group flags
+   (#209).
 2. **CORRECTED (2026-08-14, review of the #207-adjacent P2-1 finding):** this
    item used to read "add `capture_stack` to `toolchain/wasm-host-imports.nix`'s
    allow-list, in the same commit as step 1." That is WRONG and is not part of
@@ -410,8 +415,8 @@ attrs"; Phase 3 is "pc downloads this by default."
    forked (rule 1 in `docs/process-model.md`); with fork restored there is no
    reason left to carve them out.
 8. **`.#spawn-linkcheck`** (`spikes/spawn-contract/check.nix`, renamed from
-   `spikes/nofork/`/`.#nofork-linkcheck` — `.#nofork-linkcheck` kept only as a
-   compat alias — by #202 PR-1, which also parameterized the probe over both
+   `spikes/nofork/`/`.#nofork-linkcheck` — the old alias is now retired — by
+   #202 PR-1, which also parameterized the probe over both
    process-model profiles ahead of this flip; PR-1's own review additionally
    found and fixed the `__post_Fork`/`_Fork` object-file coupling this item's
    PINNED contract depends on — see item 8a below) — the probe's PINNED
@@ -465,7 +470,8 @@ attrs"; Phase 3 is "pc downloads this by default."
    discriminate fork-callers from spawn-only programs). Full trace + the
    corrected post-split contract: `spikes/spawn-contract/check.nix`'s header
    and the root CLAUDE.md's "#202 PR-1" learnings entry's AXIS-1 update.
-9. **Rewrite `docs/process-model.md`.** The whole document is framed around
+9. **DONE (2026-08-14) — rewrite `docs/process-model.md`.** The whole document
+   was framed around
    "`posix_spawn`-only by default, fork as a per-binary opt-in" — that framing
    inverts. Keep, rather than delete, the "measured dead-ends" section
    (per-process `WebAssembly.Memory` caps at ~124/tab; the two-wall analysis
@@ -473,8 +479,9 @@ attrs"; Phase 3 is "pc downloads this by default."
    record of WHY the old contract existed and what changed it — a reader six
    months from now needs to know Track A's COW is what resolved the second
    wall, not that the wall was never real. The busybox/ash/glib patch
-   inventory (already retired by this phase) becomes historical too; keep it
-   dated rather than deleting the section outright, per this repo's practice
+   inventory remains current until its later cleanup boxes execute; keep the
+   eventual history dated rather than deleting the section outright, per this
+   repo's practice
    of recording *why* elsewhere (`kernel-worker.js` `__lsan_*` note, the
    virtio-enum-drift note) rather than only recording current state.
 10. **Unblocks #93** — s6 no longer needs a fork→`posix_spawn` port; it can
@@ -496,7 +503,7 @@ either. This was the one remaining Phase-2 precondition (the "only the
 autotools proof above remains" statement at the end of Phase 1, and the
 audit doc's "do not check a REVERT box until that gate is green" rule); it
 is now MET, so the prove-then-flip procedure is unblocked on this axis. The
-Phase-2 world rebuild itself is still NOT executed by this change.)
+Phase-2 world rebuild is executed by the promotion change and proved by its CI.)
 
 Re-point the EXISTING Phase-1 MMU CI jobs (`boot-smoke`'s `mmu`/`mmu-devices`
 shards, `nix-boot-smoke-mmu`'s `core`/`gtk` shards, the autotools-fork smoke
@@ -506,7 +513,7 @@ needs no job wiring changes beyond what's already landed; only what
 the substituted artifacts now contain changes. The NOMMU-facing jobs
 (`artifacts`, `nix-boot-smoke`, `boot-smoke`'s `signals` shard, `browser-smoke`)
 are UNTOUCHED in this phase — `.#kernel`/`.#linux-image` still point at the
-old NOMMU/`posix_spawn`-only build until Phase 3, so they must keep passing
+NOMMU build until Phase 3, so they must keep passing
 unregressed throughout. (Nothing about restoring fork() at the musl layer
 forces the *kernel* choice; Phase 2 and Phase 3 are deliberately decoupled so
 a Phase-2 regression is caught on `.#kernel-mmu-a2` CI, never on the thing pc

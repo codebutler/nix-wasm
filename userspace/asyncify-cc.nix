@@ -12,10 +12,10 @@
 # The unwind point is a DEDICATED `capture_stack()` host import (Task-0 finding B),
 # NOT the generic __wasm_syscall_N wrapper — so the clone-with-fn fast path stays
 # asyncify-free. `asyncify-onlylist` bounds which functions get instrumented (cost).
-# muslFork (Phase 2): the musl-fork variant (canonical musl + patch 0008). Its
-# libc.a is linked FIRST so the seam `_Fork` (capture_stack) overrides the
-# canonical clone-syscall `_Fork`; everything else in the archive is byte-identical
-# to the sysroot's musl, so no ODR risk. `forkSeam = false` skips it (freestanding
+# muslFork (Phase 2): the explicit name for the now-default fork-capable libc.
+# Its libc.a is linked FIRST so the seam `_Fork` (capture_stack) is selected
+# explicitly; it is byte-identical to the sysroot's musl. `forkSeam = false`
+# skips it (freestanding
 # probes like fork-smoke that call capture_stack directly need no libc override).
 { pkgs, cross, muslFork, busyboxKernelHeaders, binaryen ? pkgs.binaryen }:
 

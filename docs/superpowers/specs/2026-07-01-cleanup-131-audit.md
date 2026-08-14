@@ -120,10 +120,9 @@ and `docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s
 "Real-fork autotools proof" item. This unblocks slice-1 REVERTs whose
 correctness that gate was standing in for. The FIRST one has been executed
 in this same change — see the `wasmAsh`-from-fork-profile box above, now
-checked. The remaining REVERT boxes below (musl fork/vfork restoration,
-the forkshell-ash accommodation itself, the busybox fork-patch reverts, the
-per-package fork triage, the link-contract relax) are each their own
-world-rebuild-scale edit and are each still UNSTARTED — this gate going
+checked. The remaining REVERT boxes below (the forkshell-ash accommodation,
+the busybox fork-patch reverts, and the per-package fork triage) are each
+their own world-rebuild-scale edit and are still UNSTARTED — this gate going
 green does not itself execute them, it only removes the precondition that
 was blocking their execution. Per this audit's own DoD ("each box checked
 OR explicitly decided 'keep, because <reason>'"), a **KEEP-with-reason**
@@ -134,12 +133,12 @@ two items originally on this list were adjudicated KEEP on 2026-08-13
 and moved to "Explicitly KEPT" below instead of staying REVERT checkboxes
 here.
 
-- [ ] `toolchain/musl.nix` — restore `fork`/`vfork` (drop the symbol-removal
-  postPatch). **Couples to** re-integrating PR #20's `muslFork` seam patch
-  against master's current musl patch series (0007/0008 differ) — a `--fuzz=0`
-  merge on the box. (NOTE: `.#musl-fork` already exists and builds today as
-  the CI-gated MMU variant's musl — this item is about promoting it to the
-  flake's *default* `musl` attr, not building it for the first time.)
+- [x] `toolchain/musl.nix` — restore `fork`/`vfork`. DONE (2026-08-14):
+  `fork ? true` promotes the existing asyncify seam to the default libc;
+  `patchFlags = [ "-p1" "--fuzz=0" ]` makes the full musl patch stack strict,
+  and patch 0008's stale context was regenerated against the preceding syscall
+  arity patch. The explicit `fork = false` variant remains available only for
+  historical comparison.
 - [x] **`flake.nix` `wasmSystemFork` — drop `wasmAsh` from the fork profile's
   `toolchain` list. DONE (2026-08-13).** The narrow, closure-weight-only
   sub-piece of the box below: `wasmSystemFork`'s `toolchain` was
@@ -191,10 +190,9 @@ here.
   see the 2026-08-13 disposition).
 - [ ] `deps-overlay.nix` per-package fork triage — re-enable openssl CLI, pcre2
   callout-fork, ncurses test-demos, busybox IFUP/IFDOWN/TELNETD.
-- [ ] `.#nofork-linkcheck` — once the default `musl` becomes muslFork (this
-  slice's own item 1, fork-capable), `nofork-linkcheck`'s "fork=ABSENT" case no
-  longer describes the new default and should retire or be repointed at
-  whatever variant (if any) still removes fork. **CORRECTED (2026-08-14):**
+- [x] `.#nofork-linkcheck` — retired (2026-08-14). The canonical
+  `.#spawn-linkcheck` now pins the promoted default's
+  `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` contract. **CORRECTED (2026-08-14):**
   this item does NOT include touching `toolchain/wasm-host-imports.nix` —
   that file's allow-list permanently excludes `capture_stack` regardless of
   which `musl` is default (see its own header comment and commit 99e7a73's
@@ -204,7 +202,8 @@ here.
   (spikes/spawn-contract/check-fork.nix) is the standing regression gate for the
   muslFork link contract (spawn LINKS, non-asyncified fork fails on
   `capture_stack`) and stays in place unchanged by this slice.
-- [ ] Rewrite `docs/process-model.md`.
+- [x] Rewrite `docs/process-model.md` for the fork-capable libc default while
+  keeping the NOMMU-vs-MMU execution boundary explicit.
 - [ ] Unblocks **#93** (s6 no longer needs fork→posix_spawn).
 
 ## Slice 3 — non-Wayland NOMMU-memory accommodations (gated on #128 real MMU)

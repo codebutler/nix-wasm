@@ -9,7 +9,7 @@
 #
 # Compiled against compiler-rt (--rtlib via LIBCC). No other deps — musl is the
 # base of the sysroot.
-# `fork ? false` (#129 Track B, muslFork variant): when true, KEEP fork() and
+# `fork ? true` (#129 Track B, promoted default): when true, KEEP fork() and
 # route _Fork() through the asyncify double-return seam (patch 0010) instead of
 # the clone syscall. This is the userspace half of real fork() over the software
 # MMU + COW (#128). The seam is foundation-independent — _Fork() just calls
@@ -17,8 +17,10 @@
 # kernel clone + rewind live in the engine/kernel, not here. capture_stack is an
 # undefined symbol resolved only at PROGRAM link (via forkStdenv's allow-list +
 # --asyncify pass), so the libc.a itself builds unchanged. The DEFAULT (fork =
-# false) is the standard no-fork guest libc (fork()/vfork() removed → link error).
-{ pkgs, compilerRt, fork ? false }:
+# true) is now fork-capable; ordinary non-asyncified links still fail loudly on
+# capture_stack because it deliberately remains off the shared host allow-list.
+# Pass fork = false explicitly only for the legacy symbol-absent variant.
+{ pkgs, compilerRt, fork ? true }:
 let
   llvm = pkgs.llvmPackages_21;
   bt = llvm.bintools-unwrapped;
@@ -54,13 +56,18 @@ pkgs.stdenv.mkDerivation {
     # dlsym. dlclose is leak-until-exit (table slots can't be reclaimed).
     ../patches/musl/0009-wasm-dlopen-dlsym-host-loader.patch
   ] ++ pkgs.lib.optionals fork [
-    # 0010 (#129 Track B, muslFork only): _Fork() over the asyncify double-return
+    # 0010 (#129 Track B, fork-capable libc): _Fork() over the asyncify double-return
     # seam — fork() no longer issues the clone syscall; it calls capture_stack()
     # (a host import) which the engine unwinds + dual-rewinds so fork() returns
     # twice. Applies on top of 0007's clone-arity baseline. Only in the fork
-    # variant; the default guest libc has fork() removed (postPatch below).
+    # variant. The legacy fork=false libc removes fork() in postPatch below.
     ../patches/musl/0010-fork-asyncify-seam.patch
   ];
+
+  # Patch-stack integrity is part of the build contract. GNU patch's default
+  # fuzz silently hid 0008's stale context after 0004 changed SYS_exit's arity
+  # (#207); every musl patch must apply at its authored location with zero fuzz.
+  patchFlags = [ "-p1" "--fuzz=0" ];
 
   nativeBuildInputs = [ bt ];
   dontStrip = true;
@@ -203,7 +210,8 @@ EOF
     # the asyncify seam (patch 0010) instead of removed.
     ${pkgs.lib.optionalString (!fork) "sed -i '/^pid_t fork(void)/,/^}/d' src/process/fork.c"}
     # vfork(): the whole TU is just an asm return-twice stub that can't work on
-    # wasm. In the DEFAULT (no-fork) guest libc, empty it so no symbol remains
+    # wasm. In the explicit legacy fork=false guest libc, empty it so no symbol
+    # remains
     # (posix_spawn/clone-with-fn is the spawn contract; a live vfork fails to LINK).
     # In the FORK variant (#131), define vfork() as a REAL fork(): on the software
     # MMU every process has its own COW page table, so vfork-as-fork is
@@ -280,6 +288,18 @@ int posix_fallocate(int fd, off_t base, off_t len)
 	return 0;
 }
 EOF
+    # 0008 is load-bearing for detached pthread exit. Zero-fuzz application
+    # proves the hunk landed at its authored context; assert the resulting wasm
+    # branch too so a future patch rewrite cannot preserve context while losing
+    # the no-stack-switch behavior.
+    grep -qF 'for (;;) __syscall(SYS_exit, 0);' src/thread/__unmapself.c || {
+      echo "ERROR: musl patch 0008 did not install the wasm __unmapself exit loop" >&2
+      exit 1
+    }
+    grep -qF '__syscall(SYS_munmap, base, size);' src/thread/__unmapself.c || {
+      echo "ERROR: musl patch 0008 did not install the wasm __unmapself munmap path" >&2
+      exit 1
+    }
     # __post_Fork TU-split anti-fuzz guard (fork variant only), mirroring
     # kernel.nix's 0017-0020 precedent: `patch -p1` defaults to GNU fuzz 2,
     # and issue #207 already recorded patches/musl/0008 applying only under
