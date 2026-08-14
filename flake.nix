@@ -1230,7 +1230,7 @@
         galculator = cross.galculator;
 
         # Task 1 clean-NOMMU probe, now parameterized (nix-wasm#202 PR-1; was
-        # spikes/nofork/): verifies fork=ABSENT / spawn=LINKED for the DEFAULT
+        # spikes/spawn-contract/): verifies fork=ABSENT / spawn=LINKED for the DEFAULT
         # (nommu-spawn) guest libc, and separately verifies the #129/#131
         # mmu-fork libc's MEASURED today-contract (both fail on capture_stack,
         # not fork) — see spikes/spawn-contract/check.nix's header for the full
@@ -1257,6 +1257,15 @@
         # the same non-`rec`-attrset reason.
         guest-spawn-contract-nommu = guestSpawnContractNommu;
         guest-spawn-contract-fork = guestSpawnContractFork;
+
+        # P2-2 (review of commit 99e7a73's __post_Fork TU split): the muslFork-variant
+        # sibling of nofork-linkcheck above. Asserts the asymmetry the split exists to
+        # preserve — against the FORK-CAPABLE libc: posix_spawn() still LINKS (the
+        # split keeps clone.o's __post_Fork references from dragging in _Fork.lo), and
+        # a non-asyncified fork() FAILS to link specifically on `capture_stack` (not
+        # merely "some error") — see spikes/spawn-contract/check-fork.nix's header for the
+        # full rationale.
+        musl-fork-linkcheck = import ./spikes/spawn-contract/check-fork.nix { inherit cross muslFork; };
 
         # #33: gtk3-widget-factory — the headline GTK3 app. GtkBuilder autoconnect
         # via add_callback_symbol (no GModule on the static guest). --selftest is the

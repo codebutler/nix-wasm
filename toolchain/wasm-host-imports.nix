@@ -43,7 +43,7 @@
 # does not reference capture_stack) — that split is what makes "references
 # capture_stack" a reliable signal of "was asyncify-instrumented for fork",
 # and it only WORKS as a signal if capture_stack stays absent from this file.
-# `.#musl-fork-linkcheck` (spikes/nofork/check-fork.nix) is the regression
+# `.#musl-fork-linkcheck` (spikes/spawn-contract/check-fork.nix) is the regression
 # gate for that split; `toolchain/musl.nix`'s `fork = true` postPatch also
 # asserts the split's shape directly.
 #

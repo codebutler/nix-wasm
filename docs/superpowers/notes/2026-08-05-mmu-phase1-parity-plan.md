@@ -378,7 +378,7 @@ attrs"; Phase 3 is "pc downloads this by default."
    local-extension idioms a real fork-capable link uses instead (per-link,
    never shared). This step is therefore DROPPED from the batched edit set;
    step 1 (promoting muslFork to the default `musl`) stands on its own, and
-   `.#musl-fork-linkcheck` (spikes/nofork/check-fork.nix) plus
+   `.#musl-fork-linkcheck` (spikes/spawn-contract/check-fork.nix) plus
    `toolchain/musl.nix`'s `fork = true` postPatch assertion are the standing
    regression gates for the TU split this flip depends on.
 3. **`userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*`** —

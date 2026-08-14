@@ -201,7 +201,7 @@ here.
   `__post_Fork` TU split); adding it there was never part of this slice, it
   would defeat the split's whole point (see the parity-plan doc's item-2
   correction for the full rationale). `.#musl-fork-linkcheck`
-  (spikes/nofork/check-fork.nix) is the standing regression gate for the
+  (spikes/spawn-contract/check-fork.nix) is the standing regression gate for the
   muslFork link contract (spawn LINKS, non-asyncified fork fails on
   `capture_stack`) and stays in place unchanged by this slice.
 - [ ] Rewrite `docs/process-model.md`.

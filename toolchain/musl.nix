@@ -280,6 +280,43 @@ int posix_fallocate(int fd, off_t base, off_t len)
 	return 0;
 }
 EOF
+    # __post_Fork TU-split anti-fuzz guard (fork variant only), mirroring
+    # kernel.nix's 0017-0020 precedent: `patch -p1` defaults to GNU fuzz 2,
+    # and issue #207 already recorded patches/musl/0008 applying only under
+    # fuzz — so a future rebase could silently fuzz-drop the post_Fork.c half
+    # of patch 0010 (a NEW-FILE hunk; a dropped new-file hunk leaves no
+    # reject trace at all, unlike a context-mismatch hunk against an
+    # existing file) and re-couple clone.lo to _Fork.lo with no build-time
+    # signal (commit 99e7a73's __post_Fork TU split; see that commit message
+    # + patches/musl/0010's header for the full story). Assert the split
+    # actually landed, loudly, in patchPhase — not just "the patch applied"
+    # (which `patch` itself already enforces) but the SPECIFIC shape the
+    # split requires: __post_Fork defined in the new companion TU, and gone
+    # from _Fork.c.
+    ${pkgs.lib.optionalString fork ''
+      if [ ! -f src/process/post_Fork.c ]; then
+        echo "ERROR: src/process/post_Fork.c is missing — patch 0010's __post_Fork" >&2
+        echo "TU split did not apply. clone.o would fall back to pulling" >&2
+        echo "__post_Fork from _Fork.c, re-coupling every posix_spawn()/" >&2
+        echo "pthread_create() link to _Fork.lo's capture_stack import. See" >&2
+        echo "commit 99e7a73 (musl-fork: split __post_Fork into its own TU)." >&2
+        exit 1
+      fi
+      grep -qE '^void[[:space:]]+__post_Fork\(' src/process/post_Fork.c || {
+        echo "ERROR: src/process/post_Fork.c exists but does not define __post_Fork()" >&2
+        echo "— the TU split is broken. See commit 99e7a73." >&2
+        exit 1
+      }
+      if grep -qE '^void[[:space:]]+__post_Fork\(' src/process/_Fork.c; then
+        echo "ERROR: src/process/_Fork.c still defines __post_Fork() — the __post_Fork" >&2
+        echo "TU split (commit 99e7a73) regressed. clone.o will again pull __post_Fork" >&2
+        echo "from _Fork.c, dragging _Fork.lo's capture_stack import into every plain" >&2
+        echo "posix_spawn()/pthread_create() link — exactly the coupling that commit" >&2
+        echo "exists to break. Re-run patches/musl/0010's __post_Fork split with" >&2
+        echo "--fuzz=0 against the current tree." >&2
+        exit 1
+      fi
+    ''}
   '';
 
   configurePhase = ''

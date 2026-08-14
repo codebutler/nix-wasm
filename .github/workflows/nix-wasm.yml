@@ -216,6 +216,8 @@ jobs:
             '.#deepfork-exec-init' \
             '.#deepfork-sig-child' \
             '.#userspace-busybox-fork' \
+            '.#nofork-linkcheck' \
+            '.#musl-fork-linkcheck' \
             --print-out-paths --no-link 2>&1 | tee build.log
 
       # `nix-env -iA wasm-tools.<tool>` (the static pkgs.nix catalog) SUBSTITUTES
