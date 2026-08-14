@@ -92,8 +92,12 @@ export async function bootNode(opts = {}) {
 // harness can't reach. So each nix smoke primes a USER-level nix.conf that
 // overrides the substituter back to the local 9P cache (still mounted at
 // /nix-cache for the catalogs) — the standard "give the offline test a local
-// cache" shape, with NO change to the baked (Cachix-only) system config. Call
-// AFTER waitForPrompt(), before any nix command.
+// cache" shape, with NO change to the baked (Cachix-only) system config. Keep
+// `always-allow-substitutes = true` in this override: `guest-cc`/`guest-cxx` are
+// trivial builders with `allowSubstitutes = false`, and without this setting the
+// guest tries to build them locally (platform mismatch / std::bad_alloc) instead
+// of substituting the cached outputs.
+// Call AFTER waitForPrompt(), before any nix command.
 export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
   // Write via $HOME, NOT ~. The MMU/fork boot's /bin/sh is busybox hush, built
   // WITHOUT CONFIG_HUSH_TILDE, so it does NOT expand `~` — `~/.config/nix` would
@@ -105,7 +109,10 @@ export async function primeLocalNixCache(session, { timeoutMs = 15000 } = {}) {
   session.send(
     "mkdir -p $HOME/.config/nix && " +
       "printf 'substituters = file:///nix-cache\\n" +
-      "trusted-substituters = file:///nix-cache\\nrequire-sigs = false\\n' " +
+      "trusted-substituters = file:///nix-cache\\n" +
+      "require-sigs = false\\n" +
+      "substitute = true\\n" +
+      "always-allow-substitutes = true\\n' " +
       "> $HOME/.config/nix/nix.conf && echo LOCAL_NIX_CACHE_READY=$?\n",
   );
   const ok = await session.waitForOutput(/LOCAL_NIX_CACHE_READY=0/, timeoutMs);
