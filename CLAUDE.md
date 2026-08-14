@@ -1764,6 +1764,51 @@ CI / the linux box, per the design's "ship what works" scope):
   (memory.copy/fill/init, page-chunked) and does the standard 2-level walk
   matching the kernel tables; it strips the wasm start section → `__mmu_start`
   (init-memory must run after `pt_base` is set).
+- **Track A1 — instrument-at-load MEMORY (#202): FIXED (2026-08-14, PR #212).**
+  The pass ran at LOAD time in the engine, and on the big binaries that cost
+  enough to OOM-kill a CI runner (exit 137 — which is why `nix-boot-smoke-mmu`
+  sits on the `-lg` profile). Two fixes, both in `runtime/softmmu-pass.js`:
+  (1) **streaming `ByteSink` emit** — `rewriteFuncBody` accumulated into a JS
+  `number[]`, ~24 bytes of heap PER EMITTED BYTE, so one 1.4 MB function of
+  `nix.wasm` cost ~298 MiB by itself; `instrument()` now streams the whole
+  module through one growable `Uint8Array`, which also removes two of the three
+  whole-module copies. Section outer sizes + per-function body sizes use
+  **padded 5-byte LEBs with backpatch** (spec-legal `uN`: at byte 5, N=4, so
+  the last byte must be ≤ 0x0f) — that padding is what makes single-pass
+  streaming possible without a size-measuring pre-pass. (2) **one combined
+  predicate**: the checked path's two per-level present tests plus (width≥2)
+  the page-crossing test collapse into `(pgd_e != 0) & ((pte & need) == need)
+  [& page-fits]` from an UNCONDITIONAL two-level walk, branching once to an
+  inline arm or an out-of-line `__mmu_translate_ck` call — 147 → 100.4 B per
+  access. MEASURED: `nix.wasm` `instrument()` peak 603 → 227.6 MiB (−62%),
+  output 149.9 → 111.0 MB (5.39× → 3.99×).
+  **THE CRUX — why the unconditional level-2 read is safe, and which operand
+  actually matters** (a review corrected this twice, so it is written down):
+  when `pgd_e == 0` the level-2 address is `idx*4`, always inside page 0, so it
+  NEVER traps — but it returns GARBAGE that can happen to satisfy the
+  permission mask. Both conjuncts are therefore normalised to 0/1 booleans
+  before `i32.and`. Getting the TWO operands wrong has OPPOSITE consequences:
+  ANDing a raw `pgd_e` is a **performance** bug, not a corruption one (bitwise
+  AND with 0 is 0, so nothing walks through; but real kernel PGD entries are
+  bare page-aligned addresses with bit 0 clear — see `patches/kernel/0023`'s
+  `set_pmd` — so the predicate would be false on PRESENT entries too, sending
+  EVERY access down the helper call and silently reinstating the ~12× cost the
+  Track A1 entry above calls the load-bearing lesson). ANDing a raw
+  `pte & need` is the **silent-corruption** one: the predicate collapses to the
+  present bit, so a store to a present-but-read-only COW page takes the fast
+  arm and writes straight through to the shared page instead of faulting into
+  `do_wp_page`. Both are pinned by mutation-tested unit tests.
+  **AND THE LESSON WORTH GENERALISING — a test fixture that doesn't model the
+  kernel's REAL format makes its guard FAKE.** Every softmmu fixture used to
+  write PGD entries as `pteTable | 3`. The kernel writes a BARE address (bit 0
+  clear). So mutating level-1 present from `!= 0` back to `& 1` — verbatim the
+  A2 keystone bug this file records as an infinite-refault hang — passed all 55
+  tests. Fixtures now use the kernel's format and the mock fault handlers are
+  BOUNDED (`>100 faults` throws), so that mutation now fails 18 tests in
+  milliseconds instead of passing or hanging. The pass was correct the whole
+  time; the guard was theater, and only mutation testing found it. Any new
+  fixture that stands in for a kernel structure must match the kernel's
+  bit-level format, and any mock fault handler must be bounded.
 - **Track A1 — CONFIG_MMU=y kernel half: DONE + IT BOOTS (2026-07-02).**
   `nix build .#kernel-mmu` builds the software-MMU vmlinux (`kernel.nix`
   `mmu=true` applies `patches/kernel/0023-wasm-software-mmu.patch`); the
@@ -2044,6 +2089,24 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   module cache; warm execs instant). Lesson: harness markers must use `=$?`
   (matches the expanded value in OUTPUT, not the echoed command) AND not be a
   substring of any earlier marker.
+  **THIRD INSTANCE of this class (2026-08-14, PR #212) — a wait that
+  terminates on an INTERMEDIATE marker.** `deepfork-exec-smoke.mjs` reported
+  FAIL while the guest transcript plainly showed success: its
+  `waitForOutput` alternation included `DEEP2: init reaped`, but
+  `deepfork-exec-init.c` prints that string WITHOUT a trailing newline (the
+  status value follows) and only THEN prints the verdict `DEEP2: ALL-OK`,
+  which is what the pass test requires — so the wait could return, and the
+  snapshot be taken, before the verdict existed. The tell in the transcript
+  was a truncated `status=0x000` where every other value is 8 hex digits: a
+  snapshot caught MID-WRITE. Always racy; #202's timing change just started
+  losing it. The sibling `deepfork-smoke.mjs`/`grandfork-smoke.mjs` never had
+  the bug (they wait only on their terminal marker) — this one had drifted.
+  Fixed by waiting for a genuine terminal state, keeping the intermediate
+  marker only as a BOUNDED fast path so a real failure still fails in seconds
+  instead of burning the 120s timeout. Generalised rule for this whole class:
+  **a smoke's wait condition must be its pass condition (plus genuine
+  terminal failures) — never an earlier progress marker**, and a partial
+  `put()` with no newline is a marker that can be observed half-written.
 - **#92** — in-guest `nix build` from source: the BUILD path WORKS. nix's
   `local-derivation-goal` (fork/exec a builder) runs on the NOMMU wasm guest via
   `posix_spawn` (no fork/vfork), with sandbox/namespaces off (`sandbox = false`,
