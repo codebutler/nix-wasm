@@ -566,17 +566,22 @@ export function concatBytes(chunks) {
  * `new WebAssembly.Module(...)`): section sizes, function-body sizes, and
  * vector counts all load fine whether minimal or padded.
  *
- * SCOPE (deliberately narrow — see the `instrument()` call sites): only the
- * per-function body-size field and the code section's own outer size field
- * use the padded/backpatch form, because those are the only two values that
- * are genuinely unknown until after they are written. Every other
- * length/count in the module (the module header, the type/func/global/export
- * sections' bodies and outer sizes, the appended fixed helper bodies' length
- * prefixes, the code section's function-count vector) is fully computable
- * BEFORE it is written, so those keep the plain minimal `u()`/`s()` LEB
- * encoding unchanged — this bounds the wire-format delta from the pre-#202
- * pass to exactly the two categories that need it, rather than repadding the
- * whole module.
+ * SCOPE: the padded/backpatch form is used for every section's OUTER size
+ * field (the final assembly loop reserve()s 5 bytes for each emitted
+ * section, writes its body, then patch5()s the true length once known —
+ * see the loop at the end of this file) and for each per-function body-size
+ * field within the code section, because those are the values whose true
+ * length is not known until after the bytes are written — most sections'
+ * bodies happen to be fully computable up front, but reserve/patch is used
+ * uniformly rather than special-cased per section, so every outer size field
+ * in the emitted module is 5 bytes regardless of whether that particular
+ * section's size was knowable in advance. Everything ELSE — the module
+ * header, section bodies' own internal counts/lengths (types, exports,
+ * globals, the code section's function-count vector), and the appended fixed
+ * helper bodies' length prefixes — is fully computable before it is written
+ * and keeps the plain minimal `u()`/`s()` LEB encoding unchanged. Verified
+ * directly against V8 (see above) for both the minimal and padded forms, so
+ * a reader can trust either encoding appearing anywhere in the output.
  */
 export class ByteSink {
   constructor(initialCapacity = 1 << 16) {
@@ -913,6 +918,16 @@ export function rewriteFuncBody(
   sink = undefined,
 ) {
   if (!sink) throw new Error("softmmu: rewriteFuncBody requires a ByteSink `sink` argument");
+  // #202 P2-4: `checkedTranslateFunc` is JSDoc-optional on `checked` (it's
+  // attached by `instrument()` after `resolveCheckedImports` returns it), but
+  // every checked-mode caller MUST have set it before reaching here — the
+  // inline checked translate emits `call <checked.checkedTranslateFunc>`
+  // (`u(undefined) >>> 0 === 0` would silently emit `call 0`, binding to
+  // whatever function happens to sit at index 0 if its type matches, instead
+  // of failing loudly). Fail fast instead of trusting the field silently.
+  if (checked && checked.checkedTranslateFunc == null) {
+    throw new Error("softmmu: checked context is missing checkedTranslateFunc");
+  }
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -1077,13 +1092,37 @@ export function rewriteFuncBody(
   // bits set such that `(garbage & need) == need` is true. The `pgd_e != 0`
   // conjunct is what neutralises that: `i32.and` of the two ALREADY-BOOLEAN
   // (0/1) operands is false whenever pgd_e==0, regardless of what the
-  // unconditional level-2 read produced. DROPPING this conjunct (or ANDing
-  // the raw pgd_e value instead of its boolean form) would let a not-present
-  // access whose page-0 garbage happens to satisfy the permission mask walk
-  // through to a WRONG physical address instead of faulting — silent memory
-  // corruption, not a trap. See the dedicated unit test for exactly this case
-  // (a not-present level-1 entry with bits 0+1 deliberately set at the
-  // corresponding page-0 offset).
+  // unconditional level-2 read produced. DROPPING this conjunct entirely
+  // would let a not-present access whose page-0 garbage happens to satisfy
+  // the permission mask walk through to a WRONG physical address instead of
+  // faulting — silent memory corruption, not a trap. See the dedicated unit
+  // test for exactly this case (a not-present level-1 entry with bits 0+1
+  // deliberately set at the corresponding page-0 offset).
+  //
+  // The `pgd_e` conjunct is ALSO normalised to a boolean (`!= 0`, "bool1")
+  // rather than ANDed in as the raw `pgd_e` value — but getting THAT wrong is
+  // a PERFORMANCE bug, not a corruption one: `raw_pgd_e & bool2` is still
+  // bitwise-zero whenever pgd_e==0 (0 ANDed with anything is 0), so a
+  // not-present access can never walk through this way. What it breaks is
+  // the PRESENT case: real kernel PGD entries are the BARE page-aligned
+  // physical address of the pte table (see patches/kernel/0023's
+  // `pmd_populate`/`set_pmd` — `set_pmd(pmd, __pmd((unsigned long)
+  // page_address(pte)))`, no flag bits), so bit 0 is architecturally 0 on
+  // EVERY present level-1 entry too — ANDing the raw value into the
+  // predicate would make it false there as well, so the predicate is never
+  // true, the fast arm is never taken, and EVERY access (not just the
+  // faulting ones) falls through to the out-of-line `__mmu_translate_ck`
+  // call: correct results, but silently reinstating the ~12×
+  // helper-call-per-access cost this file's own header calls the
+  // load-bearing lesson. The operand whose normalisation actually guards
+  // against silent CORRUPTION is the LEAF permission test just below: it
+  // already compares with `i32.eq` (`(pte & need) == need`) rather than
+  // ANDing the raw `pte & need` in directly — with a raw `pte & 3`,
+  // `bool1 & (pte & 3)` reduces to just the present bit whenever bool1==1,
+  // so a store to a present-but-read-only COW page (`pte & 3 == 1`) would
+  // read as truthy and take the fast arm, writing straight through to the
+  // shared physical page instead of faulting into `do_wp_page`. See the
+  // dedicated COW/mprotect unit tests for exactly that case.
   const emitCheckedPresentPredicate = (kind) => {
     // level 1 (unconditional): pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
     out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base

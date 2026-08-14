@@ -36,8 +36,17 @@ function boot(bytes, { instrumented, remap } = {}) {
   // TWO-LEVEL identity tables, laid out like the kernel builds them:
   //   PGD (4 KiB, 1024 entries, each covers 4 MiB) at PT
   //   one PTE table (4 KiB, 1024 entries) per used PGD slot, following.
-  // Low-bit FLAGS are deliberately set on every entry (|3, |7) to prove the
-  // pass masks them out of the address (kernel PTEs carry present/write bits).
+  // PGD (level-1) entries are the BARE page-aligned physical address of the
+  // pte table — NO flag bits — matching the real kernel format exactly
+  // (patches/kernel/0023's `pmd_populate`/`set_pmd`: `set_pmd(pmd,
+  // __pmd((unsigned long)page_address(pte)))`); this is why the level-1
+  // present test in softmmu-pass.js is `entry != 0`, not `entry & 1`. Only
+  // the LEAF pte entries carry real low-bit flags (`|7` = present+write) —
+  // deliberately set to prove the pass masks them out of the physical
+  // address. Using a fixture PGD format that differs from the kernel's would
+  // hide a regression that flips the level-1 present test to `& 1` (see the
+  // A2 present-test test group below for the fixture that's specifically
+  // shaped to catch that).
   const PT = 0x40000; // pgd base (256 KiB in)
   const HEAP = 0x100000; // working area (1 MiB in)
   // setPte(va, physBase): point va's page at physBase (flags added here).
@@ -52,7 +61,7 @@ function boot(bytes, { instrumented, remap } = {}) {
     const t = u32();
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3; // pgd entry -> pte table (+flag bits)
+      t[PT / 4 + g] = pteTable; // pgd entry -> pte table (BARE address, no flag bits — kernel format)
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
@@ -632,7 +641,19 @@ describe("checked (A2 present-check) translate", () => {
     const rawCalls = []; // full (sp, tp, nr, ea, kind) — used by the tp round-trip test
     const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
     let inst;
+    let faultCount = 0;
     const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop. A level-1 present-test regression (e.g.
+      // `& 1` instead of `!= 0` — see the boot() comment above for why the
+      // kernel's bare-address PGD format makes that distinction load-bearing)
+      // can make the predicate never true, so the instrumented code re-faults
+      // on every retry forever. Without a bound that hangs the test runner
+      // instead of failing it — throw a clear error so the regression surfaces
+      // as a normal (fast) test FAILURE.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
       rawCalls.push({
         sp: Number(sp),
         tp: Number(tp),
@@ -649,8 +670,10 @@ describe("checked (A2 present-check) translate", () => {
         // initial setup loop below already populated for this slot (still
         // fully identity-mapped underneath; only the PGD pointer itself was
         // zeroed to simulate "not present"), exactly as a real fault
-        // handler creates/attaches a table on a genuine level-1 miss.
-        t[PT / 4 + g] = (PT + 0x1000 + g * 0x1000) | 3;
+        // handler creates/attaches a table on a genuine level-1 miss. BARE
+        // address, no flag bits — matches the real kernel PGD format (see
+        // the boot() comment above); this is deliberate, not an oversight.
+        t[PT / 4 + g] = PT + 0x1000 + g * 0x1000;
       }
       const pteTable = t[PT / 4 + g] & ~0xfff;
       t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7; // identity, present+write
@@ -678,7 +701,7 @@ describe("checked (A2 present-check) translate", () => {
     const t = new Uint32Array(mem.buffer);
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
@@ -1289,7 +1312,14 @@ describe("checked + page-crossing scalar access (#202 §6.2 combined predicate, 
     const calls = [];
     const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
     let inst;
+    let faultCount = 0;
     const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop — see the sibling bootChecked's identical
+      // comment above for why.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
       calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
       const t = new Uint32Array(inst.exports.memory.buffer);
       const va = Number(ea) >>> 0;
@@ -1310,7 +1340,7 @@ describe("checked + page-crossing scalar access (#202 §6.2 combined predicate, 
     const t = new Uint32Array(mem.buffer);
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
@@ -1408,12 +1438,20 @@ describe("checked + page-crossing scalar access (#202 §6.2 combined predicate, 
     const calls = [];
     const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
     let inst;
+    let faultCount = 0;
     const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop — see bootChecked's identical comment above.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
       calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
       const t = new Uint32Array(inst.exports.memory.buffer);
       const va = Number(ea) >>> 0;
       const g = va >>> 22;
-      if (t[PT / 4 + g] === 0) t[PT / 4 + g] = (PT + 0x1000 + g * 0x1000) | 3;
+      // BARE address on re-attach, no flag bits — kernel format (see boot()'s
+      // comment near the top of this file).
+      if (t[PT / 4 + g] === 0) t[PT / 4 + g] = PT + 0x1000 + g * 0x1000;
       const pteTable = t[PT / 4 + g] & ~0xfff;
       t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7;
       return 0;
@@ -1428,7 +1466,7 @@ describe("checked + page-crossing scalar access (#202 §6.2 combined predicate, 
     const nPgd = Math.ceil(pages / 1024);
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
