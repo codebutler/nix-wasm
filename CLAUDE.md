@@ -175,9 +175,22 @@ incident, still visible at `ef7e64dc` (publish dispatched 6 min after its
 `nix-wasm.yml` started; that run was then CANCELLED by a newer master push, and
 the publish built + pushed `wasm-binary-cache` itself and went green). The
 script's **artifact-provenance gate** now evaluates both store paths (pure eval,
-seconds) and asserts each is already in `nix-wasm.cachix.org`, failing fast with
-the remedy if not; the two builds then run `--max-jobs 0` (substitute-only) so a
-residual gap is a hard failure rather than an unvetted local rebuild. `dry_run:
+seconds) and asserts each is already in `nix-wasm.cachix.org` — **plus every
+toolchain `.drv` root** (read from `.#wasm-cache-drv-roots`, the same file CI's
+push step reads, so they cannot drift), since that push is a SEPARATE LATER step
+of the artifacts job and the outputs alone can read present while it is still in
+flight, which would flip the pointer to a cache where in-guest `nix-env -iA
+wasm-tools.*` fails. It fails fast with the remedy if any are absent; the two
+builds then run `--max-jobs 0` (substitute-only) so a residual gap is a hard
+failure rather than an unvetted local rebuild. `REQUIRE_DRV_ROOTS` mirrors that
+CI step's own master-only condition, so branch publishes stay possible (with a
+loud NOTICE) instead of being unsatisfiable.
+**A runtime-only ABI bump is a full `nix` change**: `runtime/abi.js` is
+`builtins.readFile`d by both `flake.nix` and `userspace/linux-image.nix` (baked
+into the image manifest as `minEngine`), so it is now in `nix-wasm.yml`'s `nix`
+paths-filter — without that entry a pure engine-side ABI bump skipped the
+`artifacts` job entirely and the gate would reject the release with no CI-backed
+way to satisfy it. `dry_run:
 true` runs the gate too — use it to check the coast is clear. Override, for a
 deliberate publish of un-CI'd artifacts, is the `allow_unpublished` input
 (`ALLOW_UNPUBLISHED=true`; `repository_dispatch` can never set it). The gate

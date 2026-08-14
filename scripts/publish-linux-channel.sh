@@ -151,6 +151,35 @@ if ! curl -fsS -o /dev/null --max-time 30 --retry 3 --retry-delay 2 "$CACHIX_URL
   exit 1
 fi
 
+# Probe ONE store path against the cache; sets CACHE_STATUS to present|absent.
+# Called directly, never inside $(...) — an `exit` in a command substitution only
+# kills the subshell, which would let an unanswered probe sail on as "".
+CACHE_STATUS=""
+_cache_probe() { # $1 = /nix/store/<hash>-name, $2 = label for messages
+  # /nix/store/<32-char nixbase32 hash>-<name> → the narinfo key is the hash.
+  local _base="${1#/nix/store/}"
+  local _hash="${_base%%-*}"
+  # No -f: a 404 is a real ANSWER (absent), not a transport failure, so let curl
+  # exit 0 and branch on the status code.
+  local _code
+  _code=$(curl -sS -o /dev/null -w '%{http_code}' -I --max-time 30 --retry 3 --retry-delay 2 \
+    "$CACHIX_URL/$_hash.narinfo" 2>/dev/null || true)
+  case "$_code" in
+    200) CACHE_STATUS=present ;;
+    404) CACHE_STATUS=absent ;;
+    "")
+      echo "ERROR: the request for $CACHIX_URL/$_hash.narinfo ($2) failed outright" >&2
+      echo "       (no HTTP status after retries). Transport problem, not a missing artifact." >&2
+      exit 1
+      ;;
+    *)
+      echo "ERROR: unexpected HTTP $_code for $CACHIX_URL/$_hash.narinfo ($2)." >&2
+      echo "       Neither present nor absent — refusing to guess. Re-run once the cache is healthy." >&2
+      exit 1
+      ;;
+  esac
+}
+
 # --max-jobs 0 unless the gate is explicitly overridden (see below).
 NIX_BUILD_MODE="--max-jobs 0"
 GATE_MISSING=""
@@ -162,32 +191,70 @@ for _attr in linux-image wasm-binary-cache; do
     echo "ERROR: could not evaluate .#$_attr — the flake does not evaluate here." >&2
     exit 1
   }
-  # /nix/store/<32-char nixbase32 hash>-<name> → the narinfo key is the hash.
-  _base="${_path#/nix/store/}"
-  _hash="${_base%%-*}"
-  # No -f: a 404 is a real ANSWER (absent), not a transport failure, so let curl
-  # exit 0 and branch on the status code.
-  _code=$(curl -sS -o /dev/null -w '%{http_code}' -I --max-time 30 --retry 3 --retry-delay 2 \
-    "$CACHIX_URL/$_hash.narinfo" 2>/dev/null || true)
-  case "$_code" in
-    200) echo "    PRESENT  .#$_attr → $_path" ;;
-    404)
-      echo "    MISSING  .#$_attr → $_path"
-      GATE_MISSING="$GATE_MISSING
+  _cache_probe "$_path" ".#$_attr"
+  if [ "$CACHE_STATUS" = present ]; then
+    echo "    PRESENT  .#$_attr → $_path"
+  else
+    echo "    MISSING  .#$_attr → $_path"
+    GATE_MISSING="$GATE_MISSING
   .#$_attr → $_path"
-      ;;
-    "")
-      echo "ERROR: the request for $CACHIX_URL/$_hash.narinfo (.#$_attr) failed outright" >&2
-      echo "       (no HTTP status after retries). Transport problem, not a missing artifact." >&2
-      exit 1
-      ;;
-    *)
-      echo "ERROR: unexpected HTTP $_code for $CACHIX_URL/$_hash.narinfo (.#$_attr)." >&2
-      echo "       Neither present nor absent — refusing to guess. Re-run once the cache is healthy." >&2
-      exit 1
-      ;;
-  esac
+  fi
 done
+
+# ---- the toolchain .drv closures --------------------------------------------
+# The two outputs above are the BOOT bytes; they are not the whole channel. A
+# complete channel also needs the wasm-tools .drv closures on Cachix, because
+# in-guest `nix-env -iA wasm-tools.<tool>` substitutes the DERIVER first and
+# cachix-action's post-build-hook pushes only built OUTPUTS — so nix-wasm.yml
+# pushes them in a SEPARATE, LATER step of the artifacts job. Probing only the
+# outputs therefore cannot see whether that step ran, finished, or failed: both
+# outputs can read 200 while the drv push is still in flight, and the channel
+# would go live with a cache where toolchain installs fail (boot fine, `nix-env
+# -iA wasm-tools.guest-cc` broken). Read the drv list from
+# .#wasm-cache-drv-roots — the SAME file that CI's push step reads, so the two
+# can never drift — and probe every entry.
+#
+# NOT built with $NIX_BUILD_MODE: it is a trivial writeText whose realisation
+# only INSTANTIATES the toolchain derivations (writing .drv files locally), it
+# does not build them, so --max-jobs 0 would wrongly refuse it.
+#
+# REQUIRE_DRV_ROOTS mirrors that CI step's own `if: github.ref ==
+# refs/heads/master` condition: off master CI deliberately never pushes them
+# ("only the channel the live guest boots from needs a complete cache"), so
+# requiring them there would make every branch publish unsatisfiable. Default
+# true — the live-channel flow is the one that must be safe by default.
+REQUIRE_DRV_ROOTS="${REQUIRE_DRV_ROOTS:-true}"
+# shellcheck disable=SC2086
+_drv_roots=$(eval "$NIX build .#wasm-cache-drv-roots --no-link --print-out-paths") || {
+  echo "ERROR: could not build .#wasm-cache-drv-roots (the toolchain .drv list)." >&2
+  exit 1
+}
+_drv_missing=""
+while IFS= read -r _drv; do
+  [ -n "$_drv" ] || continue
+  _cache_probe "$_drv" "drv $_drv"
+  if [ "$CACHE_STATUS" = present ]; then
+    echo "    PRESENT  drv → $_drv"
+  else
+    echo "    MISSING  drv → $_drv"
+    _drv_missing="$_drv_missing
+  drv → $_drv"
+  fi
+done < "$_drv_roots"
+
+if [ -n "$_drv_missing" ]; then
+  if [ "$REQUIRE_DRV_ROOTS" = "true" ]; then
+    GATE_MISSING="$GATE_MISSING$_drv_missing"
+  else
+    echo ""
+    echo "==> NOTICE: toolchain .drv closures are not in $CACHIX_URL, and"
+    echo "    REQUIRE_DRV_ROOTS=false (CI pushes them on master only). The published"
+    echo "    channel will BOOT, but in-guest \`nix-env -iA wasm-tools.<tool>\` will not"
+    echo "    resolve against it. Expected for a branch publish; wrong for a live flip."
+    echo "    Missing:$_drv_missing"
+    echo ""
+  fi
+fi
 
 if [ -n "$GATE_MISSING" ]; then
   if [ "$ALLOW_UNPUBLISHED" = "true" ]; then
@@ -207,9 +274,12 @@ if [ -n "$GATE_MISSING" ]; then
     echo "  Building them on this runner would take hours and would ship an image no CI" >&2
     echo "  job ever built or boot-smoked (nix-wasm#121 / #123)." >&2
     echo "" >&2
-    echo "  FIX: let nix-wasm.yml's \`artifacts\` job COMPLETE on this exact commit — it" >&2
-    echo "       pushes both paths to $CACHIX_URL — then re-run this publish. If that run" >&2
-    echo "       was cancelled (a newer master push cancels it) or skipped, re-run it first." >&2
+    echo "  FIX: let nix-wasm.yml's \`artifacts\` job COMPLETE on this exact commit — its" >&2
+    echo "       build step publishes the two outputs and its LAST step pushes the" >&2
+    echo "       toolchain .drv closures — then re-run this publish. If that run was" >&2
+    echo "       cancelled (a newer master push cancels it) or skipped, re-run it first." >&2
+    echo "       A run still in flight can already satisfy the outputs while the .drv" >&2
+    echo "       push is pending; that is why the .drv roots are checked too." >&2
     echo "" >&2
     echo "  OVERRIDE (deliberate publish of un-CI'd artifacts): ALLOW_UNPUBLISHED=true," >&2
     echo "       or the workflow's \`allow_unpublished\` input." >&2
