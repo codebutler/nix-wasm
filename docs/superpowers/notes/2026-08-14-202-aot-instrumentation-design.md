@@ -780,13 +780,25 @@ The **first-vs-second exec latency delta on MMU (~30.1s → ~2.1s) is the
 single cleanest, most trustworthy number this session obtained.** It is
 exactly the shape §3.4/§6.4's `exec_module_cache` design predicts: the first
 exec pays `instrument()` + `WebAssembly.compile()` of the ~111 MB output once;
-the second exec, same content hash, hits the cache and completes in about the
-same wall-clock as the NOMMU baseline's un-instrumented exec. The NOMMU
-baseline's near-identical first/second timings (nothing to instrument, since
-`pt_base == 0` gates the whole pass off) are the correctly-behaving control
-that makes this comparison meaningful — this is real evidence the fix's
-target case (repeated execs of the same binary) behaves as designed in an
-actual browser, not just in Node.
+a second exec of the same content hash completes in about the same wall-clock
+as the NOMMU baseline's un-instrumented exec.
+
+**ATTRIBUTION CAVEAT (raised in review, and it is correct).** This timing
+shape is CONSISTENT with an `exec_module_cache` hit but does not PROVE one:
+the run never directly observed a cache hit. On a MISS,
+`runtime/kernel-worker.js` still calls `WebAssembly.compile()`, so warm
+browser compilation state, V8 code caching, or other generic second-run
+effects could produce the same first/second shape. The NOMMU control does
+not discriminate either — it exercises a different, uninstrumented path, so
+its flat timings show only that there is nothing to instrument there, not
+that the cache is what made the MMU second run fast. **What this measurement
+establishes is therefore narrower than "the cache works": repeated exec of
+the same binary is ~14× faster in a real browser tab.** That is still the
+target case #202 cares about, but the mechanism is inferred, not observed.
+To actually confirm the fast path, a follow-up needs either a cache-hit
+trace (instrument the lookup and assert the hit) or a cache-DISABLED
+comparison — if the second exec stays ~2.1s with the cache off, the speedup
+was never the cache.
 
 ### What is NOT trustworthy, and why: a new, real, separate finding
 
@@ -808,7 +820,24 @@ and both variants' tabs eventually crash (Chromium kills the renderer; no
 crashpad minidump is produced, consistent with an internal OOM policy kill
 rather than a real segfault) at a broadly similar renderer-RSS ceiling,
 **with 13–15 GiB of host RAM free throughout in every run** (`free -h`,
-sampled continuously) — ruling out host memory pressure as the trigger. This
+sampled continuously).
+
+**On ruling out host pressure (tightened after review).** `free -h` alone is
+NOT sufficient to rule this out: inside a container, `free` reports
+node-wide RAM while the process can be capped by a much smaller cgroup
+limit, and exhausting that cap kills only the renderer — producing exactly
+this symptom. Checked explicitly on this host afterwards: cgroup **v1**
+`memory/memory.limit_in_bytes` reads `9223372036854771712` (the "unlimited"
+sentinel, ~9.2 EB — note the misleading digit-similarity to the observed
+~9–10 **GiB** ceiling; the scales differ by nine orders of magnitude), and
+no cgroup **v2** controller files (`memory.max`, `memory.current`,
+`memory.events`) exist at all. So there is genuinely no memory cap here and
+host pressure IS ruled out — but on the strength of that check, not of
+`free`. Any future repro on a different host or a CI runner must re-check
+`memory.max`/`memory.current` before drawing the same conclusion, since a
+constrained runner would make this symptom mean something completely
+different. (`memory.events` being absent under v1 also means no OOM-kill
+counter was available to corroborate the exit reason independently.) This
 is the exact "baseline crashed too, with plenty of host RAM free" symptom the
 task brief's failed prior attempt reported; this session reproduces it
 reliably with a validated harness and localizes it to the renderer process
