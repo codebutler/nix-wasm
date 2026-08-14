@@ -82,9 +82,24 @@ s.console(0).onData((bytes) => {
       console.log(stamp() + " | " + line.trim());
   }
 });
+// `DEEP2: init reaped` is an INTERMEDIATE marker, not a terminal one:
+// deepfork-exec-init.c prints it (without a trailing newline — the status value
+// follows) and only THEN prints the verdict `DEEP2: ALL-OK`. Terminating the
+// wait on it snapshots BEFORE the verdict exists, so a perfectly healthy run
+// reports FAIL — with a tell-tale half-written `status=0x000` in the transcript
+// where the full-width `0x00000000` should be. That race is timing-dependent
+// and had been sitting latent; #202's instrumentation change shifted guest
+// timing just enough to lose it in CI. (The sibling deepfork-smoke.mjs and
+// grandfork-smoke.mjs never had this bug — they wait only on their terminal
+// marker. This is the one that drifted.)
+//
+// So wait for a genuine terminal state. The intermediate marker is kept only
+// as a BOUNDED fast path, so a real `status != 5` failure still fails in
+// seconds rather than burning the full 120s timeout.
 await s
   .waitForOutput(/DEEP2: ALL-OK|DEEP2: init reaped|Kernel panic|Attempted to kill init/, 120000)
   .catch((e) => console.log(stamp() + " WAIT-ERR " + (e && e.message)));
+await s.waitForOutput(/DEEP2: ALL-OK|Kernel panic|Attempted to kill init/, 10000).catch(() => {});
 const snap = s.snapshot();
 const pass = /DEEP2: ALL-OK/.test(snap);
 if (!pass) console.log("\n── full transcript tail ──\n" + snap.slice(-4000));
