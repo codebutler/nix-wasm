@@ -612,8 +612,12 @@ system). Four workflows:
   closure from Cachix and uploads `base.squashfs` + the `nix-cache/` tree to R2
   (`scripts/publish-to-r2.sh`).
 - `.github/workflows/runtime-gates.yml` — runtime/ engine `test` + `typecheck`
-  (the two gates green on a clean checkout). `lint`/`format:check` are red on
-  pre-existing debt (no committed oxfmt/oxlint config) and deliberately unwired.
+  + `lint` + `format:check`. **All FOUR are wired and green** — this entry used
+  to say `lint`/`format:check` were "red on pre-existing debt and deliberately
+  unwired"; that debt is gone (oxlint reports 0 warnings across 130 files, and
+  oxfmt passes on a clean checkout, both still with no committed config). Treat
+  them as real gates: a `format:check` failure on one edited `demo/node/` file
+  is exactly what turned #204's first run red.
 - `.github/workflows/publish-linux-channel.yml` — **the one-button guest
   republish to pc** (`workflow_dispatch`-only, `dry_run` input). Builds
   `.#linux-image` + `.#wasm-binary-cache`, uploads under a new content-hash
