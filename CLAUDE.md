@@ -83,12 +83,13 @@ definitions then cross-compile.
   cc-wrapper; boots through a thin Nix-generated `/init` (`bootstrap.nix`) that
   mounts the squashfs base over a read-only virtio-blk device as the `/nix` overlay
   lowerdir and hands off to busybox-init.
-- **Process model** = the published image remains a single shared NOMMU arena
-  where ordinary binaries use `posix_spawn`. The default libc now contains the
-  real-fork `fork`/`vfork` seam, but `capture_stack` is deliberately excluded
-  from the shared allow-list, so a plain non-asyncified fork caller still fails
-  to **link** loudly. Real fork binaries opt into asyncify and require the
-  software-MMU+COW kernel.
+- **Process model** = the published/default image is the checked software-MMU
+  kernel plus the real-fork userspace. Ordinary binaries still use
+  `posix_spawn`; fork-capable binaries opt into asyncify and use COW page
+  tables. `capture_stack` remains deliberately excluded from the shared
+  allow-list, so a plain non-asyncified fork caller still fails to **link**
+  loudly. The former NOMMU image remains only through explicit `-nommu`
+  artifact names during its deprecation window.
   Holdouts are handled by one documented rule (don't-build an unused CLI / port a
   real library to `posix_spawn` / compile out an unused return-twice symbol) — never
   a stub. See **`docs/process-model.md`**. Per-process Memory is a *measured*
@@ -740,7 +741,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   cc-wrapper (`wasm-cross.nix`), `guest-clang`/`guest-cxx`/`guest-cc`, and nix.wasm's
   `wcxx` (`nix-wasm.nix`) — allows undefined ONLY the documented host-provided imports
   via the **one shared allow-list file** (`__wasm_abort`, `__cpp_exception`, `logAPIs`,
-  `__dlsym_time64`, `__cxa_thread_atexit_impl`, `__wasm_syscall_0..6` — empirically the
+  `__cxa_thread_atexit_impl`, `__wasm_syscall_0..6` — empirically the
   exact superset of every guest binary's `env.*` imports). A **blanket
   `--allow-undefined` (or `--import-undefined`) silently turns ANY unresolved symbol
   into an `env.*` import** — exactly how #36's removal of `fork` from musl became the
@@ -2135,12 +2136,12 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
   build INPUTS — a separate effort; and memory ceilings for big builds are
   unmeasured (the toolchain itself stays substitute-only).
 - **#175** — DONE: in-guest **build-from-source works on the software-MMU guest**
-  (it SIGSEGV'd because nix's spawn breaks under the MMU). The shipped default
-  guest is `posix_spawn`-only (nix's builder spawn is fine there — #92); this is
-  about the **MMU fork variant** (`.#nix-wasm-fork` / `.#wasm-base-squashfs-fork`),
-  where nix uses **real `fork()`+`exec`** over muslFork's asyncify seam (Track B).
-  Two parts, both **confined to the fork variant** (shipped NOMMU guest byte-identical,
-  NO `ENGINE_ABI` bump, NO pc sync):
+  (it SIGSEGV'd because nix's clone-vfork spawn breaks under the MMU). The
+  shipped default now uses the real-fork build (`.#nix-wasm`, with the former
+  `.#nix-wasm-fork` name retained as an alias), where nix uses **real
+  `fork()`+`exec`** over muslFork's asyncify seam (Track B). The original fix
+  was confined to the fork variant; Phase 3 promoted that variant and carried
+  the mandatory ENGINE_ABI bump + pc sync:
   1. **`clone(CLONE_VM|CLONE_VFORK)` → real `fork()`.** nix's `startProcess`
      spawned the builder with a parent-mmap'd child stack; under the software MMU
      the `CLONE_VM` child gets a **private pgd**, so the parent-mmap'd stack is
@@ -2167,10 +2168,10 @@ Remaining work and design notes live as GitHub issues, not in-repo plan files:
      **feature-detects** it and, when present, collapses via that GENUINE wasm trap.
      A real trap is NOT catchable by `catch/catch_all`, and stays uncatchable across
      the `__wasm_syscall_N` + `wasm_user_mode_tail` JS import frames (pinned by the
-     unit test — verified in V8). NOMMU kernels have no `wasm_collapse` export → the
-     engine keeps the byte-identical JS-throw path, so `ENGINE_ABI` stays 11
-     (documented in `abi.js`, incl. the deferred bump obligation if the MMU/fork
-     guest ever becomes the published image). NO `entry.S`/FOOT surgery.
+     unit test — verified in V8). NOMMU kernels have no `wasm_collapse` export and
+     keep the JS-throw path. Phase 3 made the MMU/fork image the published default,
+     discharging `abi.js`'s deferred obligation with ENGINE_ABI 14. NO
+     `entry.S`/FOOT surgery.
   Proven by `build-from-source-e2e` on `.#kernel-mmu-a2` + the fork squashfs:
   BUILD1/BUILD2 (the forked `/bin/sh` builder fork+execs and runs — the exact
   SIGSEGV path) both pass, with no NOMMU regression. **BUILD3** (a derivation that

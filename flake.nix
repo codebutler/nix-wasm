@@ -65,10 +65,9 @@
       kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
       # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
       kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
-      # Worker #7 spawn-corruption investigation: the shipped-default NOMMU
-      # kernel + CONFIG_DEBUG_NOMMU_REGIONS/CONFIG_DEBUG_VM. Byte-identical to
-      # `kernel` except for kernel .config debug options — no ABI/behavior
-      # change, so it can boot the SAME initramfs/squashfs as a stock preview.
+      # Worker #7 spawn-corruption investigation: the deprecated NOMMU kernel +
+      # CONFIG_DEBUG_NOMMU_REGIONS/CONFIG_DEBUG_VM. Byte-identical to the
+      # internal NOMMU `kernel` derivation except for debug options.
       kernelDebugNommu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; debugNommu = true; };
 
       # ---- opt-in ccache variant of the from-source kernel LLVM (CLAUDE.md §
@@ -795,8 +794,8 @@
       # (upstream's `else pid = fork();` path) linked against muslFork's asyncify
       # _Fork seam + a whole-module wasm-opt --asyncify, and bakes it into a PARALLEL
       # squashfs (real-fork busybox + the fork bootstrap, matching .#wasm-initramfs-
-      # fork). Used ONLY by the nix-boot-smoke-mmu job to prove build-from-source on
-      # the MMU; the shipped NOMMU guest keeps the default clone-vfork build above.
+      # fork). Phase 3 promotes this build to the shipped default; the old
+      # clone-vfork build remains under the explicit `-nommu` compatibility attrs.
       nixWasmFork = import ./nix-wasm.nix {
         inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc muslFork;
         realFork = true;
@@ -910,9 +909,10 @@
       # image. Downloaded once by pc via the disc installer, mounted, and booted
       # from the bytes. nix-cache stays a separate lazy R2 cache.
       linuxImage = import ./userspace/linux-image.nix {
-        inherit pkgs nixpkgs kernel;
-        initramfs = wasmInitramfs;
-        squashfs = wasmBaseSquashfs;
+        inherit pkgs nixpkgs;
+        kernel = kernelMmuA2;
+        initramfs = wasmInitramfsFork;
+        squashfs = wasmBaseSquashfsFork;
       };
 
       # ---- nix-wasm#202 PR-1: the spawn-contract gate (see spikes/
@@ -1056,8 +1056,11 @@
         # Kernel cc/ld wrapper toolchain (fake-llvm equivalent) for inspection.
         kernel-cc = kernelCC;
 
-        # The wasm guest kernel: $out/vmlinux.wasm (new exec ABI; boot pending).
-        kernel = kernel;
+        # Phase 3: the checked software-MMU/fork guest is the public default.
+        # Keep explicit compatibility attrs for the NOMMU deprecation window and
+        # the former MMU names so callers can migrate without ambiguity.
+        kernel = kernelMmuA2;
+        kernel-nommu = kernel;
         kernel-mmu = kernelMmu;
         kernel-mmu-a2 = kernelMmuA2;
         kernel-mmu-a2-dbg = kernelMmuA2Dbg;
@@ -1086,8 +1089,9 @@
         # In-guest make (pdpmake → $out/bin/make).
         make-wasm = makeWasm;
 
-        userspace-busybox = wasmBusybox;
-        # #131 slice 1: real-fork busybox (CONFIG_NOMMU=n + muslFork + asyncify).
+        userspace-busybox = wasmBusyboxFork;
+        userspace-busybox-nommu = wasmBusybox;
+        # Compatibility name for the now-default real-fork busybox.
         userspace-busybox-fork = wasmBusyboxFork;
         userspace-busybox-kernel-headers = wasmBusyboxKernelHeaders;
 
@@ -1311,8 +1315,11 @@
         # Gate: runtime/demo/node/sommelier-leak-smoke.mjs.
         wasm-pool-churn = wlPoolChurn;
 
-        # Nix itself, cross-compiled → $out/bin/nix (the wasm binary).
-        nix-wasm = nixWasm;
+        # Nix itself, cross-compiled → $out/bin/nix (the wasm binary). The
+        # real-fork build is the Phase-3 default; retain the old clone-vfork
+        # build explicitly for the NOMMU deprecation job.
+        nix-wasm = nixWasmFork;
+        nix-wasm-nommu = nixWasm;
 
         # #175: the real-fork nix.wasm (upstream startProcess fork() + muslFork
         # asyncify seam) for the software-MMU guest — the clone-vfork spawn above
@@ -1320,32 +1327,34 @@
         nix-wasm-fork = nixWasmFork;
 
         # Curated NixOS-module eval -> guest /etc.
-        userspace-etc = wasmSystem.config.system.build.etc;
+        userspace-etc = wasmSystemFork.config.system.build.etc;
+        userspace-etc-nommu = wasmSystem.config.system.build.etc;
 
         # Guest system profile (/run/current-system/sw): busybox + ncurses/terminfo.
-        userspace-path = wasmSystem.config.system.path;
+        userspace-path = wasmSystemFork.config.system.path;
+        userspace-path-nommu = wasmSystem.config.system.path;
 
         # Generated guest inittab (profile-absolute paths) — debug/inspection.
         wasm-inittab = wasmInittab;
 
         # Assembled guest system closure: $out/{etc,sw,init,activate} in boot layout.
-        wasm-system = wasmToplevel;
+        # wasmToplevelFork embeds the same kernelMmuA2 + wasmInitramfsFork pair
+        # as linuxImage, so an installed generation cannot fall back to NOMMU.
+        wasm-system = wasmToplevelFork;
+        wasm-system-nommu = wasmToplevel;
 
         # The guest initramfs.cpio.gz (cross busybox + the generated thin /init).
-        wasm-initramfs = wasmInitramfs;
+        wasm-initramfs = wasmInitramfsFork;
+        wasm-initramfs-nommu = wasmInitramfs;
 
-        # #131 prove-then-flip: the real-fork initramfs (busybox-fork + fork
-        # bootstrap) for booting the full nix system on .#kernel-mmu-a2 — the
-        # nix-boot-smoke-mmu gate that must go green before any NOMMU/no-fork
-        # accommodation can be deleted.
+        # Compatibility name for the now-default real-fork initramfs.
         wasm-initramfs-fork = wasmInitramfsFork;
 
         # The base-system store closure as a single squashfs image for virtio-blk.
-        wasm-base-squashfs = wasmBaseSquashfs;
+        wasm-base-squashfs = wasmBaseSquashfsFork;
+        wasm-base-squashfs-nommu = wasmBaseSquashfs;
 
-        # #175 prove-then-flip: the SAME base squashfs but with the real-fork
-        # nix.wasm (+ real-fork busybox), for the nix-boot-smoke-mmu build-from-
-        # source gate. The shipped guest uses .#wasm-base-squashfs (clone-vfork).
+        # Compatibility name for the now-default real-fork base squashfs.
         wasm-base-squashfs-fork = wasmBaseSquashfsFork;
 
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):

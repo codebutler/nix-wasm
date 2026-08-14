@@ -9,14 +9,14 @@
 // The required files: vmlinux.wasm, initramfs.cpio.gz, base.squashfs, nix-cache/
 //
 // A `?variant=<name>` query param boots an alternate artifact set from the SAME
-// preview URL — currently just `mmu` (kernel-mmu-a2 + wasm-initramfs-fork +
-// wasm-base-squashfs-fork: the software-MMU guest with real fork(), same file
-// names, engine-autodetected by its nonzero pt_base — see CLAUDE.md's #126
-// epic). PR previews publish the variant's artifacts to their own cas/<hash>/
+// preview URL — currently just `nommu`, the pre-Phase-3 compatibility guest.
+// The default is kernel-mmu-a2 + the real-fork initramfs/squashfs; the engine
+// autodetects it by the kernel's nonzero pt_base. PR previews publish the
+// variant's artifacts to their own cas/<hash>/
 // prefix and record it in preview.json's "variants" map (pr-preview.yml); local
 // dev mirrors the ./artifacts symlink convention per variant, e.g.:
-//   ln -sfn /path/to/nix-wasm/.artifacts-nix-mmu runtime/demo/web/artifacts-mmu
-// No param → today's default NOMMU behavior, byte-identical.
+//   ln -sfn /path/to/nix-wasm/.artifacts-nix-nommu runtime/demo/web/artifacts-nommu
+// No param → the shipped software-MMU/real-fork default.
 import { init, Terminal, FitAddon } from "./vendor/ghostty/ghostty.mjs";
 import { bootNixSystem, MemVfs } from "../../index.js";
 import { getWaylandCompositor } from "./wayland-compositor.js";

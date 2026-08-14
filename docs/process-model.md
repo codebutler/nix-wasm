@@ -1,11 +1,11 @@
 # Guest process model
 
-The currently published wasm guest is a **single-shared-arena NOMMU system**: one
-`WebAssembly.Memory`, `mm/nommu.c` loads each process at its `data_start`
-offset (the runtime wires `data_start → __memory_base` in
-`runtime/kernel-worker.js`), soft isolation only, `MAP_SHARED` works, and it
-scales to thousands of processes. This is exactly what real uClinux does — the
-guest even prints *"This architecture does not have kernel memory protection."*
+The published/default wasm guest is a **software-MMU system**: processes share
+one `WebAssembly.Memory`, while the checked two-level page-table walk gives each
+process an isolated, copy-on-write address space. Fork-capable binaries use the
+asyncify seam to return twice; ordinary binaries continue to use
+`posix_spawn`. The former single-arena NOMMU guest remains available only
+through explicitly `-nommu`-suffixed artifacts during its deprecation window.
 
 This document is the authoritative description of the **spawn contract**. Its
 purpose: the busybox/ash/glib spawn patches are **one documented platform port**,
@@ -29,9 +29,9 @@ return-twice.
 The default libc now contains the real-fork seam, but that does not make every
 binary fork-capable. The contract is defined at three layers:
 
-- **Published NOMMU kernel:** `clone(CLONE_VM|CLONE_VFORK|SIGCHLD, fn)` is the
-  ordinary spawn primitive (the same `clone()`-with-a-function
-  `pthread_create` uses).
+- **Published software-MMU kernel:** `posix_spawn` still uses
+  `clone(CLONE_VM|CLONE_VFORK|SIGCHLD, fn)` for ordinary binaries, while an
+  asyncified fork binary uses the `capture_stack` seam plus COW page tables.
 - **musl:** `posix_spawn` rides that primitive; `system()` and `popen()` route
   through `posix_spawn` (upstream musl 1.2.5 already does — `src/process/system.c`
   and `src/stdio/popen.c` call `posix_spawn`, and `src/process/posix_spawn.c` uses
@@ -77,20 +77,12 @@ per-binary cost and a kernel-profile requirement.
 
 ## Current profiles
 
-The repo builds two CI-gated process-model shapes. The libc promotion is
-shared by both, but the published kernel/image remains NOMMU until the final
-MMU channel promotion.
+The repo builds two CI-gated process-model shapes. The libc promotion is shared
+by both; Phase 3 made the software-MMU/fork shape the unsuffixed default.
 
-**(i) Shipped NOMMU guest.** It retains the busybox/ash/glib spawn-port
-accommodations and ordinary programs use `posix_spawn`. Its default libc has
-the fork symbols, but no shipped module may import `capture_stack`;
-`.#spawn-linkcheck` pins the loud link failure for a plain fork caller and
-`.#guest-spawn-contract-nommu` confirms the closure contains zero seam
-importers. This is what `.#linux-image`/`.#kernel` publish today.
-
-**(ii) Software-MMU / real-fork guest — `.#kernel-mmu-a2` + the
-`-fork`-suffixed initramfs/squashfs (Track B of #126, issue #131 slice 1).**
-A parallel, CI-gated build (never shipped) where real `fork()`+COW works:
+**(i) Shipped software-MMU / real-fork guest — `.#kernel`,
+`.#wasm-initramfs`, and `.#wasm-base-squashfs` (also available through the
+former `-mmu-a2`/`-fork` compatibility names).** Real `fork()`+COW works:
 the program is linked through the fork stdenv and asyncified, the kernel's
 software-MMU page tables
 (`patches/kernel/0023`/`0024`/`0026`) give a forked child a genuinely
@@ -103,7 +95,7 @@ limit (musl's `longjmp` is an `abort()` stub, nix-wasm#188), not by fork
 itself.
 
 Boot-verified today: `fork()`+`wait()` returns twice with real COW
-divergence (`fork-smoke.mjs`, gated); the promoted `nix-boot-smoke-mmu` GTK +
+divergence (`fork-smoke.mjs`, gated); the default `nix-boot-smoke` GTK +
 core smoke set (the same one-per-boot apps the NOMMU guest runs), plus
 `autotools-fork-smoke.mjs`'s in-guest autotools acceptance smoke (promoted
 2026-08-13, see "Now closed" below for its history), each recorded CI
@@ -118,6 +110,13 @@ on the host, hermetically, by `.#autotools-fixture-hush-check` against a real
 generated `configure` (including a sabotaged-compiler negative case pinned to
 exit 77). Full record: CLAUDE.md's hush learnings entry.
 
+**(ii) NOMMU deprecation guest — `.#kernel-nommu`,
+`.#wasm-initramfs-nommu`, and `.#wasm-base-squashfs-nommu`.** It retains the
+busybox/ash/glib spawn-port accommodations and ordinary programs use
+`posix_spawn`. No module may import `capture_stack`;
+`.#guest-spawn-contract-nommu` pins that closure contract. One clearly labeled
+CI job keeps it from silently rotting until Phase 4 removes it.
+
 **Now closed (2026-08-13):** the IN-GUEST autotools proof
 (`runtime/demo/node/autotools-fork-smoke.mjs`) recorded its first-ever green
 `CFGRC` end-to-end once issue #192 — a kernel exec-image-buffer fragmentation
@@ -126,7 +125,7 @@ bug (repeated large execs, e.g. clang's driver+cc1 pair, failed around the
 exec-image cache (`patches/kernel/0030`, PR #199); no remaining hush defect
 stood in the way (the shell half closed earlier the same day via
 `patches/busybox/0009`–`0011`). The smoke is now a `run_smoke` hard gate in
-`nix-wasm.yml`'s `nix-boot-smoke-mmu` `core` shard — no soak step remains
+`nix-wasm.yml`'s default `nix-boot-smoke` `core` shard — no soak step remains
 for it. Full record: the root `CLAUDE.md`'s autotools caveat and the
 2026-08-05 parity-plan note's "Real-fork autotools proof" item (see "Full
 status record" just below). Retiring the `posix_spawn`-only accommodation
@@ -254,8 +253,8 @@ per-package hacks; no symbol that links but aborts at runtime.
   shipped a booted, CI-gated software-MMU + real-fork guest on top of this
   cost, consistent with CLAUDE.md's "permanent ~2-3× per-access-walk cost"
   framing. It is not a per-process-Memory-style dead end — it is a second,
-  working, opt-in guest shape that coexists with the NOMMU default (see
-  above), not (yet) a replacement for it.
+  working guest shape and is now the published default; NOMMU remains only as
+  the bounded deprecation profile described above.
 
 Full rationale and the investigation record:
 `docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md`. Per-holdout

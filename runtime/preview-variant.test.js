@@ -1,7 +1,7 @@
 // Tests for resolveArtifactsBase (preview-variant.js) — the reader half of the
 // pr-preview.yml ↔ main.js "variants.<name>.artifactsBase" contract. Pins the
 // exact key path the jq step in pr-preview.yml writes
-// (`.variants.mmu.artifactsBase = $base`) so a rename on either side fails
+// (`.variants.nommu.artifactsBase = $base`) so a rename on either side fails
 // here instead of only surfacing as a live "unknown preview variant" click.
 //
 // The fixture-based tests below pin the READER side only (resolveArtifactsBase
@@ -10,7 +10,7 @@
 // resolveArtifactsBase contract" describe block at the end of this file closes
 // that gap for real: it reads the workflow source itself and asserts (a) its
 // jq mutation target is the literal `variants.<name>.artifactsBase` key path
-// resolveArtifactsBase reads (a rename to e.g. `.variants.mmu.base` fails the
+// resolveArtifactsBase reads (a rename to e.g. `.variants.nommu.base` fails the
 // regex match outright) and (b) the variant name embedded there is the SAME
 // name the "Comment preview link" step's `?variant=` URL links (a rename on
 // only one side desyncs the two captured names). Without that block, editing
@@ -47,9 +47,9 @@ describe("variant requested, preview.json present (PR preview)", () => {
   test("variant present in variants map → resolved against its artifactsBase", () => {
     const preview = {
       artifactsBase: "/cas/abc123/",
-      variants: { mmu: { artifactsBase: "/cas/def456/" } },
+      variants: { nommu: { artifactsBase: "/cas/def456/" } },
     };
-    expect(resolveArtifactsBase(preview, "mmu", BASE_HREF)).toBe(
+    expect(resolveArtifactsBase(preview, "nommu", BASE_HREF)).toBe(
       "https://preview.example/cas/def456/",
     );
   });
@@ -57,7 +57,7 @@ describe("variant requested, preview.json present (PR preview)", () => {
   test("variant absent from variants map → throws, never falls back to the default guest", () => {
     const preview = {
       artifactsBase: "/cas/abc123/",
-      variants: { mmu: { artifactsBase: "/cas/def456/" } },
+      variants: { nommu: { artifactsBase: "/cas/def456/" } },
     };
     expect(() => resolveArtifactsBase(preview, "nope", BASE_HREF)).toThrow(
       /unknown preview variant "nope"/,
@@ -66,16 +66,16 @@ describe("variant requested, preview.json present (PR preview)", () => {
 
   test("preview.json present with no variants map at all → throws (same as absent)", () => {
     const preview = { artifactsBase: "/cas/abc123/" };
-    expect(() => resolveArtifactsBase(preview, "mmu", BASE_HREF)).toThrow(
-      /unknown preview variant "mmu"/,
+    expect(() => resolveArtifactsBase(preview, "nommu", BASE_HREF)).toThrow(
+      /unknown preview variant "nommu"/,
     );
   });
 });
 
 describe("variant requested, no preview.json (local dev)", () => {
   test("mirrors the ./artifacts-<variant>/ symlink convention", () => {
-    expect(resolveArtifactsBase(null, "mmu", BASE_HREF)).toBe(
-      "https://preview.example/pr-42/demo/web/artifacts-mmu/",
+    expect(resolveArtifactsBase(null, "nommu", BASE_HREF)).toBe(
+      "https://preview.example/pr-42/demo/web/artifacts-nommu/",
     );
   });
 });
@@ -90,12 +90,12 @@ describe("pr-preview.yml ↔ resolveArtifactsBase contract", () => {
   test("the jq step's mutation target is the literal variants.<name>.artifactsBase key path", () => {
     // resolveArtifactsBase reads `preview?.variants?.[variant]?.artifactsBase`
     // (preview-variant.js) — this must match the jq filter's literal key path
-    // byte-for-byte. A rename on the yml side (e.g. to `.variants.mmu.base`,
+    // byte-for-byte. A rename on the yml side (e.g. to `.variants.nommu.base`,
     // or hoisting the field a level) makes this regex fail to match, not
     // silently pass with a stale capture.
     const jqTarget = workflow.match(/'\.variants\.([\w-]+)\.artifactsBase = \$base'/);
     expect(jqTarget).not.toBeNull();
-    expect(jqTarget[1]).toBe("mmu");
+    expect(jqTarget[1]).toBe("nommu");
   });
 
   test("the jq write and the PR-comment's ?variant= link agree on the same variant name", () => {

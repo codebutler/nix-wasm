@@ -119,8 +119,8 @@ let
     + "-Wl,--no-merge-data-segments "
     # No-undef contract (#52): allow ONLY the host-provided imports enumerated in
     # the shared allow-list — the libc imports clang/lld legitimately pull
-    # (__dlsym_time64 via musl's time64 dlsym redirect, __cxa_thread_atexit_impl
-    # from libc++abi, __cpp_exception, the __wasm_syscall_* bridge). Any OTHER
+    # (__cxa_thread_atexit_impl from libc++abi, __cpp_exception, the
+    # __wasm_syscall_* bridge). Any OTHER
     # unresolved symbol (a stray `fork`/`exec`/`system`) fails the link loudly
     # rather than becoming a dangling `env.*` import — replacing the old blanket
     # --allow-undefined that let #36's removed `fork` slip through as the #50 crash.
