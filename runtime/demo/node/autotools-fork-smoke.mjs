@@ -21,13 +21,13 @@
 // Flow (boots the software-MMU / real-fork artifact set — same mechanism
 // build-from-source-e2e.mjs uses, see its header comment):
 //   1. Boot nix:true with a 9P-exposed VFS carrying the .#autotools-fixture
-//      tree (configure.ac/configure/Makefile.in/prog.c) under /mnt/pc.
+//      tree (configure.ac/configure/Makefile.in/prog.c) under /mnt/yore.
 //   2. Substitute the in-guest toolchain from the cache: `nix-env -iA
 //      wasm-tools.guest-cc wasm-tools.make-wasm32` (both already published in
 //      the wasm-tools catalog — see userspace/binary-cache.nix's devPaths /
 //      flake.nix's wasmDevPaths; make-wasm32 is the `pname` of
 //      toolchain/make.nix's pdpmake port, ALREADY catalogued — nothing to add).
-//   3. `cp -r` the fixture from the /mnt/pc mount (`cache=none` — the
+//   3. `cp -r` the fixture from the /mnt/yore mount (`cache=none` — the
 //      unbuffered 9P read path bootstrap.nix documents as fragile for large
 //      reads on this guest, and no sibling smoke has ever cp -r'd a nested
 //      tree out of it before) to a writable ramfs location (/tmp) —
@@ -97,7 +97,7 @@ for (const f of FIXTURE_FILES) {
 }
 const vfs = MemVfs.from({ Home: { "autotools-fixture": fixtureTree } });
 // Known-good host-side values for the post-copy staged-tree assertion below
-// (P2-3): /mnt/pc is mounted `cache=none` (bootstrap.nix), the unbuffered 9P
+// (P2-3): /mnt/yore is mounted `cache=none` (bootstrap.nix), the unbuffered 9P
 // read path documented elsewhere as fragile for large reads on this guest —
 // and no sibling smoke has ever `cp -r`'d a NESTED TREE out of it before. A
 // truncated/failed copy must fail HERE, with its own clear marker, instead of
@@ -164,14 +164,14 @@ try {
   s.send(". /etc/set-environment 2>/dev/null\n");
   await s.waitForPrompt(10000);
 
-  // Stage the fixture from the (possibly-9P-unbuffered, cache=none) /mnt/pc
+  // Stage the fixture from the (possibly-9P-unbuffered, cache=none) /mnt/yore
   // mount onto writable ramfs — configure/make need to write config.status/
   // Makefile/prog/*.o into the source tree's own directory, and print the
   // staged byte/file count in the SAME command so a truncated copy is
   // attributable right here (P2-3).
   console.log("  [staging the fixture onto ramfs …]");
   const cp = await run(
-    "rm -rf /tmp/fixture && cp -r /mnt/pc/Home/autotools-fixture /tmp/fixture && " +
+    "rm -rf /tmp/fixture && cp -r /mnt/yore/Home/autotools-fixture /tmp/fixture && " +
       "cd /tmp/fixture && " +
       "B=$(wc -c < configure) && echo STAGE_BYTES=$B && " +
       "N=$(ls -1 | wc -l) && echo STAGE_FILES=$N",

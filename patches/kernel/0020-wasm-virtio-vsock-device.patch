@@ -50,7 +50,7 @@ index 7ec9114..15cae5d 100644
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
 @@ -378,6 +378,14 @@ enum {
- 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: Yore VFS export (mount tag "yoreroot") */
  	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
  #endif
 +#if IS_ENABLED(CONFIG_VIRTIO_VSOCKETS)

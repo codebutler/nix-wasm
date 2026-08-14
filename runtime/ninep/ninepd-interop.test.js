@@ -7,7 +7,7 @@
 // listener, exactly mirroring the vsock reverse connection: guest connects
 // OUT, host accepts and speaks 9P as the client. The fixture tree reproduces
 // the Nix shapes the feature lives on — absolute + relative symlink chains,
-// a dangling link, and the /mnt/pc recursion guard.
+// a dangling link, and the /mnt/yore recursion guard.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -64,8 +64,8 @@ maybe("ninepd (real C binary) ↔ JS 9P client", () => {
     mkdirSync(join(root, "nix/store/aaa-app/share/applications"), { recursive: true });
     mkdirSync(join(root, "nix/store/zzz-system/sw"), { recursive: true });
     mkdirSync(join(root, "run"), { recursive: true });
-    mkdirSync(join(root, "mnt/pc"), { recursive: true });
-    writeFileSync(join(root, "mnt/pc/HOST-FILE"), "must never be served\n");
+    mkdirSync(join(root, "mnt/yore"), { recursive: true });
+    writeFileSync(join(root, "mnt/yore/HOST-FILE"), "must never be served\n");
     writeFileSync(
       join(root, "nix/store/aaa-app/share/applications/app.desktop"),
       "[Desktop Entry]\nType=Application\nName=App\nExec=app\nCategories=Game;\n",
@@ -168,15 +168,15 @@ maybe("ninepd (real C binary) ↔ JS 9P client", () => {
     await clunk(5);
   });
 
-  test("the recursion guard: /mnt/pc is invisible", async () => {
-    // Walking into it stops at mnt — pc is not walkable (partial Rwalk).
-    const rw = await walk(["mnt", "pc"], 6);
+  test("the recursion guard: /mnt/yore is invisible", async () => {
+    // Walking into it stops at mnt — yore is not walkable (partial Rwalk).
+    const rw = await walk(["mnt", "yore"], 6);
     expect(rw.qids.length).toBe(1);
     // And hidden from its parent's listing.
     await walk(["mnt"], 7);
     await rpc({ type: P9.Tlopen, fid: 7, flags: 0 });
     const rd = await rpc({ type: P9.Treaddir, fid: 7, offset: 0, count: 8192 });
-    expect(new TextDecoder().decode(rd.data)).not.toContain("pc");
+    expect(new TextDecoder().decode(rd.data)).not.toContain("yore");
     await clunk(7);
   });
 

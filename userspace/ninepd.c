@@ -1,10 +1,10 @@
 /* ninepd.c — guest-side READ-ONLY 9P2000.L file server for pc's /Linux mount
- * (pc issue #472): the mirror image of the host→guest /mnt/pc mount. pc's VFS
+ * (pc issue #472): the mirror image of the host→guest /mnt/yore mount. pc's VFS
  * grows a 9P *client* (pc js/vfs/backends/guest-9p.js); this daemon serves the
  * guest's rootfs to it, so the host browses the RUNNING system live (Filer,
  * the tray-menu app launcher reading /run/current-system/sw/share/applications).
  *
- * Transport is the /Ctl reverse-connection trick (see pcctl.c): the host
+ * Transport is the /Ctl reverse-connection trick (see yorectl.c): the host
  * cannot initiate a vsock connection into the guest, so we connect OUT to the
  * host (VMADDR_CID_HOST = 2) on the well-known port and hold the stream. pc
  * listens (pc js/linux/guest-fs.js), handshakes, and mounts /Linux for exactly
@@ -21,9 +21,9 @@
  *   - Symlinks are NOT followed server-side (standard 9P): walks stop at a
  *     symlink component (partial Rwalk) and Treadlink serves the target — the
  *     client does the splice, exactly like the kernel's own v9fs.
- *   - THE RECURSION GUARD: /mnt/pc is the host's OWN filesystem mounted into
+ *   - THE RECURSION GUARD: /mnt/yore is the host's OWN filesystem mounted into
  *     this guest. Serving it back to the host would make the two mounts
- *     recurse into each other (/mnt/pc/Linux/mnt/pc/...). EXCLUDE_PATH is
+ *     recurse into each other (/mnt/yore/Linux/mnt/yore/...). EXCLUDE_PATH is
  *     invisible: hidden from readdir, ENOENT on walk.
  *
  * Test seams (native builds; the wasm build ignores them unless set):
@@ -68,7 +68,7 @@
 #define P9_PORT 1025
 
 /* The host's own filesystem, mounted into this guest — never serve it back. */
-#define EXCLUDE_PATH "/mnt/pc"
+#define EXCLUDE_PATH "/mnt/yore"
 
 #define MAX_MSIZE 65536u
 #define MAX_FIDS 128
@@ -549,7 +549,7 @@ static int scan_dir(struct fid *f) {
   while ((e = readdir(d))) {
     if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
     if (at_exclude_parent && strcmp(e->d_name, strrchr(EXCLUDE_PATH, '/') + 1) == 0)
-      continue; /* the recursion guard: hide /mnt/pc from its parent's listing */
+      continue; /* the recursion guard: hide /mnt/yore from its parent's listing */
     if (cnt == cap) {
       cap *= 2;
       struct dent *ne = realloc(ents, cap * sizeof(*ents));

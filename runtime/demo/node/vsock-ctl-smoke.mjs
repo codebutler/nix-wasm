@@ -1,15 +1,15 @@
 // vsock-ctl-smoke.mjs — end-to-end proof of the /Ctl desktop-control bridge over
-// AF_VSOCK (issue #60 Phase 2 / nix-wasm#10 option 3): the guest agent `pcctl`
-// (userspace/pcctl.c) talking to a host /Ctl listener on the virtio-vsock device.
+// AF_VSOCK (issue #60 Phase 2 / nix-wasm#10 option 3): the guest agent `yorectl`
+// (userspace/yorectl.c) talking to a host /Ctl listener on the virtio-vsock device.
 //
 // It boots busybox-only (nix:false — kernel + initramfs, no /nix overlay needed),
 // registers a host listener on CTL_PORT via the `vsock.onReady(device)` boot hook,
-// and drives the guest shell to run `pcctl` for each verb:
+// and drives the guest shell to run `yorectl` for each verb:
 //
-//   pcctl open calc      → host seam records open=["calc"]
-//   pcctl notify hello   → host seam records notify=["hello"]
-//   pcctl clipset world  → host clipboard becomes "world"
-//   pcctl clipget        → guest prints the host clipboard ("world") back
+//   yorectl open calc      → host seam records open=["calc"]
+//   yorectl notify hello   → host seam records notify=["hello"]
+//   yorectl clipset world  → host clipboard becomes "world"
+//   yorectl clipget        → guest prints the host clipboard ("world") back
 //
 // PASS iff every verb reaches the host seams AND the CLIPGET reply round-trips to
 // the guest's stdout — proving the full guest→host→guest vsock path.
@@ -21,7 +21,7 @@
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";
 
-const CTL_PORT = 1024; // MUST match pc CTL_PORT and userspace/pcctl.c.
+const CTL_PORT = 1024; // MUST match pc CTL_PORT and userspace/yorectl.c.
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -121,19 +121,19 @@ try {
   if (!reached) throw new Error("no prompt");
 
   // 1. open <app id> → host openApp seam.
-  s.send("pcctl open calc\n");
+  s.send("yorectl open calc\n");
   await waitFor(() => seen.open.includes("calc"), 15000, "OPEN calc");
 
   // 2. notify <text> → host notify seam.
-  s.send("pcctl notify hello\n");
+  s.send("yorectl notify hello\n");
   await waitFor(() => seen.notify.includes("hello"), 15000, "NOTIFY hello");
 
   // 3. clipset <text> → host clipboard set.
-  s.send("pcctl clipset world\n");
+  s.send("yorectl clipset world\n");
   await waitFor(() => seen.clipboard === "world", 15000, "CLIPSET world");
 
   // 4. clipget → host reply round-trips to the guest's stdout.
-  s.send("echo CLIP=$(pcctl clipget)\n");
+  s.send("echo CLIP=$(yorectl clipget)\n");
   const got = await s.waitForOutput(/CLIP=world\b/, 15000);
   if (!got) throw new Error("CLIPGET reply did not reach the guest (expected CLIP=world)");
 

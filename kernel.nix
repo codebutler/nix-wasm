@@ -83,7 +83,7 @@ pkgs.stdenv.mkDerivation {
     # virtio-9p channels (VIRTIO_ID_9P = 9) on the wasm virtio transport so the
     # stock mainline 9P-over-virtio transport (CONFIG_NET_9P_VIRTIO) can carry
     # the guest's filesystem mounts, replacing the bespoke trans_cb SAB-ring
-    # transport. VW_DEV_9P_ROOT (4, tag "pcroot") + VW_DEV_9P_NIXCACHE (5, tag
+    # transport. VW_DEV_9P_ROOT (4, tag "yoreroot") + VW_DEV_9P_NIXCACHE (5, tag
     # "nixcache"); the host serves the tag/feature (runtime/virtio/ninep-device.js).
     ./patches/kernel/0018-wasm-virtio-9p-device.patch
     # Issue #10 (option 2) / #83: register a virtio-console device

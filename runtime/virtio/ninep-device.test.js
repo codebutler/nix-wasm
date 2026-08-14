@@ -42,7 +42,7 @@ function makeVq(memory, base, num) {
   };
 }
 
-function makeDev({ tag = "pcroot", cid = 1, server, forwardNotify } = {}) {
+function makeDev({ tag = "yoreroot", cid = 1, server, forwardNotify } = {}) {
   const memory = { buffer: new ArrayBuffer(64 * 1024) };
   const shared = new SharedQueues(makeSharedQueues());
   const irqs = [];

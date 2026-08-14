@@ -360,7 +360,7 @@ jobs:
   #     signal()) must run when it interrupts a blocking syscall. No networking.
   #   • ping-pace-probe-smoke — #75 localizer (non-gating): control/restart/xcpu/
   #     repro/transparent matrix, the detailed breakdown behind ping-pace-smoke.
-  #   • vsock-ctl-smoke — the guest /Ctl agent (pcctl) ↔ host listener over
+  #   • vsock-ctl-smoke — the guest /Ctl agent (yorectl) ↔ host listener over
   #     virtio-vsock, open/notify/clipset/clipget round-trip (issue #60 Phase 2).
   #   • resize-smoke   — terminal resize: console.resize() → virtio-console
   #     config-change irq → hvc_resize(), read back via `stty size` (#83 follow-up).
@@ -522,7 +522,7 @@ jobs:
           set -e
           echo "::endgroup::"
 
-          # Issue #60 Phase 2: the guest /Ctl agent (pcctl) ↔ host listener over
+          # Issue #60 Phase 2: the guest /Ctl agent (yorectl) ↔ host listener over
           # virtio-vsock — open/notify/clipset/clipget round-trip. Gating.
           run_smoke demo/node/vsock-ctl-smoke.mjs
 
@@ -795,7 +795,7 @@ jobs:
   # virtio-device-enum patch fix: if patches 0017-0020 ever drop the 9P device
   # registration again (a silent patch-fuzz hazard the kernel.nix build-time
   # assertion already guards), `9pnet_virtio` finds "no channels available for
-  # device pcroot/nixcache" and this boot fails. smoke.mjs reads /mnt/pc (pcroot
+  # device yoreroot/nixcache" and this boot fails. smoke.mjs reads /mnt/yore (yoreroot
   # 9P) and runs `nix-env -iA make` (nixcache 9P substitution) — exercising BOTH
   # 9P channels end to end. Needs the four nix:true artifacts (kernel + initramfs +
   # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
@@ -890,8 +890,8 @@ jobs:
             echo "$script still inconclusive after 3 attempts"
             return 2
           }
-          # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/pc over
-          # pcroot 9P, installs make-wasm32 over nixcache 9P).
+          # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/yore over
+          # yoreroot 9P, installs make-wasm32 over nixcache 9P).
           run_smoke demo/node/smoke.mjs
           # The new CLI: `nix profile install` of a REAL-derivation catalog entry
           # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware

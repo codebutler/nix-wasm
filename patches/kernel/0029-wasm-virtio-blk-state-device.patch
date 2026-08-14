@@ -51,7 +51,7 @@ index 1111111..2222222 100644
 +	VW_DEV_BLK = 3,		/* virtio-blk seed squashfs (/dev/vda) */
  #endif
  #if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
- 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: Yore VFS export (mount tag "yoreroot") */
 @@ -470,12 +476,6 @@
  	if (IS_ERR(vw))
  		return PTR_ERR(vw);

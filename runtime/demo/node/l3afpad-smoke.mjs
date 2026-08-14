@@ -7,7 +7,7 @@
 // classes (menubar/textview/scrolledwindow) through the fpcast seam, fires a
 // GtkTextBuffer "changed" signal into an address-taken C handler, and checks
 // gtk_get_major_version()==3. The full editor window — open, edit, save a file
-// to /mnt/pc — is a MANUAL browser check. See userspace/l3afpad.nix +
+// to /mnt/yore — is a MANUAL browser check. See userspace/l3afpad.nix +
 // patches/l3afpad/.
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";

@@ -57,9 +57,9 @@ pkgs.writeText "init" ''
   # report) unless ignoreqv is set — hence BOTH. Read-only exports, so loose is safe.
   RO="$M,cache=loose,ignoreqv"
 
-  # pc's VFS (user files) at /mnt/pc.
-  mkdir -p /mnt/pc
-  mount -t 9p -o "$M,aname=/" pcroot /mnt/pc 2>/dev/null || echo "pc: /mnt/pc 9p mount failed"
+  # pc's VFS (user files) at /mnt/yore.
+  mkdir -p /mnt/yore
+  mount -t 9p -o "$M,aname=/" yoreroot /mnt/yore 2>/dev/null || echo "yore: /mnt/yore 9p mount failed"
 
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
@@ -68,7 +68,7 @@ pkgs.writeText "init" ''
   # ---- /nix: installed state disk vs seed installer vs legacy overlay --------
   # Stamp file written after a successful seed copy. Presence ⇒ mount vdb as /nix
   # directly (no squashfs overlay). Absence + empty vdb ⇒ install mode.
-  STAMP=/.pc-linux-installed
+  STAMP=/.yore-linux-installed
   mkdir -p /nix /mnt/nix-ro /mnt/state
 
   mount_seed_overlay() {
@@ -78,9 +78,9 @@ pkgs.writeText "init" ''
     if mount -t squashfs -o ro /dev/vda /mnt/nix-ro 2>/dev/null; then
       mount -t overlay overlay \
         -o lowerdir=/mnt/nix-ro,upperdir=/run/nix-upper,workdir=/run/nix-work /nix \
-        || { echo "pc: /nix overlay failed; falling back to ramfs /nix"; mkdir -p /nix/store; }
+        || { echo "yore: /nix overlay failed; falling back to ramfs /nix"; mkdir -p /nix/store; }
     else
-      echo "pc: served store not mounted; booting empty ramfs /nix"
+      echo "yore: served store not mounted; booting empty ramfs /nix"
       mkdir -p /nix/store
     fi
   }
@@ -94,17 +94,17 @@ pkgs.writeText "init" ''
     vdb_sectors=$(cat /sys/block/vdb/size 2>/dev/null || echo 0)
     # 64 MiB = 131072 * 512-byte sectors
     if [ "$vdb_sectors" -lt 131072 ]; then
-      echo "pc: /dev/vdb harness stub (''${vdb_sectors} sectors) — legacy overlay"
+      echo "yore: /dev/vdb harness stub (''${vdb_sectors} sectors) — legacy overlay"
       mount_seed_overlay
     else
       # Try to mount an already-installed state disk.
       if mount -t ext4 -o rw /dev/vdb /mnt/state 2>/dev/null \
          || mount -t ext2 -o rw /dev/vdb /mnt/state 2>/dev/null; then
         if [ -f "/mnt/state$STAMP" ] && [ -d /mnt/state/nix/store ]; then
-          echo "pc: installed system on /dev/vdb — mounting /nix directly"
+          echo "yore: installed system on /dev/vdb — mounting /nix directly"
           # Bind the store tree to /nix (state disk root holds /nix + /home + stamp).
           mount --bind /mnt/state/nix /nix \
-            || { echo "pc: bind /nix from state disk failed"; mount_seed_overlay; }
+            || { echo "yore: bind /nix from state disk failed"; mount_seed_overlay; }
         else
           # Mounted but unstamped / incomplete — treat as needs (re)install.
           umount /mnt/state 2>/dev/null || true
@@ -115,7 +115,7 @@ pkgs.writeText "init" ''
       fi
 
       if [ -n "$NEED_INSTALL" ]; then
-        echo "pc: installing seed /nix onto /dev/vdb (first boot / reset)"
+        echo "yore: installing seed /nix onto /dev/vdb (first boot / reset)"
         # busybox mkfs.ext2 (CONFIG_MKFS_EXT2=y). EXT4 driver mounts the result.
         # Seed squashfs carries ~100k+ inodes (one per store path). Default
         # bytes-per-inode for ≥512 MiB disks is 16384 → only ~32k inodes on a
@@ -123,7 +123,7 @@ pkgs.writeText "init" ''
         # -i 4096 (minimum for 4k blocks) so a 512 MiB disk gets ~131k inodes.
         # -m 1 keeps a small reserved pool without eating install headroom.
         mkfs.ext2 -F -q -i 4096 -m 1 /dev/vdb \
-          || { echo "pc: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
+          || { echo "yore: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
       fi
 
       if [ -n "$NEED_INSTALL" ]; then
@@ -138,7 +138,7 @@ pkgs.writeText "init" ''
             # seed fills the guest page cache and OOMs (stack alloc errno -12 /
             # kill init) before the disk fills. Sync + drop_caches between store
             # paths keeps the buddy allocator breathing under CONFIG_BOOT_MEM_PAGES.
-            echo "pc: copying seed store (this may take a while)…"
+            echo "yore: copying seed store (this may take a while)…"
             mkdir -p /mnt/state/nix/store
             COPY_FAIL=
             for p in /mnt/nix-ro/store/*; do
@@ -158,7 +158,7 @@ pkgs.writeText "init" ''
               done
             fi
             if [ -n "$COPY_FAIL" ]; then
-              echo "pc: seed copy failed"
+              echo "yore: seed copy failed"
               umount /mnt/nix-ro 2>/dev/null
               umount /mnt/state 2>/dev/null
               mount_seed_overlay
@@ -166,13 +166,13 @@ pkgs.writeText "init" ''
             fi
             umount /mnt/nix-ro 2>/dev/null || true
           else
-            echo "pc: seed squashfs missing — cannot install"
+            echo "yore: seed squashfs missing — cannot install"
             umount /mnt/state 2>/dev/null || true
             mount_seed_overlay
             NEED_INSTALL=
           fi
         else
-          echo "pc: cannot mount freshly formatted /dev/vdb"
+          echo "yore: cannot mount freshly formatted /dev/vdb"
           mount_seed_overlay
           NEED_INSTALL=
         fi
@@ -184,8 +184,8 @@ pkgs.writeText "init" ''
           || echo "installed=1" > "/mnt/state$STAMP"
         sync
         mount --bind /mnt/state/nix /nix \
-          || { echo "pc: post-install bind /nix failed"; mount_seed_overlay; }
-        echo "pc: install complete — /nix is on /dev/vdb"
+          || { echo "yore: post-install bind /nix failed"; mount_seed_overlay; }
+        echo "yore: install complete — /nix is on /dev/vdb"
       fi
     fi
   else
@@ -272,10 +272,10 @@ pkgs.writeText "init" ''
       echo 'import ${nixpkgsChannel} { }' > /root/.nix-defexpr/nixpkgs/default.nix
     ''}
 
-    echo "pc: booting Nix userspace from $sys"
+    echo "yore: booting Nix userspace from $sys"
     exec "$sys/init"
   fi
 
-  echo "pc: no Nix system found at /nix/var/nix/profiles/system — dropping to a shell"
+  echo "yore: no Nix system found at /nix/var/nix/profiles/system — dropping to a shell"
   exec /bin/sh
 ''

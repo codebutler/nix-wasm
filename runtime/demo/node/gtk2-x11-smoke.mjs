@@ -13,7 +13,7 @@
 //     seconds later — proves it didn't crash/exit (gtk_main's event loop is
 //     still running).
 //   - xwd -root: dumps the actual server framebuffer (gtk2-hello's window
-//     included, since Xvfb has no compositor) to /mnt/pc (the 9P-mounted host
+//     included, since Xvfb has no compositor) to /mnt/yore (the 9P-mounted host
 //     VFS), then this script reads the file back HOST-SIDE and parses the real
 //     XWD header (X11/XWDFile.h) to assert pixmap_width/height/depth match the
 //     requested screen AND that the pixel data is not a single flat color
@@ -97,7 +97,7 @@ try {
   // xwd -root: dump the real server framebuffer (gtk2-hello's window
   // included — Xvfb has no compositor, so xwd sees exactly what's on screen)
   // to the 9P-mounted host VFS.
-  s.send("DISPLAY=:9 xwd -root -silent -out /mnt/pc/Home/gtk2.xwd; echo XWDDONE_RC:$?\n");
+  s.send("DISPLAY=:9 xwd -root -silent -out /mnt/yore/Home/gtk2.xwd; echo XWDDONE_RC:$?\n");
   const xwdRan = await s.waitForOutput(/XWDDONE_RC:\d+/, 30000);
   const xwdMatch = /XWDDONE_RC:(\d+)/.exec(s.snapshot());
   const xwdOk = xwdRan && xwdMatch && xwdMatch[1] === "0";

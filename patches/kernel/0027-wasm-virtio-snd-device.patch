@@ -41,7 +41,7 @@ diff --git a/drivers/virtio/virtio_wasm.c b/drivers/virtio/virtio_wasm.c
 --- a/drivers/virtio/virtio_wasm.c
 +++ b/drivers/virtio/virtio_wasm.c
 @@ -434,6 +434,15 @@
- 	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
+ 	VW_DEV_9P_ROOT,		/* virtio-9p: Yore VFS export (mount tag "yoreroot") */
  	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
  #endif
 +#if IS_ENABLED(CONFIG_SND_VIRTIO)

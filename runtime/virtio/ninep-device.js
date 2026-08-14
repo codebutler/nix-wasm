@@ -7,7 +7,7 @@
 // One device == one 9P connection. Mainline 9pnet_virtio binds a single
 // virtqueue named "requests" and one mount tag per virtio device; a mount
 // selects the channel by tag (`mount -t 9p -o trans=virtio <tag>`). So this
-// repo registers one device per mount: the pc VFS export (tag "pcroot") and the
+// repo registers one device per mount: the Yore VFS export (tag "yoreroot") and the
 // nix binary cache (tag "nixcache"). Each carries a distinct 9P connection id
 // (`cid`) so the shared 9P server isolates per-connection state (negotiated
 // msize + the fid namespace) exactly as the trans_cb cid did.

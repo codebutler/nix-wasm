@@ -387,8 +387,8 @@
       # (issue #60 Phase 2 / nix-wasm#10 option 3): a tiny CLI that connects to
       # VMADDR_CID_HOST:1024 and speaks the length-prefixed open/notify/clipget/
       # clipset protocol — the standard-socket replacement for the bespoke 9P
-      # `/Ctl` mount. Baked into the initramfs as /bin/pcctl. See userspace/pcctl.c.
-      pcctlAgent = import ./userspace/pcctl.nix {
+      # `/Ctl` mount. Baked into the initramfs as /bin/yorectl. See userspace/yorectl.c.
+      yorectlAgent = import ./userspace/yorectl.nix {
         inherit cross;
       };
 
@@ -404,9 +404,9 @@
 
       # Guest-side read-only 9P2000.L rootfs server for pc's /Linux mount
       # (pc#472): connects OUT to VMADDR_CID_HOST:1025 (the same reverse-
-      # connection trick as pcctl) and serves the live guest filesystem; pc
+      # connection trick as yorectl) and serves the live guest filesystem; pc
       # mounts it at /Linux and the tray launcher reads .desktop entries off
-      # it. Never serves /mnt/pc (host↔guest mount recursion guard). Baked
+      # it. Never serves /mnt/yore (host↔guest mount recursion guard). Baked
       # into the initramfs as /bin/ninepd; started from inittab (init.nix).
       ninepdDaemon = import ./userspace/ninepd.nix {
         inherit cross;
@@ -678,7 +678,7 @@
       # ---- generated inittab (profile-absolute paths) + activation script ----
       wasmInittab = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
       wasmActivate = import ./userspace/activate.nix { pkgs = cross; };
-      wasmPcBootloader = import ./userspace/pc-bootloader.nix { pkgs = cross; };
+      wasmYoreBootloader = import ./userspace/yore-bootloader.nix { pkgs = cross; };
 
       # #177 G6: stamp ENGINE_ABI into the system boot manifest (same parse as
       # linux-image.nix) so the host refuses a generation whose kernel ABI
@@ -703,11 +703,11 @@
         inittab = wasmInittab;
         activate = wasmActivate;
         # G6: kernel + initramfs must be in the system closure so installed
-        # boots can export them without the ISO (pc-bootloader / G5).
+        # boots can export them without the ISO (yore-bootloader / G5).
         kernel = kernel;
         initramfs = wasmInitramfs;
         kernelAbi = bootKernelAbi;
-        pcBootloader = wasmPcBootloader;
+        yoreBootloader = wasmYoreBootloader;
       };
 
       # ---- thin initramfs /init (generated) + the initramfs cpio ------------
@@ -722,7 +722,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe pcctlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -854,7 +854,7 @@
         kernel = kernelMmuA2;
         initramfs = wasmInitramfsFork;
         kernelAbi = bootKernelAbi;
-        pcBootloader = wasmPcBootloader;
+        yoreBootloader = wasmYoreBootloader;
       };
       wasmBaseSquashfsFork = import ./userspace/base-squashfs.nix {
         inherit pkgs;
@@ -1179,8 +1179,8 @@
         ping-pace-probe = pingPaceProbe;
 
         # Guest /Ctl desktop-control agent over AF_VSOCK (issue #60 Phase 2) →
-        # $out/bin/pcctl.
-        pcctl = pcctlAgent;
+        # $out/bin/yorectl.
+        yorectl = yorectlAgent;
 
         # Issue #145: the in-guest ALSA test tone for the virtio-snd sound card
         # → $out/bin/alsa-tone.
@@ -1285,9 +1285,9 @@
         gcalctool = cross.gcalctool;
 
         # l3afpad — GTK3 leafpad fork (#122): the first real GTK3 productivity
-        # app (open/edit/save text, incl. /mnt/pc). Signals wired in C — no
+        # app (open/edit/save text, incl. /mnt/yore). Signals wired in C — no
         # GModule, the gtk3-demo posture. --selftest is the headless gate
-        # (runtime/demo/node/l3afpad-smoke.mjs); the editor window + a /mnt/pc
+        # (runtime/demo/node/l3afpad-smoke.mjs); the editor window + a /mnt/yore
         # save round-trip are the MANUAL browser check.
         l3afpad = cross.l3afpad;
 
