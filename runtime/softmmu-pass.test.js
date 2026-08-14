@@ -10,7 +10,7 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
+import { ByteSink, NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -36,8 +36,17 @@ function boot(bytes, { instrumented, remap } = {}) {
   // TWO-LEVEL identity tables, laid out like the kernel builds them:
   //   PGD (4 KiB, 1024 entries, each covers 4 MiB) at PT
   //   one PTE table (4 KiB, 1024 entries) per used PGD slot, following.
-  // Low-bit FLAGS are deliberately set on every entry (|3, |7) to prove the
-  // pass masks them out of the address (kernel PTEs carry present/write bits).
+  // PGD (level-1) entries are the BARE page-aligned physical address of the
+  // pte table — NO flag bits — matching the real kernel format exactly
+  // (patches/kernel/0023's `pmd_populate`/`set_pmd`: `set_pmd(pmd,
+  // __pmd((unsigned long)page_address(pte)))`); this is why the level-1
+  // present test in softmmu-pass.js is `entry != 0`, not `entry & 1`. Only
+  // the LEAF pte entries carry real low-bit flags (`|7` = present+write) —
+  // deliberately set to prove the pass masks them out of the physical
+  // address. Using a fixture PGD format that differs from the kernel's would
+  // hide a regression that flips the level-1 present test to `& 1` (see the
+  // A2 present-test test group below for the fixture that's specifically
+  // shaped to catch that).
   const PT = 0x40000; // pgd base (256 KiB in)
   const HEAP = 0x100000; // working area (1 MiB in)
   // setPte(va, physBase): point va's page at physBase (flags added here).
@@ -52,7 +61,7 @@ function boot(bytes, { instrumented, remap } = {}) {
     const t = u32();
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3; // pgd entry -> pte table (+flag bits)
+      t[PT / 4 + g] = pteTable; // pgd entry -> pte table (BARE address, no flag bits — kernel format)
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
@@ -607,14 +616,44 @@ describe("checked (A2 present-check) translate", () => {
    * call and, on the first fault for a given page, installs an identity
    * mapping for it (so the retry succeeds) — exactly the contract a real
    * kernel fault handler provides (make present, or don't return).
+   *
+   * `pgdNotPresentVa` (#202 §6.2 hazard case): like `notPresentVa`, but zeros
+   * the LEVEL-1 (PGD) entry instead of the leaf, AND pokes the module's own
+   * low-memory location the combined predicate's UNCONDITIONAL level-2 read
+   * lands on when pgd_e==0 (`idx*4` for idx=(va>>>12)&0x3ff — see
+   * `emitCheckedPresentPredicate`'s doc comment) with a value whose low bits
+   * (0b11) are deliberately set — i.e. "garbage that would pass the leaf
+   * present/permission test if the pgd_e!=0 conjunct were missing or wrong".
+   * The fault mock re-attaches the (still fully populated, only the POINTER
+   * was zeroed) pte table on a level-1 miss — a real fault handler would
+   * likewise create/attach a fresh table — so a correctly-gated access
+   * faults exactly once and then succeeds; an INCORRECTLY-gated one would
+   * either never fault (walks through to wrong physical memory) or loop
+   * forever (this mock does not "fix" the garbage location itself, only the
+   * real PGD pointer, so a buggy implementation that keeps reading the
+   * garbage address would keep re-triggering the level-2 permission check
+   * against unchanged garbage — that failure mode is caught by the "bounded
+   * fault count" assertion in the test itself, not silently accepted here).
    */
-  function bootChecked(instrumentedBytes, notPresentVa, roVa) {
+  function bootChecked(instrumentedBytes, notPresentVa, roVa, pgdNotPresentVa) {
     const mod = new WebAssembly.Module(instrumentedBytes);
     const calls = [];
     const rawCalls = []; // full (sp, tp, nr, ea, kind) — used by the tp round-trip test
     const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
     let inst;
+    let faultCount = 0;
     const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop. A level-1 present-test regression (e.g.
+      // `& 1` instead of `!= 0` — see the boot() comment above for why the
+      // kernel's bare-address PGD format makes that distinction load-bearing)
+      // can make the predicate never true, so the instrumented code re-faults
+      // on every retry forever. Without a bound that hangs the test runner
+      // instead of failing it — throw a clear error so the regression surfaces
+      // as a normal (fast) test FAILURE.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
       rawCalls.push({
         sp: Number(sp),
         tp: Number(tp),
@@ -625,7 +664,18 @@ describe("checked (A2 present-check) translate", () => {
       calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
       const t = new Uint32Array(inst.exports.memory.buffer);
       const va = Number(ea) >>> 0;
-      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      const g = va >>> 22;
+      if (t[PT / 4 + g] === 0) {
+        // level-1 (PGD) not present — re-attach the SAME pte table the
+        // initial setup loop below already populated for this slot (still
+        // fully identity-mapped underneath; only the PGD pointer itself was
+        // zeroed to simulate "not present"), exactly as a real fault
+        // handler creates/attaches a table on a genuine level-1 miss. BARE
+        // address, no flag bits — matches the real kernel PGD format (see
+        // the boot() comment above); this is deliberate, not an oversight.
+        t[PT / 4 + g] = PT + 0x1000 + g * 0x1000;
+      }
+      const pteTable = t[PT / 4 + g] & ~0xfff;
       t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7; // identity, present+write
       return 0;
     };
@@ -651,7 +701,7 @@ describe("checked (A2 present-check) translate", () => {
     const t = new Uint32Array(mem.buffer);
     for (let g = 0; g < nPgd; g++) {
       const pteTable = PT + 0x1000 + g * 0x1000;
-      t[PT / 4 + g] = pteTable | 3;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
       for (let k = 0; k < 1024; k++) {
         const p = g * 1024 + k;
         t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
@@ -670,6 +720,12 @@ describe("checked (A2 present-check) translate", () => {
       const va = roVa >>> 0;
       const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
       t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 1; // present, RO
+    }
+    if (pgdNotPresentVa !== undefined) {
+      const va = pgdNotPresentVa >>> 0;
+      t[PT / 4 + (va >>> 22)] = 0; // level-1 (PGD) absent
+      const idx = (va >>> 12) & 0x3ff;
+      t[idx] = 0xffffffff; // the deceptive "garbage" the unconditional level-2 read lands on
     }
     inst.exports.__mmu_pt_base.value = PT;
     if (inst.exports.__mmu_start) inst.exports.__mmu_start();
@@ -932,6 +988,43 @@ describe("checked (A2 present-check) translate", () => {
     expect(new Uint8Array(b.mem.buffer)[V]).toBe(0x99);
   });
 
+  // #202 §6.2: the SPECIFIC hazard the combined-predicate rewrite introduces
+  // (documented at length in emitCheckedPresentPredicate's doc comment) — a
+  // not-present LEVEL-1 (PGD) entry whose UNCONDITIONAL level-2 read lands on
+  // low-memory "garbage" that happens to satisfy the permission mask MUST
+  // still fault, not silently walk through. If the `pgd_e != 0` conjunct were
+  // dropped (or ANDed as a raw value instead of a normalised boolean), this
+  // access would see the deceptive garbage's low bits, conclude "present +
+  // correct permission", and read/write the WRONG physical address with no
+  // fault at all — silent corruption. This test fails loudly instead: any
+  // regression here manifests as either a wrong final value (walked through)
+  // or a wrong/missing fault call, not a crash — exactly the class of bug
+  // the task calls out.
+  test("#202 hazard: not-present level-1 entry with deceptive garbage bits at the level-2 address still faults (load)", () => {
+    const V = HEAP + 0x90000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, undefined, undefined, V);
+    new Uint8Array(b.mem.buffer)[V] = 0x5c; // the byte a WRONG (non-faulted) walk would also happen to read correctly if it landed on the SAME identity page — the fault-call assertion below is what actually proves the gate fired, not the returned value alone
+
+    const val = b.inst.exports.load_u8(V);
+
+    expect(b.calls.length).toBe(1); // MUST fault — not zero (walked through) and not unbounded (retry loop stuck on the garbage)
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 0 });
+    expect(val).toBe(0x5c); // and, after the fault handler properly attaches the table, the access succeeds
+  });
+
+  test("#202 hazard: not-present level-1 entry with deceptive garbage bits at the level-2 address still faults (store)", () => {
+    const V = HEAP + 0x98000;
+    const bytes = instrument(buildCheckedFixture(), { checked: true });
+    const b = bootChecked(bytes, undefined, undefined, V);
+
+    b.inst.exports.store_u8(V, 0x77);
+
+    expect(b.calls.length).toBe(1);
+    expect(b.calls[0]).toEqual({ nr: NR_MMU_FAULT, ea: V, kind: 1 });
+    expect(new Uint8Array(b.mem.buffer)[V]).toBe(0x77);
+  });
+
   test("a store to a PRESENT-but-read-only page faults (COW/mprotect), then succeeds", () => {
     // The store-permission check: a copy-on-write page is mapped present but
     // write-protected. A store must fault (kind=1) into the kernel's
@@ -1107,6 +1200,291 @@ describe("checked (A2 present-check) translate", () => {
   });
 });
 
+describe("checked + page-crossing scalar access (#202 §6.2 combined predicate, emitCheckedSplitLoad/Store)", () => {
+  // A hand-built fixture identical in shape to buildCheckedFixture above, but
+  // with a width>=4 i32.load/i32.store (opcode 0x28/0x36) instead of the
+  // 1-byte ops — this is what actually routes through splitFns and exercises
+  // the NEW emitCheckedSplitLoad/emitCheckedSplitStore code path (a width==1
+  // access never crosses a page, so buildCheckedFixture's load_u8/store_u8
+  // never reach it).
+  function leb_u(n) {
+    const out = [];
+    let v = n >>> 0;
+    do {
+      let x = v & 0x7f;
+      v >>>= 7;
+      if (v) x |= 0x80;
+      out.push(x);
+    } while (v);
+    return out;
+  }
+  function leb_s(n) {
+    const out = [];
+    let more = true;
+    let v = n | 0;
+    while (more) {
+      let x = v & 0x7f;
+      v >>= 7;
+      if ((v === 0 && !(x & 0x40)) || (v === -1 && x & 0x40)) more = false;
+      else x |= 0x80;
+      out.push(x);
+    }
+    return out;
+  }
+  const vecb = (items) => [...leb_u(items.length), ...items.flat()];
+  const sectb = (id, payload) => [id, ...leb_u(payload.length), ...payload];
+  const strb = (str) => [...leb_u(str.length), ...[...str].map((c) => c.charCodeAt(0))];
+  const funcType = (params, results) => [
+    0x60,
+    ...leb_u(params.length),
+    ...params,
+    ...leb_u(results.length),
+    ...results,
+  ];
+  const I32 = 0x7f;
+
+  function buildCheckedSplitFixture() {
+    const types = [
+      funcType([I32], [I32]), // 0: load_i32(va) -> i32
+      funcType([I32, I32], []), // 1: store_i32(va, v)
+      funcType([I32, I32, I32, I32, I32], [I32]), // 2: __wasm_syscall_2
+      funcType([], [I32]), // 3: __get_tls_base() -> i32
+    ];
+    const typeSec = sectb(1, vecb(types));
+    const imports = [
+      [...strb("env"), ...strb("__wasm_syscall_2"), 0x00, ...leb_u(2)],
+      [...strb("env"), ...strb("__stack_pointer"), 0x03, I32, 0x01],
+    ];
+    const importSec = sectb(2, vecb(imports));
+    // defined funcs (func idx 0 is the __wasm_syscall_2 import):
+    //   1: load_i32 (type 0)   2: store_i32 (type 1)   3: __get_tls_base (type 3)
+    const funcSec = sectb(3, vecb([leb_u(0), leb_u(1), leb_u(3)]));
+    const memSec = sectb(5, vecb([[0x00, ...leb_u(32)]]));
+    const exports = [
+      [...strb("memory"), 0x02, ...leb_u(0)],
+      [...strb("load_i32"), 0x00, ...leb_u(1)],
+      [...strb("store_i32"), 0x00, ...leb_u(2)],
+      [...strb("__get_tls_base"), 0x00, ...leb_u(3)],
+    ];
+    const exportSec = sectb(7, vecb(exports));
+    const readBody = [...leb_u(0), 0x20, 0x00, 0x28, 0x02, 0x00, 0x0b]; // i32.load align=2 off=0
+    const writeBody = [...leb_u(0), 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 0x00, 0x0b]; // i32.store align=2 off=0
+    const tlsBody = [...leb_u(0), 0x41, ...leb_s(0x1234), 0x0b]; // i32.const 0x1234
+    const codeSec = sectb(
+      10,
+      [
+        ...leb_u(3),
+        ...leb_u(readBody.length),
+        ...readBody,
+        ...leb_u(writeBody.length),
+        ...writeBody,
+        ...leb_u(tlsBody.length),
+        ...tlsBody,
+      ].flat(),
+    );
+    return new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      ...typeSec,
+      ...importSec,
+      ...funcSec,
+      ...memSec,
+      ...exportSec,
+      ...codeSec,
+    ]);
+  }
+
+  const PT = 0x40000;
+  const HEAP = 0x100000;
+
+  /** Same shape/contract as the sibling `bootChecked` above, duplicated
+   * locally (the split fixture's exports differ — load_i32/store_i32, not
+   * load_u8/store_u8 — so it cannot literally reuse that closure, but the
+   * page-table setup + mock fault handler are identical). */
+  function bootCheckedSplit(instrumentedBytes, { notPresentVa, notPresentVa2, remap } = {}) {
+    const mod = new WebAssembly.Module(instrumentedBytes);
+    const calls = [];
+    const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
+    let inst;
+    let faultCount = 0;
+    const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop — see the sibling bootChecked's identical
+      // comment above for why.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
+      calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
+      const t = new Uint32Array(inst.exports.memory.buffer);
+      const va = Number(ea) >>> 0;
+      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7; // identity, present+write
+      return 0;
+    };
+    inst = new WebAssembly.Instance(mod, {
+      env: { __wasm_syscall_2: fault, __stack_pointer: spGlobal },
+    });
+    const mem = inst.exports.memory;
+    const needPages = 64;
+    if (mem.buffer.byteLength < needPages * 65536) {
+      mem.grow(needPages - mem.buffer.byteLength / 65536);
+    }
+    const pages = mem.buffer.byteLength / PAGE;
+    const nPgd = Math.ceil(pages / 1024);
+    const t = new Uint32Array(mem.buffer);
+    for (let g = 0; g < nPgd; g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
+      }
+    }
+    const setAbsent = (va) => {
+      va = va >>> 0;
+      const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = 0;
+    };
+    if (notPresentVa !== undefined) setAbsent(notPresentVa);
+    if (notPresentVa2 !== undefined) setAbsent(notPresentVa2);
+    if (remap) {
+      const setPte = (va, physBase) => {
+        va = va >>> 0;
+        const pteTable = t[PT / 4 + (va >>> 22)] & ~0xfff;
+        t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = physBase | 7;
+      };
+      remap(setPte);
+    }
+    inst.exports.__mmu_pt_base.value = PT;
+    if (inst.exports.__mmu_start) inst.exports.__mmu_start();
+    return { inst, mem, calls };
+  }
+
+  test("present, within-page width>=2 access takes the fast arm: correct value, no fault", () => {
+    const V = HEAP + 0x10000;
+    const bytes = instrument(buildCheckedSplitFixture(), { checked: true });
+    const b = bootCheckedSplit(bytes);
+    b.inst.exports.store_i32(V, 0x11223344);
+    expect(b.calls.length).toBe(0);
+    expect(b.inst.exports.load_i32(V) >>> 0).toBe(0x11223344);
+    expect(b.calls.length).toBe(0);
+  });
+
+  test("present, PAGE-CROSSING access takes the slow byte-helper arm and reaches the correct two (non-adjacent) physical frames — no fault (both pages present)", () => {
+    // Mirrors the pre-#202 unchecked page-crossing test, but under CHECKED
+    // mode with both pages present — proves the combined predicate's
+    // page-fits conjunct correctly routes a straddling access to the
+    // byte-wise helper even when the present+permission conjunct is true.
+    const VB = HEAP + 0x20000;
+    const P1 = HEAP + 0x30000;
+    const P2 = HEAP + 0x50000; // deliberately NOT P1's next frame
+    const b = bootCheckedSplit(instrument(buildCheckedSplitFixture(), { checked: true }), {
+      remap: (setPte) => {
+        setPte(VB, P1);
+        setPte(VB + 0x1000, P2);
+      },
+    });
+    const CROSS = VB + 0xffe; // spans [P1+0xffe,P1+0xfff] and [P2+0,P2+1]
+    b.inst.exports.store_i32(CROSS, 0x11223344);
+    expect(b.calls.length).toBe(0); // both pages present — no fault expected
+    const u8 = new Uint8Array(b.mem.buffer);
+    expect(u8[P1 + 0xffe]).toBe(0x44);
+    expect(u8[P1 + 0xfff]).toBe(0x33);
+    expect(u8[P2 + 0]).toBe(0x22);
+    expect(u8[P2 + 1]).toBe(0x11);
+    expect(u8[P1 + 0x1000]).toBe(0); // NOT the frame physically after P1
+    expect(b.inst.exports.load_i32(CROSS) >>> 0).toBe(0x11223344);
+    expect(b.calls.length).toBe(0);
+  });
+
+  test("not-present, WITHIN-page width>=2 access: predicate rejects it (not present), byte-helper faults it in, then succeeds", () => {
+    const V = HEAP + 0x60000;
+    const bytes = instrument(buildCheckedSplitFixture(), { checked: true });
+    const b = bootCheckedSplit(bytes, { notPresentVa: V });
+    b.inst.exports.store_i32(V, 0xdeadbeef);
+    // the byte-wise helper fault-checks per BYTE (4 bytes here, all on the
+    // same not-present page) — assert it faulted (>=1) and, critically,
+    // landed on the right value with the right kind every time it did.
+    expect(b.calls.length).toBeGreaterThan(0);
+    for (const c of b.calls) expect(c).toEqual({ nr: NR_MMU_FAULT, ea: c.ea, kind: 1 });
+    expect(new Uint8Array(b.mem.buffer)[V]).toBe(0xef);
+    expect(b.inst.exports.load_i32(V) >>> 0).toBe(0xdeadbeef);
+  });
+
+  test("not-present, PAGE-CROSSING width>=2 access: each not-present page faults independently, then succeeds", () => {
+    const VB = HEAP + 0x70000;
+    const b = bootCheckedSplit(instrument(buildCheckedSplitFixture(), { checked: true }), {
+      notPresentVa: VB, // page containing VB
+      notPresentVa2: VB + 0x1000, // the NEXT virtual page
+    });
+    const CROSS = VB + 0xffe;
+    b.inst.exports.store_i32(CROSS, 0x89abcdef);
+    expect(b.calls.length).toBeGreaterThan(0);
+    for (const c of b.calls) expect(c.kind).toBe(1);
+    expect(b.inst.exports.load_i32(CROSS) >>> 0).toBe(0x89abcdef);
+  });
+
+  test("#202 hazard (split path): not-present level-1 entry with deceptive garbage bits at the level-2 address still faults", () => {
+    // Same hazard as the plain (non-split) test above, exercised through
+    // emitCheckedSplitStore's own combined-predicate call site.
+    const V = HEAP + 0x80000;
+    const mod = new WebAssembly.Module(instrument(buildCheckedSplitFixture(), { checked: true }));
+    const calls = [];
+    const spGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 0);
+    let inst;
+    let faultCount = 0;
+    const fault = (sp, tp, nr, ea, kind) => {
+      // P2-1: bound the retry loop — see bootChecked's identical comment above.
+      if (++faultCount > 100)
+        throw new Error(
+          "softmmu test: refault loop (>100 faults) — level-1 present test regression?",
+        );
+      calls.push({ nr: Number(nr), ea: Number(ea), kind: Number(kind) });
+      const t = new Uint32Array(inst.exports.memory.buffer);
+      const va = Number(ea) >>> 0;
+      const g = va >>> 22;
+      // BARE address on re-attach, no flag bits — kernel format (see boot()'s
+      // comment near the top of this file).
+      if (t[PT / 4 + g] === 0) t[PT / 4 + g] = PT + 0x1000 + g * 0x1000;
+      const pteTable = t[PT / 4 + g] & ~0xfff;
+      t[pteTable / 4 + ((va >>> 12) & 0x3ff)] = (va & ~0xfff) | 7;
+      return 0;
+    };
+    inst = new WebAssembly.Instance(mod, {
+      env: { __wasm_syscall_2: fault, __stack_pointer: spGlobal },
+    });
+    const mem = inst.exports.memory;
+    if (mem.buffer.byteLength < 64 * 65536) mem.grow(64 - mem.buffer.byteLength / 65536);
+    const t = new Uint32Array(mem.buffer);
+    const pages = mem.buffer.byteLength / PAGE;
+    const nPgd = Math.ceil(pages / 1024);
+    for (let g = 0; g < nPgd; g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable; // bare address, no flag bits — kernel format
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
+      }
+    }
+    t[PT / 4 + (V >>> 22)] = 0; // level-1 absent
+    t[(V >>> 12) & 0x3ff] = 0xffffffff; // deceptive garbage at the landing address
+    inst.exports.__mmu_pt_base.value = PT;
+    if (inst.exports.__mmu_start) inst.exports.__mmu_start();
+
+    inst.exports.store_i32(V, 0x01020304);
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c.kind).toBe(1);
+    expect(inst.exports.load_i32(V) >>> 0).toBe(0x01020304);
+  });
+});
+
 describe("concatBytes — code-section assembly must not use Array.flat", () => {
   test("byte-exact concatenation of mixed number[] / Uint8Array chunks", () => {
     const chunks = [[1, 2, 3], new Uint8Array([4, 5]), [], new Uint8Array([]), [6]];
@@ -1136,4 +1514,198 @@ describe("concatBytes — code-section assembly must not use Array.flat", () => 
   // (JavaScriptCore), which has a different/higher ceiling, so the crash can
   // only be reproduced end-to-end by the Node boot smoke (mmu prove-then-flip);
   // asserting `.flat()` throws here would be a false engine-specific gate.
+});
+
+describe("ByteSink — #202 streaming encoder", () => {
+  // Local LEB128 decoders mirroring softmmu-pass.js's internal (unexported)
+  // readU/readS, so these tests can read back what ByteSink wrote without
+  // depending on module internals — same technique the checked-translate
+  // fixture builder above already uses for leb_u/leb_s.
+  function decodeU(b, i = 0) {
+    let r = 0,
+      sh = 0,
+      x;
+    do {
+      x = b[i++];
+      r += (x & 0x7f) * 2 ** sh;
+      sh += 7;
+    } while (x & 0x80);
+    return [r >>> 0, i];
+  }
+
+  test("push (variadic, Array.push-compatible) + toUint8Array", () => {
+    const sink = new ByteSink();
+    sink.push(1, 2, 3);
+    sink.push(4);
+    expect([...sink.toUint8Array()]).toEqual([1, 2, 3, 4]);
+    expect(sink.len).toBe(4);
+  });
+
+  test("pushBytes accepts both number[] and Uint8Array sources", () => {
+    const sink = new ByteSink();
+    sink.pushBytes([1, 2, 3]);
+    sink.pushBytes(new Uint8Array([4, 5]));
+    sink.pushBytes([]); // empty is a no-op
+    sink.pushBytes(new Uint8Array([]));
+    expect([...sink.toUint8Array()]).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test("grows past its initial capacity (doubling) without losing or corrupting bytes", () => {
+    const sink = new ByteSink(4); // deliberately tiny — forces several doublings
+    const n = 10_000;
+    for (let k = 0; k < n; k++) sink.push(k & 0xff);
+    const out = sink.toUint8Array();
+    expect(out.length).toBe(n);
+    for (let k = 0; k < n; k++) expect(out[k]).toBe(k & 0xff);
+  });
+
+  test("reserve() returns the pre-reservation offset and leaves room for later content", () => {
+    const sink = new ByteSink();
+    sink.push(0xaa);
+    const off = sink.reserve(5);
+    expect(off).toBe(1);
+    expect(sink.len).toBe(6);
+    sink.push(0xbb);
+    expect(sink.len).toBe(7);
+    expect(sink.toUint8Array()[6]).toBe(0xbb);
+  });
+
+  test("truncating .len (the discard-and-retry pattern #164's fallback uses) drops already-written bytes", () => {
+    // Mirrors instrument()'s "emit inline, discover it's too big, roll back to
+    // just past the reserved size field, re-emit via the helper path" dance —
+    // the exact mechanism that lets a single shared sink replace the old
+    // per-function number[] + a second whole-body re-emission on overflow.
+    const sink = new ByteSink();
+    const off = sink.reserve(5);
+    const bodyStart = sink.len;
+    sink.push(1, 2, 3, 4, 5); // "inline" attempt — too big, discard it
+    expect(sink.len).toBe(bodyStart + 5);
+    sink.len = bodyStart; // roll back
+    sink.push(9, 9); // "helper" attempt — smaller, kept
+    sink.patch5(off, sink.len - bodyStart);
+    const out = sink.toUint8Array();
+    expect(out.length).toBe(5 + 2);
+    expect([...out.subarray(5)]).toEqual([9, 9]);
+    expect(decodeU(out, off)[0]).toBe(2);
+  });
+
+  // #202: "V8 was directly verified to accept padded 5-byte LEBs for section
+  // size, body size, and vector count" — these boundary values are exactly
+  // where a MINIMAL LEB128 encoding changes byte-length (1→2 bytes at 128,
+  // 2→3 at 16384, 3→4 at 2097152, 4→5 at 268435456), so a decoder that only
+  // ever saw minimal encodings could plausibly special-case the byte count.
+  // patch5 always emits exactly 5 bytes regardless of which side of a
+  // boundary `value` falls on; assert both the padded WIDTH (always 5) and
+  // that decoding round-trips to the exact original value on every one of
+  // these boundaries, plus 0 and the full 32-bit max.
+  const LEB_BOUNDARY_VALUES = [
+    0, // minimal 1 byte (all-zero case)
+    1,
+    127, // last value a minimal 1-byte LEB can hold
+    128, // first value that NEEDS a minimal 2nd byte
+    16383, // last minimal-2-byte value
+    16384, // first minimal-3-byte value
+    2097151, // last minimal-3-byte value
+    2097152, // first minimal-4-byte value
+    268435455, // last minimal-4-byte value
+    268435456, // first minimal-5-byte value (padded and minimal coincide here)
+    0xffffffff, // full 32-bit max (minimal encoding is ALSO 5 bytes here)
+  ];
+
+  test("patch5: padded 5-byte LEB round-trips every value across every LEB byte-length boundary", () => {
+    for (const v of LEB_BOUNDARY_VALUES) {
+      const sink = new ByteSink();
+      const off = sink.reserve(5);
+      sink.patch5(off, v);
+      const bytes = sink.toUint8Array();
+      expect(bytes.length).toBe(5);
+      // padded: the first 4 bytes carry the continuation bit UNCONDITIONALLY,
+      // the 5th never does — this is what distinguishes "padded" from
+      // "minimal" and is exactly what #202 verified V8 accepts.
+      for (let k = 0; k < 4; k++) expect(bytes[k] & 0x80).toBe(0x80);
+      expect(bytes[4] & 0x80).toBe(0);
+      const [decoded, next] = decodeU(bytes, 0);
+      expect(decoded).toBe(v >>> 0);
+      expect(next).toBe(5);
+    }
+  });
+
+  test("pushPadded5 (reserve+patch5 for an already-known value) matches manual reserve/patch5", () => {
+    for (const v of [0, 128, 16384, 268435456, 0xffffffff]) {
+      const a = new ByteSink();
+      a.pushPadded5(v);
+      const b = new ByteSink();
+      const off = b.reserve(5);
+      b.patch5(off, v);
+      expect([...a.toUint8Array()]).toEqual([...b.toUint8Array()]);
+    }
+  });
+
+  test("reserve+write-real-content+patch5 round-trips (declared length == actual content length), at every SMALL/MEDIUM boundary", () => {
+    // The actual USE pattern instrument() relies on: reserve 5, write N REAL
+    // bytes of content, patch the reserved field with N — proven here with
+    // genuine content (not just a patched-in number) at every 1-, 2-, and
+    // 3-byte-LEB boundary from the list above. (The 4-/5-byte boundaries
+    // (2097152+) are covered by the pure patch5 round-trip test above, where
+    // writing that many real bytes would defeat the point of this fast unit
+    // test; the end-to-end "instrument() output" test below additionally
+    // proves a REAL, much larger code section's declared size is consistent.)
+    for (const n of [0, 1, 127, 128, 16383, 16384]) {
+      const sink = new ByteSink();
+      const off = sink.reserve(5);
+      const start = sink.len;
+      for (let k = 0; k < n; k++) sink.push(k & 0xff);
+      const bodyLen = sink.len - start;
+      expect(bodyLen).toBe(n);
+      sink.patch5(off, bodyLen);
+      const out = sink.toUint8Array();
+      const [decodedLen, afterLen] = decodeU(out, off);
+      expect(decodedLen).toBe(n);
+      // and the declared length really does span exactly the written content
+      expect(out.length - afterLen).toBe(n);
+      for (let k = 0; k < n; k++) expect(out[afterLen + k]).toBe(k & 0xff);
+    }
+  });
+
+  test("instrument() output: the code section's declared size and every function's declared body size read back exactly (real pass, real fixture)", () => {
+    // End-to-end proof that the padded fields instrument() ACTUALLY emits
+    // (not just the ByteSink primitive in isolation) decode correctly and are
+    // internally consistent: the code section's own size must equal its true
+    // byte content, and the sum of (5-byte size field + body) over every
+    // vector entry must exactly fill it — i.e. no drift between what was
+    // reserved/patched and what was actually written.
+    const out = instrument(prog, { exportControls: true });
+    expect(out[0]).toBe(0x00);
+    expect(out[1]).toBe(0x61); // "wasm" magic, sanity
+    let i = 8;
+    let codeSecStart = -1;
+    let codeSecBodyLen = -1;
+    while (i < out.length) {
+      const id = out[i++];
+      const [size, next] = decodeU(out, i);
+      i = next;
+      if (id === 10) {
+        codeSecStart = i;
+        codeSecBodyLen = size;
+      }
+      i += size;
+    }
+    expect(codeSecStart).toBeGreaterThan(0);
+    expect(codeSecStart + codeSecBodyLen).toBeLessThanOrEqual(out.length);
+    // walk the code section's own function vector and confirm each declared
+    // body size is consistent (sum of size-field-relative body lengths does
+    // not run past the section's own declared end).
+    let j = codeSecStart;
+    const [nFuncs, afterCount] = decodeU(out, j);
+    j = afterCount;
+    let seen = 0;
+    const sectionEnd = codeSecStart + codeSecBodyLen;
+    while (j < sectionEnd) {
+      const [bodyLen, afterLen] = decodeU(out, j);
+      j = afterLen + bodyLen;
+      seen++;
+    }
+    expect(j).toBe(sectionEnd); // no drift: bodies exactly fill the section
+    expect(seen).toBe(nFuncs);
+  });
 });

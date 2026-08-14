@@ -324,7 +324,11 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}}
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}}
+ *   `checkedTranslateFunc` is NOT set by this function — `instrument()`
+ *   attaches it afterward, once the appended `__mmu_translate_ck` function's
+ *   index is known, so `rewriteFuncBody`'s inline checked path (#202 §6.2)
+ *   can call it as the combined predicate's out-of-line "slow" arm.
  */
 function resolveCheckedImports(importSec, typeSec, exportSec) {
   if (!importSec) {
@@ -526,6 +530,126 @@ export function concatBytes(chunks) {
     off += c.length;
   }
   return out;
+}
+
+/**
+ * A growable byte buffer for SINGLE-PASS streaming wasm emission (#202).
+ *
+ * WHY: `rewriteFuncBody` used to accumulate into a plain JS `number[]`
+ * (`out.push(byte)` per emitted byte). On a Node build without pointer
+ * compression that costs ~24 bytes of process RSS per emitted byte (an 8-byte
+ * `PACKED_SMI_ELEMENTS` FixedArray slot × ~2-3× for geometric array growth +
+ * the old backing store still live mid-grow + GC lag) — measured: ONE 1.4 MB
+ * function of `nix.wasm` produced a 12.6 MB rewritten body and moved peak RSS
+ * by ~298 MiB by itself. `instrument()` then held the whole instrumented
+ * module THREE TIMES OVER at final assembly (`newCodeEntries` — one Uint8Array
+ * per function — then `newCodeBody = concatBytes(newCodeEntries)`, then the
+ * final `bytesOut`). A `ByteSink` fixes both: it is an ordinary
+ * doubling-growth `Uint8Array` (the same ~1-2× transient any typed-array
+ * accumulator pays, NOT 24×-per-byte), and `instrument()` now streams the
+ * ENTIRE module — including every function body — into ONE shared sink,
+ * eliminating `newCodeEntries` and `newCodeBody` outright (two of the three
+ * whole-module copies; only the sink's own backing buffer remains).
+ *
+ * PADDED-LEB BACKPATCH: a function body's final byte length (and the code
+ * section's own total byte length) are not known until every byte has been
+ * written — including the rare case where an over-limit function is
+ * re-emitted via the helper-call fallback (#164), which must be able to
+ * DISCARD an in-progress inline emission and retry from the same offset. The
+ * `reserve`/`patch5` pair lets a caller reserve a FIXED 5-byte field, write
+ * the (variable-length) content, then backpatch the field once the true
+ * length is known — no separate size-measuring pre-pass, no second body copy.
+ * A 5-byte field is always big enough: standard LEB128 allows non-minimal
+ * ("padded") encodings up to `ceil(N/7)` bytes for an N-bit value, and 5×7=35
+ * bits covers every 32-bit wasm length/count field with room to spare. This
+ * padded form was verified directly against V8 (Node 22,
+ * `new WebAssembly.Module(...)`): section sizes, function-body sizes, and
+ * vector counts all load fine whether minimal or padded.
+ *
+ * SCOPE: the padded/backpatch form is used for every section's OUTER size
+ * field (the final assembly loop reserve()s 5 bytes for each emitted
+ * section, writes its body, then patch5()s the true length once known —
+ * see the loop at the end of this file) and for each per-function body-size
+ * field within the code section, because those are the values whose true
+ * length is not known until after the bytes are written — most sections'
+ * bodies happen to be fully computable up front, but reserve/patch is used
+ * uniformly rather than special-cased per section, so every outer size field
+ * in the emitted module is 5 bytes regardless of whether that particular
+ * section's size was knowable in advance. Everything ELSE — the module
+ * header, section bodies' own internal counts/lengths (types, exports,
+ * globals, the code section's function-count vector), and the appended fixed
+ * helper bodies' length prefixes — is fully computable before it is written
+ * and keeps the plain minimal `u()`/`s()` LEB encoding unchanged. Verified
+ * directly against V8 (see above) for both the minimal and padded forms, so
+ * a reader can trust either encoding appearing anywhere in the output.
+ */
+export class ByteSink {
+  constructor(initialCapacity = 1 << 16) {
+    this.buf = new Uint8Array(Math.max(initialCapacity, 64));
+    this.len = 0;
+  }
+
+  /** Grow the backing store (geometric doubling) so `extra` more bytes fit. */
+  _ensure(extra) {
+    if (this.len + extra <= this.buf.length) return;
+    let cap = this.buf.length * 2;
+    while (cap < this.len + extra) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf.subarray(0, this.len));
+    this.buf = next;
+  }
+
+  /** Append one or more raw bytes — drop-in replacement for `Array.push`. */
+  push(...byteArgs) {
+    this._ensure(byteArgs.length);
+    this.buf.set(byteArgs, this.len);
+    this.len += byteArgs.length;
+    return this.len;
+  }
+
+  /** Append every byte of an array-like (`number[]` or `Uint8Array`), no spread. */
+  pushBytes(bytesArrayLike) {
+    const n = bytesArrayLike.length;
+    this._ensure(n);
+    this.buf.set(bytesArrayLike, this.len);
+    this.len += n;
+    return this.len;
+  }
+
+  /** Reserve `n` raw placeholder bytes (uninitialized-value = 0), return their offset. */
+  reserve(n) {
+    this._ensure(n);
+    const off = this.len;
+    this.len += n;
+    return off;
+  }
+
+  /**
+   * Backpatch a PADDED 5-byte unsigned LEB128 at `offset` (from a prior
+   * `reserve(5)`) with `value`. Always exactly 5 bytes: the first four bytes
+   * carry the continuation bit UNCONDITIONALLY (regardless of whether more
+   * significant bits remain), and the fifth never does — see the class doc
+   * comment for why this is spec-legal and V8-verified.
+   */
+  patch5(offset, value) {
+    let v = value >>> 0;
+    for (let k = 0; k < 4; k++) {
+      this.buf[offset + k] = 0x80 | (v & 0x7f);
+      v >>>= 7;
+    }
+    this.buf[offset + 4] = v & 0x7f;
+  }
+
+  /** Reserve 5 bytes and immediately patch them — for a value known up-front. */
+  pushPadded5(value) {
+    const off = this.reserve(5);
+    this.patch5(off, value);
+  }
+
+  /** The written portion as a Uint8Array VIEW (no copy) — call once, at the end. */
+  toUint8Array() {
+    return this.buf.subarray(0, this.len);
+  }
 }
 
 /** Split a module into [{id, body}] (body excludes id + size). */
@@ -747,9 +871,12 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
- *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
- *   default A1 unchecked fast path (byte-identical to before A2 existed).
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}|null} [checked]
+ *   A2 present-check context (from `resolveCheckedImports`, with
+ *   `checkedTranslateFunc` attached by `instrument()` — see that function's
+ *   doc comment; the inline checked path, #202 §6.2, calls it as its combined
+ *   predicate's out-of-line "slow" arm); omit/null for the default A1
+ *   unchecked fast path (byte-identical to before A2 existed).
  * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
  *   #164: when set, emit each access's translate as a CALL to the appended
  *   translate helper (`__mmu_translate` / `__mmu_translate_ck`) instead of
@@ -767,7 +894,18 @@ function skipAtomic(b, i) {
  *   correct two (non-adjacent) physical frames. In helper mode a width>=2 access
  *   ALWAYS takes the byte helper (no inline fast path — keeps the over-limit
  *   function compact). Null (unit-test direct calls) = pre-fix raw access.
- * @returns {number[]}
+ * @param {ByteSink} sink #202: the byte sink to APPEND this function's rewritten
+ *   body into (local-decl vec + instructions, no size prefix — the caller owns
+ *   framing/backpatching the size field). Callers stream every function
+ *   directly into ONE shared whole-module sink (see `instrument()`), so this
+ *   is REQUIRED (not defaulted — a trailing param after three optional ones
+ *   needs a default expression to satisfy `tsc -p jsconfig.json`'s checkJs,
+ *   so the default is `undefined` and this throws immediately if omitted,
+ *   rather than silently writing into nothing), not owned/returned by this
+ *   function — measure what was written via `sink.len` before/after the call
+ *   (this replaced the old `number[]` return value; see the #202 ByteSink
+ *   doc comment for why).
+ * @returns {void}
  */
 export function rewriteFuncBody(
   code,
@@ -777,7 +915,19 @@ export function rewriteFuncBody(
   checked = null,
   helper = null,
   splitFns = null,
+  sink = undefined,
 ) {
+  if (!sink) throw new Error("softmmu: rewriteFuncBody requires a ByteSink `sink` argument");
+  // #202 P2-4: `checkedTranslateFunc` is JSDoc-optional on `checked` (it's
+  // attached by `instrument()` after `resolveCheckedImports` returns it), but
+  // every checked-mode caller MUST have set it before reaching here — the
+  // inline checked translate emits `call <checked.checkedTranslateFunc>`
+  // (`u(undefined) >>> 0 === 0` would silently emit `call 0`, binding to
+  // whatever function happens to sit at index 0 if its type matches, instead
+  // of failing loudly). Fail fast instead of trusting the field silently.
+  if (checked && checked.checkedTranslateFunc == null) {
+    throw new Error("softmmu: checked context is missing checkedTranslateFunc");
+  }
   let i = 0;
   let nLocals;
   [nLocals, i] = readU(code, 0);
@@ -811,10 +961,14 @@ export function rewriteFuncBody(
   const PGD_E = base + 7;
   const PTE = base + 8;
 
-  const out = [];
+  // #202: `out` is the caller's shared ByteSink (the whole module streams into
+  // ONE sink — see `instrument()`), not a fresh accumulator per call. Every
+  // `out.push(...)` call below is UNCHANGED from the pre-#202 number[] version
+  // — ByteSink.push is a drop-in, Array.push-compatible variadic append.
+  const out = sink;
   // new local-decl vec: existing 6 groups + 1 more (pgd_e+pte) when checked
   out.push(...u(nLocals + 6 + (checked ? 1 : 0)));
-  for (let k = localsStart; k < localsEnd; k++) out.push(code[k]);
+  out.pushBytes(code.subarray(localsStart, localsEnd));
   out.push(...u(2), VT.i32); // ea + val_i32
   out.push(...u(1), VT.i64); // val_i64
   out.push(...u(1), VT.f32); // val_f32
@@ -832,19 +986,16 @@ export function rewriteFuncBody(
   // Low 12 bits of both entries are MASKED — kernel PTEs carry flag bits
   // (present/write/accessed/dirty); the A1 fast path ignores them but must
   // not let them corrupt the address.
-  // emitFaultCall(kind): __wasm_syscall_2(sp, tp, NR_MMU_FAULT, ea, kind),
-  // result dropped (the retry loop re-walks rather than consuming a value).
-  // Only valid when `checked` is set (resolveCheckedImports already verified
-  // the import + its signature).
-  const emitFaultCall = (kind) => {
-    out.push(0x23, ...u(checked.spGlobalIdx)); // global.get __stack_pointer
-    out.push(0x10, ...u(checked.tlsFuncIdx)); // call __get_tls_base -> tp
-    out.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(kind)); // i32.const kind
-    out.push(0x10, ...u(checked.syscallFuncIdx)); // call __wasm_syscall_2
-    out.push(0x1a); // drop
-  };
+  //
+  // #202 §6.2: the inline checked path no longer emits its OWN
+  // `__wasm_syscall_2(NR_MMU_FAULT, ea, kind)` fault call (there used to be
+  // an `emitFaultCall` closure here, emitted up to twice per access, one per
+  // page-table level) — it now calls the appended `__mmu_translate_ck`
+  // (checkedTranslateBody) out of line on a present-check miss, and THAT
+  // function owns the fault call + retry loop (checked.spGlobalIdx /
+  // .tlsFuncIdx / .syscallFuncIdx are still validated by
+  // `resolveCheckedImports` and still consumed there, just no longer
+  // referenced directly from this per-access emission).
 
   // emitTranslate(kind): leaves `phys` (i32) on the stack from `ea` in $EA.
   // `kind` (0=load, 1=store/rmw/cmpxchg) is only used by the checked variant
@@ -853,17 +1004,14 @@ export function rewriteFuncBody(
   // UNCHECKED (default, checked===null): the A1 fast path — pure two-level
   // walk, no present check (byte-identical to the pre-A2 pass).
   //
-  // CHECKED: the SAME two-level walk, but after each level's raw i32.load a
-  // present-bit test (`entry & 1`) gates a `call __wasm_syscall_2(NR_MMU_FAULT,
-  // ea, kind)` + RE-WALK (a `block $done (result i32) { loop $retry { … } }`:
-  // a clear bit calls the fault handler then `br $retry`; present falls
-  // through; the final phys computation `br $done`s out with the result). The
-  // kernel's fault handler is expected to have made the entry present (or to
-  // have delivered a fatal signal instead of returning) — the loop simply
-  // re-reads, it does not bound the retry count, exactly like a hardware page
-  // fault. Entries are held in $pgd_e/$pte locals (`local.tee`) so the
-  // present-bit test can consume a copy while the raw value survives for the
-  // next level / the final address computation.
+  // CHECKED (#202 §6.2 — the combined-predicate/out-of-line-fault form,
+  // replacing the original per-level block/loop/retry): see
+  // `emitCheckedPresentPredicate` below for the walk + predicate, and the
+  // `emitCombinedAccessBody`-style helper doc for why folding the two
+  // per-level present/permission branches into ONE `if`/out-of-line-call is
+  // safe. This function's EXTERNAL contract (leaves phys on the stack,
+  // caller emits the raw op) is UNCHANGED — only the internal shape of the
+  // checked case changed, so every caller below needed no edits.
   const emitTranslate = (kind) => {
     if (helper) {
       // #164: helper-call translate — call the appended walk function instead
@@ -899,9 +1047,84 @@ export function rewriteFuncBody(
       out.push(0x6a); // i32.add -> phys
       return;
     }
-    out.push(0x02, VT.i32); // block $done (result i32)
-    out.push(0x03, 0x40); // loop $retry (void)
-    // level 1: pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
+    // CHECKED, inline (#202 §6.2): compute the combined present+permission
+    // predicate, then branch ONCE — fast arm recomputes phys from the
+    // already-read $pte; slow arm (present-check failed) calls the appended,
+    // authoritative `__mmu_translate_ck(ea,kind)` (checkedTranslateBody — the
+    // SAME function the #164 helper-fallback path already calls), which owns
+    // its OWN fault+retry loop out of line. This replaces the old two
+    // separate per-level `if (void) { fault; br $retry }` blocks (each
+    // ~15 B of emitFaultCall, emitted up to twice) with ONE branch whose
+    // "cold" arm is a 3-instruction call — the hot (present) path pays for
+    // the predicate once and nothing else.
+    emitCheckedPresentPredicate(kind);
+    out.push(0x04, VT.i32); // if (result i32)
+    // fast arm: phys = (pte & ~0xfff) + (ea & 0xfff), pte from the LOCAL
+    // (the stack copy from the predicate's tee was already consumed by the
+    // permission test above).
+    out.push(0x20, ...u(PTE)); // local.get pte
+    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
+    out.push(0x6a); // add -> phys
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(kind)); // i32.const kind
+    out.push(0x10, ...u(checked.checkedTranslateFunc)); // call __mmu_translate_ck -> phys
+    out.push(0x0b); // end if
+  };
+
+  // emitCheckedPresentPredicate(kind) (#202 §6.2): the shared "walk both
+  // levels unconditionally, then combine present+permission into ONE
+  // boolean" building block used by both `emitTranslate`'s checked case
+  // (above) and the checked page-crossing split load/store (below). Leaves
+  // an i32 boolean (1 = present+correct-permission, take the fast arm) on
+  // the stack; $pgd_e/$pte are left holding the RAW (flag-bits-included)
+  // entries in their locals for the caller's subsequent phys computation.
+  //
+  // CORRECTNESS — the hazard #202's own design doc calls out explicitly, and
+  // the reason this function reads level 2 UNCONDITIONALLY rather than only
+  // after confirming level 1 is present: the address computed for the level-2
+  // read when pgd_e==0 is `(0 & ~0xfff) + ((ea>>>12 & 0x3ff)<<2)` = `idx*4`
+  // for idx in [0,1023] — i.e. always inside the module's own page 0, which
+  // always exists, so this NEVER traps. But the VALUE it reads is garbage
+  // (whatever page 0 happens to hold), and garbage CAN happen to have its low
+  // bits set such that `(garbage & need) == need` is true. The `pgd_e != 0`
+  // conjunct is what neutralises that: `i32.and` of the two ALREADY-BOOLEAN
+  // (0/1) operands is false whenever pgd_e==0, regardless of what the
+  // unconditional level-2 read produced. DROPPING this conjunct entirely
+  // would let a not-present access whose page-0 garbage happens to satisfy
+  // the permission mask walk through to a WRONG physical address instead of
+  // faulting — silent memory corruption, not a trap. See the dedicated unit
+  // test for exactly this case (a not-present level-1 entry with bits 0+1
+  // deliberately set at the corresponding page-0 offset).
+  //
+  // The `pgd_e` conjunct is ALSO normalised to a boolean (`!= 0`, "bool1")
+  // rather than ANDed in as the raw `pgd_e` value — but getting THAT wrong is
+  // a PERFORMANCE bug, not a corruption one: `raw_pgd_e & bool2` is still
+  // bitwise-zero whenever pgd_e==0 (0 ANDed with anything is 0), so a
+  // not-present access can never walk through this way. What it breaks is
+  // the PRESENT case: real kernel PGD entries are the BARE page-aligned
+  // physical address of the pte table (see patches/kernel/0023's
+  // `pmd_populate`/`set_pmd` — `set_pmd(pmd, __pmd((unsigned long)
+  // page_address(pte)))`, no flag bits), so bit 0 is architecturally 0 on
+  // EVERY present level-1 entry too — ANDing the raw value into the
+  // predicate would make it false there as well, so the predicate is never
+  // true, the fast arm is never taken, and EVERY access (not just the
+  // faulting ones) falls through to the out-of-line `__mmu_translate_ck`
+  // call: correct results, but silently reinstating the ~12×
+  // helper-call-per-access cost this file's own header calls the
+  // load-bearing lesson. The operand whose normalisation actually guards
+  // against silent CORRUPTION is the LEAF permission test just below: it
+  // already compares with `i32.eq` (`(pte & need) == need`) rather than
+  // ANDing the raw `pte & need` in directly — with a raw `pte & 3`,
+  // `bool1 & (pte & 3)` reduces to just the present bit whenever bool1==1,
+  // so a store to a present-but-read-only COW page (`pte & 3 == 1`) would
+  // read as truthy and take the fast arm, writing straight through to the
+  // shared physical page instead of faulting into `do_wp_page`. See the
+  // dedicated COW/mprotect unit tests for exactly that case.
+  const emitCheckedPresentPredicate = (kind) => {
+    // level 1 (unconditional): pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
     out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(22), 0x76); // >>> 22
@@ -909,20 +1132,11 @@ export function rewriteFuncBody(
     out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pgd_e (RAW)
     out.push(0x22, ...u(PGD_E)); // local.tee pgd_e (keep a copy on stack)
-    // LEVEL-1 (PGD/PMD) present test is "entry != 0", NOT "bit 0 set". The
-    // kernel's folded 2-level tables store the bare pte-page PHYSICAL address in
-    // the pgd/pmd slot with NO flag bits (arch/wasm pgtable.h: pmd_present(pmd)
-    // = pmd_val(pmd), pmd_none = !pmd_val, pmd_page_vaddr = pmd_val & PAGE_MASK).
-    // Only the LEAF pte carries _PAGE_PRESENT in bit 0. Testing bit 0 here would
-    // read a validly-populated pgd entry (e.g. 0x206ed000) as not-present and
-    // fault forever. So the present bit lives at the leaf; the branch node is
-    // present iff nonzero.
-    out.push(0x45); // i32.eqz -> pgd_e == 0 ("not present")
-    out.push(0x04, 0x40); // if (void)
-    emitFaultCall(kind);
-    out.push(0x0c, ...u(1)); // br $retry
-    out.push(0x0b); // end if
-    // level 2: pte = u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]
+    out.push(0x41, ...s(0)); // i32.const 0
+    out.push(0x47); // i32.ne -> (pgd_e != 0)  [stack: bool1]
+    // level 2 (unconditional — see the correctness note above): pte =
+    // u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]. Read pgd_e from the
+    // LOCAL here — the stack currently holds bool1, not a reusable pgd_e copy.
     out.push(0x20, ...u(PGD_E)); // local.get pgd_e
     out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
     out.push(0x20, ...u(EA)); // local.get ea
@@ -932,42 +1146,75 @@ export function rewriteFuncBody(
     out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
     out.push(0x22, ...u(PTE)); // local.tee pte (keep a copy on stack)
-    // LEAF present/permission test. A LOAD needs only _PAGE_PRESENT (bit 0); a
-    // STORE/RMW needs _PAGE_PRESENT|_PAGE_WRITE (bits 0+1). Testing the write
-    // bit on stores is what makes COW and mprotect WORK: a copy-on-write page is
-    // mapped present-but-read-only, so a store must FAULT (kind=1) into
-    // do_wp_page/handle_mm_fault to duplicate it — otherwise the store would
-    // walk straight through to the shared physical page and corrupt it. After
-    // the kernel resolves the write fault it installs a writable PTE (bits 0+1),
-    // so the re-walk passes.
+    // permission test, normalised to a 0/1 boolean via i32.eq (not the
+    // negated i32.ne the old per-level branch used — this value is ANDed
+    // straight into the combined predicate, not gating a fault branch on its
+    // own). A LOAD needs only _PAGE_PRESENT (bit 0); a STORE/RMW needs
+    // _PAGE_PRESENT|_PAGE_WRITE (bits 0+1) — the write-bit test on stores is
+    // what makes COW and mprotect work: a copy-on-write page is mapped
+    // present-but-read-only, so a store must take the slow/fault arm to
+    // duplicate it via do_wp_page rather than walking through to the shared
+    // physical page.
     if (kind === 1) {
       out.push(0x41, ...s(3), 0x71); // & 3 (present|write)
-      out.push(0x41, ...s(3), 0x47); // i32.const 3 ; i32.ne -> (pte&3) != 3
+      out.push(0x41, ...s(3), 0x46); // i32.const 3 ; i32.eq -> (pte&3) == 3
     } else {
       out.push(0x41, ...s(1), 0x71); // & 1 (present)
-      out.push(0x45); // i32.eqz -> not present
+      out.push(0x41, ...s(1), 0x46); // i32.const 1 ; i32.eq -> (pte&1) == 1
     }
-    out.push(0x04, 0x40); // if (void)
-    emitFaultCall(kind);
-    out.push(0x0c, ...u(1)); // br $retry
-    out.push(0x0b); // end if
-    // phys = (pte & ~0xfff) + (ea & 0xfff); exit with it as $done's result.
-    out.push(0x20, ...u(PTE)); // local.get pte
-    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+    out.push(0x71); // i32.and -> bool1 & bool2 (both already 0/1 booleans)
+  };
+
+  // emitCheckedSplitLoad/Store (#202 §6.2): the CHECKED, non-helper,
+  // width>=2 page-crossing case. Folds the page-crossing "does the whole
+  // access fit in one page" test into the SAME combined predicate
+  // `emitCheckedPresentPredicate` produces (one more ANDed conjunct), so
+  // there is ONE `if`, not the present-check's block/loop/retry followed by
+  // a SEPARATE page-crossing `if` the pre-#202 pass emitted. The slow arm
+  // calls the byte-wise helper directly — it ALREADY present-checks (and
+  // fault-in retries) EACH byte's page individually via the checked
+  // `__mmu_translate_ck` (see loadBytesHelperBody/storeBytesHelperBody's use
+  // of `emitTranslateCall`), so it correctly covers both reasons the fast
+  // path can be rejected (not present, OR straddles a page) without this
+  // caller needing to distinguish them.
+  const emitCheckedSplitLoad = (op, W) => {
+    emitCheckedPresentPredicate(0); // kind=0 read
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-    out.push(0x6a); // add -> phys
-    out.push(0x0c, ...u(1)); // br $done (carries phys out of the loop+block)
-    out.push(0x0b); // end loop
-    // The loop is ALWAYS exited via one of the `br`s above (never falls off
-    // the end), but wasm validation does not propagate that "unreachable"
-    // fact past a nested construct's `end`: after the loop frame pops, the
-    // $done block's OWN reachability is independent (it was reachable when
-    // the loop was entered) and its `end` requires an actual i32 on the
-    // stack. An explicit `unreachable` here (dead at runtime — every path
-    // through the loop already branched out) satisfies that statically.
-    out.push(0x00); // unreachable
-    out.push(0x0b); // end block -> phys left on the value stack
+    out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W)  (i32.le_u)
+    out.push(0x71); // AND into the combined predicate
+    out.push(0x04, LOAD_RESVT[op]); // if (result <loadvt>)
+    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
+    out.push(0x41, ...s(-4096), 0x71);
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x6a); // -> phys
+    out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes)); // -> i64
+    out.push(...LOAD_POST[op]); // post-process to loadvt
+    out.push(0x0b); // end if
+  };
+  const emitCheckedSplitStore = (op, W, vl) => {
+    emitCheckedPresentPredicate(1); // kind=1 write
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x41, ...s(0x1000 - W), 0x4d);
+    out.push(0x71); // AND into the combined predicate
+    out.push(0x04, 0x40); // if (void)
+    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
+    out.push(0x41, ...s(-4096), 0x71);
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x6a); // -> phys
+    out.push(0x20, ...u(vl)); // local.get val
+    out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA)); // ea
+    out.push(0x20, ...u(vl)); // val (typed)
+    out.push(...STORE_TOI64[op]); // -> i64
+    out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+    out.push(0x0b); // end if
   };
 
   i = localsEnd;
@@ -991,10 +1238,17 @@ export function rewriteFuncBody(
           // post-process into the op's result type.
           out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes));
           out.push(...LOAD_POST[op]);
+        } else if (splitFns && W >= 2 && checked) {
+          // #202 §6.2: CHECKED + page-crossing, non-helper — ONE combined
+          // predicate (present+permission AND page-fits) instead of the A1
+          // shape's separate page-crossing `if` wrapping a present-checked
+          // `emitTranslate`. See emitCheckedSplitLoad's doc comment.
+          emitCheckedSplitLoad(op, W);
         } else if (splitFns && W >= 2) {
-          // #128 inline mode: fast within-page path when the whole access fits
-          // in one page ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path
-          // that translates each byte's page separately. Both leave the op's
+          // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
+          // fast within-page path when the whole access fits in one page
+          // ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path that
+          // translates each byte's page separately. Both leave the op's
           // result value on the stack (the `if`'s result type).
           out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
           out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
@@ -1024,8 +1278,13 @@ export function rewriteFuncBody(
           out.push(0x20, ...u(vl)); // val (typed)
           out.push(...STORE_TOI64[op]); // -> i64
           out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+        } else if (splitFns && W >= 2 && checked) {
+          // #202 §6.2: CHECKED + page-crossing, non-helper — see
+          // emitCheckedSplitStore's doc comment (mirrors the load case above).
+          emitCheckedSplitStore(op, W, vl);
         } else if (splitFns && W >= 2) {
-          // #128 inline mode: fast within-page path else byte-wise slow path.
+          // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
+          // fast within-page path else byte-wise slow path.
           out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
           out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
           out.push(0x04, 0x40); // if (void)
@@ -1056,7 +1315,7 @@ export function rewriteFuncBody(
       if (!a) {
         // atomic.fence or an unmodeled atomic — copy the whole instr verbatim.
         const next = skipInstr(code, i);
-        for (let k = i; k < next; k++) out.push(code[k]);
+        out.pushBytes(code.subarray(i, next));
         i = next;
         continue;
       }
@@ -1107,10 +1366,12 @@ export function rewriteFuncBody(
       }
     }
     const next = skipInstr(code, i);
-    for (let k = i; k < next; k++) out.push(code[k]);
+    out.pushBytes(code.subarray(i, next));
     i = next;
   }
-  return out;
+  // #202: nothing to return — `out` IS the caller's shared sink (see the
+  // `sink` param doc above); the caller measures what this call wrote via
+  // `sink.len` before/after, not a return value.
 }
 
 // ---- module surgery ---------------------------------------------------------
@@ -1786,6 +2047,10 @@ export function instrument(bytes, opts = {}) {
   };
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
   const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
+  // #202 §6.2: the INLINE checked translate's combined-predicate fast path
+  // (rewriteFuncBody's emitTranslate) calls this SAME appended function as its
+  // out-of-line "slow" (fault+retry) arm — see the field doc where it's read.
+  if (checkedCtx) checkedCtx.checkedTranslateFunc = checkedTranslateFunc;
 
   // #128 PAGE-CROSSING byte-wise slow-path helpers, appended AFTER the checked
   // translate (or after the bulk set when unchecked) so every existing index
@@ -1808,46 +2073,8 @@ export function instrument(bytes, opts = {}) {
   const inlineLimit = opts.inlineLimit ?? 6_000_000;
   const helperFns = { translateFunc, checkedTranslateFunc };
   const cb = codeSec.body;
-  let ci = 0;
-  let nCode;
-  [nCode, ci] = readU(cb, 0);
-  const newCodeEntries = [];
-  for (let f = 0; f < nCode; f++) {
-    let size;
-    [size, ci] = readU(cb, ci);
-    const body = cb.subarray(ci, ci + size);
-    ci += size;
-    const numParams = paramCounts[defTypes[f]] ?? 0;
-    let rewritten = rewriteFuncBody(
-      body,
-      numParams,
-      ptBaseGlobal,
-      bulkFns,
-      checkedCtx,
-      null,
-      splitFns,
-    );
-    if (rewritten.length > inlineLimit) {
-      const viaHelper = rewriteFuncBody(
-        body,
-        numParams,
-        ptBaseGlobal,
-        bulkFns,
-        checkedCtx,
-        helperFns,
-        splitFns,
-      );
-      // Not a silent cap (per #128's boot-debuggability ethos): announce the
-      // fallback + both sizes so a boot log shows exactly which function and why.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `softmmu: function #${f} inline body ${rewritten.length}B ` +
-          `exceeds ${inlineLimit}B — using helper-call translate (${viaHelper.length}B) to stay under V8's max function size`,
-      );
-      rewritten = viaHelper;
-    }
-    newCodeEntries.push(concatBytes([u(rewritten.length), rewritten]));
-  }
+  const nCode = readU(cb, 0)[0];
+
   // append the translate helper body (RAW loads — it IS the translate):
   //   translate(va): pt_base + ((u32[pt_base + (va>>>12<<2)]) not inlined here)
   const translateBody = [
@@ -1895,34 +2122,91 @@ export function instrument(bytes, opts = {}) {
     0x6a, // +
     0x0b,
   ];
-  newCodeEntries.push(concatBytes([u(translateBody.length), translateBody]));
-  for (const body of [
-    memcpyHelperBody(translateFunc, checkedTranslateFunc),
-    memfillHelperBody(translateFunc, checkedTranslateFunc),
-    ...unhandled.initSegs.map((seg) => meminitHelperBody(translateFunc, checkedTranslateFunc, seg)),
-  ]) {
-    newCodeEntries.push(concatBytes([u(body.length), body]));
-  }
-  if (checkedCtx) {
-    const ckBody = checkedTranslateBody(ptBaseGlobal, checkedCtx);
-    newCodeEntries.push(concatBytes([u(ckBody.length), ckBody]));
-  }
-  // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
-  // checked translate). Each translates every byte's page separately.
-  {
-    const lb = loadBytesHelperBody(translateFunc, checkedTranslateFunc);
-    const sb = storeBytesHelperBody(translateFunc, checkedTranslateFunc);
-    newCodeEntries.push(concatBytes([u(lb.length), lb]));
-    newCodeEntries.push(concatBytes([u(sb.length), sb]));
-  }
-  // Assemble the code section as a Uint8Array via a summed byte copy, NOT
-  // `newCodeEntries.flat()` + spread: the flattened number array of a large
-  // instrumented binary (nix.wasm, hundreds of MB) exceeds V8's Array.flat
-  // ceiling → `RangeError: Invalid array length` (see concatBytes).
-  const newCodeBody = concatBytes([
-    u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes
-    ...newCodeEntries,
-  ]);
+
+  // #202: the code section used to be assembled via TWO extra whole-module
+  // copies — `newCodeEntries` (one length-prefixed Uint8Array per function,
+  // via `concatBytes`) and then `newCodeBody = concatBytes(newCodeEntries)`.
+  // Both are gone: `emitCodeSectionBody` streams the function-count vector,
+  // every rewritten function body, and every appended helper body DIRECTLY
+  // into the caller's shared whole-module `ByteSink` (see the final assembly
+  // below), so the code section — by far the largest part of a real guest
+  // binary — now exists as bytes exactly ONCE (inside that one sink), not
+  // three times over. `sink` is the SAME sink the rest of the module streams
+  // into; this function does not allocate a section-sized buffer of its own.
+  const emitCodeSectionBody = (sink) => {
+    // function-count vector: fully known BEFORE any function is written (nCode
+    // from the original module + the fixed appended-helper count), so it stays
+    // a plain MINIMAL LEB — no backpatch needed (unlike the two fields below).
+    sink.push(...u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2)); // +2: load_bytes/store_bytes
+    let ci = 0;
+    [, ci] = readU(cb, 0); // skip the original function-count field (== nCode)
+    for (let f = 0; f < nCode; f++) {
+      let size;
+      [size, ci] = readU(cb, ci);
+      const body = cb.subarray(ci, ci + size);
+      ci += size;
+      const numParams = paramCounts[defTypes[f]] ?? 0;
+
+      // Padded backpatch: this function's rewritten byte length is unknown
+      // until it has been fully emitted (and, on overflow, re-emitted via the
+      // helper fallback), so reserve the field, write, then patch — the SAME
+      // pattern #164's "measure then decide" used, just without a second
+      // whole-body copy to measure from (see the ByteSink doc comment).
+      const sizeOff = sink.reserve(5);
+      const bodyStart = sink.len;
+      rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      let bodyLen = sink.len - bodyStart;
+      if (bodyLen > inlineLimit) {
+        // Discard the inline attempt (truncate back to just past the reserved
+        // size field) and re-emit via the helper-call translate into the SAME
+        // sink at the SAME offset — semantically identical to the old
+        // "build both, keep the smaller", but the discarded inline bytes were
+        // never materialised as their own retained copy.
+        sink.len = bodyStart;
+        rewriteFuncBody(
+          body,
+          numParams,
+          ptBaseGlobal,
+          bulkFns,
+          checkedCtx,
+          helperFns,
+          splitFns,
+          sink,
+        );
+        const viaHelperLen = sink.len - bodyStart;
+        // Not a silent cap (per #128's boot-debuggability ethos): announce the
+        // fallback + both sizes so a boot log shows exactly which function and why.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `softmmu: function #${f} inline body ${bodyLen}B ` +
+            `exceeds ${inlineLimit}B — using helper-call translate (${viaHelperLen}B) to stay under V8's max function size`,
+        );
+        bodyLen = viaHelperLen;
+      }
+      sink.patch5(sizeOff, bodyLen);
+    }
+    // Appended helper bodies: each one's length is fully known BEFORE it is
+    // written (no retry possible — these are fixed, hand-built bodies), so
+    // they keep the plain minimal-LEB length-prefix form, unchanged from
+    // before #202.
+    const appendFixed = (body) => {
+      sink.push(...u(body.length));
+      sink.pushBytes(body);
+    };
+    appendFixed(translateBody);
+    appendFixed(memcpyHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(memfillHelperBody(translateFunc, checkedTranslateFunc));
+    for (const seg of unhandled.initSegs) {
+      appendFixed(meminitHelperBody(translateFunc, checkedTranslateFunc, seg));
+    }
+    if (checkedCtx) {
+      appendFixed(checkedTranslateBody(ptBaseGlobal, checkedCtx));
+    }
+    // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
+    // checked translate). Each translates every byte's page separately.
+    appendFixed(loadBytesHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(storeBytesHelperBody(translateFunc, checkedTranslateFunc));
+  };
 
   // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
   // only) (i32,i32)->i32 -------------------------------------------------
@@ -2011,14 +2295,18 @@ export function instrument(bytes, opts = {}) {
   const newExportBody = [...u(nEx + adds.length), ...exTail, ...adds.flat()];
 
   // --- reassemble (insert sections that were absent, in canonical order) -----
-  // Section bodies are number[] except the code section (newCodeBody), which is
-  // a Uint8Array (assembled via concatBytes to dodge Array.flat's ceiling).
-  /** @type {Map<number, number[]|Uint8Array>} */
+  // Section bodies are number[] except the code section, which is represented
+  // by the CODE_SECTION_STREAM sentinel — its real bytes are never assembled
+  // as a standalone value at all (see the final assembly below and the
+  // ByteSink doc comment for why: #202 streams it directly into the shared
+  // output sink instead of building a separate whole-section copy first).
+  const CODE_SECTION_STREAM = Symbol("softmmu:code-section-stream");
+  /** @type {Map<number, number[]|Uint8Array|typeof CODE_SECTION_STREAM>} */
   const replaced = new Map();
   replaced.set(1, newTypeBody);
   replaced.set(3, newFuncBody);
   replaced.set(6, newGlobalBody);
-  replaced.set(10, newCodeBody);
+  replaced.set(10, CODE_SECTION_STREAM);
   if (newExportBody) replaced.set(7, newExportBody);
   const present = new Set(secs.map((x) => x.id));
 
@@ -2038,21 +2326,28 @@ export function instrument(bytes, opts = {}) {
   }
   emitMissingBefore(11);
 
-  // Assemble WITHOUT push(...spread): spreading a whole section's bytes as
-  // call arguments blows V8's argument-count limit on large binaries (a full
-  // musl-linked program is ~0.5 MB; the 22 KB test inits never tripped it).
-  /** @type {Uint8Array[]} */
-  const parts = [new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])];
+  // #202: stream the WHOLE module into one growable ByteSink, instead of
+  // building a `parts` array of section-sized Uint8Arrays and copying them
+  // all into a final `bytesOut` at the end. Every section's outer size field
+  // uses the padded/backpatch form uniformly (reserve 5, write the body,
+  // patch) — for the small sections the body length is already known, so
+  // this is a trivial reserve-then-immediately-known-value patch; only the
+  // code section's write in between is genuinely streamed (see
+  // `emitCodeSectionBody`). Pre-size the sink from the measured expansion
+  // ratio (busybox/nix-wasm: 5.4-6.9×, #202 §6.1) so it doesn't have to
+  // double-and-copy its own backing store on the way there.
+  const out = new ByteSink(Math.max(bytes.length * 7, 1 << 16));
+  out.pushBytes([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
   for (const sec of outSecs) {
-    parts.push(new Uint8Array([sec.id, ...u(sec.body.length)]));
-    parts.push(sec.body instanceof Uint8Array ? sec.body : new Uint8Array(sec.body));
+    out.push(sec.id);
+    const szOff = out.reserve(5);
+    const bodyStart = out.len;
+    if (sec.body === CODE_SECTION_STREAM) {
+      emitCodeSectionBody(out);
+    } else {
+      out.pushBytes(sec.body);
+    }
+    out.patch5(szOff, out.len - bodyStart);
   }
-  const total = parts.reduce((a, p) => a + p.length, 0);
-  const bytesOut = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    bytesOut.set(p, off);
-    off += p.length;
-  }
-  return bytesOut;
+  return out.toUint8Array();
 }
