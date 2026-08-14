@@ -537,6 +537,7 @@ export class WlDevice extends VirtioWasmDevice {
       }
       case VIRTIO_WL_CMD_VFD_CLOSE: {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
+        const closing = this.contexts.get(vfdId);
         this.contexts.delete(vfdId);
         this.log(`[virtio-wl] CLOSE vfd_id=${vfdId} -> RESP_OK`);
         // Tell the host bridge the guest closed this ctx — e.g. Sommelier
@@ -544,7 +545,28 @@ export class WlDevice extends VirtioWasmDevice {
         // compositor uses it to tear down the matching server-side client now,
         // instead of leaking it (and pumping events to a dead ctx) until a
         // timeout. Fire-and-forget; harmless when no bridge is wired.
-        this._bridge?.onClose?.(vfdId);
+        //
+        // ONLY for a CTX vfd. `contexts` holds every vfd kind — NEW_CTX(_NAMED),
+        // NEW_PIPE, and NEW_ALLOC shm buffers all land in the same map — but the
+        // host bridge keys its Wayland CLIENTS by ctx vfd_id, so firing this for
+        // a pipe/shm close asks it to destroy a "client" that is really a buffer.
+        // With a single Sommelier that was invisible: no client had a matching
+        // id, and pc's destroyGuestClient just logged a miss. It stops being
+        // invisible as soon as a SECOND context exists (`sommelier -X`, the X11
+        // epic): guest-allocated vfd ids are one flat space shared by ctxs,
+        // pipes and shm, so one Sommelier closing an ordinary buffer whose id
+        // happens to equal the other Sommelier's ctx id tears down that LIVE
+        // client. Guest-side that surfaces as `failed to read Wayland events:
+        // Connection reset by peer`, and in sommelier -X it kills the XWM
+        // mid-handshake (`Assertion failed: xfixes_query_version_reply`),
+        // leaving a zombie Xwayland and nothing serving DISPLAY=:1.
+        if (
+          closing &&
+          (closing.type === VIRTIO_WL_CMD_VFD_NEW_CTX ||
+            closing.type === VIRTIO_WL_CMD_VFD_NEW_CTX_NAMED)
+        ) {
+          this._bridge?.onClose?.(vfdId);
+        }
         return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
       }
       case VIRTIO_WL_CMD_VFD_SEND: {
