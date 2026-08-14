@@ -448,7 +448,9 @@ try {
   const matchesKnownSigbusSignature = mmapOk && !readProbeSeen && busError && testRc === "135";
 
   if (matchesKnownSigbusSignature && !content) {
-    console.log("REGRESSION(#203) wl_shm mmap SIGBUS is back — matches the pre-fix signature exactly");
+    console.log(
+      "REGRESSION(#203) wl_shm mmap SIGBUS is back — matches the pre-fix signature exactly",
+    );
   } else if (!content) {
     console.log(
       `UNEXPECTED — CONTENT failed but the outcome doesn't match the known pre-fix SIGBUS signature either ` +
