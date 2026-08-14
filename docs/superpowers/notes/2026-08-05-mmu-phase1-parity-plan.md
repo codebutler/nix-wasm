@@ -361,14 +361,26 @@ attrs"; Phase 3 is "pc downloads this by default."
    re-verification that patch 0010 still applies against master's current
    0007/0008 series (they may have drifted since the `-fork` variant was last
    rebuilt), not a from-scratch port.
-2. **`toolchain/wasm-host-imports.nix`** — add `capture_stack` to the
-   allow-list. It is DELIBERATELY absent today (the file's own header comment:
-   "Add capture_stack here in the PR that ships the first REAL fork package
-   through forkStdenv — a deliberate, CI-planned world rebuild") precisely
-   because adding it changes the file's store path, which is baked into
-   `wasm-cross.nix`'s cc-wrapper — i.e. it ALREADY forces the same full
-   `cross.*` rebuild step 1 forces, so land both in the same commit rather
-   than paying the rebuild twice.
+2. **CORRECTED (2026-08-14, review of the #207-adjacent P2-1 finding):** this
+   item used to read "add `capture_stack` to `toolchain/wasm-host-imports.nix`'s
+   allow-list, in the same commit as step 1." That is WRONG and is not part of
+   this flip. Commit 99e7a73 (precedes this promotion; see its message + the
+   `patches/musl/0010-fork-asyncify-seam.patch` header) split `__post_Fork`
+   into its own TU specifically so a plain posix_spawn/pthread_create link
+   against muslFork does NOT drag in `_Fork.lo`'s `capture_stack` reference —
+   i.e. so "references capture_stack" stays a reliable link-time signal of
+   "was asyncify-instrumented for fork." Adding capture_stack to the SHARED
+   allow-list would destroy that signal: every binary would then be free to
+   reference it without asyncify instrumentation, silently trading the loud
+   link failure for a runtime TypeError the first time an un-instrumented
+   binary actually forked. `toolchain/wasm-host-imports.nix`'s own header
+   comment states this permanently, not as a "not yet" — see it for the two
+   local-extension idioms a real fork-capable link uses instead (per-link,
+   never shared). This step is therefore DROPPED from the batched edit set;
+   step 1 (promoting muslFork to the default `musl`) stands on its own, and
+   `.#musl-fork-linkcheck` (spikes/nofork/check-fork.nix) plus
+   `toolchain/musl.nix`'s `fork = true` postPatch assertion are the standing
+   regression gates for the TU split this flip depends on.
 3. **`userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*`** —
    retire the forkshell hacks; build stock upstream ash against the new
    default (fork-capable) musl/busybox, still promoted to `/bin/sh` in
