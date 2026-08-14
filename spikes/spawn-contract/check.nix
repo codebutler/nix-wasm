@@ -140,18 +140,25 @@ cross.stdenv.mkDerivation {
   buildPhase = ''
     mkdir -p $out
     : > $out/result
+    # -w (whole-word match), NOT plain -q: "undefined symbol: fork" is a
+    # literal PREFIX of "undefined symbol: forkpty" (and any other fork*
+    # symbol), so an unanchored substring match would misclassify a
+    # forkpty/forkfoo undefined-symbol error as this probe's own
+    # `fork=ABSENT` case (nix-wasm#202, found by review). -w requires the
+    # matched text not be immediately followed by another word character, so
+    # "undefined symbol: forkpty" no longer matches "undefined symbol: fork".
     if $CC ${extraArgs} ${./uses-fork.c} -o fork.wasm 2>fork.err; then
       echo "fork=LINKED" >> $out/result
-    elif grep -q "undefined symbol: fork" fork.err; then
+    elif grep -qw "undefined symbol: fork" fork.err; then
       echo "fork=ABSENT" >> $out/result
-    elif grep -q "undefined symbol: capture_stack" fork.err; then
+    elif grep -qw "undefined symbol: capture_stack" fork.err; then
       echo "fork=NEEDS_CAPTURE_STACK" >> $out/result
     else
       echo "fork=OTHER_ERROR" >> $out/result; cat fork.err >> $out/result
     fi
     if $CC ${extraArgs} ${./uses-spawn.c} -o spawn.wasm 2>spawn.err; then
       echo "spawn=LINKED" >> $out/result
-    elif grep -q "undefined symbol: capture_stack" spawn.err; then
+    elif grep -qw "undefined symbol: capture_stack" spawn.err; then
       echo "spawn=NEEDS_CAPTURE_STACK" >> $out/result
     else
       echo "spawn=FAILED" >> $out/result; cat spawn.err >> $out/result

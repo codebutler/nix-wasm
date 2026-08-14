@@ -940,6 +940,7 @@
       guestSweepCommonRoots = wasmDevPaths ++ wasmPublishedPkgs;
       guestSpawnContractNommu = import ./userspace/spawn-contract-sweep.nix {
         inherit pkgs;
+        name = "guest-spawn-contract-nommu";
         profile = "nommu-spawn";
         roots = [ wasmBusybox wasmToplevel wasmBootstrap ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
         # MEASURED (2026-08-13, against real already-built store paths
@@ -954,9 +955,26 @@
         # the mmu-fork sweep below, which is the harder case — see that
         # sweep's own comment) — CI's own build is what closes this.
         expectCaptureStackCount = 0;
+        # Identity, not just count (review finding, nix-wasm#202): a bare
+        # count of 0 already implies an empty importer set, but pinning the
+        # (empty) name list too keeps this profile's assertion shape
+        # consistent with the fork profile's below, and costs nothing.
+        expectCaptureStackNames = [ ];
+        # MEASURED (2026-08-14, a real `nix build .#guest-spawn-contract-nommu`
+        # in this session, --option build-dir /dev/shm to work around this
+        # host's near-full root disk — nix-wasm#202, found by review): 195
+        # distinct wasm modules swept. Pinned as a FLOOR (5 below the measured
+        # value, not the exact count) rather than an exact count like the
+        # capture_stack count above — this total legitimately grows as new
+        # packages/roots are added (unlike the capture_stack set, which is
+        # semantically supposed to stay exactly {}), so a floor catches a real
+        # collapse (a root path typo, a build that stopped producing dylink
+        # sections) without going red on every ordinary addition.
+        expectMinModules = 190;
       };
       guestSpawnContractFork = import ./userspace/spawn-contract-sweep.nix {
         inherit pkgs;
+        name = "guest-spawn-contract-fork";
         profile = "mmu-fork";
         roots = [ wasmBusyboxFork wasmToplevelFork wasmBootstrapFork ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
         # MEASURED (2026-08-13, against real already-built store paths, via
@@ -979,6 +997,38 @@
         # complete sweep ever disagrees, THIS assertion is what turns the job
         # red rather than the drift going unnoticed).
         expectCaptureStackCount = 2;
+        # Identity, not just count (review finding, nix-wasm#202): a count
+        # match alone cannot tell "the right 2 modules use fork" from "some
+        # OTHER 2 modules gained a fork path while one of the real ones lost
+        # it" — e.g. after the musl TU split (spikes/spawn-contract/
+        # check.nix's AXIS-1 note), busybox-fork could stop pulling
+        # _Fork.c (fork silently gone from the guest's actual /bin/sh)
+        # while some unrelated binary picks up capture_stack some other
+        # way; the COUNT alone would stay 2 and this gate would stay green
+        # through a real regression. Basenames (not full store paths) —
+        # `$out/bin/busybox` and `$out/bin/nix` are each realpath-deduped
+        # from a symlink farm, so the on-disk FILE name is what a sweep
+        # observes, not either package's derivation/attr name.
+        expectCaptureStackNames = [ "busybox" "nix" ];
+        # NO expectMinModules pin here (unlike the nommu profile above),
+        # documented rather than silently omitted: a real, from-scratch
+        # `nix build .#guest-spawn-contract-fork` in this session could not
+        # reach the sweep step at all — it failed earlier, at nix-wasm-fork's
+        # own `libnixutil.so` link, on `wasm-ld: error: unknown argument:
+        # --start-group`/`--end-group` (meson's default archive-cycle-
+        # breaking link-group flags, ELF-only, apparently not yet in the
+        # wasm-ld flag filter). This is a REAL, reproducible build break, but
+        # it is UNRELATED to this review pass's six P1/P2 findings (nothing
+        # here touches nix-wasm.nix, wasm-cross.nix, or the wasm-ld flag
+        # filter) and fixing it is out of scope for this change — filed as a
+        # separate observation rather than guessed at or silently worked
+        # around. Without a real full-closure build, there is no MEASURED
+        # total to pin a floor against (the count that already sits above,
+        # 2, WAS independently confirmed — see its own comment — against the
+        # real busybox-wasm32-fork/nix-wasm-fork binaries directly, which
+        # doesn't need this closure-wide build). Add expectMinModules here
+        # once a from-scratch `.#guest-spawn-contract-fork` build succeeds
+        # and reports its real swept-module count.
       };
         in
         {

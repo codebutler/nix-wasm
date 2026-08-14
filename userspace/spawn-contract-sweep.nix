@@ -57,11 +57,28 @@
 # set the caller already has as plain Nix derivations. Sweeping the inputs
 # directly is equivalent (initramfs.nix / base-squashfs.nix copy these EXACT
 # paths in, verbatim, uncompressed-then-compressed) and far cheaper.
-{ pkgs, profile, roots, expectCaptureStackCount ? null }:
+{ pkgs, profile, roots, expectCaptureStackCount ? null
+, expectCaptureStackNames ? null
+, expectMinModules ? null
+# The DERIVATION name, deliberately NOT derived from `profile` by default
+# fallback logic here: `profile` is "nommu-spawn"/"mmu-fork" (the
+# wasm-check-imports.py contract-profile vocabulary), but the flake attrs
+# these derivations are actually exposed as are `guest-spawn-contract-nommu`
+# / `guest-spawn-contract-fork` (flake.nix's `packages`) — a plain
+# `"guest-spawn-contract-${profile}"` default would produce
+# `guest-spawn-contract-nommu-spawn` / `guest-spawn-contract-mmu-fork`,
+# neither of which matches its own flake attr name (nix-wasm#202, found by
+# review — `nix build .#guest-spawn-contract-fork --print-out-paths` prints
+# a store path whose own basename disagreed with the attr that built it,
+# confusing for anyone reading `nix build -L` output or a store-path log).
+# Callers (flake.nix) pass the real attr name explicitly; the profile-based
+# fallback only covers ad hoc/spike callers that don't care.
+, name ? "guest-spawn-contract-${profile}"
+}:
 let
   closure = pkgs.closureInfo { rootPaths = roots; };
 in
-pkgs.runCommand "guest-spawn-contract-${profile}"
+pkgs.runCommand name
   { nativeBuildInputs = [ pkgs.python3 ]; }
   ''
     # `set -o pipefail`: WITHOUT it, `python3 ... | tee $out`'s overall exit
@@ -73,17 +90,34 @@ pkgs.runCommand "guest-spawn-contract-${profile}"
     # fails whenever the checker does, while $out still carries the full
     # per-module report for a human (or the log) to read.
     set -o pipefail
-    # ${../scripts} (the DIRECTORY, not ${../scripts/wasm-closure-sweep.py})
-    # is deliberate: interpolating a path to a single FILE copies only that
-    # file into the store — siblings are NOT copied alongside it. This
+    # The DIRECTORY below is interpolated on purpose (see the line after this
+    # comment block) — NOT a path to the single file wasm-closure-sweep.py
+    # itself. Interpolating a path to a single FILE copies only that file
+    # into the store — siblings are NOT copied alongside it — and this
     # script's own `_HERE`-relative loads of wasm-check-imports.py and
     # wasm-check-exports.py would then FileNotFoundError inside the sandbox
     # (nix-wasm#202, found by review — reproduced with a minimal flake of
     # identical shape before this fix). Interpolating the directory copies
     # the whole `scripts/` tree as one store path, so the siblings survive.
+    # NOTE ON WRITING THIS COMMENT ITSELF: this whole buildCommand is a Nix
+    # indented ("doubled-apostrophe-delimited") string, so Nix's own lexer
+    # scans EVERY line of it — including this shell `#` comment — for
+    # dollar-brace interpolation and for the doubled-apostrophe escape
+    # sequence, regardless of the shell never treating a comment as code. An
+    # earlier revision illustrated the WRONG shape by writing a live,
+    # unescaped dollar-brace path to the single-file script right here in
+    # prose — which Nix duly evaluated, silently adding that unused
+    # single-file store path to this derivation's inputs (nix-wasm#202,
+    # found by review). This paragraph deliberately describes the escape
+    # mechanism in words rather than typing the literal characters, to avoid
+    # reintroducing exactly that hazard in its own explanation.
     python3 ${../scripts}/wasm-closure-sweep.py ${profile} \
       ${pkgs.lib.optionalString (expectCaptureStackCount != null)
         "--expect-capture-stack-count=${toString expectCaptureStackCount}"} \
+      ${pkgs.lib.optionalString (expectCaptureStackNames != null)
+        "--expect-capture-stack=${pkgs.lib.concatStringsSep "," expectCaptureStackNames}"} \
+      ${pkgs.lib.optionalString (expectMinModules != null)
+        "--expect-min-modules=${toString expectMinModules}"} \
       --roots-file=${closure}/store-paths \
       | tee $out
   ''
