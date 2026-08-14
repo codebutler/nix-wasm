@@ -86,51 +86,40 @@
 //     mmap of the shm vfd to ACTUALLY reach the same physical buffer the
 //     host's pfn-derived view reads.
 //
-//     The kernel code for this (patches/kernel/0013's virtwl_vfd_mmap /
-//     virtwl_vfd_get_unmapped_area) was written for NOMMU's do_mmap
-//     direct-mapping and was never given real (page-fault-driven) MMU
-//     semantics. Precisely: patch 0023 ADDS an `#ifndef CONFIG_MMU` guard
-//     around `virtwl_vfd_mmap_capabilities` and its fops slot — compiling
-//     that NOMMU-only direct-map capability hook OUT under CONFIG_MMU —
-//     while `.mmap` (virtwl_vfd_mmap) and `.get_unmapped_area`
-//     (virtwl_vfd_get_unmapped_area) stay REGISTERED UNCHANGED; nothing was
-//     "relaxed" for MMU, a guard was added around the one hook that can't
-//     even exist there (fs.h only defines that struct field under
-//     !CONFIG_MMU). Neither surviving hook does anything MMU-correct:
-//     `.mmap` never sets `vma->vm_ops` and never calls remap_pfn_range (so
-//     no page table entries are ever installed for the mapping), and
-//     `.get_unmapped_area` returns `(unsigned long)vfd->shm_buf` — a KERNEL
-//     address — as if it were the USER mapping address, which is not what
-//     that hook means under a real MMU (a hint for a FREE user VA range,
-//     not literally where the backing pages live). Filed as issue #203
-//     (both corrections above were posted there) with these findings, which
-//     this smoke reproduces on every boot: an earlier PID-1 variant of
-//     wl-shm-test reached "WLSHM: mmap ok" (mmap() itself succeeds) and then
-//     died to a FATAL SIGNAL (guest exit_code 0x07 = SIGBUS) on the first
-//     ACCESS into the mapped region, taking the whole guest down with
-//     "Attempted to kill init!"; with the test running as an ordinary child
-//     instead, the guest console shows a plain "Bus error" and wl-shm-test
-//     exits 135 (128+SIGBUS) at the SAME point — the read probe, even
-//     before any write — with the shell surviving cleanly. See the
-//     KNOWN_SIGBUS_SIGNATURE check below: this smoke asserts that EXACT,
-//     reproduced signature so any OTHER outcome (a different signal, a
-//     clean exit with wrong bytes, a hang) is flagged loudly as something
-//     that needs a human, not silently absorbed as "still failing".
-//
-// PROMOTION: this step runs non-gating (continue-on-error) in CI for now.
-// The next commit is expected to flip it to a hard XFAIL gate inside the
-// existing `run_smoke` sequence — a ONE-LINE change to the `pass` line
-// below, from `item2 && item3 && content` to
-// `item2 && item3 && (content || matchesKnownSigbusSignature)` — once
-// ITEM2/ITEM3 have recorded a green run in CI (see the workflow step's own
-// comment for the exact criterion). If CONTENT ever starts passing for
-// real, that is itself the interesting event (someone ported
-// virtwl_vfd_mmap for real MMU semantics) — see the "#203 appears FIXED"
-// message below.
+//     FIXED (issue #203). The kernel code for this (patches/kernel/0013's
+//     virtwl_vfd_mmap / virtwl_vfd_get_unmapped_area) was written for
+//     NOMMU's do_mmap direct-mapping and, for a while, was never given real
+//     (page-fault-driven) MMU semantics: patch 0023 had ADDED an `#ifndef
+//     CONFIG_MMU` guard around `virtwl_vfd_mmap_capabilities` and its fops
+//     slot (that NOMMU-only direct-map capability hook can't even build
+//     under CONFIG_MMU — fs.h only defines the struct field there) while
+//     leaving `.mmap`/`.get_unmapped_area` registered UNCHANGED and
+//     MMU-incorrect: `.mmap` never called remap_pfn_range (so no page table
+//     entries were ever installed for the mapping — every access SIGBUS'd,
+//     `do_anonymous_page()`'s VM_SHARED guard, since the vma had no
+//     `vm_ops` and no populated ptes), and `.get_unmapped_area` returned
+//     `(unsigned long)vfd->shm_buf` — a KERNEL address — as if it were the
+//     USER mapping address. Completing patch 0023's own CONFIG_MMU port of
+//     virtio_wl.c fixes both: `virtwl_vfd_mmap()` now calls
+//     `remap_pfn_range()` over `vfd->pfn` (the SAME physically-contiguous
+//     buffer the host's `_resolveShmFd` already resolves via that pfn —
+//     `__pa`/`__va` are identity on this arch under both NOMMU and MMU, so
+//     pfn semantics are unchanged, only how a USER mapping of it gets built)
+//     — MAP_SHARED only, MAP_PRIVATE is rejected with -EINVAL since this
+//     driver keeps no struct-page tracking that could support real
+//     copy-on-write and silently accepting it would risk aliased/stale data
+//     — and `virtwl_vfd_get_unmapped_area`/`virtwl_vfd_mmap_capabilities`
+//     are now NOMMU-only (the generic `mm->get_unmapped_area` free-VMA-hole
+//     search is exactly right for a real page-table-backed mapping). See
+//     the KNOWN_SIGBUS_SIGNATURE check below: it stays as a defensive
+//     diagnostic — if this ever regresses, matching that EXACT signature
+//     (mmap succeeds, no read-probe line, exit 135, a bare "Bus error")
+//     tells a future reader this is the SAME historical bug reappearing,
+//     not a new failure mode.
 //
 // Exit: 0 all three checks PASS / 1 boot completed but >=1 check failed (a
-// real, tracked finding — see CONTENT above) / 2 inconclusive (no boot,
-// panic, or the shell never reached its witness line — re-run).
+// real regression — see CONTENT above) / 2 inconclusive (no boot, panic, or
+// the shell never reached its witness line — re-run).
 import {
   mkdtempSync,
   readFileSync,
@@ -443,37 +432,30 @@ try {
   }
   console.log(`CONTENT: ${content ? "PASS" : "FAIL"} (${contentDetail})`);
 
-  // --- the exact, reproduced SIGBUS signature (issue #203) ------------------
-  // The current, EXPECTED state on unfixed code: mmap() succeeds, then the
-  // very first ACCESS (even a read) into the region raises SIGBUS, printed
-  // by the shell as a bare "Bus error", with wl-shm-test exiting
-  // 128+SIGBUS=135 and no read_probe/pattern-written/second-SEND line past
-  // "WLSHM: mmap ok". Checking this EXACT signature (not just "content
-  // failed") is what makes the eventual XFAIL promotion (see the file
-  // header) meaningful: any OTHER outcome — a different signal, a clean exit
-  // with wrong bytes, a hang — must be flagged loudly, not silently treated
-  // as "still the known failure".
+  // --- the historical SIGBUS signature (issue #203, FIXED) — kept as a
+  // defensive regression diagnostic --------------------------------------
+  // Before the fix, unpatched code hit this EXACT signature on every boot:
+  // mmap() succeeds, then the very first ACCESS (even a read) into the
+  // region raises SIGBUS, printed by the shell as a bare "Bus error", with
+  // wl-shm-test exiting 128+SIGBUS=135 and no read_probe/pattern-written/
+  // second-SEND line past "WLSHM: mmap ok". `pass` below requires a REAL
+  // CONTENT pass — this signature is not accepted as a substitute — but
+  // matching it exactly on a future failure tells a human this is the SAME
+  // historical bug back, not a new failure mode.
   const mmapOk = /^WLSHM: mmap ok\r?$/m.test(transcript);
   const readProbeSeen = /^WLSHM: read_probe0=/m.test(transcript);
   const busError = /Bus error/.test(transcript);
   const matchesKnownSigbusSignature = mmapOk && !readProbeSeen && busError && testRc === "135";
 
   if (matchesKnownSigbusSignature && !content) {
-    console.log("XFAIL(#203) wl_shm mmap SIGBUS — expected, tracked");
-  } else if (content) {
+    console.log("REGRESSION(#203) wl_shm mmap SIGBUS is back — matches the pre-fix signature exactly");
+  } else if (!content) {
     console.log(
-      '#203 appears FIXED — promote this XFAIL to a hard CONTENT assertion (drop the "|| matchesKnownSigbusSignature" fallback below once this is confirmed on more than one run)',
-    );
-  } else {
-    console.log(
-      `UNEXPECTED — outcome matches neither the known SIGBUS signature nor a clean content pass ` +
+      `UNEXPECTED — CONTENT failed but the outcome doesn't match the known pre-fix SIGBUS signature either ` +
         `(mmapOk=${mmapOk} readProbeSeen=${readProbeSeen} busError=${busError} testRc=${testRc ?? "?"}); needs investigation, not just a re-run`,
     );
   }
 
-  // One-line flip point for the future hard-gate promotion (see the file
-  // header's PROMOTION note): today `pass` requires content===true; the
-  // promoted XFAIL gate instead requires (content || matchesKnownSigbusSignature).
   pass = item2 && item3 && content;
   console.log(
     `RESULT wl_shm_mmu ${pass ? "PASS" : "FAIL"} item2_inode=${item2 ? 1 : 0} item3_addr=${

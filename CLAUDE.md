@@ -315,15 +315,24 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/resize-smoke.mjs
 # Also wired into nix-wasm.yml boot-smoke (gating).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/snd-smoke.mjs
 
-# #11 items 2/3 (wl_shm-on-MMU) parity check (issue #203; busybox-fork boot on
-# .#kernel-mmu-a2, no compositor needed): userspace/wl-shm-test.c drives
-# virtio_wl's NEW_ALLOC/anon-inode/SEND-fds path directly; a `wayland.sendOut`
-# bridge hook captures the host device model's resolution bit-exact.
-# ITEM2_INODE/ITEM3_ADDR reliably PASS (the wire-level accommodations work);
-# CONTENT reliably FAILS with a reproducible SIGBUS (virtwl_vfd_mmap was never
-# given real MMU semantics — tracked as issue #203, not a regression). Wired
-# into nix-wasm.yml boot-smoke's `mmu` shard as a non-gating step (see its own
-# comment for the promotion criterion).
+# #11 items 2/3 (wl_shm-on-MMU) parity check (issue #203, FIXED; busybox-fork
+# boot on .#kernel-mmu-a2, no compositor needed): userspace/wl-shm-test.c
+# drives virtio_wl's NEW_ALLOC/anon-inode/SEND-fds path directly; a
+# `wayland.sendOut` bridge hook captures the host device model's resolution
+# bit-exact. ITEM2_INODE/ITEM3_ADDR PASS (the wire-level accommodations work)
+# AND CONTENT now PASSES too: virtwl_vfd_mmap()/virtwl_vfd_get_unmapped_area()
+# (patches/kernel/0013) were written for NOMMU's do_mmap direct-mapping and,
+# for a while, were never given real MMU page-fault semantics, so a guest
+# mmap of the vfd SIGBUS'd on first access — patch 0023 completes its own
+# (until-then partial) CONFIG_MMU port of virtio_wl.c: virtwl_vfd_mmap() now
+# remap_pfn_range()s vfd->pfn (the same physically-contiguous buffer the
+# host's _resolveShmFd already resolves via that pfn) into the vma —
+# MAP_SHARED only, MAP_PRIVATE is rejected with -EINVAL since this driver has
+# no struct-page tracking that could support real COW — and
+# virtwl_vfd_get_unmapped_area/virtwl_vfd_mmap_capabilities are now
+# NOMMU-only (the generic mm->get_unmapped_area is correct under a real MMU).
+# Wired into nix-wasm.yml boot-smoke's "MMU smokes" step as a hard
+# `run_smoke` gate (promoted from its earlier non-gating XFAIL form).
 MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm \
   BUSYBOX_FORK=$(nix build .#userspace-busybox-fork --print-out-paths)/bin \
   WL_SHM_TEST=$(nix build .#wl-shm-test --print-out-paths)/bin/wl-shm-test \
@@ -1762,28 +1771,51 @@ CI / the linux box, per the design's "ship what works" scope):
   #11: every gtk-shard smoke is a display-free `--selftest` (no compositor in
   the node harness → `wl_shm` is never allocated), so items 2/3/5 (the
   virtio_wl per-vfd/shm-fd/proxy accommodations) stayed unverified on MMU from
-  THIS shard's evidence alone. **UPDATE (issue #203): items 2 and 3 are now
-  verified**, by a dedicated non-compositor smoke
-  (`runtime/demo/node/wl-shm-mmu-smoke.mjs`, `boot-smoke`'s `mmu` shard,
-  non-gating) that drives virtio_wl's NEW_ALLOC/anon-inode/SEND-fds sequence
-  directly against a bespoke test binary (`userspace/wl-shm-test.c`) — no
-  compositor needed. Item 2 (per-vfd anon inode) and item 3 (the host device
-  model's pfn→host-offset `_resolveShmFd` resolution) both PASS reliably.
-  A THIRD thing this smoke found while proving that: the mmap CONTENT
-  round-trip (can the guest actually WRITE into the vfd and have the host
-  read the same bytes) reliably FAILS with a clean SIGBUS — `virtwl_vfd_mmap`
-  /`virtwl_vfd_get_unmapped_area` (`patches/kernel/0013`) were written for
-  NOMMU's `do_mmap` direct-mapping and were never given real MMU page-fault
-  semantics; patch 0023 only ADDED an `#ifndef CONFIG_MMU` guard around the
-  NOMMU-only `virtwl_vfd_mmap_capabilities` hook (compiling it OUT under
-  CONFIG_MMU, since that fops field doesn't exist there at all) while
-  `.mmap`/`.get_unmapped_area` stay registered unchanged and un-ported (no
-  `vm_ops`, no `remap_pfn_range`; `get_unmapped_area` returns the shm
-  buffer's KERNEL address as if it were a valid USER mapping address). Filed
-  as **issue #203**, tracked as a real, reproducible kernel gap (not part of
-  this smoke's own scope to fix) — the smoke's CONTENT check and the CI
-  step's XFAIL design document the exact signature so a future fix is
-  provably detected. Item 5 (waylandproxyd's mmap+copy resync) is STILL
+  THIS shard's evidence alone. **UPDATE (issue #203): items 2 AND 3 AND the
+  mmap CONTENT round-trip are all now verified**, by a dedicated
+  non-compositor smoke (`runtime/demo/node/wl-shm-mmu-smoke.mjs`,
+  `boot-smoke`'s "MMU smokes" step, a hard `run_smoke` gate) that drives
+  virtio_wl's NEW_ALLOC/anon-inode/SEND-fds sequence directly against a
+  bespoke test binary (`userspace/wl-shm-test.c`) — no compositor needed.
+  Item 2 (per-vfd anon inode) and item 3 (the host device model's
+  pfn→host-offset `_resolveShmFd` resolution) both PASS reliably, as does the
+  mmap CONTENT round-trip (can the guest actually WRITE into the vfd and have
+  the host read the same bytes) — it used to reliably FAIL with a clean
+  SIGBUS: `virtwl_vfd_mmap`/`virtwl_vfd_get_unmapped_area`
+  (`patches/kernel/0013`) were written for NOMMU's `do_mmap` direct-mapping
+  and, for a while, were never given real MMU page-fault semantics; patch
+  0023 had only ADDED an `#ifndef CONFIG_MMU` guard around the NOMMU-only
+  `virtwl_vfd_mmap_capabilities` hook (compiling it OUT under CONFIG_MMU,
+  since that fops field doesn't exist there at all) while
+  `.mmap`/`.get_unmapped_area` stayed registered unchanged and un-ported (no
+  `vm_ops`, no `remap_pfn_range`; `get_unmapped_area` returned the shm
+  buffer's KERNEL address as if it were a valid USER mapping address).
+  **FIXED** by completing patch 0023's own CONFIG_MMU port of
+  `virtio_wl.c` (still `patches/kernel/0023-wasm-software-mmu.patch` — the
+  natural place to finish the port it started, not a new patch number, since
+  no other patch in the series touches `virtio_wl.c`): `virtwl_vfd_mmap()`
+  now calls `remap_pfn_range()` over `vfd->pfn` (the SAME
+  physically-contiguous, `alloc_pages_exact()`'d buffer the host's
+  `_resolveShmFd` already resolves via that pfn — `__pa`/`__va` are identity
+  on this arch under BOTH NOMMU and MMU, `arch/wasm/include/asm/page.h`, so
+  pfn semantics are unchanged, only how a USER mapping of it gets built) —
+  **MAP_SHARED only**: MAP_PRIVATE is rejected with `-EINVAL`, loudly,
+  because this driver keeps no struct-page-level tracking that could support
+  real copy-on-write, and this buffer's entire purpose is host/guest
+  coherence over the exact same bytes, so silently accepting a private
+  mapping would risk aliasing the shared buffer or handing back stale/zero
+  pages instead of a clean failure. `virtwl_vfd_get_unmapped_area`/
+  `virtwl_vfd_mmap_capabilities` are now compiled NOMMU-only (`#ifndef
+  CONFIG_MMU`, alongside the `.mmap`/`.mmap_capabilities` fops table
+  guards) — the generic `mm->get_unmapped_area` free-VMA-hole search is
+  exactly right for a real page-table-backed mapping, so nothing MMU-shaped
+  needs to override it. Verified by booting `.#kernel-mmu-a2` +
+  `wl-shm-mmu-smoke.mjs`: ITEM2_INODE/ITEM3_ADDR/CONTENT all PASS reliably
+  (repeat runs, bit-exact pattern match on both shm pools); the smoke's
+  historical-SIGBUS-signature check is kept as a standing regression
+  diagnostic, not the passing condition. `nix-wasm.yml`'s "MMU smokes" step
+  promoted this from its earlier non-gating XFAIL form to a hard
+  `run_smoke` gate. Item 5 (waylandproxyd's mmap+copy resync) is STILL
   unverified — that logic lives in the Sommelier Wayland-client bridge path,
   unreached without a real compositor boot. Items 4 (the dropped upstream
   `vmalloc`/`find_vm_area` large-buffer-send branch) and 6 (waylandproxyd's
