@@ -423,7 +423,15 @@ attrs"; Phase 3 is "pc downloads this by default."
    failing to LINK loudly, which is the entire point of the probe and the
    process-model contract this document exists to protect. `spawn=LINKED`
    (not `NEEDS_CAPTURE_STACK`) only becomes correct once item 8a's musl TU
-   split lands — until then, restoring `fork = true` alone would make
+   split lands. **UPDATE: that split has landed, and the `expected.mmu-fork`
+   flip to `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` shipped WITH it rather
+   than waiting for this item** — the two are separable, and the pinned value
+   tracks the SPLIT, not the default flip: the probe drives the `mmu-fork`
+   profile by passing `muslFork` explicitly, so it never depended on the
+   default `fork` being flipped. (Caught by review on the batched PR: leaving
+   the pre-split pair pinned while the split landed in the same change would
+   have failed `.#spawn-linkcheck-fork` on every Nix-changing CI run.) Before
+   the split, restoring `fork = true` alone would have made
    `spawn=NEEDS_CAPTURE_STACK` too (posix_spawn's `__clone` still drags in
    `_Fork.c` incidentally), which the probe's own `expected` table would
    correctly still flag as a violation, not a pass. Keep the probe (it is

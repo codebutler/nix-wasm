@@ -102,9 +102,10 @@
 # correct if some FUTURE change also added capture_stack to the shared
 # allow-list — which is explicitly not part of PR-2's plan, so this probe
 # (and CLAUDE.md's mirroring `.#guest-spawn-contract-fork` sweep note) must
-# not describe that outcome as pending. Until the split lands, TODAY's
-# fork=NEEDS_CAPTURE_STACK / spawn=NEEDS_CAPTURE_STACK stands, and it is
-# ALSO the reason the closure-wide sweep's "exactly 2 modules import
+# not describe that outcome as pending. The split HAS now landed (same
+# change), so `expected.mmu-fork` below reads fork=NEEDS_CAPTURE_STACK /
+# spawn=LINKED; the pre-split pair was NEEDS_CAPTURE_STACK for BOTH, and it
+# was ALSO the reason the closure-wide sweep's "exactly 2 modules import
 # capture_stack" count (flake.nix's expectCaptureStackCount) is only
 # meaningful once the split lands: before it, that count could not
 # distinguish "a module calls fork()" from "a module merely spawns" — after
@@ -119,10 +120,18 @@ let
   profiles = [ "nommu-spawn" "mmu-fork" ];
   expected = {
     "nommu-spawn" = { fork = "ABSENT"; spawn = "LINKED"; };
-    # [MEASURED 2026-08-13 against the real muslFork + cross cc-wrapper store
-    # paths, via wasm-ld --why-extract; see the header above] — update this
-    # alongside wasm-host-imports.nix gaining capture_stack (PR-2).
-    "mmu-fork" = { fork = "NEEDS_CAPTURE_STACK"; spawn = "NEEDS_CAPTURE_STACK"; };
+    # POST-SPLIT contract, now that the `__post_Fork` TU split has landed (it
+    # ships in this same change): a spawn/thread-only program no longer drags
+    # in `_Fork.c`, so it LINKS; only a genuine fork() caller still needs
+    # capture_stack. `fork` deliberately stays NEEDS_CAPTURE_STACK forever —
+    # capture_stack is kept OFF wasm-host-imports.nix ON PURPOSE (see the
+    # header above and that file's own note), so a non-asyncified binary that
+    # really reaches fork() keeps failing to LINK loudly instead of silently
+    # TypeError-ing at runtime. This pair is what makes the closure sweep's
+    # pinned capture_stack count discriminating rather than a false-positive
+    # machine. [Pre-split this read spawn=NEEDS_CAPTURE_STACK, MEASURED
+    # 2026-08-13 via wasm-ld --why-extract.]
+    "mmu-fork" = { fork = "NEEDS_CAPTURE_STACK"; spawn = "LINKED"; };
   };
   want =
     if builtins.elem profile profiles
