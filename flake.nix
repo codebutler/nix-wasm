@@ -913,6 +913,123 @@
         initramfs = wasmInitramfs;
         squashfs = wasmBaseSquashfs;
       };
+
+      # ---- nix-wasm#202 PR-1: the spawn-contract gate (see spikes/
+      # spawn-contract/check.nix + userspace/spawn-contract-sweep.nix for the
+      # full rationale). Named with a hyphen (matching every other guest attr
+      # in this flake), so bound here rather than as a bare identifier inside
+      # the non-`rec` `packages` attrset below (`spawn-linkcheck` there would
+      # parse as the subtraction `spawn - linkcheck`).
+      spawnLinkcheck = import ./spikes/spawn-contract/check.nix { inherit cross; profile = "nommu-spawn"; };
+      spawnLinkcheckFork = import ./spikes/spawn-contract/check.nix { inherit cross muslFork; profile = "mmu-fork"; };
+      # Roots common to both profiles' sweeps: everything a guest of that
+      # profile can end up running, not just its boot-time initramfs/toplevel
+      # closure — the on-demand compiler toolchain (`wasmDevPaths`: guest-clang
+      # + guest-cc/cxx + make-wasm, substituted via `nix-env -iA wasm-tools.*`)
+      # and the curated nixpkgs catalog (`wasmPublishedPkgs`, `nix-env -iA
+      # nixpkgs.*`) are NOT in either profile's initramfs/toplevel closure
+      # (userspace/binary-cache.nix serves them lazily, on demand) but ARE
+      # real wasm modules the guest substitutes and runs — most pointedly
+      # `guestClang` itself (~57MB, NOT asyncified either way), which is
+      # exactly as exposed to the #202 finding post-flip as anything else.
+      # Found missing here by review (nix-wasm#202); added rather than
+      # narrowing the "every real wasm module" claim, since neither toolchain
+      # nor nixpkgs catalog is profile-specific (one `cross` package set
+      # backs both), so sweeping them costs nothing extra per profile beyond
+      # what CI already builds+caches in the `toolchain`/`artifacts` jobs.
+      guestSweepCommonRoots = wasmDevPaths ++ wasmPublishedPkgs;
+      guestSpawnContractNommu = import ./userspace/spawn-contract-sweep.nix {
+        inherit pkgs;
+        name = "guest-spawn-contract-nommu";
+        profile = "nommu-spawn";
+        roots = [ wasmBusybox wasmToplevel wasmBootstrap ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
+        # MEASURED (2026-08-13, against real already-built store paths
+        # covering the busybox/toplevel/initramfs-extraBins portion of this
+        # root set — busybox-wasm32-nommu, nix-wasm, ash, and every
+        # environment.systemPackages app): zero modules import capture_stack,
+        # as the nommu-spawn profile requires by construction (toolchain/
+        # musl.nix's default has no fork() symbol to reference it with). The
+        # toolchain/nixpkgs-catalog roots added by review were NOT separately
+        # re-measured against a from-scratch nommu build (guest-clang etc.
+        # don't call fork() and were already confirmed capture_stack-free in
+        # the mmu-fork sweep below, which is the harder case — see that
+        # sweep's own comment) — CI's own build is what closes this.
+        expectCaptureStackCount = 0;
+        # Identity, not just count (review finding, nix-wasm#202): a bare
+        # count of 0 already implies an empty importer set, but pinning the
+        # (empty) name list too keeps this profile's assertion shape
+        # consistent with the fork profile's below, and costs nothing.
+        expectCaptureStackNames = [ ];
+        # MEASURED (2026-08-14, a real `nix build .#guest-spawn-contract-nommu`
+        # in this session, --option build-dir /dev/shm to work around this
+        # host's near-full root disk — nix-wasm#202, found by review): 195
+        # distinct wasm modules swept. Pinned as a FLOOR (5 below the measured
+        # value, not the exact count) rather than an exact count like the
+        # capture_stack count above — this total legitimately grows as new
+        # packages/roots are added (unlike the capture_stack set, which is
+        # semantically supposed to stay exactly {}), so a floor catches a real
+        # collapse (a root path typo, a build that stopped producing dylink
+        # sections) without going red on every ordinary addition.
+        expectMinModules = 190;
+      };
+      guestSpawnContractFork = import ./userspace/spawn-contract-sweep.nix {
+        inherit pkgs;
+        name = "guest-spawn-contract-fork";
+        profile = "mmu-fork";
+        roots = [ wasmBusyboxFork wasmToplevelFork wasmBootstrapFork ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
+        # MEASURED (2026-08-13, against real already-built store paths, via
+        # two independent methods — a direct store-path sweep of the fork
+        # toplevel's system-path + initramfs extraBins, and a from-scratch
+        # streaming extraction of a built .#wasm-initramfs-fork's
+        # initramfs.cpio.gz): EXACTLY 2 modules import capture_stack —
+        # busybox-wasm32-fork and nix-wasm-fork. Every other module checked
+        # (25 of the 29 initramfs extraBins, the full games/apps set
+        # installed via environment.systemPackages, dltest's dl-loader
+        # probes) shows none. gtk3-demo / gtk3-widget-factory (the two
+        # largest initramfs binaries, ~37MB each, not in my own original
+        # measurement pass) were independently built and swept by adversarial
+        # review and confirmed clean too. The toolchain/nixpkgs-catalog roots
+        # added by that same review (guestClang et al., ~57MB, NOT
+        # asyncified) were not themselves re-measured against a real build —
+        # they don't call fork() so "clean" is the expected/required result,
+        # but CI's own from-scratch sweep is what actually confirms it; this
+        # pinned count is the regression guard from here forward (if CI's
+        # complete sweep ever disagrees, THIS assertion is what turns the job
+        # red rather than the drift going unnoticed).
+        expectCaptureStackCount = 2;
+        # Identity, not just count (review finding, nix-wasm#202): a count
+        # match alone cannot tell "the right 2 modules use fork" from "some
+        # OTHER 2 modules gained a fork path while one of the real ones lost
+        # it" — e.g. after the musl TU split (spikes/spawn-contract/
+        # check.nix's AXIS-1 note), busybox-fork could stop pulling
+        # _Fork.c (fork silently gone from the guest's actual /bin/sh)
+        # while some unrelated binary picks up capture_stack some other
+        # way; the COUNT alone would stay 2 and this gate would stay green
+        # through a real regression. Basenames (not full store paths) —
+        # `$out/bin/busybox` and `$out/bin/nix` are each realpath-deduped
+        # from a symlink farm, so the on-disk FILE name is what a sweep
+        # observes, not either package's derivation/attr name.
+        expectCaptureStackNames = [ "busybox" "nix" ];
+        # NO expectMinModules pin here (unlike the nommu profile above),
+        # documented rather than silently omitted: a real, from-scratch
+        # `nix build .#guest-spawn-contract-fork` in this session could not
+        # reach the sweep step at all — it failed earlier, at nix-wasm-fork's
+        # own `libnixutil.so` link, on `wasm-ld: error: unknown argument:
+        # --start-group`/`--end-group` (meson's default archive-cycle-
+        # breaking link-group flags, ELF-only, apparently not yet in the
+        # wasm-ld flag filter). This is a REAL, reproducible build break, but
+        # it is UNRELATED to this review pass's six P1/P2 findings (nothing
+        # here touches nix-wasm.nix, wasm-cross.nix, or the wasm-ld flag
+        # filter) and fixing it is out of scope for this change — filed as a
+        # separate observation rather than guessed at or silently worked
+        # around. Without a real full-closure build, there is no MEASURED
+        # total to pin a floor against (the count that already sits above,
+        # 2, WAS independently confirmed — see its own comment — against the
+        # real busybox-wasm32-fork/nix-wasm-fork binaries directly, which
+        # doesn't need this closure-wide build). Add expectMinModules here
+        # once a from-scratch `.#guest-spawn-contract-fork` build succeeds
+        # and reports its real swept-module count.
+      };
         in
         {
           # The FULL wasm32 cross package set — exposing it as legacyPackages lets
@@ -1112,9 +1229,43 @@
         # served /nix closure.
         galculator = cross.galculator;
 
-        # Task 1 clean-NOMMU probe: verifies fork=ABSENT and spawn=LINKED after the
-        # musl fork/vfork symbol removal. Always builds (link results written to $out/result).
-        nofork-linkcheck = import ./spikes/nofork/check.nix { inherit cross; };
+        # Task 1 clean-NOMMU probe, now parameterized (nix-wasm#202 PR-1; was
+        # spikes/spawn-contract/): verifies fork=ABSENT / spawn=LINKED for the DEFAULT
+        # (nommu-spawn) guest libc, and separately verifies the #129/#131
+        # mmu-fork libc's MEASURED today-contract (both fail on capture_stack,
+        # not fork) — see spikes/spawn-contract/check.nix's header for the full
+        # rationale + the wasm-ld --why-extract trace that justifies it. Always
+        # builds (link results written to $out/result).
+        spawn-linkcheck = spawnLinkcheck;
+        spawn-linkcheck-fork = spawnLinkcheckFork;
+        # Compat alias — docs/process-model.md + CLAUDE.md's no-undef contract
+        # entry both name `.#nofork-linkcheck` in prose; keep the old name
+        # resolving to the (now-renamed, but semantically identical) default-
+        # profile check rather than breaking it.
+        nofork-linkcheck = spawnLinkcheck;
+
+        # nix-wasm#202 PR-1: the closure-wide sweep that must be green BEFORE
+        # Phase 2 can flip toolchain/musl.nix's default to `fork = true` — see
+        # userspace/spawn-contract-sweep.nix's header for why this is a
+        # SEPARATE check derivation (not wired into the image builds
+        # themselves) and scripts/wasm-check-imports.py's module docstring for
+        # the capture_stack/asyncify-ABI mechanism it guards against. Sweeps
+        # the SAME roots the real images are built from (busybox + every
+        # initramfs extraBin + the toplevel system closure), not the packaged
+        # (compressed) initramfs/squashfs artifacts. Bound above (with the
+        # measurement record) alongside spawnLinkcheck/spawnLinkcheckFork, for
+        # the same non-`rec`-attrset reason.
+        guest-spawn-contract-nommu = guestSpawnContractNommu;
+        guest-spawn-contract-fork = guestSpawnContractFork;
+
+        # P2-2 (review of commit 99e7a73's __post_Fork TU split): the muslFork-variant
+        # sibling of nofork-linkcheck above. Asserts the asymmetry the split exists to
+        # preserve — against the FORK-CAPABLE libc: posix_spawn() still LINKS (the
+        # split keeps clone.o's __post_Fork references from dragging in _Fork.lo), and
+        # a non-asyncified fork() FAILS to link specifically on `capture_stack` (not
+        # merely "some error") — see spikes/spawn-contract/check-fork.nix's header for the
+        # full rationale.
+        musl-fork-linkcheck = import ./spikes/spawn-contract/check-fork.nix { inherit cross muslFork; };
 
         # #33: gtk3-widget-factory — the headline GTK3 app. GtkBuilder autoconnect
         # via add_callback_symbol (no GModule on the static guest). --selftest is the

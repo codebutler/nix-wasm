@@ -5,7 +5,7 @@
 // (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
-import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
+import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
 import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const vfs = MemVfs.from({
@@ -108,7 +108,11 @@ try {
     "nix-env -iA make-wasm32 substitutes from the cache",
   );
 } finally {
-  if (!pass) console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));
+  if (!pass) {
+    const oom = describeGuestOom(s.snapshot());
+    if (oom) console.log(`\n[smoke] ${oom}`);
+    console.log("\n── console transcript (tail) ──\n" + s.snapshot().slice(-2000));
+  }
   s.kill();
 }
 

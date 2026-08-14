@@ -361,14 +361,26 @@ attrs"; Phase 3 is "pc downloads this by default."
    re-verification that patch 0010 still applies against master's current
    0007/0008 series (they may have drifted since the `-fork` variant was last
    rebuilt), not a from-scratch port.
-2. **`toolchain/wasm-host-imports.nix`** — add `capture_stack` to the
-   allow-list. It is DELIBERATELY absent today (the file's own header comment:
-   "Add capture_stack here in the PR that ships the first REAL fork package
-   through forkStdenv — a deliberate, CI-planned world rebuild") precisely
-   because adding it changes the file's store path, which is baked into
-   `wasm-cross.nix`'s cc-wrapper — i.e. it ALREADY forces the same full
-   `cross.*` rebuild step 1 forces, so land both in the same commit rather
-   than paying the rebuild twice.
+2. **CORRECTED (2026-08-14, review of the #207-adjacent P2-1 finding):** this
+   item used to read "add `capture_stack` to `toolchain/wasm-host-imports.nix`'s
+   allow-list, in the same commit as step 1." That is WRONG and is not part of
+   this flip. Commit 99e7a73 (precedes this promotion; see its message + the
+   `patches/musl/0010-fork-asyncify-seam.patch` header) split `__post_Fork`
+   into its own TU specifically so a plain posix_spawn/pthread_create link
+   against muslFork does NOT drag in `_Fork.lo`'s `capture_stack` reference —
+   i.e. so "references capture_stack" stays a reliable link-time signal of
+   "was asyncify-instrumented for fork." Adding capture_stack to the SHARED
+   allow-list would destroy that signal: every binary would then be free to
+   reference it without asyncify instrumentation, silently trading the loud
+   link failure for a runtime TypeError the first time an un-instrumented
+   binary actually forked. `toolchain/wasm-host-imports.nix`'s own header
+   comment states this permanently, not as a "not yet" — see it for the two
+   local-extension idioms a real fork-capable link uses instead (per-link,
+   never shared). This step is therefore DROPPED from the batched edit set;
+   step 1 (promoting muslFork to the default `musl`) stands on its own, and
+   `.#musl-fork-linkcheck` (spikes/spawn-contract/check-fork.nix) plus
+   `toolchain/musl.nix`'s `fork = true` postPatch assertion are the standing
+   regression gates for the TU split this flip depends on.
 3. **`userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*`** —
    retire the forkshell hacks; build stock upstream ash against the new
    default (fork-capable) musl/busybox, still promoted to `/bin/sh` in
@@ -397,11 +409,62 @@ attrs"; Phase 3 is "pc downloads this by default."
    `deps-overlay.nix` entry for them.) Each was disabled ONLY because it
    forked (rule 1 in `docs/process-model.md`); with fork restored there is no
    reason left to carve them out.
-8. **`.#nofork-linkcheck`** (`spikes/nofork/`) — the probe's PINNED contract
-   flips from `fork=ABSENT / spawn=LINKED` to `fork=LINKED / spawn=LINKED`.
-   Keep the probe (it is still a useful regression sentinel — "fork did not
-   silently vanish again" — not a dead check), just invert its assertion and
-   rename if the `nofork-` prefix becomes misleading.
+8. **`.#spawn-linkcheck`** (`spikes/spawn-contract/check.nix`, renamed from
+   `spikes/nofork/`/`.#nofork-linkcheck` — `.#nofork-linkcheck` kept only as a
+   compat alias — by #202 PR-1, which also parameterized the probe over both
+   process-model profiles ahead of this flip; PR-1's own review additionally
+   found and fixed the `__post_Fork`/`_Fork` object-file coupling this item's
+   PINNED contract depends on — see item 8a below) — the probe's PINNED
+   `mmu-fork`-profile contract flips from `fork=NEEDS_CAPTURE_STACK /
+   spawn=NEEDS_CAPTURE_STACK` to **`fork=NEEDS_CAPTURE_STACK / spawn=LINKED`**
+   — NOT `fork=LINKED / spawn=LINKED`. capture_stack does NOT go on the
+   shared allow-list (`toolchain/wasm-host-imports.nix`) as part of this
+   flip — a non-asyncified binary that genuinely calls `fork()` must keep
+   failing to LINK loudly, which is the entire point of the probe and the
+   process-model contract this document exists to protect. `spawn=LINKED`
+   (not `NEEDS_CAPTURE_STACK`) only becomes correct once item 8a's musl TU
+   split lands. **UPDATE: that split has landed, and the `expected.mmu-fork`
+   flip to `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` shipped WITH it rather
+   than waiting for this item** — the two are separable, and the pinned value
+   tracks the SPLIT, not the default flip: the probe drives the `mmu-fork`
+   profile by passing `muslFork` explicitly, so it never depended on the
+   default `fork` being flipped. (Caught by review on the batched PR: leaving
+   the pre-split pair pinned while the split landed in the same change would
+   have failed `.#spawn-linkcheck-fork` on every Nix-changing CI run.) Before
+   the split, restoring `fork = true` alone would have made
+   `spawn=NEEDS_CAPTURE_STACK` too (posix_spawn's `__clone` still drags in
+   `_Fork.c` incidentally), which the probe's own `expected` table would
+   correctly still flag as a violation, not a pass. Keep the probe (it is
+   still a useful regression sentinel — "fork did not silently vanish
+   again" — not a dead check); update `expected.mmu-fork` in
+   `spikes/spawn-contract/check.nix`, not the probe's logic.
+8a. **musl TU split (a NEW prerequisite this flip needs, found by #202 PR-1's
+   review, not originally scoped here): `__post_Fork` must move out of
+   `_Fork.c` into its own `src/process/post_Fork.c`.** The coupling that
+   makes item 8's contract non-trivial is SELF-INFLICTED: `patches/musl/0000`
+   defines wasm's `__clone` inside `src/linux/clone.c` (upstream musl gives
+   `__clone` its own TU, where it never references `__post_Fork` at all), and
+   `__post_Fork` happens to be defined in `_Fork.c` alongside `_Fork()`
+   itself — so ANY caller of `__clone` (posix_spawn, pthread_create, i.e.
+   nearly every real program) pulls `_Fork.c`'s own `capture_stack` reference
+   in too, purely from archive/object-file granularity, whether or not that
+   program ever calls `fork()`. `--gc-sections` cannot rescue a non-forking
+   binary from this either — `wasm-cross.nix`'s `--export-all` roots every
+   DEFINED symbol against GC, proved on the shipped NOMMU busybox TODAY
+   (`_Fork`/`__post_Fork`/`__clone`/`clone`/`posix_spawn` already coexist
+   there with no fork() caller in sight). Splitting `__post_Fork` (plus its
+   `static void dummy` / `weak_alias(dummy, __aio_atfork)`) into
+   `src/process/post_Fork.c` breaks the coupling: `__clone`/posix_spawn/
+   pthread_create then never pull `_Fork.c` unless a caller genuinely calls
+   `fork()`. Do this split BEFORE (or in the same change as) flipping
+   `toolchain/musl.nix`'s default — otherwise every posix_spawn-only program
+   in the world rebuild needs capture_stack too, and `.#guest-spawn-contract-
+   fork`'s (#202 PR-1) pinned "exactly 2 modules import capture_stack" count
+   stops meaning "genuinely calls fork()" (a false-positive-machine: the
+   count would still read some fixed number, but it would no longer
+   discriminate fork-callers from spawn-only programs). Full trace + the
+   corrected post-split contract: `spikes/spawn-contract/check.nix`'s header
+   and the root CLAUDE.md's "#202 PR-1" learnings entry's AXIS-1 update.
 9. **Rewrite `docs/process-model.md`.** The whole document is framed around
    "`posix_spawn`-only by default, fork as a per-binary opt-in" — that framing
    inverts. Keep, rather than delete, the "measured dead-ends" section

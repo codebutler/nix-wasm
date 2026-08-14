@@ -235,35 +235,122 @@ index 71bea97..800663a 100644
  # put in `deps_other`.
  deps_other += boost
 diff --git a/src/libutil/serialise.cc b/src/libutil/serialise.cc
-index 22b3565..d975dca 100644
+index 22b3565..63dc92f 100644
 --- a/src/libutil/serialise.cc
 +++ b/src/libutil/serialise.cc
-@@ -9,8 +9,6 @@
+@@ -8,9 +8,8 @@
+ #include <cstring>
  #include <cerrno>
  #include <memory>
++#include <deque>
  
 -#include <boost/coroutine2/coroutine.hpp>
 -#include <boost/coroutine2/protected_fixedsize_stack.hpp>
  
  #ifdef _WIN32
  #  include <fileapi.h>
-@@ -307,57 +305,31 @@ CompressedSource::CompressedSource(RestartableSource & source, CompressionAlgo c
+@@ -305,59 +304,118 @@ CompressedSource::CompressedSource(Resta
+ {
+ }
  
++/* wasm32 port (#139, #208): shared by both sourceToSink() and sinkToSource()
++   below. Neither can use upstream's boost stackful coroutine (no fcontext
++   stack-switch backend on wasm), so both buffer everything pushed and replay
++   it through a Source once fully collected, instead of pulling lazily. That
++   buffer must NOT be one contiguous std::string: libc++'s basic_string grows
++   by exact doubling (max(2*old_cap, new_size)), so appending a large payload
++   one push at a time eventually issues ONE reallocation sized to the whole
++   buffer so far — a single, often non-power-of-two, high-order buddy-block
++   request. This is exactly what #208 hit trying to substitute `guest-clang`:
++   an observed 134,352,896 B allocation, order-16, that std::bad_alloc'd on
++   the guest's NOMMU allocator (which routinely has several 128 MiB blocks
++   free but none at 256 MiB) — and nix reported it as the misleading "no
++   substituter that can build it", three layers removed from the actual
++   allocator failure. See each function's own comment below for exactly
++   which of its two buffers (compressed vs. uncompressed) is the one #208's
++   own numbers point at — they are not the same buffer, and got conflated
++   in an earlier pass at this fix.
++
++   Fix, in both places: keep each pushed chunk as its own std::string in a
++   std::deque (a deque never relocates existing elements when you push/pop
++   at an end, so appending never copies or grows a prior allocation) and
++   walk the chunk list with this one `ChunkSource` to serve `Source::read`
++   calls — same bytes, same order, same EOF semantics as a `StringSource`
++   over the concatenation would give, but the largest single allocation is
++   now one pushed chunk, never the whole payload. `ChunkSource` pop_front()s
++   each chunk once fully consumed rather than just stepping an index past
++   it, freeing its memory as it goes — both use sites below only ever push
++   everything and THEN read everything (no interleaving), so this is safe,
++   and it matters here specifically because with both this file's buffers
++   now chunked, a substitution can have the compressed AND uncompressed
++   chunk lists alive at once (decompression pulls from one while pushing
++   into the other) — letting the compressed side shrink as it's consumed
++   caps how much of that overlap is resident at any one instant. Do not
++   "simplify" this back to a single `std::string buffer` in either function
++   — that reintroduces exactly the high-order allocation this exists to
++   avoid. */
++struct ChunkSource : Source
++{
++    std::deque<std::string> & chunks;
++    size_t pos = 0;
++
++    explicit ChunkSource(std::deque<std::string> & chunks)
++        : chunks(chunks)
++    {
++    }
++
++    size_t read(char * data, size_t len) override
++    {
++        // Drop each chunk once fully consumed (rather than merely stepping
++        // an index past it) so its memory is freed as we go. This also
++        // skips zero-length chunks outright, since `pos ==
++        // chunks.front().size()` is `0 == 0` for one.
++        while (!chunks.empty() && pos == chunks.front().size()) {
++            chunks.pop_front();
++            pos = 0;
++        }
++        if (chunks.empty())
++            throw EndOfFile("end of chunked buffer reached");
++        size_t n = chunks.front().copy(data, len, pos);
++        pos += n;
++        return n;
++    }
++};
++
  std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
  {
-+    /* wasm32 port (#139): the upstream implementation uses a boost stackful
-+       coroutine so `reader` can pull lazily as data is pushed. wasm has no
-+       fcontext stack-switch backend, so we buffer all pushed bytes and run
-+       `reader` over the complete buffer at finish(). Loses streaming (the whole
-+       input is held in memory) but is functionally equivalent for a consumer
-+       that reads to EOF. */
++    /* This buffer holds the COMPRESSED payload pushed in by the caller (for
++       a substitution: BinaryCacheStore::narFromPath's `getFile(info->url,
++       *decompressor)` in binary-cache-store.cc, i.e. the raw bytes off the
++       wire) before `reader` — ArchiveDecompressionSource, for every
++       compression method except none/br — decompresses it. filetransfer.cc
++       accumulates curl writes and flushes them as one `sink(chunk)` push
++       once its buffer exceeds `download-buffer-size` (default 1 MiB,
++       user-settable — NOT a fixed "HTTP chunk" size, and can run smaller,
++       e.g. tens of KB, right before EOF or under a small custom setting).
++
++       For a ~23.25 MiB xz-compressed NAR (guest-clang's, at xz's WEAKEST
++       setting — a deliberate upper bound; the shipped cache uses a stronger
++       one) simulating libc++'s actual growth arithmetic (<string>'s
++       __recommend/__grow_by_and_replace: new_cap = align8(max(2*old_cap,
++       new_size)+1)-1, __alignment==8) against 16 KiB..1 MiB pushes gives a
++       pre-fix peak allocation of ~33.55-33.59 MiB — nowhere near #208's
++       observed 134,352,896 B. For this buffer alone to reach that request,
++       the compressed payload would need to exceed ~67.17 MiB: worse than
++       1.5x compression on a wasm binary, against xz -1's measured ~4.3x
++       here. So this buffer was NOT the #208 site — see `sinkToSource`'s
++       comment below for the one the numbers actually match (verified with
++       the same growth simulation, against this toolchain's real libc++
++       <string>, not just estimated). It gets the same ChunkSource treatment
++       regardless: its peak is smaller today, but it still scales with the
++       artifact and a big-enough dependency would eventually reach it too. */
      struct SourceToSink : FinishSink
      {
 -        typedef boost::coroutines2::coroutine<bool> coro_t;
 -
          fun<void(Source &)> reader;
 -        std::optional<coro_t::push_type> coro;
-+        std::string buffer;
++        std::deque<std::string> chunks;
  
          SourceToSink(fun<void(Source &)> reader)
              : reader(reader)
@@ -274,8 +361,8 @@ index 22b3565..d975dca 100644
 -
          void operator()(std::string_view in) override
          {
--            if (in.empty())
--                return;
+             if (in.empty())
+                 return;
 -            cur = in;
 -
 -            if (!coro) {
@@ -303,25 +390,54 @@ index 22b3565..d975dca 100644
 -            if (!cur.empty()) {
 -                (*coro)(false);
 -            }
-+            buffer.append(in);
++            chunks.emplace_back(in);
          }
  
          void finish() override
          {
 -            if (coro && *coro)
 -                (*coro)(true);
-+            StringSource source(buffer);
++            ChunkSource source(chunks);
 +            reader(source);
          }
      };
  
-@@ -366,13 +338,16 @@ std::unique_ptr<FinishSink> sourceToSink(fun<void(Source &)> reader)
+@@ -366,13 +424,44 @@ std::unique_ptr<FinishSink> sourceToSink
  
  std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
  {
-+    /* wasm32 port (#139): boost-coroutine-free counterpart of the above. Run
-+       `writer` eagerly into a buffer on first read, then serve reads from it;
-+       call eof() once drained. Same streaming-vs-memory tradeoff. */
++    /* THIS is the #208 site: for a substitution download, `writer` is
++       `copyStorePath`'s lambda (store-api.cc), which runs
++       `srcStore.narFromPath(storePath, tee)` — i.e. `writer(sink)` below
++       receives the full DECOMPRESSED NAR, not the compressed download
++       above. Before this fix that went into one contiguous
++       `StringSink::s`, appended 8192 bytes at a time
++       (`Source::drainInto`'s fixed buffer, driving
++       `ArchiveDecompressionSource::drainInto(nextSink)` in compression.cc —
++       ~12,300 pushes for a 100 MiB NAR). For guest-clang's 100,902,552 B
++       uncompressed NAR, simulating libc++'s ACTUAL growth arithmetic (not
++       just doubling in the abstract — <string>'s
++       __recommend/__grow_by_and_replace, this toolchain's real headers:
++       new_cap = align8(max(2*old_cap, new_size)+1)-1, __alignment==8, so
++       8-byte- not 16-byte-aligned) against that exact 8192-byte push
++       pattern peaks at exactly 134,348,800 B — 4096 B (one page) short of
++       #208's observed 134,352,896 B allocation, the kind of gap a real
++       allocator's own page-rounding accounts for. That is not a
++       coincidence: THIS buffer, not the compressed one in `sourceToSink`
++       above, is what #208 actually measured.
++
++       Same fix, same shared `ChunkSource`: collect what `writer` pushes as
++       a `std::deque<std::string>` of chunks instead of one growing string,
++       and read them back through `ChunkSource`. Left un-coalesced
++       deliberately (one deque entry per 8 KiB push, not merged into larger
++       blocks): the ~12,300 extra `std::string` objects this costs for a
++       100 MiB NAR are on the order of a few hundred KB of overhead — utterly
++       negligible next to the ~128 MiB allocation being eliminated — and
++       matching sourceToSink's un-coalesced shape exactly means both
++       functions share not just ChunkSource but the same simple "push
++       whatever we're handed, verbatim" contract, with no extra buffering
++       logic that could itself grow into a scaled-down version of this same
++       bug if its threshold were ever raised "for efficiency". */
      struct SinkToSource : Source
      {
 -        typedef boost::coroutines2::coroutine<std::string_view> coro_t;
@@ -329,13 +445,12 @@ index 22b3565..d975dca 100644
          fun<void(Sink &)> writer;
          fun<void()> eof;
 -        std::optional<coro_t::pull_type> coro;
-+        std::string buffer;
-+        size_t pos = 0;
-+        bool produced = false;
++        std::deque<std::string> chunks;
++        std::unique_ptr<ChunkSource> chunkSource;
  
          SinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
              : writer(writer)
-@@ -380,49 +355,23 @@ std::unique_ptr<Source> sinkToSource(fun<void(Sink &)> writer, fun<void()> eof)
+@@ -380,50 +469,23 @@ std::unique_ptr<Source> sinkToSource(fun
          {
          }
  
@@ -354,13 +469,8 @@ index 22b3565..d975dca 100644
 -                        });
 -                        writer(sink);
 -                    });
-+            if (!produced) {
-+                StringSink sink;
-+                writer(sink);
-+                buffer = std::move(sink.s);
-+                produced = true;
-             }
- 
+-            }
+-
 -            if (cur.empty()) {
 -                if (hasCoro && *coro) {
 -                    (*coro)();
@@ -372,8 +482,15 @@ index 22b3565..d975dca 100644
 -                    eof();
 -                    unreachable();
 -                }
--            }
--
++            if (!chunkSource) {
++                LambdaSink sink([&](std::string_view data) {
++                    if (!data.empty())
++                        chunks.emplace_back(data);
++                });
++                writer(sink);
++                chunkSource = std::make_unique<ChunkSource>(chunks);
+             }
+ 
 -            size_t n = cur.copy(data, len);
 -            cur.remove_prefix(n);
 -
@@ -385,17 +502,17 @@ index 22b3565..d975dca 100644
 -                (*coro)();
 -                if (*coro)
 -                    cur = coro->get();
-+            if (pos >= buffer.size()) {
++            try {
++                return chunkSource->read(data, len);
++            } catch (EndOfFile &) {
 +                eof();
 +                unreachable();
              }
- 
-+            size_t n = std::min(len, buffer.size() - pos);
-+            memcpy(data, buffer.data() + pos, n);
-+            pos += n;
-             return n;
+-
+-            return n;
          }
      };
+ 
 diff --git a/src/libutil/unix/file-descriptor.cc b/src/libutil/unix/file-descriptor.cc
 index 05ec38a..21aaf27 100644
 --- a/src/libutil/unix/file-descriptor.cc

@@ -191,8 +191,19 @@ here.
   see the 2026-08-13 disposition).
 - [ ] `deps-overlay.nix` per-package fork triage — re-enable openssl CLI, pcre2
   callout-fork, ncurses test-demos, busybox IFUP/IFDOWN/TELNETD.
-- [ ] `toolchain/wasm-host-imports.nix` + `.#nofork-linkcheck` — relax the
-  fork-absent link contract (fork is no longer forbidden).
+- [ ] `.#nofork-linkcheck` — once the default `musl` becomes muslFork (this
+  slice's own item 1, fork-capable), `nofork-linkcheck`'s "fork=ABSENT" case no
+  longer describes the new default and should retire or be repointed at
+  whatever variant (if any) still removes fork. **CORRECTED (2026-08-14):**
+  this item does NOT include touching `toolchain/wasm-host-imports.nix` —
+  that file's allow-list permanently excludes `capture_stack` regardless of
+  which `musl` is default (see its own header comment and commit 99e7a73's
+  `__post_Fork` TU split); adding it there was never part of this slice, it
+  would defeat the split's whole point (see the parity-plan doc's item-2
+  correction for the full rationale). `.#musl-fork-linkcheck`
+  (spikes/spawn-contract/check-fork.nix) is the standing regression gate for the
+  muslFork link contract (spawn LINKS, non-asyncified fork fails on
+  `capture_stack`) and stays in place unchanged by this slice.
 - [ ] Rewrite `docs/process-model.md`.
 - [ ] Unblocks **#93** (s6 no longer needs fork→posix_spawn).
 

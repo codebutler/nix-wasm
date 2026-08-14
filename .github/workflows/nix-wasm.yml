@@ -28,6 +28,16 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      # scripts/*.py are real build inputs of several .nix derivations
+      # (busybox-fork.nix's wasm-check-imports.py post-link check,
+      # guest-clang.nix's wasm-check-exports.py, the spawn-contract sweep
+      # driver — nix-wasm#202 PR-1) — a script-only change is a derivation
+      # build-input change and must trigger the workflow at all, not just be
+      # visible to the `changes` job's dorny/paths-filter once triggered by
+      # something else (that filter already listed it below; without this
+      # top-level entry the workflow never runs for a scripts-only push, so
+      # the filter is unreachable — nix-wasm#202, found by review).
+      - 'scripts/**'
       # The boot-smoke / nix-boot-smoke jobs run the runtime engine + the
       # demo/node smoke scripts, so a change to either must re-validate them
       # (kernel/toolchain substitute from Cachix when their inputs are unchanged).
@@ -40,6 +50,7 @@ on:
       - 'flake.lock'
       - '**/*.nix'
       - 'patches/**'
+      - 'scripts/**'
       - 'runtime/**'
       - '.github/workflows/nix-wasm.yml'
   workflow_dispatch:
@@ -84,6 +95,24 @@ jobs:
               - 'patches/**'
               - '.rebuild-request'
               - '.github/workflows/nix-wasm.yml'
+              # nix-wasm#202 PR-1: several .nix derivations interpolate a
+              # scripts/*.py path directly into their build (busybox-fork.nix's
+              # wasm-check-imports.py post-link check; guest-clang.nix's
+              # wasm-check-exports.py; the new spawn-contract sweep driver) —
+              # a script-only change is a real build-input change there, so it
+              # must trigger the SAME jobs a .nix change does (this was already
+              # true before this PR for wasm-check-exports.py/wasm-strip-
+              # export.py; the filter just never covered it). This ONLY works
+              # because `scripts/**` is ALSO listed in the top-level
+              # `on.push.paths`/`on.pull_request.paths` above — those gate
+              # whether this workflow (and hence this very `changes` job) runs
+              # AT ALL, so a filter entry here with no matching top-level entry
+              # would be unreachable dead code for a scripts-only commit (the
+              # workflow would simply never start). Found missing at the
+              # top level by review (nix-wasm#202) and added there in the same
+              # change as this comment — keep both lists in sync if either
+              # changes.
+              - 'scripts/**'
             runtime:
               - 'runtime/**'
 
@@ -187,6 +216,8 @@ jobs:
             '.#deepfork-exec-init' \
             '.#deepfork-sig-child' \
             '.#userspace-busybox-fork' \
+            '.#nofork-linkcheck' \
+            '.#musl-fork-linkcheck' \
             --print-out-paths --no-link 2>&1 | tee build.log
 
       # `nix-env -iA wasm-tools.<tool>` (the static pkgs.nix catalog) SUBSTITUTES
@@ -247,6 +278,74 @@ jobs:
       - name: Determinism check (.#nix-wasm --rebuild)
         if: github.event_name != 'pull_request'
         run: nix build -L --rebuild '.#nix-wasm' --no-link
+
+  # --- contract: the spawn-contract gate (nix-wasm#202 PR-1) ------------------
+  # Must be green BEFORE Phase 2 can flip toolchain/musl.nix's default from
+  # `fork ? false` to `fork = true` — see scripts/wasm-check-imports.py's module
+  # docstring for the capture_stack/asyncify-TypeError mechanism this whole gate
+  # exists to catch at BUILD time instead of at boot. Substitutes everything it
+  # needs (the cross cc-wrapper, musl-fork, busybox-fork, nix-wasm-fork, and
+  # every extraBin/systemPackage app) from Cachix once `toolchain`/`artifacts`
+  # have pushed them, so this stays a cheap, no-boot job — no runtime/ harness,
+  # no vmlinux.wasm execution, just `nix build` on four check derivations:
+  #   • spawn-linkcheck / spawn-linkcheck-fork (spikes/spawn-contract/check.nix)
+  #     — the two-probe (fork()/posix_spawn()) LINK contract, one per profile.
+  #   • guest-spawn-contract-nommu / guest-spawn-contract-fork
+  #     (userspace/spawn-contract-sweep.nix) — the closure-wide sweep asserting
+  #     every shipped wasm module obeys the capture_stack/asyncify-ABI contract
+  #     for its profile, with the MEASURED capture_stack-importer count pinned
+  #     (0 / 2 respectively — see flake.nix's own comments on
+  #     guestSpawnContractNommu/guestSpawnContractFork for how that was measured).
+  contract:
+    name: spawn-contract gate
+    needs: [changes, artifacts]
+    # Same "world changed OR just the engine did" condition as boot-smoke below
+    # (this job never touches runtime/, but artifacts' own outputs are what it
+    # substitutes, so it should still run whenever artifacts did) — except this
+    # gate has nothing to do with the engine, so it only needs to run when the
+    # nix world itself changed.
+    if: ${{ needs.changes.outputs.nix == 'true' && !failure() && !cancelled() }}
+    # md, not xs (review finding): the two guest-spawn-contract-* sweeps each
+    # closureInfo-REALIZE their whole profile's guest closure (busybox/nix.wasm
+    # + every initramfs extraBin + every environment.systemPackages app +
+    # the toolchain/nixpkgs catalog, ~1-2GB) to enumerate store-paths — that
+    # substitution itself is cheap I/O xs could handle. The actual pressure is
+    # scripts/wasm-closure-sweep.py's own peak RSS: a prior revision held every
+    # swept module's FULL BYTES in memory at once (sorting a list of
+    # (path, data) tuples) rather than sorting paths and re-reading each
+    # module's bytes one at a time inside the check loop — measured at 2.23 GB
+    # of distinct wasm modules across the cross outputs in a real store
+    # (nix-wasm#202, found by review). The sweep script was fixed to read
+    # paths-only + stream module bytes one file at a time, which lowers that
+    # peak substantially, but md is kept regardless as headroom for the
+    # closureInfo realize step itself and any future growth in the swept set.
+    runs-on: namespace-profile-md
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Disk free
+        run: df -h /
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - name: Spawn-contract gate (link probes + closure-wide sweep)
+        run: |
+          nix build -L --keep-going \
+            '.#spawn-linkcheck' \
+            '.#spawn-linkcheck-fork' \
+            '.#guest-spawn-contract-nommu' \
+            '.#guest-spawn-contract-fork' \
+            --print-out-paths --no-link
 
   # --- boot-smoke: actually BOOT the guest and run the in-repo node smokes -----
   # The static gates (runtime-gates.yml) never boot the guest, and the artifacts

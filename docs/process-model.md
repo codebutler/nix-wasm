@@ -41,9 +41,18 @@ So the platform is **`posix_spawn`-only**, defined once at three layers:
 - **Ports:** a program that hard-codes `fork`/`vfork`+exec is handled **once**, per
   the rules below — never with a runtime stub.
 
-The link-behavior is pinned by a probe: `spikes/nofork/` (flake attr
-`.#nofork-linkcheck`) compiles a `fork()` user and a `posix_spawn()` user through
-the cross cc-wrapper and records `fork=ABSENT` / `spawn=LINKED` in its output.
+The link-behavior is pinned by a probe: `spikes/spawn-contract/` (flake attr
+`.#spawn-linkcheck`, formerly `spikes/nofork/`/`.#nofork-linkcheck` — kept as a
+compat alias; #202 PR-1 parameterized it over the nommu-spawn/mmu-fork
+profiles) compiles a `fork()` user and a `posix_spawn()` user through the
+cross cc-wrapper and records `fork=ABSENT` / `spawn=LINKED` in its output for
+this (nommu-spawn) profile. The SAME two probes, plus a closure-wide sweep
+(`scripts/wasm-check-imports.py --fork-contract=PROFILE` +
+`userspace/spawn-contract-sweep.nix`, `.#guest-spawn-contract-nommu` /
+`.#guest-spawn-contract-fork`) over every real shipped wasm module, are what
+Phase 2 must keep green before flipping the default — see CLAUDE.md's "#202
+PR-1" learnings entry for the full mechanism (the capture_stack/asyncify
+TypeError this exists to catch at build time instead of at boot).
 
 ## Real `fork()` — the asyncify seam (per-binary opt-in)
 
@@ -77,8 +86,10 @@ ship plan) lands and rewrites this document, per that plan's own item 9.
 **(i) Shipped NOMMU guest — `posix_spawn`-only, unchanged, still the
 default.** Everything above this section describes it: `fork`/`vfork`
 removed at the musl symbol level (`toolchain/musl.nix`), the busybox/ash/glib
-spawn-port patches, `.#nofork-linkcheck`'s `fork=ABSENT / spawn=LINKED`
-contract. This is what `.#linux-image`/`.#kernel` publish today.
+spawn-port patches, `.#spawn-linkcheck`'s `fork=ABSENT / spawn=LINKED`
+contract (plus, since #202 PR-1, `.#guest-spawn-contract-nommu`'s closure-wide
+confirmation that NO shipped module imports the asyncify seam). This is what
+`.#linux-image`/`.#kernel` publish today.
 
 **(ii) Software-MMU / real-fork guest — `.#kernel-mmu-a2` + the
 `-fork`-suffixed initramfs/squashfs (Track B of #126, issue #131 slice 1).**
