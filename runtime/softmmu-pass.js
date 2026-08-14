@@ -324,7 +324,11 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}}
+ * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}}
+ *   `checkedTranslateFunc` is NOT set by this function — `instrument()`
+ *   attaches it afterward, once the appended `__mmu_translate_ck` function's
+ *   index is known, so `rewriteFuncBody`'s inline checked path (#202 §6.2)
+ *   can call it as the combined predicate's out-of-line "slow" arm.
  */
 function resolveCheckedImports(importSec, typeSec, exportSec) {
   if (!importSec) {
@@ -862,9 +866,12 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}|null} [checked]
- *   A2 present-check context (from `resolveCheckedImports`); omit/null for the
- *   default A1 unchecked fast path (byte-identical to before A2 existed).
+ * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}|null} [checked]
+ *   A2 present-check context (from `resolveCheckedImports`, with
+ *   `checkedTranslateFunc` attached by `instrument()` — see that function's
+ *   doc comment; the inline checked path, #202 §6.2, calls it as its combined
+ *   predicate's out-of-line "slow" arm); omit/null for the default A1
+ *   unchecked fast path (byte-identical to before A2 existed).
  * @param {{translateFunc:number, checkedTranslateFunc:number|null}|null} [helper]
  *   #164: when set, emit each access's translate as a CALL to the appended
  *   translate helper (`__mmu_translate` / `__mmu_translate_ck`) instead of
@@ -964,19 +971,16 @@ export function rewriteFuncBody(
   // Low 12 bits of both entries are MASKED — kernel PTEs carry flag bits
   // (present/write/accessed/dirty); the A1 fast path ignores them but must
   // not let them corrupt the address.
-  // emitFaultCall(kind): __wasm_syscall_2(sp, tp, NR_MMU_FAULT, ea, kind),
-  // result dropped (the retry loop re-walks rather than consuming a value).
-  // Only valid when `checked` is set (resolveCheckedImports already verified
-  // the import + its signature).
-  const emitFaultCall = (kind) => {
-    out.push(0x23, ...u(checked.spGlobalIdx)); // global.get __stack_pointer
-    out.push(0x10, ...u(checked.tlsFuncIdx)); // call __get_tls_base -> tp
-    out.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(kind)); // i32.const kind
-    out.push(0x10, ...u(checked.syscallFuncIdx)); // call __wasm_syscall_2
-    out.push(0x1a); // drop
-  };
+  //
+  // #202 §6.2: the inline checked path no longer emits its OWN
+  // `__wasm_syscall_2(NR_MMU_FAULT, ea, kind)` fault call (there used to be
+  // an `emitFaultCall` closure here, emitted up to twice per access, one per
+  // page-table level) — it now calls the appended `__mmu_translate_ck`
+  // (checkedTranslateBody) out of line on a present-check miss, and THAT
+  // function owns the fault call + retry loop (checked.spGlobalIdx /
+  // .tlsFuncIdx / .syscallFuncIdx are still validated by
+  // `resolveCheckedImports` and still consumed there, just no longer
+  // referenced directly from this per-access emission).
 
   // emitTranslate(kind): leaves `phys` (i32) on the stack from `ea` in $EA.
   // `kind` (0=load, 1=store/rmw/cmpxchg) is only used by the checked variant
@@ -985,17 +989,14 @@ export function rewriteFuncBody(
   // UNCHECKED (default, checked===null): the A1 fast path — pure two-level
   // walk, no present check (byte-identical to the pre-A2 pass).
   //
-  // CHECKED: the SAME two-level walk, but after each level's raw i32.load a
-  // present-bit test (`entry & 1`) gates a `call __wasm_syscall_2(NR_MMU_FAULT,
-  // ea, kind)` + RE-WALK (a `block $done (result i32) { loop $retry { … } }`:
-  // a clear bit calls the fault handler then `br $retry`; present falls
-  // through; the final phys computation `br $done`s out with the result). The
-  // kernel's fault handler is expected to have made the entry present (or to
-  // have delivered a fatal signal instead of returning) — the loop simply
-  // re-reads, it does not bound the retry count, exactly like a hardware page
-  // fault. Entries are held in $pgd_e/$pte locals (`local.tee`) so the
-  // present-bit test can consume a copy while the raw value survives for the
-  // next level / the final address computation.
+  // CHECKED (#202 §6.2 — the combined-predicate/out-of-line-fault form,
+  // replacing the original per-level block/loop/retry): see
+  // `emitCheckedPresentPredicate` below for the walk + predicate, and the
+  // `emitCombinedAccessBody`-style helper doc for why folding the two
+  // per-level present/permission branches into ONE `if`/out-of-line-call is
+  // safe. This function's EXTERNAL contract (leaves phys on the stack,
+  // caller emits the raw op) is UNCHANGED — only the internal shape of the
+  // checked case changed, so every caller below needed no edits.
   const emitTranslate = (kind) => {
     if (helper) {
       // #164: helper-call translate — call the appended walk function instead
@@ -1031,9 +1032,60 @@ export function rewriteFuncBody(
       out.push(0x6a); // i32.add -> phys
       return;
     }
-    out.push(0x02, VT.i32); // block $done (result i32)
-    out.push(0x03, 0x40); // loop $retry (void)
-    // level 1: pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
+    // CHECKED, inline (#202 §6.2): compute the combined present+permission
+    // predicate, then branch ONCE — fast arm recomputes phys from the
+    // already-read $pte; slow arm (present-check failed) calls the appended,
+    // authoritative `__mmu_translate_ck(ea,kind)` (checkedTranslateBody — the
+    // SAME function the #164 helper-fallback path already calls), which owns
+    // its OWN fault+retry loop out of line. This replaces the old two
+    // separate per-level `if (void) { fault; br $retry }` blocks (each
+    // ~15 B of emitFaultCall, emitted up to twice) with ONE branch whose
+    // "cold" arm is a 3-instruction call — the hot (present) path pays for
+    // the predicate once and nothing else.
+    emitCheckedPresentPredicate(kind);
+    out.push(0x04, VT.i32); // if (result i32)
+    // fast arm: phys = (pte & ~0xfff) + (ea & 0xfff), pte from the LOCAL
+    // (the stack copy from the predicate's tee was already consumed by the
+    // permission test above).
+    out.push(0x20, ...u(PTE)); // local.get pte
+    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
+    out.push(0x6a); // add -> phys
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA)); // local.get ea
+    out.push(0x41, ...s(kind)); // i32.const kind
+    out.push(0x10, ...u(checked.checkedTranslateFunc)); // call __mmu_translate_ck -> phys
+    out.push(0x0b); // end if
+  };
+
+  // emitCheckedPresentPredicate(kind) (#202 §6.2): the shared "walk both
+  // levels unconditionally, then combine present+permission into ONE
+  // boolean" building block used by both `emitTranslate`'s checked case
+  // (above) and the checked page-crossing split load/store (below). Leaves
+  // an i32 boolean (1 = present+correct-permission, take the fast arm) on
+  // the stack; $pgd_e/$pte are left holding the RAW (flag-bits-included)
+  // entries in their locals for the caller's subsequent phys computation.
+  //
+  // CORRECTNESS — the hazard #202's own design doc calls out explicitly, and
+  // the reason this function reads level 2 UNCONDITIONALLY rather than only
+  // after confirming level 1 is present: the address computed for the level-2
+  // read when pgd_e==0 is `(0 & ~0xfff) + ((ea>>>12 & 0x3ff)<<2)` = `idx*4`
+  // for idx in [0,1023] — i.e. always inside the module's own page 0, which
+  // always exists, so this NEVER traps. But the VALUE it reads is garbage
+  // (whatever page 0 happens to hold), and garbage CAN happen to have its low
+  // bits set such that `(garbage & need) == need` is true. The `pgd_e != 0`
+  // conjunct is what neutralises that: `i32.and` of the two ALREADY-BOOLEAN
+  // (0/1) operands is false whenever pgd_e==0, regardless of what the
+  // unconditional level-2 read produced. DROPPING this conjunct (or ANDing
+  // the raw pgd_e value instead of its boolean form) would let a not-present
+  // access whose page-0 garbage happens to satisfy the permission mask walk
+  // through to a WRONG physical address instead of faulting — silent memory
+  // corruption, not a trap. See the dedicated unit test for exactly this case
+  // (a not-present level-1 entry with bits 0+1 deliberately set at the
+  // corresponding page-0 offset).
+  const emitCheckedPresentPredicate = (kind) => {
+    // level 1 (unconditional): pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
     out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(22), 0x76); // >>> 22
@@ -1041,20 +1093,11 @@ export function rewriteFuncBody(
     out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pgd_e (RAW)
     out.push(0x22, ...u(PGD_E)); // local.tee pgd_e (keep a copy on stack)
-    // LEVEL-1 (PGD/PMD) present test is "entry != 0", NOT "bit 0 set". The
-    // kernel's folded 2-level tables store the bare pte-page PHYSICAL address in
-    // the pgd/pmd slot with NO flag bits (arch/wasm pgtable.h: pmd_present(pmd)
-    // = pmd_val(pmd), pmd_none = !pmd_val, pmd_page_vaddr = pmd_val & PAGE_MASK).
-    // Only the LEAF pte carries _PAGE_PRESENT in bit 0. Testing bit 0 here would
-    // read a validly-populated pgd entry (e.g. 0x206ed000) as not-present and
-    // fault forever. So the present bit lives at the leaf; the branch node is
-    // present iff nonzero.
-    out.push(0x45); // i32.eqz -> pgd_e == 0 ("not present")
-    out.push(0x04, 0x40); // if (void)
-    emitFaultCall(kind);
-    out.push(0x0c, ...u(1)); // br $retry
-    out.push(0x0b); // end if
-    // level 2: pte = u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]
+    out.push(0x41, ...s(0)); // i32.const 0
+    out.push(0x47); // i32.ne -> (pgd_e != 0)  [stack: bool1]
+    // level 2 (unconditional — see the correctness note above): pte =
+    // u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]. Read pgd_e from the
+    // LOCAL here — the stack currently holds bool1, not a reusable pgd_e copy.
     out.push(0x20, ...u(PGD_E)); // local.get pgd_e
     out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
     out.push(0x20, ...u(EA)); // local.get ea
@@ -1064,42 +1107,75 @@ export function rewriteFuncBody(
     out.push(0x6a); // add
     out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
     out.push(0x22, ...u(PTE)); // local.tee pte (keep a copy on stack)
-    // LEAF present/permission test. A LOAD needs only _PAGE_PRESENT (bit 0); a
-    // STORE/RMW needs _PAGE_PRESENT|_PAGE_WRITE (bits 0+1). Testing the write
-    // bit on stores is what makes COW and mprotect WORK: a copy-on-write page is
-    // mapped present-but-read-only, so a store must FAULT (kind=1) into
-    // do_wp_page/handle_mm_fault to duplicate it — otherwise the store would
-    // walk straight through to the shared physical page and corrupt it. After
-    // the kernel resolves the write fault it installs a writable PTE (bits 0+1),
-    // so the re-walk passes.
+    // permission test, normalised to a 0/1 boolean via i32.eq (not the
+    // negated i32.ne the old per-level branch used — this value is ANDed
+    // straight into the combined predicate, not gating a fault branch on its
+    // own). A LOAD needs only _PAGE_PRESENT (bit 0); a STORE/RMW needs
+    // _PAGE_PRESENT|_PAGE_WRITE (bits 0+1) — the write-bit test on stores is
+    // what makes COW and mprotect work: a copy-on-write page is mapped
+    // present-but-read-only, so a store must take the slow/fault arm to
+    // duplicate it via do_wp_page rather than walking through to the shared
+    // physical page.
     if (kind === 1) {
       out.push(0x41, ...s(3), 0x71); // & 3 (present|write)
-      out.push(0x41, ...s(3), 0x47); // i32.const 3 ; i32.ne -> (pte&3) != 3
+      out.push(0x41, ...s(3), 0x46); // i32.const 3 ; i32.eq -> (pte&3) == 3
     } else {
       out.push(0x41, ...s(1), 0x71); // & 1 (present)
-      out.push(0x45); // i32.eqz -> not present
+      out.push(0x41, ...s(1), 0x46); // i32.const 1 ; i32.eq -> (pte&1) == 1
     }
-    out.push(0x04, 0x40); // if (void)
-    emitFaultCall(kind);
-    out.push(0x0c, ...u(1)); // br $retry
-    out.push(0x0b); // end if
-    // phys = (pte & ~0xfff) + (ea & 0xfff); exit with it as $done's result.
-    out.push(0x20, ...u(PTE)); // local.get pte
-    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
+    out.push(0x71); // i32.and -> bool1 & bool2 (both already 0/1 booleans)
+  };
+
+  // emitCheckedSplitLoad/Store (#202 §6.2): the CHECKED, non-helper,
+  // width>=2 page-crossing case. Folds the page-crossing "does the whole
+  // access fit in one page" test into the SAME combined predicate
+  // `emitCheckedPresentPredicate` produces (one more ANDed conjunct), so
+  // there is ONE `if`, not the present-check's block/loop/retry followed by
+  // a SEPARATE page-crossing `if` the pre-#202 pass emitted. The slow arm
+  // calls the byte-wise helper directly — it ALREADY present-checks (and
+  // fault-in retries) EACH byte's page individually via the checked
+  // `__mmu_translate_ck` (see loadBytesHelperBody/storeBytesHelperBody's use
+  // of `emitTranslateCall`), so it correctly covers both reasons the fast
+  // path can be rejected (not present, OR straddles a page) without this
+  // caller needing to distinguish them.
+  const emitCheckedSplitLoad = (op, W) => {
+    emitCheckedPresentPredicate(0); // kind=0 read
     out.push(0x20, ...u(EA)); // local.get ea
     out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-    out.push(0x6a); // add -> phys
-    out.push(0x0c, ...u(1)); // br $done (carries phys out of the loop+block)
-    out.push(0x0b); // end loop
-    // The loop is ALWAYS exited via one of the `br`s above (never falls off
-    // the end), but wasm validation does not propagate that "unreachable"
-    // fact past a nested construct's `end`: after the loop frame pops, the
-    // $done block's OWN reachability is independent (it was reachable when
-    // the loop was entered) and its `end` requires an actual i32 on the
-    // stack. An explicit `unreachable` here (dead at runtime — every path
-    // through the loop already branched out) satisfies that statically.
-    out.push(0x00); // unreachable
-    out.push(0x0b); // end block -> phys left on the value stack
+    out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W)  (i32.le_u)
+    out.push(0x71); // AND into the combined predicate
+    out.push(0x04, LOAD_RESVT[op]); // if (result <loadvt>)
+    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
+    out.push(0x41, ...s(-4096), 0x71);
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x6a); // -> phys
+    out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes)); // -> i64
+    out.push(...LOAD_POST[op]); // post-process to loadvt
+    out.push(0x0b); // end if
+  };
+  const emitCheckedSplitStore = (op, W, vl) => {
+    emitCheckedPresentPredicate(1); // kind=1 write
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x41, ...s(0x1000 - W), 0x4d);
+    out.push(0x71); // AND into the combined predicate
+    out.push(0x04, 0x40); // if (void)
+    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
+    out.push(0x41, ...s(-4096), 0x71);
+    out.push(0x20, ...u(EA));
+    out.push(0x41, ...s(0xfff), 0x71);
+    out.push(0x6a); // -> phys
+    out.push(0x20, ...u(vl)); // local.get val
+    out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+    out.push(0x05); // else
+    out.push(0x20, ...u(EA)); // ea
+    out.push(0x20, ...u(vl)); // val (typed)
+    out.push(...STORE_TOI64[op]); // -> i64
+    out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+    out.push(0x0b); // end if
   };
 
   i = localsEnd;
@@ -1123,10 +1199,17 @@ export function rewriteFuncBody(
           // post-process into the op's result type.
           out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes));
           out.push(...LOAD_POST[op]);
+        } else if (splitFns && W >= 2 && checked) {
+          // #202 §6.2: CHECKED + page-crossing, non-helper — ONE combined
+          // predicate (present+permission AND page-fits) instead of the A1
+          // shape's separate page-crossing `if` wrapping a present-checked
+          // `emitTranslate`. See emitCheckedSplitLoad's doc comment.
+          emitCheckedSplitLoad(op, W);
         } else if (splitFns && W >= 2) {
-          // #128 inline mode: fast within-page path when the whole access fits
-          // in one page ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path
-          // that translates each byte's page separately. Both leave the op's
+          // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
+          // fast within-page path when the whole access fits in one page
+          // ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path that
+          // translates each byte's page separately. Both leave the op's
           // result value on the stack (the `if`'s result type).
           out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
           out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
@@ -1156,8 +1239,13 @@ export function rewriteFuncBody(
           out.push(0x20, ...u(vl)); // val (typed)
           out.push(...STORE_TOI64[op]); // -> i64
           out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+        } else if (splitFns && W >= 2 && checked) {
+          // #202 §6.2: CHECKED + page-crossing, non-helper — see
+          // emitCheckedSplitStore's doc comment (mirrors the load case above).
+          emitCheckedSplitStore(op, W, vl);
         } else if (splitFns && W >= 2) {
-          // #128 inline mode: fast within-page path else byte-wise slow path.
+          // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
+          // fast within-page path else byte-wise slow path.
           out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
           out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
           out.push(0x04, 0x40); // if (void)
@@ -1920,6 +2008,10 @@ export function instrument(bytes, opts = {}) {
   };
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
   const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
+  // #202 §6.2: the INLINE checked translate's combined-predicate fast path
+  // (rewriteFuncBody's emitTranslate) calls this SAME appended function as its
+  // out-of-line "slow" (fault+retry) arm — see the field doc where it's read.
+  if (checkedCtx) checkedCtx.checkedTranslateFunc = checkedTranslateFunc;
 
   // #128 PAGE-CROSSING byte-wise slow-path helpers, appended AFTER the checked
   // translate (or after the bulk set when unchecked) so every existing index
