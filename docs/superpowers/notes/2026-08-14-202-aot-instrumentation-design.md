@@ -1,11 +1,14 @@
 # #202 — eliminating the instrument-at-load memory cost (design + plan)
 
 Date: 2026-08-14. Branch: `claude/issue-202-aot-instrumentation` (off
-`claude/issue-179-vadh9d`). Status: **design only — nothing implemented.**
+`claude/issue-179-vadh9d`). Status: **implemented by PR #212 and browser-
+verified without CDP; #202 and #215 closed.**
 
-Issue #202 is one of the two open risks the MMU ship plan
-(`docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md` § Risks, item 1)
-records as blocking Phase 3. The other, #203, is fixed (`045c8f0`).
+Issue #202 was one of the two open risks in the MMU ship plan
+(`docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md` § Risks, item 1).
+The plan recorded it as blocking Phase 3. It is now closed; this document
+retains the design, implementation record, and final browser measurement. The
+other risk, #203, was fixed by `045c8f0`.
 
 ---
 
@@ -886,3 +889,50 @@ no Playwright), since CDP attachment is itself now a suspect.
 (`mem-probe.mjs`, `proxy-serve.mjs`) and raw per-run JSON timelines are not
 committed (scratchpad-only, per the task's own instructions) but the exact
 buildhashes and methodology above are sufficient to reproduce.
+
+---
+
+## Addendum (2026-08-14, post-#218): no-CDP resolution of #215 and #202
+
+The missing discriminator and browser measurement are now complete. Chrome was
+launched directly, with no Playwright, remote-debugging endpoint, or DevTools
+client. A local same-origin COOP/COEP proxy served PR #212's immutable artifacts;
+the only page modification was a one-way beacon on the existing real prompt
+regex and on a shell-expanded numeric completion marker. OS `ps` sampled all
+matching renderer processes and the complete fresh-profile Chrome tree every
+two seconds.
+
+Environment: macOS 26.4.1, 32 GiB RAM, 10 logical CPUs, Google Chrome
+151.0.7922.138. NOMMU used CAS
+`23bf491f642ffaebb3e24a135eeb9054`; software MMU used
+`c211adb72d39f9d59fe0250d7a3a03c5`.
+
+First, the #215 idle NOMMU discriminator booted to a real shell and remained
+healthy for 120.9 seconds. Post-prompt renderer RSS peaked at 2983.2 MiB, fell
+to 1495.8 MiB, and had a fitted slope of -21.84 MiB/s. The last ~20 seconds
+were flat at ~1495 MiB. The earlier Playwright run's unbounded 8–10 GiB growth
+does not reproduce without a DevTools client; it was a measurement-path
+artifact, not an end-user-tab defect. This implicates Playwright/CDP broadly,
+but does not prove the narrower `Runtime.enable` hypothesis.
+
+The apples-to-apples #202 pair then booted each profile and ran one real
+`nix --version`, with completion observed only when the guest shell expanded
+`NIXVERDONE=$?` to a digit:
+
+| | NOMMU | software MMU |
+|---|---:|---:|
+| command duration | 316 ms | 8.690 s |
+| post-prompt renderer peak | 2587.3 MiB | 3437.4 MiB |
+| post-prompt whole-Chrome peak | 3077.1 MiB | 3967.2 MiB |
+| final renderer RSS | 2314.5 MiB at 151 s | 2086.5 MiB at 182 s |
+| fitted post-prompt slope | -0.41 MiB/s | -6.04 MiB/s |
+| crash / boot error | none | none |
+
+The trustworthy peak delta is approximately +850 MiB of renderer RSS for the
+MMU run. The retained tails must not be subtracted: Chrome reclaimed memory in
+coarse, differently timed stages and the observation windows differed. Both
+runs were bounded, reclaimed memory, and stayed healthy. The post-#212 MMU path
+therefore fits in a real Chrome process (under 4.0 GiB for the observed whole-
+Chrome peak including the first `nix.wasm` exec), and the optional host-side
+AOT CAS is not justified by this result. #202 and #215 are closed; the Phase-3
+ship flip is unblocked on browser-memory grounds.

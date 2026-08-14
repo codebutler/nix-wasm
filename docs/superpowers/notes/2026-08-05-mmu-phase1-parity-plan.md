@@ -862,35 +862,18 @@ or no-dlopen — do not touch them in this cleanup.
 
 ---
 
-## Risks
+## Risks and dispositions
 
-(Open, unresolved by this plan — surfaced for Phase 3 to address before it
-ships to real users, not CI runners.)
-
-1. **Browser memory for instrument-at-load of `nix.wasm`.** The engine
-   software-MMU-instruments EVERY exec'd binary at load
-   (`kernel-worker.js`'s `wasm_load_executable`, gated on the MMU kernel's
-   nonzero `pt_base`). For the real-fork `nix.wasm` — already
-   whole-module-asyncified over its fork call graph (bounded via
-   `asyncify-ignore-indirect` + a curated addlist + `propagate-addlist` +
-   size/decision-count build gates, per #175) — the SECOND pass (softmmu
-   instrumentation, layered on top of the already-asyncified module) produces
-   multi-MB helper-call-translated functions that **OOM-killed the default CI
-   runner** (`#175`, exit 137); `nix-boot-smoke-mmu` only passes today because
-   it was moved onto the `-lg` (LLVM-build-sized) Namespace profile — CI
-   runners can be given more RAM on request, real end-user BROWSER TABS
-   cannot. This is a genuine, currently-UNRESOLVED ship risk for Phase 3: if a
-   real browser tab hits the same instrument-at-load memory spike loading
-   `nix.wasm`, users get an OOM crash where the NOMMU guest today does not.
-   Nothing in this plan bounds the softmmu pass's own memory blowup the way
-   `asyncify-ignore-indirect`/the addlist bound the fork instrumentation —
-   that is a real gap, not a solved problem being restated. Before Phase 3
-   ships to production, either (a) bound the softmmu pass's per-function
-   output the same deliberate way the asyncify pass is bounded, or (b) get a
-   REAL browser (not Node/CI) memory measurement loading the fork `nix.wasm`
-   on `.#kernel-mmu-a2` — `nix-wasm.yml`'s `browser-smoke` job's Playwright
-   harness does not currently boot the MMU variant at all, so this number does
-   not exist yet.
+1. **CLOSED — browser memory for instrument-at-load of `nix.wasm` (#202,
+   #215).** PR #212 reduced the pass's Node-measured peak 603 → 227.6 MiB and
+   output 149.9 → 111.0 MB. The clean no-CDP browser pair then measured NOMMU
+   at 2587 MiB renderer / 3077 MiB whole-Chrome peak and MMU at 3437 MiB /
+   3967 MiB while completing a real `nix --version`; both reclaimed memory and
+   remained healthy. The earlier Playwright 8–10 GiB runaway does not reproduce
+   without a DevTools client. Full method, the ~850 MiB renderer peak delta,
+   and retained-tail caveats are in the final addendum to
+   `2026-08-14-202-aot-instrumentation-design.md`. The optional AOT CAS is not
+   justified by this result; Phase 3 is unblocked on browser-memory grounds.
 2. **The 2-3x per-access-walk slowdown is permanent, not a CI convenience
    line.** `nix-wasm.yml`'s own comments document it directly:
    `NIX_MAKE_TIMEOUT_MS` is raised 3.3× (180s → 600s) and `nix-boot-smoke-mmu`'s
