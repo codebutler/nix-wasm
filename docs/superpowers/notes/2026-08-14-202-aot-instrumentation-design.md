@@ -688,3 +688,201 @@ throwaway and not committed):
 - Compressed sidecar sizes (~25–35 MB zstd for `nix`) — typical wasm zstd
   ratios, not measured.
 - The flat-shadow-table sketch (~55 B/access, 4 MB/process) — arithmetic only.
+
+---
+
+## Addendum (2026-08-14, post-#212): the §7.1 step-0 real browser measurement
+
+Attempted after PR #212 (the streaming-emit + combined-predicate fix) merged
+to master as `1f507bf`. **Partial result: boot + exec success in a real
+browser tab is now confirmed for both variants (a first) and a clean,
+trustworthy EXEC-LATENCY delta was obtained — but a trustworthy
+instrument-at-load PEAK-MEMORY delta was NOT obtained**, for a specific,
+measured reason recorded below. This is not the clean "does it fit in a tab"
+verdict §7.1 was hoping for; it is real progress plus a new, real, separate
+finding that blocked the rest.
+
+### Method
+
+Per this doc's own instruction ("Extend `runtime/demo/web/smoke.mjs`"), the
+harness reuses that file's proven boot-detection idiom rather than a fresh
+driver — see the file-header note in the throwaway probe script (`mem-probe.mjs`,
+not committed; lives only in the session's scratchpad) for why.
+
+- **Target**: PR #212's own artifacts, fetched from the `nix-wasm-previews` R2
+  bucket's content-addressed `cas/<buildhash>/` prefixes (immutable, and NOT
+  removed by the PR-close teardown workflow, unlike the `pr-212/` pointer
+  itself, which the close-triggered `teardown` job purges — confirmed by a
+  direct 404 on the old PR-212 preview URL). Buildhashes recovered from the
+  `deploy` job's own log (`nix-wasm.yml` run `31786008858`):
+  default `23bf491f642ffaebb3e24a135eeb9054`, mmu `c211adb72d39f9d59fe0250d7a3a03c5`.
+- A local Node static server plus a `/cas/*` **same-origin proxy** to that R2
+  prefix (`proxy-serve.mjs`) stands in for the torn-down `pr-212/` frontend —
+  necessary because the R2 worker sends no `Access-Control-Allow-Origin`, so a
+  cross-origin `fetch()` of `base.squashfs` (boot-nix-system.js's plain
+  `fetch(u("base.squashfs"))`) is CORS-rejected and boot silently never
+  progresses; this was the first dead end (see below).
+- Chromium: the pre-installed `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`
+  (matches the vendored Playwright's expected revision; the host's default
+  `chromium.launch()` targets rev 1194 too — no mismatch this session),
+  `--no-sandbox --use-angle=swiftshader --enable-unsafe-swiftshader`, headless.
+- `window.crossOriginIsolated === true` confirmed on every run (COOP/COEP both
+  present via the local server); `performance.measureUserAgentSpecificMemory`
+  confirmed present and callable.
+- OS-level cross-check: every Chromium process matching the binary path,
+  summed and broken out by `--type=` from `ps -eo pid,rss,args`, sampled every
+  2s for the whole run — this is what actually localized the finding below to
+  the **renderer** process specifically.
+
+### Two real harness bugs found and fixed en route (recorded so they aren't repeated)
+
+1. **Cross-origin `fetch()` with no CORS headers.** The first attempt pointed
+   `preview.json`'s `artifactsBase` straight at the R2 worker's `cas/` URLs
+   from a `localhost` page. Boot hung forever with zero console signal (the
+   `fetch()` promise rejects, `boot()`'s `.catch` only sets page text, and
+   nothing in the page emits a matching console line) — indistinguishable from
+   a slow boot until diagnosed by adding live `window._termLog` tailing to the
+   probe and noticing it never grew. Fixed by the same-origin proxy above.
+2. **The exact #96 class of bug, reproduced by this session firsthand.** The
+   guest tty echoes every keystroke into `window._termLog` **immediately**,
+   before any shell reads it. A bare `/[#$%]/` prompt-detection regex (copied
+   from `smoke.mjs`) false-positived on kernel boot text containing those
+   characters, ~13 real seconds before a shell actually existed; an
+   `.includes("MARKER")` completion check false-positived on the **raw typed,
+   not-yet-executed** keystrokes themselves (typing `echo FOO=$?` makes
+   `_termLog` contain `FOO=` on the very keypress, with no digit, well before
+   Enter). Together these made an early "run" falsely report `nix --version`
+   as completing in under a second when it had not even reached a real shell
+   yet. Fixed exactly per CLAUDE.md's own #96 lesson: match the REAL prompt
+   banner specifically (`/root@[^\n]*#/`, the identical regex `main.js` itself
+   uses for its own proxy-start gating) and require a **digit** immediately
+   after `=` for command completion (`/NIXVERDONE=\d/`) — the raw echoed
+   keystrokes never satisfy that, only real shell expansion does. Re-running
+   with the fix produced markedly different, self-consistent, correct-output
+   timings (below); the pre-fix numbers were discarded, not reported.
+
+### What is trustworthy
+
+Both variants **boot to a real interactive shell and correctly execute
+`nix.wasm`** in a real, headless-but-otherwise-real Chromium tab, confirmed by
+shell-expanded exit-code markers (not keystroke echo) and correct command
+output (`nix (Nix) 2.34.7`) on both:
+
+| | NOMMU baseline | software-MMU (`kernel-mmu-a2` + real fork) |
+|---|---|---|
+| `crossOriginIsolated` | true | true |
+| wall-clock to real shell prompt | ~22–34s (3 runs, network-jitter variance) | 44.8s (1 run) |
+| first `nix --version`: wall-clock from Enter to output | **~1–3s** | **~30.1s** |
+| second `nix --version` (same content hash): wall-clock | ~2.6s | **~2.1s** |
+| second-exec output | `nix (Nix) 2.34.7`, exit 0 | `nix (Nix) 2.34.7`, exit 0 |
+
+The **first-vs-second exec latency delta on MMU (~30.1s → ~2.1s) is the
+single cleanest, most trustworthy number this session obtained.** It is
+exactly the shape §3.4/§6.4's `exec_module_cache` design predicts: the first
+exec pays `instrument()` + `WebAssembly.compile()` of the ~111 MB output once;
+a second exec of the same content hash completes in about the same wall-clock
+as the NOMMU baseline's un-instrumented exec.
+
+**ATTRIBUTION CAVEAT (raised in review, and it is correct).** This timing
+shape is CONSISTENT with an `exec_module_cache` hit but does not PROVE one:
+the run never directly observed a cache hit. On a MISS,
+`runtime/kernel-worker.js` still calls `WebAssembly.compile()`, so warm
+browser compilation state, V8 code caching, or other generic second-run
+effects could produce the same first/second shape. The NOMMU control does
+not discriminate either — it exercises a different, uninstrumented path, so
+its flat timings show only that there is nothing to instrument there, not
+that the cache is what made the MMU second run fast. **What this measurement
+establishes is therefore narrower than "the cache works": repeated exec of
+the same binary is ~14× faster in a real browser tab.** That is still the
+target case #202 cares about, but the mechanism is inferred, not observed.
+To actually confirm the fast path, a follow-up needs either a cache-hit
+trace (instrument the lookup and assert the hit) or a cache-DISABLED
+comparison — if the second exec stays ~2.1s with the cache off, the speedup
+was never the cache.
+
+### What is NOT trustworthy, and why: a new, real, separate finding
+
+Peak-RSS attribution to `instrument()` specifically could **not** be obtained.
+Across 5 independent boots (3 baseline, 2 mmu, all post-#96-fix), the
+Chromium **renderer** process (isolated from the browser/gpu-process/utility/
+zygote processes via the `ps --type=` breakdown — only the renderer moves)
+exhibits large, continuous, roughly linear growth — tens to ~250 MiB per 2s
+sample — that:
+
+- **begins within seconds of the guest reaching an interactive shell**,
+- **continues identically whether or not any guest command is ever run**
+  (reproduced on a NOMMU run that only idled after boot, no exec at all), and
+- **is present on the un-instrumented NOMMU baseline just as much as on MMU**
+  (baseline peak renderer RSS before crash: 8,474 MiB / total 9,124.7 MiB at
+  t+59.5s; MMU: 9,506.6 MiB / total 10,153.4 MiB at t+87.8s) —
+
+and both variants' tabs eventually crash (Chromium kills the renderer; no
+crashpad minidump is produced, consistent with an internal OOM policy kill
+rather than a real segfault) at a broadly similar renderer-RSS ceiling,
+**with 13–15 GiB of host RAM free throughout in every run** (`free -h`,
+sampled continuously).
+
+**On ruling out host pressure (tightened after review).** `free -h` alone is
+NOT sufficient to rule this out: inside a container, `free` reports
+node-wide RAM while the process can be capped by a much smaller cgroup
+limit, and exhausting that cap kills only the renderer — producing exactly
+this symptom. Checked explicitly on this host afterwards: cgroup **v1**
+`memory/memory.limit_in_bytes` reads `9223372036854771712` (the "unlimited"
+sentinel, ~9.2 EB — note the misleading digit-similarity to the observed
+~9–10 **GiB** ceiling; the scales differ by nine orders of magnitude), and
+no cgroup **v2** controller files (`memory.max`, `memory.current`,
+`memory.events`) exist at all. So there is genuinely no memory cap here and
+host pressure IS ruled out — but on the strength of that check, not of
+`free`. Any future repro on a different host or a CI runner must re-check
+`memory.max`/`memory.current` before drawing the same conclusion, since a
+constrained runner would make this symptom mean something completely
+different. (`memory.events` being absent under v1 also means no OOM-kill
+counter was available to corroborate the exit reason independently.) This
+is the exact "baseline crashed too, with plenty of host RAM free" symptom the
+task brief's failed prior attempt reported; this session reproduces it
+reliably with a validated harness and localizes it to the renderer process
+specifically, but did **not** root-cause it.
+
+Because this growth is large (dwarfing the ~227.6 MiB `instrument()` peak
+PR #212 measured in Node), continuous, and present on the **NOMMU** baseline —
+which runs no `instrument()` pass at all — it cannot be the softmmu pass, and
+it swamps any exec-specific signal a peak-RSS-before-crash number would
+otherwise carry. Reporting the raw peak or crash numbers as "the MMU tab needs
+~9.5 GB" would misattribute this separate phenomenon to #202; that number is
+not reported as such here.
+
+**Unverified hypothesis** (recorded for the next attempt, not claimed as
+fact): Playwright's `page.on("console")` listener enables Chromium's
+DevTools-protocol `Runtime` domain, which is documented to make V8 retain
+extra per-script state for a page's dynamically-compiled objects. This boot
+process calls `WebAssembly.compile()` many times over the guest's lifetime
+(once per distinct exec'd binary, more under MMU since each is a freshly
+instrumented ~2–6× larger module); Runtime-domain retention accumulating
+across all of them, unbounded, for as long as DevTools stays attached, would
+produce exactly this signature — and would **not** affect a real end-user tab
+with no DevTools/CDP attached. This could not be confirmed this session
+(Playwright's automation is itself CDP, so a CDP-free control wasn't
+available without a different automation approach entirely) and is offered
+as the most promising lead for whoever picks this up next, not as a finding.
+
+### Net effect on §7.1's step 0 and §7.4's sequencing
+
+Step 0 is **partially, not fully, closed**. What it resolves: both variants
+demonstrably boot and correctly exec `nix.wasm` in a real browser tab, and the
+`exec_module_cache` fast-path is confirmed working end-to-end outside Node for
+the first time. What it leaves open: the actual question §7.1 was written to
+answer — "is a real Chrome tab now comfortable after #212, or is §5.2 (AOT
+CAS) still needed" — is **still unanswered**, because the renderer-growth
+confound above makes every peak-RSS number from this session's harness
+unusable as evidence either way. The next attempt should either (a) root-cause
+and eliminate the renderer growth (starting from the DevTools-Runtime-domain
+hypothesis above) so a clean peak-RSS reading becomes possible, or (b) measure
+peak RSS via a channel that doesn't require CDP at all (e.g. a manual PR
+preview click-through with the OS-level `ps` sampling script run alongside,
+no Playwright), since CDP attachment is itself now a suspect.
+
+**Session record**: worktree branch `claude/issue-202-browser-mem-measurement`
+(off `origin/master` post-#212, commit `1f507bf`); the throwaway probe scripts
+(`mem-probe.mjs`, `proxy-serve.mjs`) and raw per-run JSON timelines are not
+committed (scratchpad-only, per the task's own instructions) but the exact
+buildhashes and methodology above are sufficient to reproduce.
