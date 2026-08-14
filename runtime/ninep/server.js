@@ -236,7 +236,7 @@ export function createNinePServer(opts) {
     // exec bit and chmod is a no-op (Tsetattr below), so without this the
     // kernel's MAY_EXEC check rejects every file and programs in the VFS can't
     // be exec'd (`Permission denied`) — the prerequisite for Phase C cb_exec /
-    // the Nix store living under /mnt/pc. Cosmetic only for data files.
+    // the Nix store living under /mnt/yore. Cosmetic only for data files.
     return 0o100000 | 0o755;
   }
   async function sizeOf(vfs, rec) {

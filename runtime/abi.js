@@ -97,4 +97,9 @@
 // Seed squashfs stays RO at VW_DEV_BLK=3 (/dev/vda). An old engine answers
 // "unknown device index 1" (or still serves EchoDevice) and the guest's
 // installer/installed bootstrap can't mount the state disk: bump.
-export const ENGINE_ABI = 12;
+//
+// 13 (#903: finish the Yore rename): the root 9P device mount tag changed from
+// `pcroot` to `yoreroot`, alongside the guest mount moving from `/mnt/pc` to
+// `/mnt/yore`. An old engine exposes only the retired tag, so the renamed guest
+// cannot mount YoreFS; an old image likewise cannot find the new engine tag.
+export const ENGINE_ABI = 13;

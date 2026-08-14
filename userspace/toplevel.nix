@@ -15,9 +15,9 @@
 # single-port virtio-console devices (CONSOLE_DEVICES / HVC_CONSOLES, see init.nix).
 #
 # #177 G6: $out/boot/{vmlinux.wasm,initramfs.cpio.gz,manifest.json} are generation
-# artifacts the host bootloader mirrors after activate (G5 / pc-bootloader).
+# artifacts the host bootloader mirrors after activate (G5 / yore-bootloader).
 { pkgs, busybox, etc, systemPath, passwd, group, inittab, activate
-, kernel, initramfs, kernelAbi, pcBootloader }:
+, kernel, initramfs, kernelAbi, yoreBootloader }:
 let
   # nix-wasm#202 PR-1: the EARLIEST point that has all three of kernel,
   # initramfs, and busybox in hand at once — so it is also the earliest point
@@ -77,7 +77,7 @@ pkgs.runCommand "wasm-system" { passthru.processModel = kernelModel; } ''
   cp ${inittab} $out/etc/inittab
   ln -s ${systemPath} $out/sw
   ln -s ${activate} $out/activate
-  ln -s ${pcBootloader} $out/pc-bootloader
+  ln -s ${yoreBootloader} $out/yore-bootloader
   # init entrypoint: the PATCHED busybox (the thin /init execs $out/init;
   # basename `init` -> busybox init applet). MUST be the clone-spawn busybox —
   # stock busybox's fork/vfork PID1 SIGILLs on the wasm NOMMU model.

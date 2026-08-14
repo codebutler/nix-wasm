@@ -42,9 +42,9 @@ pkgs.writeText "activate" ''
   : > /var/log/wtmp
 
   # #177 G5: publish this generation's kernel/initrd to the host bootloader
-  # mirror over 9P. Best-effort — missing /mnt/pc (harness boots) must not fail
-  # activation. Script lives at $sys/pc-bootloader (see pc-bootloader.nix).
-  if [ -f "$sys/pc-bootloader" ]; then
-    sh "$sys/pc-bootloader" "$sys" || true
+  # mirror over 9P. Best-effort — missing /mnt/yore (harness boots) must not fail
+  # activation. Script lives at $sys/yore-bootloader (see yore-bootloader.nix).
+  if [ -f "$sys/yore-bootloader" ]; then
+    sh "$sys/yore-bootloader" "$sys" || true
   fi
 ''

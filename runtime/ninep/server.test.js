@@ -376,7 +376,7 @@ function parseDirents(buf) {
 
 // A client bound to a specific connection id (cid) — the per-mount channel the
 // transport supplies. Two clientOn(srv, 0/1) model two guest mounts sharing one
-// server (Phase E/N1: /mnt/pc + /nix over one trans_cb ring).
+// server (Phase E/N1: /mnt/yore + /nix over one trans_cb ring).
 function clientOn(srv, cid) {
   let tag = 0;
   let nextFid = 1;

@@ -257,7 +257,7 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/gtk-demo-smoke.mj
 # gtk_builder_connect_signals) → NO GModule dependency. --selftest class_inits
 # the editor widget classes + fires a GtkTextBuffer "changed" signal into an
 # address-taken C handler through the fpcast seam, display-free; the editor
-# window + an open/edit/save round-trip to /mnt/pc are a MANUAL browser check).
+# window + an open/edit/save round-trip to /mnt/yore are a MANUAL browser check).
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/l3afpad-smoke.mjs
 
 # #35 async-signal smokes (busybox-only boot, nix:false — kernel+initramfs only):
@@ -289,7 +289,7 @@ LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/timeout-repro-smo
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-smoke.mjs
 LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/ping-pace-probe-smoke.mjs
 
-# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `pcctl`
+# #60 Phase 2 /Ctl-over-vsock smoke (busybox-only boot): the guest agent `yorectl`
 # (socket(AF_VSOCK)+connect(host:1024)) ↔ a host /Ctl listener registered via the
 # vsock.onReady hook. PASS = open/notify/clipset reach the host seams and clipget
 # round-trips the reply back to the guest. Also wired into nix-wasm.yml boot-smoke.
@@ -1201,7 +1201,7 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   without a display), `gtk_get_major_version()==3`. Gate:
   `node demo/node/l3afpad-smoke.mjs` matches `/L3AFPAD-SELFTEST: .* OK/` (in
   the `nix-boot-smoke` CI job, one-per-boot like its GTK siblings). The
-  open/edit/save-a-file-to-/mnt/pc flow is a MANUAL browser check.
+  open/edit/save-a-file-to-/mnt/yore flow is a MANUAL browser check.
 
 **`nix.wasm` link/build (`nix-wasm.nix`):**
 - `-DBOOST_STACKTRACE_USE_NOOP` (Nix's crash handler pulls unimplementable
@@ -1273,14 +1273,14 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   `VW_DEV_9P_ROOT/9P_NIXCACHE` `virtio_wasm_register()` calls and (0020, authored
   pre-0019) land `VW_DEV_VSOCK` before `VW_DEV_CONSOLE` (CONSOLE 6→8). The guest then
   registered every virtio device EXCEPT 9P, so `9pnet_virtio: no channels available
-  for device pcroot/nixcache` — the pc VFS root + /nix-cache never mounted (a nix:true
+  for device yoreroot/nixcache` — the pc VFS root + /nix-cache never mounted (a nix:true
   boot reached a shell but `nix` couldn't read /nix-cache). It went unseen because no
   CI booted nix:true headless (the wayland browser path differs). Fix: keep these
   patches regenerated against the current tree (`patch -p1 --fuzz=0` must apply all of
   0017-0020 cleanly), and the `kernel.nix` `postPatch` assertion now dumps + checks
   the post-patch enum order + every device registration, failing the build LOUDLY in
   `patchPhase` instead of shipping a subtly-broken kernel. Runtime gate: the
-  `nix-boot-smoke` CI job (`smoke.mjs` — reads `/mnt/pc` + `nix-env -iA`) exercises
+  `nix-boot-smoke` CI job (`smoke.mjs` — reads `/mnt/yore` + `nix-env -iA`) exercises
   both 9P channels end to end. **NOTE (#83 single-port console pivot):** the
   canonical layout changed — the console is now **8 single-port virtio-console
   devices** at an explicit `VW_DEV_CONSOLE_BASE = 8` (host idx 8..15, registered by a

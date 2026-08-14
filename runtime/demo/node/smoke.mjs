@@ -58,7 +58,7 @@ try {
   );
 
   // read path
-  s.send("cat /mnt/pc/Home/pc-9p-proof.txt\n");
+  s.send("cat /mnt/yore/Home/pc-9p-proof.txt\n");
   check(await s.waitForOutput(/written by pc's vfs\.write/), "cat reads a real-VFS file over 9P");
 
   // write / overwrite / append round-trip back to the host VFS
@@ -76,12 +76,12 @@ try {
         : `: vfs sees ${JSON.stringify(got)} (expected ${JSON.stringify(expect)})`,
     );
   };
-  await writeCheck(`echo hello-from-linux > /mnt/pc${FILE}\n`, "hello-from-linux\n", "write");
-  await writeCheck(`echo hi > /mnt/pc${FILE}\n`, "hi\n", "overwrite (O_TRUNC)");
-  await writeCheck(`echo more >> /mnt/pc${FILE}\n`, "hi\nmore\n", "append");
+  await writeCheck(`echo hello-from-linux > /mnt/yore${FILE}\n`, "hello-from-linux\n", "write");
+  await writeCheck(`echo hi > /mnt/yore${FILE}\n`, "hi\n", "overwrite (O_TRUNC)");
+  await writeCheck(`echo more >> /mnt/yore${FILE}\n`, "hi\nmore\n", "append");
 
   // directory read-back
-  s.send("ls /mnt/pc/Home\n");
+  s.send("ls /mnt/yore/Home\n");
   check(await s.waitForOutput(/smoke-wtest\.txt/), "ls lists the written file");
 
   // nix-system: substitute a package from the committed binary cache.

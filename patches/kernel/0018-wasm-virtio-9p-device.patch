@@ -13,7 +13,7 @@ virtualized Linux to the 9P layer — stock v9fs over a stock carrier.
 Mainline 9pnet_virtio binds exactly one virtqueue ("requests") and one
 mount tag per virtio device; a mount selects a channel by tag via
 `-o trans=virtio <tag>`. So we register one device per 9P connection the
-guest needs. This repo has two: the pc VFS export (tag "pcroot") and the
+guest needs. This repo has two: the Yore VFS export (tag "yoreroot") and the
 nix binary cache (tag "nixcache"). The host serves each device's mount
 tag in config space and offers VIRTIO_9P_MOUNT_TAG in its feature bits
 (runtime/virtio/ninep-device.js); the kernel side here is just the device
@@ -59,7 +59,7 @@ index b47e06c..d22cd22 100644
  	VW_DEV_BLK,		/* virtio-blk block device (squashfs /nix image) */
 +#endif
 +#if IS_ENABLED(CONFIG_NET_9P_VIRTIO)
-+	VW_DEV_9P_ROOT,		/* virtio-9p: pc VFS export (mount tag "pcroot") */
++	VW_DEV_9P_ROOT,		/* virtio-9p: Yore VFS export (mount tag "yoreroot") */
 +	VW_DEV_9P_NIXCACHE,	/* virtio-9p: nix binary cache (tag "nixcache") */
  #endif
  	VW_DEV_COUNT,

@@ -434,7 +434,7 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   // synchronous transport probes (features/config/setup) and forwards the kick;
   // the main-thread instance does the async server round-trip + IRQ self-wake.
   const VW_DEV_9P = [
-    { dev: 4, tag: "pcroot", cid: 1 }, // VW_DEV_9P_ROOT — pc VFS export (aname "/")
+    { dev: 4, tag: "yoreroot", cid: 1 }, // VW_DEV_9P_ROOT — Yore VFS export (aname "/")
     { dev: 5, tag: "nixcache", cid: 2 }, // VW_DEV_9P_NIXCACHE — nix binary cache
   ];
   const ninepVirtioByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));

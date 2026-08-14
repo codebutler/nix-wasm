@@ -56,7 +56,7 @@ const DEFAULT_CMDLINE =
 const enc = new TextEncoder();
 
 /**
- * Boot a linux-wasm kernel with a VFS mounted at /mnt/pc over 9P.
+ * Boot a linux-wasm kernel with a VFS mounted at /mnt/yore over 9P.
  *
  * @param {{
  *   vfs: any,                         // the async typed-record VFS (MemVfs in tests, pc vfs in prod)

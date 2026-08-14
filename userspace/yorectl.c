@@ -1,10 +1,10 @@
-/* pcctl.c — guest-side agent for pc's /Ctl desktop-control bridge over AF_VSOCK
+/* yorectl.c — guest-side agent for pc's /Ctl desktop-control bridge over AF_VSOCK
  * (issue #60 Phase 2 / nix-wasm#10 option 3).
  *
  * This is the standard-socket replacement for the bespoke 9P `/Ctl` mount. The
  * old model surfaced `/Ctl/open`, `/Ctl/clipboard`, `/Ctl/notify` as files on
  * the 9P export, so the guest drove the desktop with plain redirection
- * (`echo calc > /mnt/pc/Ctl/open`). vsock is a byte STREAM, not a file tree, so
+ * (`echo calc > /mnt/yore/Ctl/open`). vsock is a byte STREAM, not a file tree, so
  * the guest needs a tiny client that frames the request itself — this program.
  *
  * It opens a SOCK_STREAM AF_VSOCK socket, connects to the host
@@ -28,15 +28,15 @@
  *   CLIPSET  new clipboard text       (empty)        — set pc's clipboard
  *
  * Usage:
- *   pcctl open    <app-or-path>
- *   pcctl notify  <text>
- *   pcctl clipget
- *   pcctl clipset <text>      (empty text clears the clipboard)
+ *   yorectl open    <app-or-path>
+ *   yorectl notify  <text>
+ *   yorectl clipget
+ *   yorectl clipset <text>      (empty text clears the clipboard)
  *
  * On an OK reply we exit 0 (CLIPGET first writes the clipboard payload + a
  * newline to stdout). On an ERR reply we write the host's message to stderr and
  * exit 1. The host port is CTL_PORT (1024) by default; override with the
- * PCCTL_PORT env var (handy for the node smoke without a rebuild). */
+ * YORECTL_PORT env var (handy for the node smoke without a rebuild). */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,11 +141,11 @@ static const char *verb_for(const char *cmd, int *needs_arg) {
 
 static void usage(void) {
   fprintf(stderr,
-          "usage: pcctl <open|notify|clipget|clipset> [arg]\n"
-          "  pcctl open    <app-or-path>\n"
-          "  pcctl notify  <text>\n"
-          "  pcctl clipget\n"
-          "  pcctl clipset <text>\n");
+          "usage: yorectl <open|notify|clipget|clipset> [arg]\n"
+          "  yorectl open    <app-or-path>\n"
+          "  yorectl notify  <text>\n"
+          "  yorectl clipget\n"
+          "  yorectl clipset <text>\n");
 }
 
 int main(int argc, char **argv) {
@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
   int needs_arg = 0;
   const char *verb = verb_for(argv[1], &needs_arg);
   if (!verb) {
-    fprintf(stderr, "pcctl: unknown command '%s'\n", argv[1]);
+    fprintf(stderr, "yorectl: unknown command '%s'\n", argv[1]);
     usage();
     return 2;
   }
@@ -165,20 +165,20 @@ int main(int argc, char **argv) {
   int is_clipget = (strcmp(verb, "CLIPGET") == 0);
   if (needs_arg) {
     if (argc < 3) {
-      fprintf(stderr, "pcctl: '%s' needs an argument\n", argv[1]);
+      fprintf(stderr, "yorectl: '%s' needs an argument\n", argv[1]);
       usage();
       return 2;
     }
     payload = argv[2];
   } else if (argc > 2) {
-    fprintf(stderr, "pcctl: '%s' takes no argument\n", argv[1]);
+    fprintf(stderr, "yorectl: '%s' takes no argument\n", argv[1]);
     usage();
     return 2;
   }
   size_t payload_len = strlen(payload);
 
   unsigned int port = CTL_PORT;
-  const char *port_env = getenv("PCCTL_PORT");
+  const char *port_env = getenv("YORECTL_PORT");
   if (port_env && *port_env) {
     long p = strtol(port_env, NULL, 10);
     if (p > 0 && p < 65536) port = (unsigned int)p;
@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
 
   int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
   if (fd < 0) {
-    perror("pcctl: socket(AF_VSOCK)");
+    perror("yorectl: socket(AF_VSOCK)");
     return 1;
   }
 
@@ -196,7 +196,7 @@ int main(int argc, char **argv) {
   addr.svm_cid = VMADDR_CID_HOST; /* 2 — the host (pc) */
   addr.svm_port = port;
   if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-    perror("pcctl: connect to host /Ctl");
+    perror("yorectl: connect to host /Ctl");
     close(fd);
     return 1;
   }
@@ -206,7 +206,7 @@ int main(int argc, char **argv) {
   int hn = snprintf(hdr, sizeof(hdr), "%s %zu\n", verb, payload_len);
   if (hn < 0 || (size_t)hn >= sizeof(hdr) || write_all(fd, hdr, (size_t)hn) != 0 ||
       (payload_len && write_all(fd, payload, payload_len) != 0)) {
-    fprintf(stderr, "pcctl: short write to host\n");
+    fprintf(stderr, "yorectl: short write to host\n");
     close(fd);
     return 1;
   }
@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
   char status[16];
   long rlen = 0;
   if (read_header(fd, status, sizeof(status), &rlen) != 0) {
-    fprintf(stderr, "pcctl: malformed reply from host\n");
+    fprintf(stderr, "yorectl: malformed reply from host\n");
     close(fd);
     return 1;
   }
@@ -223,7 +223,7 @@ int main(int argc, char **argv) {
   if (rlen > 0) {
     body = malloc((size_t)rlen);
     if (!body || read_all(fd, body, (size_t)rlen) != 0) {
-      fprintf(stderr, "pcctl: short read of reply payload\n");
+      fprintf(stderr, "yorectl: short read of reply payload\n");
       free(body);
       close(fd);
       return 1;
@@ -234,7 +234,7 @@ int main(int argc, char **argv) {
   int ok = (strcmp(status, "OK") == 0);
   if (!ok) {
     /* ERR — surface the host's message on stderr. */
-    fprintf(stderr, "pcctl: host error: %.*s\n", (int)rlen, body ? body : "");
+    fprintf(stderr, "yorectl: host error: %.*s\n", (int)rlen, body ? body : "");
     free(body);
     return 1;
   }

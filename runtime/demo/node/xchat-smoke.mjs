@@ -24,7 +24,7 @@
 //      real target for the xwd pixel proof, not a placeholder dialog.
 //
 // xwd -root dumps the real server framebuffer (no compositor on Xvfb, so xwd
-// sees exactly what's on screen) to /mnt/pc, parsed host-side against the
+// sees exactly what's on screen) to /mnt/yore, parsed host-side against the
 // real XWD header layout (X11/XWDFile.h) — same verification gtk2-x11-smoke.mjs
 // and x11-apps-smoke.mjs already established.
 //
@@ -117,7 +117,7 @@ try {
   // xwd -root: dump the real server framebuffer (xchat's window included —
   // Xvfb has no compositor, so xwd sees exactly what's on screen) to the
   // 9P-mounted host VFS.
-  s.send("DISPLAY=:9 xwd -root -silent -out /mnt/pc/Home/xchat.xwd; echo XWDDONE_RC:$?\n");
+  s.send("DISPLAY=:9 xwd -root -silent -out /mnt/yore/Home/xchat.xwd; echo XWDDONE_RC:$?\n");
   const xwdRan = await s.waitForOutput(/XWDDONE_RC:\d+/, 30000);
   const xwdMatch = /XWDDONE_RC:(\d+)/.exec(s.snapshot());
   const xwdOk = xwdRan && xwdMatch && xwdMatch[1] === "0";

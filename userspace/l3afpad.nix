@@ -5,7 +5,7 @@
 # gtk_builder_connect_signals(NULL), so it has NO GModule dependency and needs
 # no dynsym-inject seam; the address-taken G_CALLBACK(&handler) pointers are
 # exactly the fpcast canonical thunks. Open/edit/save works on any writable
-# guest path, notably /mnt/pc (the 9P pc-VFS mount) — saved files land in the
+# guest path, notably /mnt/yore (the 9P pc-VFS mount) — saved files land in the
 # pc VFS.
 #
 # nixpkgs dropped l3afpad before our pin (no pkgs/by-name/l3 shard, no alias at
