@@ -196,12 +196,16 @@ jobs:
           set -o pipefail
           nix build -L --keep-going \
             '.#nix-wasm' \
+            '.#nix-wasm-nommu' \
             '.#wasm-binary-cache' \
             '.#wasm-base-squashfs' \
+            '.#wasm-base-squashfs-nommu' \
             '.#wasm-base-squashfs-fork' \
             '.#wasm-initramfs' \
+            '.#wasm-initramfs-nommu' \
             '.#wasm-initramfs-fork' \
             '.#linux-image' \
+            '.#kernel-nommu' \
             '.#kernel-mmu' \
             '.#kernel-mmu-a2' \
             '.#mmu-init' \
@@ -680,7 +684,7 @@ jobs:
             MMU_VMLINUX="$A2K/vmlinux.wasm" BUSYBOX_FORK="$BBF/bin" WL_SHM_TEST="$WST/bin/wl-shm-test"
 
       # mmu-devices group: substitute the software-MMU kernel + fork initramfs
-      # (same pair nix-boot-smoke-mmu boots, but busybox-only — no squashfs/
+      # (same pair the default nix-boot-smoke boots, but busybox-only — no squashfs/
       # nix-cache needed for any smoke here).
       - name: Build MMU kernel + fork initramfs (substitute from Cachix)
         run: |
@@ -725,7 +729,7 @@ jobs:
       #     image, so this is where its reject path is exercised for real — the
       #     `signals`-shard run of this same smoke, on NOMMU, only ever proves
       #     assertions 1/3/4 (see the smoke's own header comment). It runs ONLY
-      #     here, not in nix-boot-smoke-mmu's `core` shard too — that would be a
+      #     here, not in the default nix-boot-smoke's `core` shard too — that would be a
       #     pure duplicate boot of the identical kernel+initramfs pair on a far
       #     more expensive runner for zero extra coverage.
       # ping-pace-probe stays the one non-gating diagnostic, same as `signals`.
@@ -738,7 +742,7 @@ jobs:
       # `check` call to a real `run_smoke` hard gate. The soak-idiom rationale
       # (continue-on-error bounds FAILURE, step timeout-minutes bounds WALL
       # CLOCK, never a return-0 helper) lives in git history and
-      # pr-preview.yml's MMU-preview step comment (nix-boot-smoke-mmu no longer
+      # pr-preview.yml's preview-variant step comment (the default nix-boot-smoke no longer
       # has a soak step of its own — its one remaining soak smoke,
       # autotools-fork-smoke.mjs, was itself promoted to a hard gate on
       # 2026-08-13). The step-level timeout stays even though the step now gates: a hang
@@ -789,9 +793,9 @@ jobs:
           run_smoke demo/node/exec-reject-smoke.mjs
           run_smoke demo/node/blk-rw-smoke.mjs
 
-  # --- nix-boot-smoke: boot the FULL nix system and prove the 9P transport works -
-  # The first CI job that boots nix:true (squashfs /nix overlay + the binary cache,
-  # both carried over virtio-9p). It is the runtime regression gate for the
+  # --- nix-boot-smoke-nommu: bounded compatibility coverage ------------------
+  # The former default full-system job now keeps the explicit NOMMU artifacts
+  # healthy during their Phase-3 deprecation window. It remains the regression gate for the
   # virtio-device-enum patch fix: if patches 0017-0020 ever drop the 9P device
   # registration again (a silent patch-fuzz hazard the kernel.nix build-time
   # assertion already guards), `9pnet_virtio` finds "no channels available for
@@ -800,8 +804,8 @@ jobs:
   # 9P channels end to end. Needs the four nix:true artifacts (kernel + initramfs +
   # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
   # pushed to Cachix first and this job substitutes them.
-  nix-boot-smoke:
-    name: nix system smoke (core + gtk)
+  nix-boot-smoke-nommu:
+    name: NOMMU deprecation smoke (core + gtk)
     needs: [changes, toolchain, artifacts]
     # Run on a world OR engine change. `!failure() && !cancelled()` lets it run
     # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
@@ -814,14 +818,8 @@ jobs:
     # duplicate 10-25 min "Assemble nix:true artifacts" step every run, on top of
     # queueing separately for an `md` runner (real CI history showed 25-65 min
     # queue waits in this wave). Merging means the substitution happens ONCE and
-    # both smoke groups reuse it. Also absorbs the former standalone
-    # `browser-smoke` job (see its old comment, preserved below at the relevant
-    # step): it booted the exact same nix:true artifact set independently a
-    # third time purely to run one browser-based dlopen check, so it now reuses
-    # this job's `core` artifacts instead of fetching its own copy.
-    # 240 = the former 90-min-per-shard budget, generously summed for running
-    # core smokes -> browser smoke -> gtk smokes sequentially instead of in
-    # parallel (they were often serialized by runner-pool scarcity anyway).
+    # both smoke groups reuse it. The browser gate moved to the MMU default job.
+    # Keep the established budget for the core + GTK compatibility suite.
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -853,11 +851,11 @@ jobs:
       - name: Assemble nix:true artifacts (substitute from Cachix)
         run: |
           mkdir -p .artifacts-nix
-          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
+          ln -sfn "$(nix build -L '.#kernel-nommu' --no-link --print-out-paths)/vmlinux.wasm" \
             .artifacts-nix/vmlinux.wasm
-          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
+          ln -sfn "$(nix build -L '.#wasm-initramfs-nommu' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix/initramfs.cpio.gz
-          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs-nommu' --no-link --print-out-paths)/base.squashfs" \
             .artifacts-nix/base.squashfs
           ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
             .artifacts-nix/nix-cache
@@ -928,45 +926,6 @@ jobs:
           # cairo-png headless, zero source patches. The game windows are
           # browser checks on the rig. Gating.
           run_smoke demo/node/rsvg-smoke.mjs
-
-      # Issue #138 (formerly the standalone `browser-smoke` job): the guest must
-      # boot IN A BROWSER with a dlopen workload, not just under Node. Two engine
-      # bugs shipped through green Node smokes because only a browser hits them
-      # end-to-end: TextDecoder rejecting SAB-backed views (#137) and fpcast
-      # callers call_indirect'ing dlsym'd raw exports (#139 — surfaced only by a
-      # REAL gtk3-demo run reaching pango text shaping; the Node gtk smokes run
-      # display-free --selftest variants that stop short of it). Reuses this job's
-      # own `.artifacts-nix` (identical nix:true set the standalone job used to
-      # re-substitute independently) instead of fetching a separate copy.
-      - name: Install Chromium
-        working-directory: runtime
-        run: bunx playwright install --with-deps chromium
-
-      # One retry absorbs a boot-panic flake; a genuine engine crash fails both
-      # attempts (the crash-line check runs from the first console message).
-      - name: Browser boot + dlopen smoke
-        working-directory: runtime
-        run: |
-          ln -sfn "${{ github.workspace }}/.artifacts-nix" demo/web/artifacts
-          for attempt in 1 2; do
-            echo "::group::browser smoke (attempt $attempt)"
-            set +e
-            node demo/web/smoke.mjs
-            rc=$?
-            set -e
-            echo "::endgroup::"
-            [ "$rc" -eq 0 ] && break
-            echo "attempt $attempt failed (rc=$rc)"
-            [ "$attempt" -eq 2 ] && exit 1
-          done
-
-      - name: Upload browser-smoke screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-smoke-screenshot
-          path: runtime/demo/web/demo.png
-          if-no-files-found: ignore
 
       - name: Boot full nix system + nix install smokes (gtk)
         working-directory: runtime
@@ -1039,20 +998,16 @@ jobs:
             # above. One-per-boot like its GTK siblings. Gating.
             run_smoke demo/node/xchat-smoke.mjs
 
-  # --- nix-boot-smoke-mmu: boot the FULL nix system on the software-MMU kernel --
-  # Issue #131 "prove-then-flip" (the payoff epic's prerequisite gate). Every
-  # NOMMU/no-fork/built-in-loader accommodation is still load-bearing for the
-  # DEFAULT guest (.#kernel, NOMMU). Before any of them can be deleted, the whole
-  # userspace + 9P + nix stack must be PROVEN to boot on the MMU+real-fork guest.
-  # No existing smoke does that: nix-boot-smoke boots .#kernel (NOMMU); the MMU
-  # smokes in boot-smoke boot only tiny custom inits (mmu-init, fork-init) or a
-  # bare busybox-fork script (busybox-fork-smoke) — never the full squashfs system.
+  # --- nix-boot-smoke: boot the shipped software-MMU/fork guest ----------------
+  # This was issue #131's prove-then-flip job. Phase 3 promotes the exact proven
+  # artifact set to the unsuffixed defaults; the historical proof notes below
+  # remain because they explain why each expensive gate exists.
   #
-  # This job assembles the SAME nix:true artifact set as nix-boot-smoke but with:
-  #   • vmlinux    ← .#kernel-mmu-a2 (CONFIG_MMU + patch 0026 fork + A2 demand-page)
-  #   • initramfs  ← .#wasm-initramfs-fork (busybox-fork PID 1 + a fork bootstrap
+  # This job assembles the shipped nix:true artifact set:
+  #   • vmlinux    ← .#kernel (kernel-mmu-a2: CONFIG_MMU + A2 demand paging)
+  #   • initramfs  ← .#wasm-initramfs (busybox-fork PID 1 + a fork bootstrap
   #                  that keeps hush as /bin/sh — no NOMMU forkshell-ash promotion)
-  #   • squashfs   ← .#wasm-base-squashfs-fork (#175): the base system with the
+  #   • squashfs   ← .#wasm-base-squashfs (#175): the base system with the
   #                  REAL-FORK nix.wasm + real-fork busybox. nix's OWN startProcess
   #                  spawns a builder via clone(CLONE_VM|CLONE_VFORK) on the default
   #                  build — that SIGSEGVs under the software MMU (the CLONE_VM child
@@ -1065,9 +1020,8 @@ jobs:
   #                  exec'd binary at load (kernel-worker wasm_load_executable, gated
   #                  on the MMU kernel's nonzero pt_base).
   #
-  # core + gtk run as two sequential steps in one job (CI perf pass — see the
-  # job's own `timeout-minutes` comment for why), mirroring nix-boot-smoke's
-  # own core/gtk split, just on the fork/MMU artifact set instead of NOMMU.
+  # core + browser + gtk run sequentially in one job (CI perf pass — see the
+  # job's own `timeout-minutes` comment for why).
   # `core` now runs every non-GTK
   # nix-boot-smoke smoke EXCEPT exec-reject-smoke — including the two nix-CLI
   # install paths (profile-install-e2e/wrapperless-cc-e2e) and rsvg-smoke.
@@ -1118,8 +1072,8 @@ jobs:
   # is now a `run_smoke` call in the `core` hard-gates step below (see its own
   # comment) and the dedicated soak step is gone — there is nothing left to
   # soak in this job.
-  nix-boot-smoke-mmu:
-    name: boot full nix system on software MMU (core + gtk, #131 prove-then-flip)
+  nix-boot-smoke:
+    name: boot default MMU/fork nix system (core + browser + gtk)
     needs: [changes, toolchain, artifacts]
     # Same changes-filter gating every sibling boot job uses (nix-boot-smoke,
     # boot-smoke): run on a world OR engine change, and don't block on
@@ -1175,11 +1129,11 @@ jobs:
       - name: Assemble MMU nix:true artifacts (substitute from Cachix)
         run: |
           mkdir -p .artifacts-nix-mmu
-          ln -sfn "$(nix build -L '.#kernel-mmu-a2' --no-link --print-out-paths)/vmlinux.wasm" \
+          ln -sfn "$(nix build -L '.#kernel' --no-link --print-out-paths)/vmlinux.wasm" \
             .artifacts-nix-mmu/vmlinux.wasm
-          ln -sfn "$(nix build -L '.#wasm-initramfs-fork' --no-link --print-out-paths)/initramfs.cpio.gz" \
+          ln -sfn "$(nix build -L '.#wasm-initramfs' --no-link --print-out-paths)/initramfs.cpio.gz" \
             .artifacts-nix-mmu/initramfs.cpio.gz
-          ln -sfn "$(nix build -L '.#wasm-base-squashfs-fork' --no-link --print-out-paths)/base.squashfs" \
+          ln -sfn "$(nix build -L '.#wasm-base-squashfs' --no-link --print-out-paths)/base.squashfs" \
             .artifacts-nix-mmu/base.squashfs
           ln -sfn "$(nix build -L '.#wasm-binary-cache' --no-link --print-out-paths)" \
             .artifacts-nix-mmu/nix-cache
@@ -1240,7 +1194,7 @@ jobs:
           # NOMMU (every access is a 2-level walk; page-crossing accesses split
           # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
           # budget than the shared 180s default so the (correct, slower) install
-          # can finish. NOMMU nix-boot-smoke keeps the 180s default.
+          # can finish. The NOMMU deprecation job keeps the 180s default.
           NIX_MAKE_TIMEOUT_MS: "600000"
         run: |
           run_smoke() {
@@ -1338,6 +1292,37 @@ jobs:
             # The GNOME-games tier render (rsvg-convert → libcroco → librsvg →
             # pango/cairo → cairo-png, headless).
             run_smoke demo/node/rsvg-smoke.mjs
+
+      # Browser-only regressions (#137/#139) must gate the shipped default,
+      # which is now this MMU/fork artifact set rather than the NOMMU
+      # deprecation job above.
+      - name: Install Chromium
+        working-directory: runtime
+        run: bunx playwright install --with-deps chromium
+
+      - name: Browser boot + dlopen smoke
+        working-directory: runtime
+        run: |
+          ln -sfn "${{ github.workspace }}/.artifacts-nix-mmu" demo/web/artifacts
+          for attempt in 1 2; do
+            echo "::group::browser smoke (attempt $attempt)"
+            set +e
+            node demo/web/smoke.mjs
+            rc=$?
+            set -e
+            echo "::endgroup::"
+            [ "$rc" -eq 0 ] && break
+            echo "attempt $attempt failed (rc=$rc)"
+            [ "$attempt" -eq 2 ] && exit 1
+          done
+
+      - name: Upload browser-smoke screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-screenshot
+          path: runtime/demo/web/demo.png
+          if-no-files-found: ignore
 
       - name: Boot full nix system on MMU + gtk smokes — hard gates
         working-directory: runtime

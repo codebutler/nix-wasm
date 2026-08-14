@@ -102,4 +102,11 @@
 // `pcroot` to `yoreroot`, alongside the guest mount moving from `/mnt/pc` to
 // `/mnt/yore`. An old engine exposes only the retired tag, so the renamed guest
 // cannot mount YoreFS; an old image likewise cannot find the new engine tag.
-export const ENGINE_ABI = 13;
+//
+// 14 (#216 Phase 3: software-MMU/fork guest becomes the published default):
+// the channel image now exports `wasm_collapse`, and the engine's exec tail must
+// use that uncatchable wasm trap to collapse a fork child's asyncified stack.
+// The old NOMMU image used the catchable host-JS throw path. Shipping either
+// side without the other breaks fork+exec, so the coordinated engine/image
+// rollout requires an exact-match bump.
+export const ENGINE_ABI = 14;
