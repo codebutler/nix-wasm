@@ -19,7 +19,7 @@ Parent: `2026-07-01-software-mmu-asyncify-design.md` (#126), issue #131.
 | Slice | Gate | Track status | Can execute here? |
 |---|---|---|---|
 | 1 — fork/spawn | Track B real `fork()` (#129) | **mechanism DONE + BOOT-VERIFIED** (musl/kernel/engine fork+COW; `fork-smoke` passes; the MMU guest's `/bin/sh` (hush) is autoconf-capable, host-proven + hard-gated, and the in-guest autotools acceptance gate is green). Slice-1 is dispositioned by profile: MMU uses stock fork sites; NOMMU keeps the forkshell/clone-with-fn port it requires. | Done; both profiles have explicit build and boot coverage |
-| 2 — dlopen | Track C GModule (#130) | **LANDED + BOOT-VERIFIED** (loader + musl 0009 + dynsym seam + libffi codegen; `dlopen-smoke` passes in a booted guest, galculator carries `cb.dynsym`) | Yes — being executed |
+| 2 — dlopen | Track C GModule (#130) | **DONE + BOOT/GUI-VERIFIED** (loader + musl 0009 + dynsym seam + libffi codegen; `dlopen-smoke` and widget-factory pass, and galculator click-to-42 is verified). Loadable GIO/gdk-pixbuf modules are explicit static-platform KEEP decisions. | Done; every item is removed, verified, or explicitly kept |
 | 3 — NOMMU memory | Track A real MMU (#128) | **mechanism DONE + BOOT-VERIFIED** (both A1 — `.#kernel-mmu`, `mmu-smoke.mjs` — and A2 demand-paging/COW — `.#kernel-mmu-a2`, `mmu-smoke-a2.mjs` — boot and are hard-gated in CI). Memory-model accommodations must now be classified as shared, MMU-only, or NOMMU-only rather than removed wholesale. | Partially — remaining boxes still need per-profile build/boot disposition |
 
 ## Slice 2 — dlopen accommodations (gated on #130, LANDED)
@@ -27,24 +27,25 @@ Parent: `2026-07-01-software-mmu-asyncify-design.md` (#126), issue #131.
 Track C shipped the general loader (`runtime/dylink.js`), the musl dlopen/dlsym
 port (`patches/musl/0009`), the dynsym-inject seam (`userspace/dynsym.nix` +
 `scripts/wasm-dynsym-inject.py`), and the runtime libffi codegen
-(`runtime/ffi-codegen.js`). So these accommodations can be removed — each is a
-nix/patch edit whose PROOF is the `dlopen-smoke.mjs` + GTK smokes on the box:
+(`runtime/ffi-codegen.js`). These accommodations can now be dispositioned;
+removals use `dlopen-smoke.mjs` + GTK smokes as proof, while KEEP decisions
+must name a reason independent of the former dlopen wall:
 
-- [ ] **`deps-overlay.nix` glib — gio modules loadable again.** DEFERRED, low
-  value. NOT a meson-flag flip: the guest is `isStatic = true` platform-wide
+- [x] **`deps-overlay.nix` glib — KEEP gio modules built in.** NOT a
+  meson-flag flip: the guest is `isStatic = true` platform-wide
   (`-Ddefault_library=static` everywhere), so gio's modules build INTO libgio.
   Making them loadable means building each as a PIC `SIDE_MODULE`, installing to
   `GIO_MODULE_DIR`, and shipping the scan — a real per-module packaging effort,
   while the **built-in** modules work fine (the guest is not missing
   functionality). The MECHANISM that made this a wall (no dlopen) is gone —
   proven by `dlopen-smoke` + widget-factory — so this is now purely a
-  stock-shapedness cleanup, correctly deprioritized behind Track A (the actual
-  remaining value). If pursued: `glib-smoke.mjs` + a booted gio-module load is
-  the gate.
-- [ ] **`deps-overlay.nix` gtk3 — gdk-pixbuf loadable loaders.** DEFERRED, same
-  reasoning: built-in loaders work; loadable loaders are a side-module packaging
-  effort (`loaders.cache` + PIC loader modules), not a flag flip, with marginal
-  value now that the dlopen wall is gone.
+  stock-shapedness cleanup with no capability gain. The built-in modules are
+  therefore the supported static-platform shape, not an unfinished dlopen
+  accommodation.
+- [x] **`deps-overlay.nix` gtk3 — KEEP gdk-pixbuf loaders built in.** Same
+  reasoning: the built-in PNG/JPEG/SVG loaders are boot-verified and complete;
+  loadable loaders are a side-module packaging effort (`loaders.cache` + PIC
+  loader modules) with no capability gain now that the dlopen wall is gone.
 - [x] **`patches/widget-factory/0001` — drop `add_callback_symbol`. DONE +
   BOOT-VERIFIED.** The `--selftest` now resolves its `.ui` handler purely via
   `gtk_builder_connect_signals(NULL)` → `g_module_open(NULL)`/`g_module_symbol` →
@@ -64,21 +65,22 @@ nix/patch edit whose PROOF is the `dlopen-smoke.mjs` + GTK smokes on the box:
   the dynamic symbol table the loader searches) + the dynsym-inject pass (so the
   fpcast'd handlers have canonical-thunk elem slots — already the seam from Track
   C). **Verify:** `widget-factory-smoke.mjs` with the workaround removed.
-- [ ] **galculator — real window with no workaround.** galculator's 115 `.ui`
+- [x] **galculator — real window with no workaround. DONE + GUI-VERIFIED
+  (2026-07-11).** galculator's 115 `.ui`
   handlers go through `gtk_builder_connect_signals(NULL)` → GModule → the real
   loader now. galculator already dynsym-injects (this PR wired it,
   `deps-overlay.nix`, and its binary now carries `cb.dynsym` — verified on the
-  build box). The GModule wall is gone (dlopen boot-verified); the click-to-42 is
-  now a browser-VISUAL check (needs a compositor), no longer a mechanism gap.
+  build box). The GModule wall is gone (dlopen boot-verified); the real browser
+  click-to-42 path passed through the 115 autoconnected handlers with no
+  GModule/signal-connect failure. See
+  `docs/superpowers/notes/m4-galculator-visual.md`.
 - [x] **`runtime/kernel-worker.js` — real dlsym.** DONE in this PR: the
   `__wasm_dl_probe`/`__wasm_dlopen`/`__wasm_dlsym` host imports + the
   `DynamicLoader` back them; musl 0009 DEFINES `__dlsym_time64` as a real
-  function. The old `__dlsym_time64: () => 0` env stub is now **vestigial** (no
-  new-musl binary imports it) but is KEPT until the coordinated musl rebuild
-  ships — removing it now would break instantiation of any not-yet-rebuilt binary
-  that still carries the weak-undef import. Remove the stub + its allow-list entry
-  in the SAME commit that lands the musl 0009 world rebuild. ENGINE_ABI bumped to
-  8; `sync-to-pc.sh` on the pc side per the runbook.
+  function. **KEEP** the host `__dlsym_time64: () => 0` weak-undefined fallback:
+  current musl resolves the symbol guest-side, while returning NULL lets older
+  objects that still carry the weak import instantiate correctly. The required
+  runtime sync and ABI bump already shipped.
 
 ## Slice 1 — fork/spawn accommodations (gated on #129 real fork + COW)
 
@@ -219,8 +221,11 @@ Gated on the CONFIG_MMU=y kernel arch layer
 - [ ] `toolchain/musl.nix` — `posix_fallocate` emulation + `patches/musl/0008`
   `__unmapself` no-stack-switch — revisit under real VM (both may become
   unnecessary or change shape).
-- [ ] `patches/kernel/0016` (RO-shared-mmap copy), `0022` (ramfs-regrow-shared-
-  mmap), `0025` (file-mmap eager bounce) — demand-paged/COW mmap replaces these.
+- [ ] `patches/kernel/0016` (RO-shared-mmap copy) and `0022`
+  (ramfs-regrow-shared-mmap) — demand-paged/COW mmap may replace these in the
+  MMU kernel, while the supported NOMMU kernel still requires them. The old
+  `0025` "file-mmap eager bounce" reference was stale: `0025` is now the
+  MMU-debug trace patch and must not be removed.
 - [ ] `kernel.nix` — `CONFIG_BOOT_MEM_PAGES` / `CONFIG_ARCH_FORCE_MAX_ORDER`
   contiguous-alloc bumps + `patches/kernel/0007` (4 MiB user stack) — real VM
   removes the contiguous-alloc pressure (paging replaces contiguity).
