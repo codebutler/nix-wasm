@@ -83,15 +83,6 @@ pkgs.writeText "init" ''
       echo "yore: served store not mounted; booting empty ramfs /nix"
       mkdir -p /nix/store
     fi
-
-    # SQLite WAL mmaps its -shm sidecar MAP_SHARED. The writable overlay upper
-    # is ramfs, but overlayfs itself cannot provide the NOMMU shared mapping and
-    # SQLite reports SQLITE_IOERR. Keep the ephemeral fallback database on a
-    # direct ramfs mount instead. Installed systems never take this path: their
-    # persistent database remains directly on the ext2/ext4 state disk.
-    mkdir -p /nix/var/nix/db
-    mount -t ramfs none /nix/var/nix/db 2>/dev/null \
-      || echo "yore: direct ramfs Nix database mount failed"
   }
 
   if [ -b /dev/vdb ]; then

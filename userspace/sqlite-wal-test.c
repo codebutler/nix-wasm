@@ -1,12 +1,14 @@
 /* sqlite-wal-test — #131 SQLite memory-model regression test.
  *
  * The old wasm package forced SQLITE_OMIT_WAL and SQLITE_THREADSAFE=0 because
- * NOMMU could not grow a shared mmap. Both supported kernels now provide a
- * growable MAP_SHARED ramfs mapping. Prove the restored library can select WAL
- * and serialize genuinely concurrent writers on both ramfs mounts.
+ * NOMMU could not grow a shared mmap. Serialized threading is now restored in
+ * both profiles. The MMU profile additionally selects WAL; NOMMU deliberately
+ * uses rollback journaling because SQLite's WAL-index protocol still receives
+ * SQLITE_IOERR on that kernel even on direct ramfs.
  *
  * `--probe-db PATH` is used after a real `nix-env` install to verify that Nix's
- * actual store database persisted WAL mode with this same sqlite library. */
+ * actual store database persisted the profile's expected journal mode with
+ * this same sqlite library. */
 #define _GNU_SOURCE
 #include <pthread.h>
 #include <sqlite3.h>
@@ -17,6 +19,20 @@
 
 #define WORKERS 4
 #define ROWS_PER_WORKER 24
+
+#ifndef SQLITE_EXPECT_WAL
+#define SQLITE_EXPECT_WAL 1
+#endif
+
+#if SQLITE_EXPECT_WAL
+#define JOURNAL_PRAGMA "PRAGMA journal_mode=WAL"
+#define JOURNAL_MODE "wal"
+#define PROFILE_NAME "mmu-wal"
+#else
+#define JOURNAL_PRAGMA "PRAGMA journal_mode=TRUNCATE"
+#define JOURNAL_MODE "truncate"
+#define PROFILE_NAME "nommu-rollback"
+#endif
 
 struct start_gate {
   pthread_mutex_t mutex;
@@ -162,8 +178,8 @@ static int test_path(const char *path) {
     goto out;
   sqlite3_busy_timeout(db, 20000);
 
-  rc = sqlite3_exec(db, "PRAGMA journal_mode=WAL", capture_text, mode, NULL);
-  if (rc != SQLITE_OK || strcmp(mode, "wal") != 0)
+  rc = sqlite3_exec(db, JOURNAL_PRAGMA, capture_text, mode, NULL);
+  if (rc != SQLITE_OK || strcmp(mode, JOURNAL_MODE) != 0)
     goto out;
   if (exec_sql(db,
                "CREATE TABLE writes(worker INTEGER, seq INTEGER, "
@@ -207,21 +223,31 @@ join:
   stmt = NULL;
   if (count != WORKERS * ROWS_PER_WORKER)
     goto out;
-  if (query_journal_mode(db, mode) != SQLITE_OK || strcmp(mode, "wal") != 0)
+  if (query_journal_mode(db, mode) != SQLITE_OK ||
+      strcmp(mode, JOURNAL_MODE) != 0)
     goto out;
 
   snprintf(wal, sizeof(wal), "%s-wal", path);
   snprintf(shm, sizeof(shm), "%s-shm", path);
+#if SQLITE_EXPECT_WAL
   if (access(wal, F_OK) != 0 || access(shm, F_OK) != 0)
     goto out;
 
-  printf("SQLITE-WAL-TEST: %s threadsafe=%d journal=wal rows=%d wal+shm=OK\n",
-         path, sqlite3_threadsafe(), count);
+  printf("SQLITE-MODE-TEST: %s threadsafe=%d journal=%s rows=%d "
+         "profile=%s wal+shm=OK\n",
+         path, sqlite3_threadsafe(), mode, count, PROFILE_NAME);
+#else
+  if (access(shm, F_OK) == 0)
+    goto out;
+  printf("SQLITE-MODE-TEST: %s threadsafe=%d journal=%s rows=%d "
+         "profile=%s rollback=OK\n",
+         path, sqlite3_threadsafe(), mode, count, PROFILE_NAME);
+#endif
   failed = 0;
 out:
   if (failed)
-    printf("SQLITE-WAL-TEST: %s rc=%d mode=%s rows=%d FAIL\n", path, rc,
-           mode, count);
+    printf("SQLITE-MODE-TEST: %s rc=%d mode=%s rows=%d profile=%s FAIL\n",
+           path, rc, mode, count, PROFILE_NAME);
   sqlite3_finalize(stmt);
   sqlite3_close(db);
   pthread_cond_destroy(&gate.cond);
@@ -237,21 +263,23 @@ static int probe_store_db(const char *path) {
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL);
   if (rc == SQLITE_OK)
     rc = query_journal_mode(db, mode);
-  if (rc != SQLITE_OK || strcmp(mode, "wal") != 0 || sqlite3_threadsafe() == 0) {
-    printf("SQLITE-STORE-DB: %s threadsafe=%d journal=%s rc=%d FAIL\n", path,
-           sqlite3_threadsafe(), mode, rc);
+  if (rc != SQLITE_OK || strcmp(mode, JOURNAL_MODE) != 0 ||
+      sqlite3_threadsafe() == 0) {
+    printf("SQLITE-STORE-DB: %s threadsafe=%d journal=%s profile=%s rc=%d FAIL\n",
+           path, sqlite3_threadsafe(), mode, PROFILE_NAME, rc);
     sqlite3_close(db);
     return 1;
   }
-  printf("SQLITE-STORE-DB: %s threadsafe=%d journal=wal OK\n", path,
-         sqlite3_threadsafe());
+  printf("SQLITE-STORE-DB: %s threadsafe=%d journal=%s profile=%s OK\n", path,
+         sqlite3_threadsafe(), mode, PROFILE_NAME);
   sqlite3_close(db);
   return 0;
 }
 
 int main(int argc, char **argv) {
   if (sqlite3_threadsafe() == 0 || sqlite3_config(SQLITE_CONFIG_SERIALIZED) != SQLITE_OK) {
-    printf("SQLITE-WAL-TEST: serialized threading unavailable FAIL\n");
+    printf("SQLITE-MODE-TEST: serialized threading unavailable profile=%s FAIL\n",
+           PROFILE_NAME);
     return 1;
   }
   if (argc == 3 && strcmp(argv[1], "--probe-db") == 0)

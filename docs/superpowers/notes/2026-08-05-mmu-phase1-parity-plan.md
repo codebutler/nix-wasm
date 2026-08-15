@@ -712,19 +712,17 @@ Closed dispositions:
   1.75–2 GiB guest. Patch 0007 likewise remains a NOMMU hard ceiling and the
   MMU initial stack-VMA size. Shared patch/config assertions plus both modes'
   wrapperless-cc, large-install, core, and GTK boot gates verify the decision.
-- [x] **RESTORE IN BOTH MODES** `deps-overlay.nix` SQLite WAL and serialized
-  threading. `SQLITE_OMIT_WAL` and `SQLITE_THREADSAFE=0` are gone; the static
-  target still keeps `SQLITE_OMIT_LOAD_EXTENSION`. A new shared
-  `sqlite-wal-test` selects WAL and runs four contending connections on both
-  `/tmp` and `/dev/shm`, checking the shared-memory sidecars and 96 committed
-  rows. The normal full-system smoke then runs the original real `nix-env`
-  store-DB write and verifies `/nix/var/nix/db/db.sqlite` persisted WAL mode.
-  Installed systems keep that database on their ext2/ext4 state disk; the
-  stateless squashfs+overlay CI/recovery fallback mounts only the database
-  directory directly on ramfs because overlayfs cannot expose the NOMMU shared
-  mapping required by SQLite's `-shm` sidecar.
-  Both MMU and NOMMU core jobs hard-gate the same tests, confirming this was a
-  ramfs mmap limitation already removed for the supported NOMMU profile too.
+- [x] **RESTORE SERIALIZED THREADING IN BOTH; WAL IN MMU.**
+  `SQLITE_THREADSAFE=0` and `SQLITE_OMIT_WAL` are gone from the shared SQLite
+  build; only the orthogonal static-build `SQLITE_OMIT_LOAD_EXTENSION` remains.
+  Live NOMMU boot diagnosis proved that selecting WAL still reaches
+  `SQLITE_IOERR` during the first table write even on a direct ramfs mount, so
+  the NOMMU Nix profile sets upstream's `use-sqlite-wal = false` and uses
+  truncate journaling. The MMU profile keeps WAL. Mode-specific tests run four
+  contending serialized connections on `/tmp` and `/dev/shm`, verify 96 rows,
+  and, for MMU, require both `-wal`/`-shm` sidecars. The full-system smoke then
+  performs the real `nix-env` store-DB write and requires WAL on MMU or truncate
+  mode on NOMMU. Both modes remain supported without globally weakening SQLite.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
   9P `cache=loose,ignoreqv`). **Provisional: VERIFY both, may flip.**
   `cache=loose` exists because NOMMU can't `get_user_pages` on a user buffer
