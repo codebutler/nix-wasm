@@ -1,0 +1,35 @@
+runtime/kernel-worker.js
+  s_5c319dde45a577::t_772d541ee671ff 344-351,1529-1532,1539-1540,1542-1555,1557-1560
+  s_5c319dde45a577::t_0c3865dbc5abc8 1533-1538,1541
+runtime/ffi-codegen.test.js
+  s_5c319dde45a577::t_8603c89f5c676d 85-99
+  s_5c319dde45a577::t_43aa4391e954d0 74
+  s_5c319dde45a577::t_772d541ee671ff 72-73,75-84,228-263
+  s_5c319dde45a577::t_2aa4ef16838e97 264-300
+  s_5c319dde45a577::t_19ab4e3e335760 301
+userspace/libffi-selftest.c
+  s_5c319dde45a577::t_e762fe821e2d50 2-4,18,40-41,48-57,88
+runtime/ffi-codegen.js
+  s_5c319dde45a577::t_8603c89f5c676d 92-97,103-105,124,344-345,348,378-383
+  s_5c319dde45a577::t_4609ae89f762c4 346-347
+  s_5c319dde45a577::t_43aa4391e954d0 116-119
+  s_5c319dde45a577::t_1c832df33db0e7 136
+  s_5c319dde45a577::t_772d541ee671ff 28,88-91,102,112-115,126-132,137-146,329-338,340,343,355-361,384-401,405,408,412
+  s_5c319dde45a577::t_5531e27f067b25 409-411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c9c7710e8c3232a22089ff5dba186970a5732573",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
