@@ -1,0 +1,54 @@
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_e7cb9802002332 1314-1325
+runtime/kernel-worker.js
+  s_5c319dde45a577::t_1725f1021dd5f6 323-330
+runtime/dylink.test.js
+  s_5c319dde45a577::t_1b707a366d3927 11,78-79,81-86,88-95,97-98,100-103,105-108,115-125,127-128,249-250,255-268,278-283,285-291
+  s_5c319dde45a577::t_e6ab5f25fc1677 12,109-111,113-114,269-277
+  s_5c319dde45a577::t_c5eb00a29a66b5 26-28,87,96,251-253
+  s_5c319dde45a577::t_3099184846de76 80
+  s_5c319dde45a577::t_dfa44e6a1aee0e 99,104,126,254,284
+  s_5c319dde45a577::t_3f5eea0ed8388e 292-343
+  s_5c319dde45a577::t_bdcf200c1a347b 112
+  s_5c319dde45a577::t_3196bfb8b48685 344-345
+runtime/softmmu-pass.test.js
+  s_5c319dde45a577::t_b9ba0b91e01826 629,837
+  s_5c319dde45a577::t_3b33e63d00b5b1 13-20,616-628,630-665,797-836
+  s_5c319dde45a577::t_81fe077236ccaa 838-839
+runtime/dylink.js
+  s_5c319dde45a577::t_7239fad57d4c88 710-717,823-827
+  s_5c319dde45a577::t_5ded834ec52872 50,445,451-471
+  s_5c319dde45a577::t_f5080506919b0b 435-440
+  s_5c319dde45a577::t_7f36a89cb2eee3 828
+runtime/test-fixtures/dylink/build.sh
+  s_5c319dde45a577::t_ef456d250b1f16 11,26-32
+  s_5c319dde45a577::t_a71b316f2cd4a7 33-34
+runtime/mmu-uaccess.js
+  s_5c319dde45a577::t_c5ca9af762e0c1 16-19
+CLAUDE.md
+  s_5c319dde45a577::t_c5ca9af762e0c1 1040-1046
+runtime/softmmu-pass.js
+  s_5c319dde45a577::t_ddae1421f0b17b 214-221,241-303,386
+  s_5c319dde45a577::t_41be9ac00646b7 1917-1920,1922-1924
+  s_5c319dde45a577::t_cd6bc278bb00d3 1998-1999,2024
+  s_5c319dde45a577::t_b0b65c286f46c0 2098
+  s_5c319dde45a577::t_36607a3c35a417 387-396,405,952,1906,1921,1925-1926,1930
+  s_5c319dde45a577::t_effea9b66c029f 2060-2068,2101-2105,2142-2144
+  s_5c319dde45a577::t_406a8c34d4947c 304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "cb23397ae3bf0365fca4a286f68455de36800d31",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
