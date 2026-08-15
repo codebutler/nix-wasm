@@ -132,8 +132,11 @@ here.
   `fork ? true` promotes the existing asyncify seam to the default libc;
   `patchFlags = [ "-p1" "--fuzz=0" ]` makes the full musl patch stack strict,
   and patch 0008's stale context was regenerated against the preceding syscall
-  arity patch. The explicit `fork = false` variant remains the supported NOMMU
-  libc and is wired into that image's package set.
+  arity patch. Both shipped images use the shared fork-capable libc and cross
+  package set. NOMMU remains safe because its closure/link contract requires
+  zero `capture_stack` importers, so ordinary NOMMU programs must not call the
+  asyncify fork seam; the optional `fork = false` derivation is only a legacy
+  symbol-absent variant, not the libc wired into the NOMMU image.
 - [x] **`flake.nix` `wasmSystemFork` — drop `wasmAsh` from the fork profile's
   `toolchain` list. DONE (2026-08-13).** The narrow, closure-weight-only
   sub-piece of the box below: `wasmSystemFork`'s `toolchain` was
