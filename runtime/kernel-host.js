@@ -33,7 +33,7 @@ import {
 } from "./virtio/console-device.js";
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SndVirtioDevice } from "./virtio/snd-device.js";
-import { BLK_SECTOR, dirtyBitmapBytes, markDirty, packDirtySectors } from "./virtio/blk-disk.js";
+import { createStateDiskBacking, packDirtySectors } from "./virtio/blk-disk.js";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -121,59 +121,16 @@ export const linux = async ({
   // multi-worker virtio kicks cannot diverge. Bootstrap treats stub-sized
   // disks as "no install" (legacy overlay). hasStateDisk/saveDisk stay false
   // for stubs — only a caller-provided image is persistable.
-  const STATE_STUB_BYTES = 1024 * 1024; // 1 MiB — below bootstrap install threshold
   let state_sab = null;
   let state_dirty_sab = null;
   let state_persistable = false;
   /** @type {(() => void) | null} */
   let state_on_dirty = null;
   {
-    // Prefer the caller's SharedArrayBuffer in place — a 1–2 GiB state disk
-    // must not be duplicated (Uint8Array + SAB copy OOMs the host under the
-    // ~2 GiB guest RAM wasm Memory). Only copy when the buffer isn't already
-    // a sector-aligned SAB (or a full-buffer Uint8Array view over one).
-    const callerImg = stateDisk && stateDisk.image;
-    let sab = null;
-    let persistable = false;
-    if (callerImg instanceof SharedArrayBuffer) {
-      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
-      if (bytes > 0 && bytes === callerImg.byteLength) {
-        sab = callerImg;
-        persistable = true;
-      } else if (bytes > 0) {
-        sab = new SharedArrayBuffer(bytes);
-        new Uint8Array(sab).set(new Uint8Array(callerImg, 0, bytes));
-        persistable = true;
-      }
-    } else if (
-      callerImg instanceof Uint8Array &&
-      callerImg.buffer instanceof SharedArrayBuffer &&
-      callerImg.byteOffset === 0 &&
-      callerImg.byteLength === callerImg.buffer.byteLength
-    ) {
-      const bytes = Math.floor(callerImg.byteLength / BLK_SECTOR) * BLK_SECTOR;
-      if (bytes > 0 && bytes === callerImg.byteLength) {
-        sab = callerImg.buffer;
-        persistable = true;
-      }
-    }
-    if (!sab) {
-      const src = callerImg
-        ? callerImg instanceof Uint8Array
-          ? callerImg
-          : new Uint8Array(callerImg)
-        : null;
-      const bytes =
-        src && src.byteLength
-          ? Math.floor(src.byteLength / BLK_SECTOR) * BLK_SECTOR
-          : STATE_STUB_BYTES;
-      sab = new SharedArrayBuffer(bytes);
-      if (src && bytes > 0) new Uint8Array(sab).set(src.subarray(0, bytes));
-      persistable = !!(src && bytes > 0);
-    }
-    state_sab = sab;
-    state_dirty_sab = new SharedArrayBuffer(dirtyBitmapBytes(sab.byteLength));
-    state_persistable = persistable;
+    const backing = createStateDiskBacking(stateDisk?.image);
+    state_sab = backing.imageBuffer;
+    state_dirty_sab = backing.dirtyBuffer;
+    state_persistable = backing.persistable;
     state_on_dirty =
       state_persistable && typeof stateDisk?.onDirty === "function" ? stateDisk.onDirty : null;
   }
@@ -858,25 +815,13 @@ export const linux = async ({
     // contract). Clears the dirty bitmap so the next save is incremental.
     // Returns null when no persistable state disk was attached (harness stub).
     //
-    // Belt-and-suspenders against a zero base (fresh/Reset image): also mark
-    // every non-zero sector dirty before packing. Incremental saves still rely
-    // on T_OUT dirty bits for sectors written back to zero.
+    // The caller-provided image is the baseline. Guest T_OUT requests mark the
+    // shared bitmap, so packing it is incremental and never scans/re-emits the
+    // populated baseline. Writes back to zero remain represented by dirty bits.
     saveDisk: () => {
       if (!state_persistable || !state_sab || !state_dirty_sab) return null;
       const image = new Uint8Array(state_sab);
       const dirty = new Uint8Array(state_dirty_sab);
-      const sectors = Math.floor(image.length / BLK_SECTOR);
-      for (let s = 0; s < sectors; s++) {
-        const off = s * BLK_SECTOR;
-        let nz = false;
-        for (let i = 0; i < BLK_SECTOR; i++) {
-          if (image[off + i] !== 0) {
-            nz = true;
-            break;
-          }
-        }
-        if (nz) markDirty(dirty, s, 1);
-      }
       const bytes = packDirtySectors(image, dirty, { clear: true });
       return new Blob([bytes]);
     },

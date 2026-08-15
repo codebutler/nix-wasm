@@ -113,6 +113,15 @@ async function main() {
     s1.kill();
     process.exit(1);
   }
+  const secondBlob = s1.handle.saveDisk();
+  if (!secondBlob || secondBlob.size !== 16) {
+    console.error(
+      "FAIL: second save re-emitted the populated baseline (size=%s, expected=16)",
+      secondBlob?.size,
+    );
+    s1.kill();
+    process.exit(1);
+  }
   s1.kill();
 
   // Reboot with dirties applied onto a fresh zero image.

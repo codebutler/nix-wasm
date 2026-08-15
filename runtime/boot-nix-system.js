@@ -21,7 +21,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   vmlinux?: ArrayBuffer|Blob,       // bytes-mode: kernel wasm bytes
  *   initramfs?: ArrayBuffer|Blob,     // bytes-mode: initramfs.cpio.gz bytes
  *   squashfs?: ArrayBuffer | (() => Promise<ArrayBuffer>),
- *   stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void },  // #177: RW /dev/vdb
+ *   stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void },  // #177: RW /dev/vdb; >64 MiB must be a full SharedArrayBuffer
  *   nixCacheBaseUrl?: string,         // bytes-mode: the lazy nix-cache base URL
  *   onModuleCached?: () => void,
  *   cmdline?: string,
