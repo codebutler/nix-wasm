@@ -851,6 +851,17 @@ or no-dlopen — do not touch them in this cleanup.
   closes #11, not this plan.** Do not close the ticket, and do not cite the
   `gtk` shard OR the items-2/3 smoke's CONTENT failure as "real wl_shm"
   evidence, until item 5 (and #203) land.
+  **UPDATE 2026-08-15 — #11 closeout:** #203 is fixed, and item 5 now has the
+  compositor proof this paragraph required. The default-MMU browser hard gate
+  launches `wl-anim` through Sommelier into the real Greenfield compositor,
+  verifies the exact 2,304 foreground / 36,096 background pixel counts on the
+  compositor canvas, and then requires a different full-frame hash with the
+  same counts. Because Sommelier copies damage from the client's ordinary shm
+  mapping into the separate host-visible virtwl allocation on commit, this is
+  direct coverage of `copy_damaged_rect()`'s mmap+copy resynchronization path.
+  KEEP that path; items 4 and 6 retain the explicit KEEP dispositions above.
+  This update supersedes the historical "still open" state in the Phase-1
+  narrative without rewriting the evidence sequence that led to it.
 - **#131** closes when slice 1 (Phase 2), slice 2 (Phase 4, three items), and
   slice 3 (Phase 4, six items) are ALL resolved (deleted-and-verified or
   kept-with-reason) — i.e. at the end of Phase 4.

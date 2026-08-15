@@ -3,8 +3,9 @@
 // Boots the full nix system in headless Chromium (real COOP/COEP via
 // serve.mjs), waits for a shell prompt, then runs the workload matrix:
 //   1. `echo WEB_OK`      — shell round-trip (boot actually works)
-//   2. `gtk3-demo &`      — the dlopen/dlsym + fpcast + wayland workload
-//   3. `echo AFTER_OK`    — the shell (and kernel) survived the GUI app
+//   2. `wl-anim &`        — changing wl_shm pixels reach the real compositor
+//   3. `gtk3-demo &`      — the dlopen/dlsym + fpcast + wayland workload
+//   4. `echo AFTER_OK`    — the shell (and kernel) survived the GUI apps
 // The run FAILS if any `[user-exec] Wasm crash` (or SAB/TextDecoder rejection)
 // appears on the page console at ANY point — that is the whole point: two
 // browser-only engine bugs (nix-wasm#137 SAB decode, #139 canonical dynSlot
@@ -30,6 +31,39 @@ async function waitFor(fn, timeoutMs, pollMs = 500) {
     await new Promise((r) => setTimeout(r, pollMs));
   }
   throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+async function animatedSurfaceState(page) {
+  return page.evaluate(() => {
+    const win = [...document.querySelectorAll(".wl-win")].find(
+      (candidate) => candidate.querySelector(".wl-win-title")?.textContent?.trim() === "anim",
+    );
+    const canvas = win?.querySelector("canvas");
+    if (!canvas || canvas.width !== 240 || canvas.height !== 160) return null;
+
+    const pixels = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height).data;
+    if (!pixels) return null;
+
+    // FNV-1a over compositor-visible RGBA bytes. Count each color as an
+    // independent content check: wl-anim draws a 48x48 box (2,304 pixels) over
+    // a 240x160 background (36,096 pixels), with no antialiasing.
+    let hash = 0x811c9dc5;
+    const colorCounts = new Map();
+    for (let i = 0; i < pixels.length; i += 4) {
+      hash = Math.imul(hash ^ pixels[i], 0x01000193);
+      hash = Math.imul(hash ^ pixels[i + 1], 0x01000193);
+      hash = Math.imul(hash ^ pixels[i + 2], 0x01000193);
+      hash = Math.imul(hash ^ pixels[i + 3], 0x01000193);
+      const rgba = pixels[i] | (pixels[i + 1] << 8) | (pixels[i + 2] << 16) | (pixels[i + 3] << 24);
+      colorCounts.set(rgba, (colorCounts.get(rgba) || 0) + 1);
+    }
+    return {
+      hash: hash >>> 0,
+      colorCounts: [...colorCounts.values()].sort((a, b) => a - b),
+      width: canvas.width,
+      height: canvas.height,
+    };
+  });
 }
 
 async function main() {
@@ -99,6 +133,34 @@ async function main() {
       30_000,
     );
     console.log("WEB_OK received.");
+
+    // #11: wl-anim writes a moving box into ordinary guest wl_shm buffers.
+    // Sommelier must copy each damaged region into its intermediate virtwl
+    // allocation; Greenfield then imports that allocation and paints this
+    // browser canvas. Two non-flat compositor-side frames with distinct hashes
+    // prove the mmap+copy resynchronization path is both necessary and working.
+    await page.keyboard.type("wl-anim >/tmp/wl-anim.log 2>&1 &");
+    await page.keyboard.press("Enter");
+    const hasExpectedPixels = (state) =>
+      state?.colorCounts.length === 2 &&
+      state.colorCounts[0] === 48 * 48 &&
+      state.colorCounts[1] === 240 * 160 - 48 * 48;
+    const firstFrame = await waitFor(async () => {
+      const state = await animatedSurfaceState(page);
+      return hasExpectedPixels(state) ? state : null;
+    }, 60_000);
+    const secondFrame = await waitFor(
+      async () => {
+        const state = await animatedSurfaceState(page);
+        return hasExpectedPixels(state) && state.hash !== firstFrame.hash ? state : null;
+      },
+      15_000,
+      100,
+    );
+    console.log(
+      `wl_shm compositor frames changed: ${firstFrame.hash} -> ${secondFrame.hash} ` +
+        `(${secondFrame.width}x${secondFrame.height}, pixel-counts=${secondFrame.colorCounts}).`,
+    );
 
     // dlopen workload: gtk3-demo dlsym's pango/harfbuzz symbols and runs a
     // full GTK UI through sommelier/greenfield. Run it in the background,
