@@ -4,7 +4,8 @@
 // present in /bin), so no install is needed — we boot once and run them in
 // sequence, amortising the one squashfs+cache substitution over all of them.
 //
-// Covered (each is the exact command + assertion of its standalone *-smoke.mjs):
+// Covered (each entry is an exact in-guest command plus output assertion):
+//   pthread-exit-test       — ramfs posix_fallocate + detached __unmapself (#131)
 //   glib-selftest            — gobject + libffi double marshaller (M3a)
 //   libffi-selftest          — libffi raw wasm backend (f32/f64/i64 by-value)
 //   pango-text --selftest    — pango_cairo layout → fontconfig → cairo-ft (M3a)
@@ -33,6 +34,15 @@
 import { bootNode } from "./boot-node.mjs";
 
 const TESTS = [
+  {
+    name: "musl-memory",
+    cmd: "/bin/pthread-exit-test",
+    // One ordered assertion covers both fallocate probes and the final detached
+    // thread marker. The binary exits before the pthread half if either ramfs
+    // check fails, so the final marker cannot mask an earlier failure.
+    re: /FALLOCATE-TEST: \/tmp\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*FALLOCATE-TEST: \/dev\/shm\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*PTHREAD-EXIT-TEST: spawned\+exited 16 detached threads OK/,
+    ms: 30000,
+  },
   {
     name: "glib",
     cmd: "/bin/glib-selftest",

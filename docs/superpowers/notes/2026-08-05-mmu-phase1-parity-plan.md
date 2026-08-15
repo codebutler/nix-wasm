@@ -667,22 +667,22 @@ Closed dispositions:
 
 (Unblocked by Phase 3 — every item below needs a CONFIG_MMU=y boot to verify.)
 
-- [ ] `toolchain/musl.nix` `posix_fallocate` emulation.
-  **Provisional: keep, because** the underlying gap is a real Linux
-  filesystem property, not a NOMMU accommodation — ramfs has NO `->fallocate`
+- [x] **KEEP** `toolchain/musl.nix` `posix_fallocate` emulation. The underlying
+  gap is a real Linux filesystem property, not a NOMMU accommodation — ramfs
+  has NO `->fallocate`
   on ANY kernel, MMU or not (`fs/ramfs/file-nommu.c` / `file-mmu.c` both lack
-  it; glibc emulates on every real system for the same reason). MMU-vs-NOMMU
-  is orthogonal to this gap. VERIFY empirically anyway (boot the MMU-default
-  guest, `fallocate` on `/tmp`/`/dev/shm`) before writing off the audit's own
-  "may become unnecessary" hedge as wrong.
-- [ ] `patches/musl/0008` `__unmapself` no-stack-switch.
-  **Provisional: keep, because** the underlying limitation is wasm's own
-  operand-stack model (`CRTJMP` needs a native SP swap that no wasm engine
+  it; glibc emulates on every real system for the same reason). The shared
+  `selftests-batch` musl-memory case hard-gates NOMMU and MMU boots and proves raw
+  `fallocate(2)` fails on both `/tmp` and `/dev/shm`, while the emulated
+  `posix_fallocate()` succeeds with the required size/offset/content semantics.
+- [x] **KEEP** `patches/musl/0008` `__unmapself` no-stack-switch. The underlying
+  limitation is wasm's own operand-stack model (`CRTJMP` needs a native SP swap
+  that no wasm engine
   offers), not a property of NOMMU vs a software-MMU page table — asyncify
-  controls the *C call stack's contents*, not a foreign jump target. VERIFY:
-  boot `.#pthread-exit-test`-equivalent (detached-thread exit) on the
-  MMU-default guest; if it still SIGILLs without the emulation, keep with this
-  same reasoning recorded, don't re-litigate it per-PR.
+  controls the *C call stack's contents*, not a foreign jump target. The same
+  two-mode `selftests-batch` musl-memory case returns 16 detached threads through
+  this path; losing the patch takes musl's generic `CRTJMP` abort and prevents
+  the required `PTHREAD-EXIT-TEST` success marker.
 - [ ] `patches/kernel/0016` (RO-shared-mmap copy) + `0022` (ramfs-regrow-
   shared-mmap). **Provisional: delete + boot-verify.** These exist
   specifically because NOMMU mmap has no demand-paging/COW to fall back on;

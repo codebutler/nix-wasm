@@ -1,4 +1,9 @@
-/* pthread-exit-test — regression test for detached-thread exit on wasm/NOMMU.
+/* pthread-exit-test — musl memory-compat regression test on wasm Linux.
+ *
+ * First prove why the local posix_fallocate emulation remains necessary on
+ * both supported kernels: their /tmp and /dev/shm are ramfs, whose native
+ * fallocate(2) returns EOPNOTSUPP, while posix_fallocate() must still grow a
+ * regular file without changing its offset or contents.
  *
  * A DETACHED pthread that returns/exits goes through musl __pthread_exit →
  * __unmapself, which on the generic path does a native stack-pointer switch
@@ -6,12 +11,82 @@
  * that abort()s → SIGILL (exit 132). GLib GThreadPool workers (gdk-pixbuf/GTask,
  * used by GTK apps like gtk3-widget-factory) are detached threads, so this crash
  * blocked GTK rendering. patches/musl/0008 replaces __unmapself on wasm with an
- * inline munmap+exit (no stack switch). This test spawns several detached threads
- * that immediately exit; if the fix is missing the process dies with SIGILL and
- * never prints the OK line. */
+ * inline munmap+exit (no stack switch). The second half spawns several detached
+ * threads that immediately exit; if the fix is missing the process dies with
+ * SIGILL and never prints the OK line. */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+static int test_fallocate(const char *path) {
+  const off_t base = 4096;
+  const off_t len = 8192;
+  const off_t expected_size = base + len;
+  const off_t expected_offset = 7;
+  const unsigned char marker = 0x5a;
+  unsigned char actual = 0;
+  struct stat st;
+
+  int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+  if (fd < 0) {
+    printf("FALLOCATE-TEST: %s open failed: %s FAIL\n", path, strerror(errno));
+    return 1;
+  }
+
+  int failed = 0;
+  if (write(fd, &marker, 1) != 1 || lseek(fd, expected_offset, SEEK_SET) != expected_offset) {
+    printf("FALLOCATE-TEST: %s setup failed: %s FAIL\n", path, strerror(errno));
+    failed = 1;
+    goto out;
+  }
+
+  errno = 0;
+  if (fallocate(fd, 0, base, len) == 0 || (errno != EOPNOTSUPP && errno != ENOSYS)) {
+    printf("FALLOCATE-TEST: %s raw fallocate unexpectedly rc/errno=%d FAIL\n", path,
+           errno);
+    failed = 1;
+    goto out;
+  }
+  int raw_errno = errno;
+
+  int rc = posix_fallocate(fd, base, len);
+  if (rc != 0) {
+    printf("FALLOCATE-TEST: %s posix_fallocate rc=%d (%s) FAIL\n", path, rc,
+           strerror(rc));
+    failed = 1;
+    goto out;
+  }
+  if (fstat(fd, &st) != 0) {
+    printf("FALLOCATE-TEST: %s fstat failed: %s FAIL\n", path, strerror(errno));
+    failed = 1;
+    goto out;
+  }
+  if (st.st_size < expected_size) {
+    printf("FALLOCATE-TEST: %s size=%lld expected>=%lld FAIL\n", path,
+           (long long)st.st_size, (long long)expected_size);
+    failed = 1;
+    goto out;
+  }
+  if (lseek(fd, 0, SEEK_CUR) != expected_offset || pread(fd, &actual, 1, 0) != 1 ||
+      actual != marker) {
+    printf("FALLOCATE-TEST: %s offset/content preservation FAIL\n", path);
+    failed = 1;
+    goto out;
+  }
+
+  printf("FALLOCATE-TEST: %s raw=%s posix=OK size=%lld offset/content=OK\n", path,
+         raw_errno == EOPNOTSUPP ? "EOPNOTSUPP" : "ENOSYS", (long long)st.st_size);
+
+out:
+  close(fd);
+  unlink(path);
+  return failed;
+}
 
 static void *worker(void *arg) {
   (void)arg;
@@ -19,6 +94,10 @@ static void *worker(void *arg) {
 }
 
 int main(void) {
+  if (test_fallocate("/tmp/posix-fallocate-test") != 0 ||
+      test_fallocate("/dev/shm/posix-fallocate-test") != 0)
+    return 1;
+
   const int N = 16;
   for (int i = 0; i < N; i++) {
     pthread_attr_t attr;

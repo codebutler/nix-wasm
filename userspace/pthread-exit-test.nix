@@ -1,10 +1,10 @@
-# pthread-exit-test — regression test for detached-thread exit on wasm/NOMMU
-# (the __unmapself / CRTJMP-abort crash fixed by patches/musl/0008). Statically
-# linked so it runs from the initramfs. Run in guest: `pthread-exit-test`.
+# pthread-exit-test — regression test for the two wasm musl memory accommodations:
+# ramfs posix_fallocate emulation plus detached-thread __unmapself without the
+# native CRTJMP stack switch. Statically linked into both initramfs variants.
 { cross }:
 cross.stdenv.mkDerivation {
   pname = "pthread-exit-test";
-  version = "0.1.0";
+  version = "0.2.0";
   dontUnpack = true;
   dontConfigure = true;
   buildPhase = ''
@@ -17,5 +17,5 @@ cross.stdenv.mkDerivation {
     install -Dm755 pthread-exit-test $out/bin/pthread-exit-test
     runHook postInstall
   '';
-  meta.description = "detached pthread exit (__unmapself) regression test, wasm32";
+  meta.description = "ramfs fallocate and detached pthread exit regression test, wasm32";
 }
