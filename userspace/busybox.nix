@@ -1,5 +1,8 @@
-# The wasm32-linux-musl NOMMU busybox — the guest's init + shell + coreutils,
-# built from busybox 1.36.1 + the harness wasm-arch/clone-spawn patch.
+# The wasm32-linux-musl NOMMU busybox — the supported NOMMU mode's init + shell
+# + coreutils, built from busybox 1.36.1 + the harness wasm-arch/clone-spawn
+# patch. yore-pc can select this process model independently of the default MMU
+# image, so these patches are mode-specific implementation, not deprecation
+# scaffolding.
 #
 # WHY a custom derivation and not nixpkgs `cross.busybox`: stock busybox spawns
 # children with fork()/vfork()+exec. On the wasm NOMMU clone-with-fn model a raw

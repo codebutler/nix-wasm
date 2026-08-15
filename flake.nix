@@ -65,7 +65,7 @@
       kernelMmuA2 = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; };
       # #128 A2 DEBUG: same as kernelMmuA2 + a bounded printk trace of the fault path.
       kernelMmuA2Dbg = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; mmu = true; a2 = true; debugTrace = true; };
-      # Worker #7 spawn-corruption investigation: the deprecated NOMMU kernel +
+      # Worker #7 spawn-corruption investigation: the supported NOMMU kernel +
       # CONFIG_DEBUG_NOMMU_REGIONS/CONFIG_DEBUG_VM. Byte-identical to the
       # internal NOMMU `kernel` derivation except for debug options.
       kernelDebugNommu = import ./kernel.nix { inherit pkgs kernelCC kernelSrc; debugNommu = true; };
@@ -795,7 +795,7 @@
       # _Fork seam + a whole-module wasm-opt --asyncify, and bakes it into a PARALLEL
       # squashfs (real-fork busybox + the fork bootstrap, matching .#wasm-initramfs-
       # fork). Phase 3 promotes this build to the shipped default; the old
-      # clone-vfork build remains under the explicit `-nommu` compatibility attrs.
+      # clone-vfork build remains under the explicit supported `-nommu` attrs.
       nixWasmFork = import ./nix-wasm.nix {
         inherit pkgs cross sysroot kernelHeaders libcxx compilerRt nixSrc muslFork;
         realFork = true;
@@ -814,7 +814,7 @@
       wasmSystemFork = import ./userspace/system.nix {
         inherit nixpkgs cross;
         busybox = wasmBusyboxFork;
-        # #131 slice-1 (first accommodation retirement, 2026-08-13): wasmAsh
+        # #131 slice-1 (MMU-profile isolation, 2026-08-13): wasmAsh
         # dropped from this profile's toolchain. The fork guest's /bin/sh is
         # busybox-fork's own stock hush applet (userspace/busybox-fork.nix) —
         # bootstrap.nix's forkshell-ash `/bin/sh` promotion is unconditionally
@@ -904,15 +904,23 @@
         extraRootPaths = [ nixpkgs.outPath ] ++ builtins.concatMap allOutputs wasmPublishedPkgs;
       };
 
-      # ---- the single versioned `linux` boot bundle (pc#315) ----------------
-      # vmlinux + initramfs + squashfs + manifest(minEngine) as one iso9660
-      # image. Downloaded once by pc via the disc installer, mounted, and booted
-      # from the bytes. nix-cache stays a separate lazy R2 cache.
+      # ---- the versioned `linux` boot bundles (pc#315 / dual-mode channel) ---
+      # Each process model gets a coherent vmlinux + initramfs + squashfs +
+      # manifest(minEngine) iso9660 image. The publisher exposes both in one
+      # backward-compatible channel pointer: MMU remains the default/top-level
+      # image, while yore-pc can explicitly select NOMMU. nix-cache stays a
+      # separate lazy R2 cache shared by both modes.
       linuxImage = import ./userspace/linux-image.nix {
         inherit pkgs nixpkgs;
         kernel = kernelMmuA2;
         initramfs = wasmInitramfsFork;
         squashfs = wasmBaseSquashfsFork;
+      };
+      linuxImageNommu = import ./userspace/linux-image.nix {
+        inherit pkgs nixpkgs;
+        kernel = kernel;
+        initramfs = wasmInitramfs;
+        squashfs = wasmBaseSquashfs;
       };
 
       # ---- nix-wasm#202 PR-1: the spawn-contract gate (see spikes/
@@ -1057,7 +1065,7 @@
         kernel-cc = kernelCC;
 
         # Phase 3: the checked software-MMU/fork guest is the public default.
-        # Keep explicit compatibility attrs for the NOMMU deprecation window and
+        # Keep explicit supported attrs for yore-pc's selectable NOMMU mode and
         # the former MMU names so callers can migrate without ambiguity.
         kernel = kernelMmuA2;
         kernel-nommu = kernel;
@@ -1316,8 +1324,8 @@
         wasm-pool-churn = wlPoolChurn;
 
         # Nix itself, cross-compiled → $out/bin/nix (the wasm binary). The
-        # real-fork build is the Phase-3 default; retain the old clone-vfork
-        # build explicitly for the NOMMU deprecation job.
+        # real-fork build is the default; retain the clone-vfork build explicitly
+        # for the supported NOMMU mode and its dedicated CI job.
         nix-wasm = nixWasmFork;
         nix-wasm-nommu = nixWasm;
 
@@ -1387,8 +1395,11 @@
         # + $out/share/dltest/*.so. Gate: runtime demo/node/dlopen-smoke.mjs.
         dltest = wasmDltest;
 
-        # The single versioned `linux` boot bundle (pc#315): $out/iso/linux.iso.
+        # Production channel boot bundles: MMU is the default; NOMMU is an
+        # equally supported selectable mode in yore-pc. Each evaluates the
+        # process-model coherence assertion in userspace/linux-image.nix.
         linux-image = linuxImage;
+        linux-image-nommu = linuxImageNommu;
 
         # Static passwd/group files for the wasm guest.
         userspace-passwd = pkgs.runCommand "userspace-passwd" { } ''

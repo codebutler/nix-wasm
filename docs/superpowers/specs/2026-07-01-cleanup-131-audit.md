@@ -6,23 +6,21 @@ world-build-gated items are specified exactly here so the box/CI executes them
 without re-deriving intent.
 Parent: `2026-07-01-software-mmu-asyncify-design.md` (#126), issue #131.
 
-> #131 is the point of the epic — DELETE the NOMMU/no-fork/no-dlopen
-> accommodations the three tracks make unnecessary. Its own DoD: "each box
+> #131 is the point of the epic — classify the NOMMU/no-fork/no-dlopen
+> accommodations the three tracks made optional. Its own DoD is "each box
 > checked OR explicitly decided 'keep, because <reason not one of the three
-> walls>'." Every accommodation is a nix-override / patch / musl / kernel change
-> whose correctness is only observable by BUILDING + BOOTING the guest. This
-> environment has no nix and cannot fetch the kernel source, so the deletions are
-> **specified here to the exact edit** and executed on the box — blindly editing
-> the (documented-as-fiddly) glib/gtk3 overrides without a boot to verify would
-> be precisely the unverified workaround the PRIME DIRECTIVE forbids.
+> walls>'." NOMMU is now an intentionally supported yore-pc mode, so process-
+> and memory-model accommodations remain where that mode requires them and are
+> excluded from the MMU image. Every removal still requires a built and booted
+> guest rather than an unverified source-only edit.
 
 ## Gate status of each slice
 
 | Slice | Gate | Track status | Can execute here? |
 |---|---|---|---|
-| 1 — fork/spawn | Track B real `fork()` (#129) | **mechanism DONE + BOOT-VERIFIED** (musl/kernel/engine fork+COW; `fork-smoke` passes; the fork guest's `/bin/sh` (hush) is autoconf-capable, host-proven + hard-gated, and the in-guest autotools acceptance gate is now green too — see the 2026-08-13 updates below). Slice-1 *retirement*: the `wasmAsh`-from-fork-profile REVERT is DONE (2026-08-13); the rest (musl fork/vfork restoration, the forkshell-ash accommodation, the busybox fork-patch reverts, the per-package triage, the link-contract relax) has **not started**. | Yes for the first REVERT (executed); the remaining slice-1 REVERTs are each their own world-rebuild-scale edit, now unblocked (the in-guest autotools gate that used to precondition them is green) but not yet executed |
+| 1 — fork/spawn | Track B real `fork()` (#129) | **mechanism DONE + BOOT-VERIFIED** (musl/kernel/engine fork+COW; `fork-smoke` passes; the MMU guest's `/bin/sh` (hush) is autoconf-capable, host-proven + hard-gated, and the in-guest autotools acceptance gate is green). Slice-1 is dispositioned by profile: MMU uses stock fork sites; NOMMU keeps the forkshell/clone-with-fn port it requires. | Done; both profiles have explicit build and boot coverage |
 | 2 — dlopen | Track C GModule (#130) | **LANDED + BOOT-VERIFIED** (loader + musl 0009 + dynsym seam + libffi codegen; `dlopen-smoke` passes in a booted guest, galculator carries `cb.dynsym`) | Yes — being executed |
-| 3 — NOMMU memory | Track A real MMU (#128) | **mechanism DONE + BOOT-VERIFIED** (both A1 — `.#kernel-mmu`, `mmu-smoke.mjs` — and A2 demand-paging/COW — `.#kernel-mmu-a2`, `mmu-smoke-a2.mjs` — boot and are hard-gated in CI). Slice-3 *retirement* itself (the accommodations below) has **not started**, and each item there still needs its own CONFIG_MMU=y boot to verify per-item, not just the mechanism. | Partially — the CONFIG_MMU=y boot the row used to require now exists and is gated; executing the slice-3 retirement items still needs the box |
+| 3 — NOMMU memory | Track A real MMU (#128) | **mechanism DONE + BOOT-VERIFIED** (both A1 — `.#kernel-mmu`, `mmu-smoke.mjs` — and A2 demand-paging/COW — `.#kernel-mmu-a2`, `mmu-smoke-a2.mjs` — boot and are hard-gated in CI). Memory-model accommodations must now be classified as shared, MMU-only, or NOMMU-only rather than removed wholesale. | Partially — remaining boxes still need per-profile build/boot disposition |
 
 ## Slice 2 — dlopen accommodations (gated on #130, LANDED)
 
@@ -117,17 +115,14 @@ Issue #192 (the kernel exec-image-buffer fragmentation bug that killed
 first green CFGRC (workflow run 31697211801) and is now a `run_smoke` hard
 gate in `nix-wasm.yml`'s `nix-boot-smoke-mmu` `core` shard — see CLAUDE.md
 and `docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`'s
-"Real-fork autotools proof" item. This unblocks slice-1 REVERTs whose
-correctness that gate was standing in for. The FIRST one has been executed
-in this same change — see the `wasmAsh`-from-fork-profile box above, now
-checked. The remaining REVERT boxes below (the forkshell-ash accommodation,
-the busybox fork-patch reverts, and the per-package fork triage) are each
-their own world-rebuild-scale edit and are still UNSTARTED — this gate going
-green does not itself execute them, it only removes the precondition that
-was blocking their execution. Per this audit's own DoD ("each box checked
-OR explicitly decided 'keep, because <reason>'"), a **KEEP-with-reason**
-disposition is a valid closure on its own terms independent of this gate:
-two items originally on this list were adjudicated KEEP on 2026-08-13
+"Real-fork autotools proof" item. This made every slice-1 disposition
+testable on the MMU profile. The `wasmAsh`-from-fork-profile removal is
+executed, while the forkshell, BusyBox spawn patches, and shared-package
+triage below are now explicitly KEEP for the supported NOMMU profile. Per
+this audit's own DoD ("each box checked OR explicitly decided 'keep, because
+<reason>'"), a **KEEP-with-reason** disposition closes the item independently
+of the gate. Two items originally on this list were first adjudicated KEEP on
+2026-08-13
 (codebutler/nix-wasm#131 comment
 [5278756088](https://github.com/codebutler/nix-wasm/issues/131#issuecomment-5278756088))
 and moved to "Explicitly KEPT" below instead of staying REVERT checkboxes
@@ -137,8 +132,11 @@ here.
   `fork ? true` promotes the existing asyncify seam to the default libc;
   `patchFlags = [ "-p1" "--fuzz=0" ]` makes the full musl patch stack strict,
   and patch 0008's stale context was regenerated against the preceding syscall
-  arity patch. The explicit `fork = false` variant remains available only for
-  historical comparison.
+  arity patch. Both shipped images use the shared fork-capable libc and cross
+  package set. NOMMU remains safe because its closure/link contract requires
+  zero `capture_stack` importers, so ordinary NOMMU programs must not call the
+  asyncify fork seam; the optional `fork = false` derivation is only a legacy
+  symbol-absent variant, not the libc wired into the NOMMU image.
 - [x] **`flake.nix` `wasmSystemFork` — drop `wasmAsh` from the fork profile's
   `toolchain` list. DONE (2026-08-13).** The narrow, closure-weight-only
   sub-piece of the box below: `wasmSystemFork`'s `toolchain` was
@@ -170,26 +168,30 @@ here.
   shrinks by the ash package + its unique deps). This is a REVERT of the
   narrowest possible slice of the item below — it does not touch
   `userspace/ash.nix`/`ash-cb-guest.c`/`patches/busybox/ash/*` themselves,
-  which remain load-bearing for NOMMU and are unstarted work, tracked
-  separately in the next box.
-- [ ] `userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*` — drop
-  the forkshell-ash accommodation ENTIRELY (i.e. retire it as a NOMMU
-  accommodation too, once #131 slice 1 flips the default guest off NOMMU).
-  **Superseded direction (see status update above):** stock ash is blocked by
-  nix-wasm#188 (musl `longjmp` is an `abort()` stub, unrelated to fork), so
-  the guest's post-retirement `/bin/sh` is stock hush (already promoted on
-  the `-fork` variant today), not stock ash as this item originally
-  specified. The narrow `wasmAsh`-from-fork-profile sub-piece this item used
-  to also describe is DONE — see the box immediately above; this box is now
-  scoped to the NOMMU-only forkshell-ash accommodation itself, unstarted.
-- [ ] `patches/busybox/0001,0003–0007`, fork part of `0008` — revert to stock
-  busybox fork.
+  which remain load-bearing for NOMMU and are dispositioned separately in the
+  next box.
+- [x] `userspace/ash.nix` + `ash-cb-guest.c` + `patches/busybox/ash/*` —
+  **KEEP for the supported NOMMU mode.** yore-pc must be able to boot Linux
+  both with and without the software MMU. The MMU image already excludes this
+  derivation and uses stock hush with real fork, so the accommodation is
+  isolated to the process model that requires it rather than imposed on the
+  default.
+- [x] `patches/busybox/0001,0003–0007`, fork part of `0008` — **KEEP for the
+  supported NOMMU mode.** `userspace/busybox-fork.nix` is the MMU recipe and
+  already preserves stock fork/vfork call sites; `userspace/busybox.nix` owns
+  the clone-with-fn implementation needed by the selectable NOMMU image.
 - [x] `patches/glib/0001` + `deps-overlay.nix` glib — **KEEP** (moved to
   "Explicitly KEPT" below; see the 2026-08-13 disposition).
 - [x] `patches/pkg-config/0001` — **KEEP** (moved to "Explicitly KEPT" below;
   see the 2026-08-13 disposition).
-- [ ] `deps-overlay.nix` per-package fork triage — re-enable openssl CLI, pcre2
-  callout-fork, ncurses test-demos, busybox IFUP/IFDOWN/TELNETD.
+- [x] `deps-overlay.nix` per-package fork triage — **profile-aware
+  disposition.** The cross package set is shared by both supported modes, so
+  KEEP the unused OpenSSL CLI and PCRE2 callout-fork feature disabled rather
+  than ship non-asyncified fork callers that NOMMU cannot run. KEEP ncurses'
+  uninstalled test/demo programs out of the cross build because they add no
+  guest capability. BusyBox is already split correctly: the MMU recipe keeps
+  IFUP/IFDOWN/TELNETD enabled and asserts all three; only the NOMMU recipe
+  disables their incompatible vfork call sites.
 - [x] `.#nofork-linkcheck` — retired (2026-08-14). The canonical
   `.#spawn-linkcheck` now pins the promoted default's
   `fork=NEEDS_CAPTURE_STACK / spawn=LINKED` contract. **CORRECTED (2026-08-14):**
@@ -204,7 +206,10 @@ here.
   `capture_stack`) and stays in place unchanged by this slice.
 - [x] Rewrite `docs/process-model.md` for the fork-capable libc default while
   keeping the NOMMU-vs-MMU execution boundary explicit.
-- [ ] Unblocks **#93** (s6 no longer needs fork→posix_spawn).
+- [x] Reassess **#93** — dual-mode support means the old blanket gate is wrong,
+  but s6 cannot simply assume stock fork everywhere: an MMU build may opt into
+  the asyncify fork seam, while a NOMMU build still needs a `posix_spawn` port.
+  Track that choice on #93 rather than treating the MMU mechanism as universal.
 
 ## Slice 3 — non-Wayland NOMMU-memory accommodations (gated on #128 real MMU)
 

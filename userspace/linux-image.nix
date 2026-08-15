@@ -1,10 +1,11 @@
-# linux-image.nix — the single versioned `linux` boot bundle (pc#315). ONE
-# iso9660 image grafting the three boot artifacts plus a manifest, built with
-# nixpkgs' standard make-iso9660-image (xorriso → reproducible). pc downloads it
-# once via the disc installer, mounts it, reads the members out, and boots from
-# the bytes. The compiler toolchain (nix-cache) is NOT in here — it stays a
-# lazily-fetched R2 cache so opening a shell/GUI app doesn't pull the ~29 MB
-# toolchain. See docs/superpowers/specs/2026-06-24-linux-bundle-channel-design.md.
+# linux-image.nix — one coherent process-model boot bundle (pc#315). Each
+# instantiation grafts vmlinux + initramfs + squashfs + manifest into an iso9660
+# image built with nixpkgs' standard make-iso9660-image (xorriso → reproducible).
+# The production channel instantiates this twice (MMU and NOMMU); yore-pc chooses
+# a mode, downloads that image once via the disc installer, mounts it, reads the
+# members out, and boots from the bytes. The compiler toolchain (nix-cache) is
+# shared and remains a lazily-fetched R2 cache. See
+# docs/superpowers/specs/2026-06-24-linux-bundle-channel-design.md.
 { pkgs, nixpkgs, kernel, initramfs, squashfs, version ? 1 }:
 let
   lib = pkgs.lib;
@@ -75,4 +76,3 @@ makeIso {
     { source = manifest;                           target = "/manifest.json"; }
   ];
 }
-

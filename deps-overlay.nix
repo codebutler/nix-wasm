@@ -135,14 +135,13 @@ in
   # int→char* and clang errors (-Wint-conversion). -U lets openssl take its POSIX
   # branch on musl. (static linking comes from isStatic.)
   #
-  # `no-apps`: clean-NOMMU spawn contract — the `openssl` CLI binary (apps/openssl)
+  # `no-apps`: dual-mode package-set contract — the `openssl` CLI binary (apps/openssl)
   # is the ONLY openssl artifact that calls fork() (speed.c parallel benchmark
-  # workers + apps/http_server.c); libssl/libcrypto do NOT. wasm musl ships no
-  # fork() (return-twice is unimplementable on the NOMMU clone-with-fn model), so
-  # apps/openssl fails to LINK ("undefined symbol: fork"). The cross-compiled wasm
-  # openssl CLI would never run on the host and the guest only consumes the
-  # libraries (curl/libgit2 → nix.wasm), so skip building it. Wasm-guarded → native
-  # openssl still builds its CLI.
+  # workers + apps/http_server.c); libssl/libcrypto do NOT. The shared cross set
+  # serves both supported process models. A plain fork caller needs the MMU-only
+  # asyncify pipeline and cannot run on NOMMU, while the CLI is not shipped or
+  # consumed by either guest. Keep it out rather than tax/split the shared world
+  # for an unused tool. Wasm-guarded → native openssl still builds its CLI.
   #
   # With `no-apps` there is no `$out/bin/openssl`, so nixpkgs' stock `postInstall`
   # (which `mv $out/bin → $bin/bin` then `makeWrapper $bin/bin/openssl … c_rehash`)
@@ -171,31 +170,28 @@ in
     }))
     prev.openssl;
 
-  # pcre2: clean-NOMMU spawn contract — the `pcre2grep` CLI tool calls fork() for
+  # pcre2: dual-mode package-set contract — the `pcre2grep` CLI tool calls fork() for
   # its `--exec`/callout-fork feature (pcre2grep.c, guarded by
   # SUPPORT_PCRE2GREP_CALLOUT_FORK). The libpcre2 LIBRARY (the only thing libgit2 →
-  # nix.wasm consumes) does NOT. wasm musl ships no fork(), so pcre2grep fails to
-  # LINK ("undefined symbol: fork"). `--disable-pcre2grep-callout-fork` drops the
-  # fork-based callout from pcre2grep — the tool still builds (and is unused on the
-  # guest), the library is unaffected. Wasm-guarded → native pcre2 keeps the
-  # feature.
+  # nix.wasm consumes) does NOT. A working callout-fork build would be MMU-only
+  # and asyncified, but this shared package output must remain runnable on NOMMU
+  # and the feature is unused by both guests. Disable only that callout; the tool
+  # still builds and the library is unaffected. Native pcre2 keeps the feature.
   pcre2 = whenWasm
     (p: p.overrideAttrs (o: {
       configureFlags = (o.configureFlags or [ ]) ++ [ "--disable-pcre2grep-callout-fork" ];
     }))
     prev.pcre2;
 
-  # ncurses: clean-NOMMU spawn contract — ncurses' default `make all` descends into
+  # ncurses: dual-mode package-set contract — ncurses' default `make all` descends into
   # its `test/` directory and builds the demo programs (ditto.c is a multi-terminal
   # demo that calls fork(); several others do too). Those demos are NEVER installed
   # (the install targets are install.{libs,progs,includes,data,man} — none touch
-  # test/) and never run on the guest. They only linked on the old runtime-abort-stub
-  # model because `fork` was a linkable symbol that SIGILL'd at runtime; with the
-  # symbol removed from musl they fail at LINK ("undefined symbol: fork"). Build only
-  # the targets that are actually installed (`libs progs` → libncursesw + tic/tput/…),
-  # so the unused fork-using demos are not built. The library and programs the guest
-  # consumes (terminfo via tic, libncursesw) are unaffected. Wasm-guarded → native
-  # ncurses still builds its full `all` (test demos included).
+  # test/) and never run on the guest. Building them would require admitting the
+  # MMU asyncify fork seam for discarded build intermediates while still producing
+  # one package set for NOMMU. Build only the installed targets (`libs progs` →
+  # libncursesw + tic/tput/…). Guest capability is unchanged; native ncurses still
+  # builds its full `all` (test demos included).
   ncurses = whenWasm
     (p: p.overrideAttrs (o: {
       buildFlags = (o.buildFlags or [ ]) ++ [ "libs" "progs" ];
