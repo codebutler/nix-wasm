@@ -35,9 +35,7 @@ async function waitFor(fn, timeoutMs, pollMs = 500) {
 
 async function animatedSurfaceState(page) {
   return page.evaluate(() => {
-    const win = [...document.querySelectorAll(".wl-win")].find(
-      (candidate) => candidate.querySelector(".wl-win-title")?.textContent?.trim() === "anim",
-    );
+    const win = document.querySelector('.wl-win[data-wayland-app-id="be.udev.anim"]');
     const canvas = win?.querySelector("canvas");
     if (!canvas || canvas.width !== 240 || canvas.height !== 160) return null;
 

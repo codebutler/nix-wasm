@@ -162,6 +162,10 @@ async function boot() {
   function mountSurfaceWindow(record, key) {
     const win = document.createElement("div");
     win.className = "wl-win";
+    const metadata = metaFor(key);
+    win.dataset.waylandSurface = key;
+    win.dataset.waylandTitle = metadata.title || "";
+    win.dataset.waylandAppId = metadata.appId || "";
     win.style.left = 80 + (winCount % 5) * 30 + "px";
     win.style.top = 80 + (winCount % 5) * 30 + "px";
     win.style.zIndex = String(nextZ++);
@@ -477,6 +481,7 @@ async function boot() {
     const key = keyOf(compositorSurface);
     metaFor(key).title = title;
     const record = surfaces.get(key);
+    if (record?.win) record.win.dataset.waylandTitle = title || "";
     if (record?._titleEl) record._titleEl.textContent = title || metaFor(key).appId || "Wayland";
   };
 
@@ -484,6 +489,7 @@ async function boot() {
     const key = keyOf(compositorSurface);
     metaFor(key).appId = appId;
     const record = surfaces.get(key);
+    if (record?.win) record.win.dataset.waylandAppId = appId || "";
     if (record?._titleEl && !metaFor(key).title) record._titleEl.textContent = appId;
   };
 
