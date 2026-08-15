@@ -444,14 +444,14 @@ in
   sqlite = whenWasm
     (p: p.overrideAttrs (o: {
       configureFlags = (o.configureFlags or [ ]) ++ [ "--static-cli-shell" ];
-      # WAL journaling needs a shared-memory `-shm` file (mmap) the wasm/NOMMU
-      # guest fs can't provide → Nix's store DB writes fail with SQLITE_IOERR
-      # ("disk I/O error" on the first store op). Disable WAL + threadsafe
-      # mutexing (single-threaded guest) + load-extension — the proven config
-      # for this target's filesystem.
+      # #131: keep loadable extensions disabled (the guest is statically linked),
+      # but restore SQLite's default WAL support and serialized mutexing. Both
+      # published kernels now support growable MAP_SHARED ramfs files, and the
+      # guest runs real pthread users. sqlite-wal-test plus the real nix-env
+      # store-DB write in smoke.mjs hard-gate this in MMU and NOMMU modes.
       env = (o.env or { }) // {
         NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
-          + " -DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION";
+          + " -DSQLITE_OMIT_LOAD_EXTENSION";
       };
     }))
     prev.sqlite;

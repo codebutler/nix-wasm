@@ -245,8 +245,14 @@ Gated on the CONFIG_MMU=y kernel arch layer
   Patch 0007 is NOMMU's hard stack ceiling and MMU's explicit initial stack
   VMA size. Post-patch/post-config assertions pin all three invariants; the
   shared wrapperless-cc/large-install/core/GTK gates boot them in both modes.
-- [ ] `nix-wasm.nix`/`deps-overlay.nix` sqlite `-DSQLITE_OMIT_WAL` (+
-  `THREADSAFE=0`) — WAL's `-shm` mmap works under real VM.
+- [x] `deps-overlay.nix` SQLite WAL + threading — **RESTORED IN BOTH MODES.**
+  Removed `SQLITE_OMIT_WAL` and `SQLITE_THREADSAFE=0`; retained only the
+  orthogonal static-build `SQLITE_OMIT_LOAD_EXTENSION`. `sqlite-wal-test`
+  selects WAL and contends four serialized connections on both ramfs-backed
+  `/tmp` and `/dev/shm`, asserting the `-wal`/`-shm` sidecars and all 96 rows.
+  The regular full-system smoke then performs the original real `nix-env`
+  store-DB write and probes `/nix/var/nix/db/db.sqlite` for persisted WAL mode.
+  The shared gates run under both published MMU and NOMMU kernels.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`, 9P
   `cache=loose`) — revisit.
 

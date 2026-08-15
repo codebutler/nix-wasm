@@ -1,6 +1,7 @@
 // smoke.mjs — boots ONCE with the full nix-system wiring and runs the cheap
 // per-boot assertions:
-//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make-wasm32.
+//   prompt → 9P read → write/overwrite/append → ls → nix-env -iA make-wasm32
+//   → verify the real Nix store DB persisted SQLite WAL mode.
 // The LINUX_WASM_ARTIFACTS nix-cache/ must be the .#wasm-binary-cache output
 // (has the `make-wasm32` attr in pkgs.nix). See devtools-e2e.mjs for the full toolchain-install
 // install-then-compile proof.
@@ -106,6 +107,19 @@ try {
   check(
     await s.waitForOutput(/NIX_MAKE_RC=0/, makeTimeoutMs),
     "nix-env -iA make-wasm32 substitutes from the cache",
+  );
+
+  // #131: the install above is the original real store-DB write workload that
+  // failed when WAL could not grow its shared `-shm` mapping. Query the actual
+  // database after that write; sqlite-wal-test is linked to the same cross.sqlite
+  // build as nix.wasm and also asserts serialized threading is compiled in.
+  s.send("/bin/sqlite-wal-test --probe-db /nix/var/nix/db/db.sqlite\n");
+  check(
+    await s.waitForOutput(
+      /SQLITE-STORE-DB: \/nix\/var\/nix\/db\/db\.sqlite threadsafe=[12] journal=wal OK/,
+      30000,
+    ),
+    "Nix store DB uses WAL with serialized SQLite",
   );
 } finally {
   if (!pass) {

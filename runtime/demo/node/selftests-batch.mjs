@@ -6,6 +6,7 @@
 //
 // Covered (each entry is an exact in-guest command plus output assertion):
 //   pthread-exit-test       — ramfs posix_fallocate + detached __unmapself (#131)
+//   sqlite-wal-test          — concurrent WAL + serialized mutexes on both ramfs mounts (#131)
 //   glib-selftest            — gobject + libffi double marshaller (M3a)
 //   libffi-selftest          — libffi raw wasm backend (f32/f64/i64 by-value)
 //   pango-text --selftest    — pango_cairo layout → fontconfig → cairo-ft (M3a)
@@ -42,6 +43,12 @@ const TESTS = [
     // check fails, so the final marker cannot mask an earlier failure.
     re: /FALLOCATE-TEST: \/tmp\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*FALLOCATE-TEST: \/dev\/shm\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*PTHREAD-EXIT-TEST: spawned\+exited 16 detached threads OK/,
     ms: 30000,
+  },
+  {
+    name: "sqlite-wal",
+    cmd: "/bin/sqlite-wal-test",
+    re: /SQLITE-WAL-TEST: \/tmp\/sqlite-wal-test\.db threadsafe=[12] journal=wal rows=96 wal\+shm=OK[\s\S]*SQLITE-WAL-TEST: \/dev\/shm\/sqlite-wal-test\.db threadsafe=[12] journal=wal rows=96 wal\+shm=OK/,
+    ms: 60000,
   },
   {
     name: "glib",

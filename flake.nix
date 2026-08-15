@@ -286,6 +286,14 @@
         inherit cross;
       };
 
+      # #131: restored SQLite WAL + serialized-threading regression. The default
+      # mode contends four connections on /tmp and /dev/shm; smoke.mjs reuses the
+      # binary to inspect Nix's real store DB after a nix-env write.
+      sqliteWalTest = import ./userspace/sqlite-wal-test.nix {
+        inherit cross;
+        sqlite = cross.sqlite;
+      };
+
       # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery on
       # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
       # mmu-init — minimal instrumented PID-1 for the software-MMU smoke (#128).
@@ -722,7 +730,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sqliteWalTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -1141,6 +1149,10 @@
         # Regression test for detached-thread exit on wasm (patches/musl/0008) →
         # $out/bin/pthread-exit-test.
         pthread-exit-test = pthreadExitTest;
+
+        # #131: concurrent SQLite WAL + serialized-threading regression, also
+        # able to probe Nix's real store DB → $out/bin/sqlite-wal-test.
+        sqlite-wal-test = sqliteWalTest;
 
         # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
         # on the wasm guest (#35) → $out/bin/sigalrm-test.
