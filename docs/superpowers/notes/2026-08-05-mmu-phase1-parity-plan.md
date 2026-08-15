@@ -719,6 +719,10 @@ Closed dispositions:
   `/tmp` and `/dev/shm`, checking the shared-memory sidecars and 96 committed
   rows. The normal full-system smoke then runs the original real `nix-env`
   store-DB write and verifies `/nix/var/nix/db/db.sqlite` persisted WAL mode.
+  Installed systems keep that database on their ext2/ext4 state disk; the
+  stateless squashfs+overlay CI/recovery fallback mounts only the database
+  directory directly on ramfs because overlayfs cannot expose the NOMMU shared
+  mapping required by SQLite's `-shm` sidecar.
   Both MMU and NOMMU core jobs hard-gate the same tests, confirming this was a
   ramfs mmap limitation already removed for the supported NOMMU profile too.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
