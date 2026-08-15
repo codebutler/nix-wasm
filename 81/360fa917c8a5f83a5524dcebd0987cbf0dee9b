@@ -1,0 +1,39 @@
+runtime/virtio/blk-disk.js
+  s_5c319dde45a577::t_3450a9e353eae6 16-19,118-184
+  s_f1a5bd6f484102::t_8d5fd342cdcd5e 185-186
+runtime/boot.js
+  s_5c319dde45a577::t_6c0a6ea7fef242 69,274
+runtime/demo/node/blk-rw-smoke.mjs
+  s_5c319dde45a577::t_3450a9e353eae6 116-124
+runtime/boot-nix-system.js
+  s_5c319dde45a577::t_6c0a6ea7fef242 24
+runtime/virtio/blk-disk.test.js
+  s_5c319dde45a577::t_3450a9e353eae6 9-10,54-55,59-99
+  s_5c319dde45a577::t_6c0a6ea7fef242 56-58
+runtime/kernel-host.js
+  s_5c319dde45a577::t_3450a9e353eae6 36,130-133,818-820
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "81360fa917c8a5f83a5524dcebd0987cbf0dee9b",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_f1a5bd6f484102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00298-425a-7023-afc5-ec78144ac34f",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
