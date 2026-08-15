@@ -69,6 +69,34 @@ describe("genTrampoline byte output", () => {
     expect(CANONICAL_PARAMS).toBe(128);
     new WebAssembly.Module(bytes); // must validate
   });
+
+  test("checked module exposes the soft-MMU fault contract", () => {
+    const bytes = genTrampoline({ params: ["i32", "i32"], result: "i32" }, { checked: true });
+    const mod = new WebAssembly.Module(bytes);
+    expect(WebAssembly.Module.imports(mod).map((i) => i.name)).toEqual([
+      "memory",
+      "__indirect_function_table",
+      "__wasm_syscall_2",
+      "__get_tls_base",
+      "__stack_pointer",
+    ]);
+    expect(WebAssembly.Module.exports(mod).map((e) => e.name)).toContain("__get_tls_base");
+  });
+
+  test("shared-memory module accepts the production kernel memory shape", () => {
+    const bytes = genTrampoline(
+      { params: ["i32"], result: "i32" },
+      { sharedMemory: true, memoryMaximum: 0x10000 },
+    );
+    const memory = new WebAssembly.Memory({ initial: 30, maximum: 0x10000, shared: true });
+    const table = new WebAssembly.Table({ initial: 1, element: "anyfunc" });
+    expect(
+      () =>
+        new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+          env: { memory, __indirect_function_table: table },
+        }),
+    ).not.toThrow();
+  });
 });
 
 describe("raw ABI trampolines (non-fpcast targets)", () => {
@@ -195,5 +223,79 @@ describe("canonical ABI trampolines (fpcast'd targets)", () => {
     expect(raw.loader.isCanonicalSlot(raw.slotOf("add"))).toBe(false);
     const fp = harness("targets.fpcast.wasm");
     expect(fp.loader.isCanonicalSlot(fp.slotOf("add"))).toBe(true);
+  });
+});
+
+describe("checked software-MMU trampolines", () => {
+  test("loads arguments and stores the result through a non-identity page table", () => {
+    const h = harness("targets.wasm");
+    const ptBase = 0x1000;
+    const ptePage = 0x2000;
+    const argPhys = 0x3000;
+    const retPhys = 0x5000;
+    const argVa = 0x00801000;
+    const retVa = 0x00802000;
+    const pageTable = new DataView(h.memory.buffer);
+    pageTable.setUint32(ptBase + 2 * 4, ptePage, true);
+    pageTable.setUint32(ptePage + 1 * 4, argPhys | 7, true);
+    pageTable.setUint32(ptePage + 2 * 4, retPhys | 7, true);
+
+    h.dv.setInt32(argPhys, 19, true);
+    h.dv.setInt32(argPhys + 8, 23, true);
+    const faults = [];
+    const ffi = new FfiTrampolines({
+      memory: h.memory,
+      table: h.table,
+      mmu: {
+        ptBase,
+        syscall2: (...args) => {
+          faults.push(args);
+          return -1;
+        },
+        stackPointer: new WebAssembly.Global({ value: "i32", mutable: true }, 0x7000),
+        getTlsBase: () => 0x7100,
+      },
+    });
+
+    ffi.call({ params: ["i32", "i32"], result: "i32" }, false, h.slotOf("add"), argVa, retVa);
+
+    expect(h.dv.getInt32(retPhys, true)).toBe(42);
+    expect(faults).toEqual([]);
+  });
+
+  test("canonical target uses the same checked non-identity translation", () => {
+    const h = harness("targets.fpcast.wasm");
+    const ptBase = 0x1000;
+    const ptePage = 0x2000;
+    const argPhys = 0x3000;
+    const retPhys = 0x5000;
+    const argVa = 0x00801000;
+    const retVa = 0x00802000;
+    const pageTable = new DataView(h.memory.buffer);
+    pageTable.setUint32(ptBase + 2 * 4, ptePage, true);
+    pageTable.setUint32(ptePage + 1 * 4, argPhys | 7, true);
+    pageTable.setUint32(ptePage + 2 * 4, retPhys | 7, true);
+
+    h.dv.setInt32(argPhys, 19, true);
+    h.dv.setInt32(argPhys + 8, 23, true);
+    const faults = [];
+    const ffi = new FfiTrampolines({
+      memory: h.memory,
+      table: h.table,
+      mmu: {
+        ptBase,
+        syscall2: (...args) => {
+          faults.push(args);
+          return -1;
+        },
+        stackPointer: new WebAssembly.Global({ value: "i32", mutable: true }, 0x7000),
+        getTlsBase: () => 0x7100,
+      },
+    });
+
+    ffi.call({ params: ["i32", "i32"], result: "i32" }, true, h.slotOf("add"), argVa, retVa);
+
+    expect(h.dv.getInt32(retPhys, true)).toBe(42);
+    expect(faults).toEqual([]);
   });
 });

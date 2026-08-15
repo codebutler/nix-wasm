@@ -25,6 +25,7 @@
 // The generated module imports the SHARED memory + table, so trampoline(argPtr,
 // retPtr, funcIndex) reads typed args straight from guest memory, calls the real
 // funcref, and writes the result back — all in the process's own address space.
+import { instrument as softmmuInstrument } from "./softmmu-pass.js";
 
 // wasm value-type byte encodings.
 const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
@@ -84,29 +85,65 @@ const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
  * trailing i32 pointer; see wasm32-raw-ffi.c) before calling here.
  *
  * @param {{ params: string[], result: string | null }} sig
- * @param {{ canonical?: boolean }} [opts]
+ * `checked` adds the three imports/exports required by the checked soft-MMU
+ * pass. They are otherwise unused by this raw generated module; instrument()
+ * consumes them when it adds the faulting page-table walk.
+ *
+ * @param {{
+ *   canonical?: boolean,
+ *   checked?: boolean,
+ *   sharedMemory?: boolean,
+ *   memoryMaximum?: number,
+ * }} [opts]
  * @returns {Uint8Array}
  */
 export function genTrampoline(sig, opts = {}) {
   const canonical = !!opts.canonical;
+  const checked = !!opts.checked;
+  const memoryImport = opts.sharedMemory
+    ? [0x02, 0x03, ...uleb(1), ...uleb(opts.memoryMaximum || 0x10000)]
+    : [0x02, 0x00, ...uleb(1)];
   // type 0 = trampoline export: (argPtr i32, retPtr i32, funcIndex i32) -> ()
   const trampType = [0x60, ...vec([VT.i32, VT.i32, VT.i32]), ...vec([])];
   // type 1 = the target call_indirect type.
   const targetType = canonical
     ? [0x60, ...vec(Array.from({ length: CANONICAL_PARAMS }, () => VT.i64)), ...vec([VT.i64])]
     : [0x60, ...vec(sig.params.map((p) => VT[p])), ...vec(sig.result ? [VT[sig.result]] : [])];
-  const typeSec = section(1, vec([trampType, targetType]));
+  // checked type 2 = musl's syscall2 host trap, type 3 = TLS accessor. The
+  // soft-MMU pass validates these exact signatures before instrumenting.
+  const syscallType = [0x60, ...vec(Array.from({ length: 5 }, () => VT.i32)), ...vec([VT.i32])];
+  const tlsType = [0x60, ...vec([]), ...vec([VT.i32])];
+  const typeSec = section(
+    1,
+    vec([trampType, targetType, ...(checked ? [syscallType, tlsType] : [])]),
+  );
 
   const importSec = section(
     2,
     vec([
-      [...str("env"), ...str("memory"), 0x02, 0x00, ...uleb(1)],
+      [...str("env"), ...str("memory"), ...memoryImport],
       [...str("env"), ...str("__indirect_function_table"), 0x01, 0x70, 0x00, ...uleb(1)],
+      ...(checked
+        ? [
+            [...str("env"), ...str("__wasm_syscall_2"), 0x00, ...uleb(2)],
+            [...str("env"), ...str("__get_tls_base"), 0x00, ...uleb(3)],
+            [...str("env"), ...str("__stack_pointer"), 0x03, VT.i32, 0x01],
+          ]
+        : []),
     ]),
   );
 
-  const funcSec = section(3, vec([[...uleb(0)]])); // func 0 : type 0
-  const exportSec = section(7, vec([[...str("trampoline"), 0x00, ...uleb(0)]]));
+  const funcSec = section(3, vec([[...uleb(0)]])); // one local function: type 0
+  // Function imports precede local functions in the index space. Re-export
+  // the imported TLS accessor so checked instrument() can call it on faults.
+  const trampolineFunc = checked ? 2 : 0;
+  const exportSec = section(
+    7,
+    vec([
+      [...str("trampoline"), 0x00, ...uleb(trampolineFunc)],
+      ...(checked ? [[...str("__get_tls_base"), 0x00, ...uleb(1)]] : []),
+    ]),
+  );
 
   const body = canonical ? genCanonicalBody(sig) : genRawBody(sig);
 
@@ -289,18 +326,39 @@ function fromABI(body, t) {
  */
 export class FfiTrampolines {
   /**
-   * @param {{ memory: WebAssembly.Memory, table: WebAssembly.Table }} opts
+   * @param {{
+   *   memory: WebAssembly.Memory,
+   *   table: WebAssembly.Table,
+   *   mmu?: {
+   *     ptBase: number,
+   *     syscall2: Function,
+   *     stackPointer: WebAssembly.Global,
+   *     getTlsBase: Function,
+   *   },
+   * }} opts
    */
-  constructor({ memory, table }) {
+  constructor({ memory, table, mmu }) {
     this.memory = memory;
     this.table = table;
+    this.mmu = mmu || null;
+    this.sharedMemory =
+      typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer;
+    const memoryAny = /** @type {any} */ (this.memory);
+    const memoryType = typeof memoryAny.type === "function" ? memoryAny.type() : null;
+    this.memoryMaximum = Number(memoryType?.maximum || 0x10000);
     /** @type {Map<string, (a: number, r: number, f: number) => void>} */
     this.cache = new Map();
   }
 
   /** @param {{ params: string[], result: string | null }} sig @param {boolean} canonical */
   key(sig, canonical) {
-    return (canonical ? "C:" : "R:") + sig.params.join("") + ">" + (sig.result || "v");
+    return (
+      (this.mmu ? "M:" : "N:") +
+      (canonical ? "C:" : "R:") +
+      sig.params.join("") +
+      ">" +
+      (sig.result || "v")
+    );
   }
 
   /**
@@ -317,13 +375,41 @@ export class FfiTrampolines {
     const k = this.key(sig, canonical);
     let tramp = this.cache.get(k);
     if (!tramp) {
-      const bytes = genTrampoline(sig, { canonical });
+      let bytes = genTrampoline(sig, {
+        canonical,
+        checked: !!this.mmu,
+        sharedMemory: this.sharedMemory,
+        memoryMaximum: this.memoryMaximum,
+      });
+      if (this.mmu) {
+        // Runtime-generated code must cross the same checked translation gate
+        // as the main image. The generated module deliberately carries the
+        // pass's syscall/SP/TLS contract above, so failure is loud rather than
+        // silently falling back to unchecked translation.
+        bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+      }
+      const env = {
+        memory: this.memory,
+        __indirect_function_table: this.table,
+      };
+      if (this.mmu) {
+        Object.assign(env, {
+          __wasm_syscall_2: this.mmu.syscall2,
+          __stack_pointer: this.mmu.stackPointer,
+          __get_tls_base: this.mmu.getTlsBase,
+        });
+      }
       const instance = new WebAssembly.Instance(
         new WebAssembly.Module(/** @type {BufferSource} */ (bytes)),
         {
-          env: { memory: this.memory, __indirect_function_table: this.table },
+          env,
         },
       );
+      if (this.mmu) {
+        const mmuExports = /** @type {any} */ (instance.exports);
+        mmuExports.__mmu_pt_base.value = this.mmu.ptBase;
+        if (mmuExports.__mmu_start) mmuExports.__mmu_start();
+      }
       tramp = /** @type {any} */ (instance.exports.trampoline);
       this.cache.set(k, tramp);
     }
