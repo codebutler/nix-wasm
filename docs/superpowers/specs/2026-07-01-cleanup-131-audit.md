@@ -234,9 +234,17 @@ Gated on the CONFIG_MMU=y kernel arch layer
   normal demand-paged/COW mmap and `file-mmu.c` paths. The old `0025`
   "file-mmap eager bounce" reference was stale: `0025` is the MMU-debug trace
   patch and remains intact.
-- [ ] `kernel.nix` — `CONFIG_BOOT_MEM_PAGES` / `CONFIG_ARCH_FORCE_MAX_ORDER`
-  contiguous-alloc bumps + `patches/kernel/0007` (4 MiB user stack) — real VM
-  removes the contiguous-alloc pressure (paging replaces contiguity).
+- [x] `kernel.nix` — **KEEP IN BOTH MODES**
+  `CONFIG_BOOT_MEM_PAGES=0x7FFF`, `CONFIG_ARCH_FORCE_MAX_ORDER=16`, and
+  `patches/kernel/0007` (4 MiB user stack). Software MMU removes userspace
+  virtual-contiguity requirements, but the wasm kernel itself remains
+  identity-mapped: patch 0023 implements its `vmalloc()` with contiguous
+  `kmalloc()`, and patch 0030 must retain each engine-readable wasm exec image
+  in one `alloc_pages_exact()` buffer. The physical-RAM/max-order envelope is
+  therefore still required by large MMU execs as well as NOMMU allocations.
+  Patch 0007 is NOMMU's hard stack ceiling and MMU's explicit initial stack
+  VMA size. Post-patch/post-config assertions pin all three invariants; the
+  shared wrapperless-cc/large-install/core/GTK gates boot them in both modes.
 - [ ] `nix-wasm.nix`/`deps-overlay.nix` sqlite `-DSQLITE_OMIT_WAL` (+
   `THREADSAFE=0`) — WAL's `-shm` mmap works under real VM.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`, 9P

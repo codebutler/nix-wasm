@@ -6,12 +6,13 @@
 # This is the Nix port of pc's build.sh `build_kernel`: configure
 # (wasm32_nommu_defconfig + the host-integration toggles), `make … vmlinux`,
 # then `cp build/vmlinux $out/vmlinux.wasm` (wasm-ld emits the .wasm directly —
-# no ELF->wasm step). The 6 kernel patches are pc's host-integration set (9p
-# trans_cb, hvc multi-console + winsize, single-CPU pin, 16K stack, force-max-
-# order). The config toggle list mirrors build.sh `configure_kernel()`: NET + 9P
+# no ELF->wasm step). The base kernel patches include the remaining wasm host
+# integration and memory-model fixes (single-CPU pin, 16K kernel stack, 4 MiB
+# user stack, and the force-max-order Kconfig knob). The config toggle list
+# mirrors build.sh `configure_kernel()`: NET + 9P
 # + the host-callback transport, devtmpfs (for /dev/hvcN), POSIX file locking,
-# the stack-end canary (#118), a 128MB buddy max order (#139 — NOMMU exec needs
-# the whole binary in one contiguous allocation), PLUS CONFIG_OVERLAY_FS (Plan 2:
+# the stack-end canary (#118), a 256 MiB buddy max order (#139 — both profiles
+# retain kernel-side contiguous allocations), PLUS CONFIG_OVERLAY_FS (Plan 2:
 # read-only served /nix store + ramfs upper; see the toggle comment below).
 #
 # It is the NEW exec ABI (039e5f3e: wasm_create_and_run_task / wasm_load_
@@ -39,9 +40,13 @@ pkgs.stdenv.mkDerivation {
     # virtio-console device owns hvc0.
     ./patches/kernel/0004-wasm-pin-user-tasks-single-cpu.patch
     ./patches/kernel/0005-wasm-enlarge-kernel-stack.patch
+    # KEEP in both profiles (#131): NOMMU maps whole process images contiguously;
+    # MMU still runs the kernel in identity space, and its wasm exec-image cache
+    # plus wasm vmalloc implementation use contiguous kernel allocations.
     ./patches/kernel/0006-wasm-force-max-order.patch
-    # User stack 8KiB->8MiB: the 8KiB stack overflowed on a single musl realpath()
-    # (8KiB of buffers) and crashed nix at startup; NOMMU stacks can't grow.
+    # KEEP in both profiles (#131), 8 KiB -> 4 MiB: NOMMU stacks cannot grow,
+    # while MMU demand paging still needs this explicit initial wasm stack/VMA
+    # size. The old 8 KiB value overflowed in one musl realpath() call.
     ./patches/kernel/0007-wasm-enlarge-user-stack.patch
     # Toolchain flags moved INTO the kernel source (replacing the fake-llvm argv
     # shim): arch/wasm/Makefile carries the wasm cc + LDFLAGS_vmlinux flags, and
@@ -197,6 +202,14 @@ pkgs.stdenv.mkDerivation {
   # loop), not a per-device VW_DEV_CONSOLE call.
   postPatch = ''
     vw=drivers/virtio/virtio_wasm.c
+
+    # #131 Slice 3: patch 0007 is shared deliberately. NOMMU needs a hard stack
+    # allocation; MMU uses the same constant for the initial grow-down stack VMA.
+    grep -qE '^#define[[:space:]]+WASM_STACK_SIZE[[:space:]]+\(1024UL \* PAGE_SIZE\)' \
+      fs/binfmt_wasm.c || {
+        echo "ERROR: shared 4 MiB wasm user-stack patch 0007 is missing" >&2
+        exit 1
+      }
 
     # #131 Slice 3: 0016 and 0022 are supported NOMMU behavior, not MMU source
     # modifications. Assert the patch selection itself because MMU builds do not
@@ -557,12 +570,14 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
       --enable CONFIG_VIRTIO_NET \
       --enable CONFIG_INET --enable CONFIG_PACKET \
       --enable CONFIG_SCHED_STACK_END_CHECK \
-      `# MAX_ORDER=15 → 128MB max buddy block. nix-env substituting the 96MB` \
-      `# guest-clang NAR calls mmap(MAP_ANON, ~134MB) internally (malloc for NAR` \
-      `# extraction buffer); this needs order 16 (256MB) = above the 128MB cap,` \
-      `# so it always fails. Raise to 16 → 256MB max buddy block, which covers` \
-      `# the 134MB nix-env allocation and any future large-binary mmap. The` \
-      `# Kconfig allows up to 17 (arch/wasm/Kconfig range 10 17).` \
+      `# KEEP in both profiles (#131). MAX_ORDER=15 is a 128MB max buddy block;` \
+      `# order 16 provides 256MB. NOMMU needs one contiguous allocation for a` \
+      `# process image and for nix-env's ~134MB NAR extraction allocation. MMU` \
+      `# removes USER virtual contiguity, but not KERNEL physical contiguity:` \
+      `# patch 0023 implements wasm vmalloc with kmalloc, and patch 0030 keeps` \
+      `# each engine-readable wasm exec image in one alloc_pages_exact buffer.` \
+      `# Lowering the order for MMU therefore recreates the large-exec failure.` \
+      `# Kconfig permits 10..17; 16 is the shared tested value.` \
       --set-val CONFIG_ARCH_FORCE_MAX_ORDER 16 \
       `# Boot RAM: arch/wasm head.S grows the wasm Memory to CONFIG_BOOT_MEM_PAGES` \
       `# (64KiB pages) and that becomes the kernel's physical RAM. The default` \
@@ -574,10 +589,12 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
       `# large window allocate an order-11 (8MB) GFP_HIGHUSER wl_shm buffer, and after` \
       `# the served /nix closure + glib/gdk init fragment the heap below 8MB, that mmap` \
       `# fails ("page allocation failure: order:11") → no window (gtk3-widget-factory).` \
-      `# 0x7FFF = 1.99GiB (max under setup.c's 0x80000000/2GiB positive-address limit):` \
-      `# with MAX_ORDER=16 (256MB blocks) we need enough RAM to have a free 256MB region` \
-      `# after boot + squashfs load; 1.99GiB gives ~1.6GB free which the buddy allocator` \
-      `# coalesces into 256MB+ blocks. 0x7FFF is the safe maximum.` \
+      `# 0x7FFF = 1.99GiB (max under setup.c's 0x80000000/2GiB positive-address limit).` \
+      `# KEEP in both profiles (#131): NOMMU needs fragmentation headroom; MMU still` \
+      `# stores engine-readable exec images in contiguous kernel RAM (with a 160MB` \
+      `# idle-cache cap) and implements wasm vmalloc via contiguous kmalloc. With` \
+      `# MAX_ORDER=16, both need enough physical RAM to leave a 256MB buddy region` \
+      `# after boot + squashfs load. 0x7FFF is the shared boot-verified safe maximum.` \
       --set-val CONFIG_BOOT_MEM_PAGES 0x7FFF \
       --enable CONFIG_SHMEM --enable CONFIG_TMPFS --enable CONFIG_OVERLAY_FS \
       `# Squashfs/virtio-blk spike (#43 Task 1): block layer + virtio-blk driver +` \
@@ -653,6 +670,14 @@ void start_thread(struct pt_regs *regs, unsigned long stack_pointer)'
     ''}
 
     make $makeFlags olddefconfig
+
+    # #131 Slice 3: these are intentional shared-profile invariants, not NOMMU
+    # leftovers. Assert after olddefconfig so a Kconfig dependency/default change
+    # cannot silently shrink the physical-memory envelope.
+    grep -qE '^CONFIG_ARCH_FORCE_MAX_ORDER=16$' build/.config \
+      || { echo "ERROR: CONFIG_ARCH_FORCE_MAX_ORDER must remain 16" >&2; exit 1; }
+    grep -qE '^CONFIG_BOOT_MEM_PAGES=(0x7[Ff][Ff][Ff]|32767)$' build/.config \
+      || { echo "ERROR: CONFIG_BOOT_MEM_PAGES must remain 0x7FFF" >&2; exit 1; }
 
     # Issue #145: a silently-dropped CONFIG_SND_VIRTIO would ship a kernel with
     # no sound card and nothing would fail until the snd smoke — fail here.

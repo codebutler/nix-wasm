@@ -700,17 +700,18 @@ Closed dispositions:
   depends on. There is no NOMMU eager-bounce patch at that number, or under
   any name, in `patches/kernel/` today — do NOT delete `0025`, it is an
   MMU-debugging facility this very phase's boot-verification work will want.)
-- [ ] `kernel.nix` `CONFIG_BOOT_MEM_PAGES`/`CONFIG_ARCH_FORCE_MAX_ORDER`
-  contiguous-alloc bumps + `patches/kernel/0007` (4 MiB user stack).
-  **Provisional: measure, don't assume either way.** Real demand paging
-  removes the CONTIGUITY pressure the bumps exist for (clang.wasm's order-11
-  mmap, nix-env's large on-demand unpack) — but MMU still needs *some*
-  explicit stack ceiling (A2 demand-pages growth, it does not remove the need
-  for a VMA size), so 0007 likely stays even if the `BOOT_MEM_PAGES`/
-  `ARCH_FORCE_MAX_ORDER` bumps shrink. VERIFY with `wrapperless-cc-e2e`
-  (clang) and a large `nix-env -iA` install before touching either value —
-  this is exactly the kind of contiguity-vs-paging tradeoff that must be
-  measured on the box, not reasoned from the design doc alone.
+- [x] **KEEP IN BOTH MODES** `kernel.nix`
+  `CONFIG_BOOT_MEM_PAGES=0x7FFF`/`CONFIG_ARCH_FORCE_MAX_ORDER=16` and
+  `patches/kernel/0007` (4 MiB user stack). The provisional assumption that
+  demand paging eliminates the contiguity pressure was incomplete: it removes
+  contiguity for *user mappings*, while this architecture's kernel remains
+  physical/identity-mapped. The MMU implementation in patch 0023 deliberately
+  lowers `vmalloc()` to contiguous `kmalloc()`, and patch 0030's exec-image
+  cache retains one contiguous kernel buffer so the engine can compile a wasm
+  executable. Its 160 MiB idle-cache budget is explicitly sized for the
+  1.75–2 GiB guest. Patch 0007 likewise remains a NOMMU hard ceiling and the
+  MMU initial stack-VMA size. Shared patch/config assertions plus both modes'
+  wrapperless-cc, large-install, core, and GTK boot gates verify the decision.
 - [ ] `nix-wasm.nix`/`deps-overlay.nix` sqlite `-DSQLITE_OMIT_WAL`
   (`+ THREADSAFE=0`). **Provisional: attempt re-enable, VERIFY under real
   concurrent load.** WAL's `-shm` needs a real growable `MAP_SHARED` file;
