@@ -57,6 +57,12 @@ try {
     /9pnet:.*Limiting 'msize'.*supported by transport virtio/.test(s.snapshot()),
     "9P-over-virtio transport mounted",
   );
+  check(
+    /yore: profile-fs=(?:mmu shm=tmpfs nixcache=direct|nommu shm=ramfs nixcache=loose)/.test(
+      s.snapshot(),
+    ),
+    "profile-specific /dev/shm and 9P cache policy",
+  );
 
   // read path
   s.send("cat /mnt/yore/Home/pc-9p-proof.txt\n");
