@@ -636,39 +636,32 @@ for completeness:)
   workaround dropped; plain `gtk_builder_connect_signals(builder, NULL)` via
   real `dlopen(NULL)`/`dlsym`. Boot-verified (`widget-factory-smoke`).
 
-A second item is scheduled, not closed — do not double-count it as done:
-- [ ] **PENDING (scheduled: Phase 3 step 2, not yet executed).** The vestigial
-  `__dlsym_time64: () => 0` env stub is still live today
-  (`runtime/kernel-worker.js:1325`), with its allow-list entry still present
-  (`toolchain/wasm-host-imports.nix`) — it batches into the mandatory
-  `ENGINE_ABI` bump commit per Phase 3 step 2 above, not before (removing it
-  early would break instantiation of any not-yet-rebuilt binary that still
-  carries the weak-undef import).
+A second item is explicitly retained:
+- [x] **KEEP** the `__dlsym_time64: () => 0` weak-undefined fallback and its
+  allow-list entry. Current musl defines the symbol guest-side, while the NULL
+  fallback lets older objects that still carry the weak import instantiate
+  correctly. The coordinated runtime sync and ABI bump already shipped.
 
-Still open:
-- [ ] `deps-overlay.nix` glib — gio modules loadable as PIC side-modules.
-  **Provisional: keep, because** the guest is platform-wide `isStatic = true`
+Closed dispositions:
+- [x] `deps-overlay.nix` glib — **KEEP** gio modules built in. The guest is
+  platform-wide `isStatic = true`
   (every meson/autotools cross build flips `-Ddefault_library=static`), so
   making gio modules loadable is a real per-module PIC-packaging +
   `GIO_MODULE_DIR` scan effort — not a flag flip — for zero functional gain
   (the built-in modules already work; nothing is missing). The dlopen WALL
   that made this a mechanism gap is gone, so this is now pure
-  stock-shapedness, correctly low priority. VERIFY: if pursued anyway,
-  `glib-smoke.mjs` + a booted gio-module load is the gate.
-- [ ] `deps-overlay.nix` gtk3 — gdk-pixbuf loadable loaders (`loaders.cache` +
-  PIC loader modules). **Provisional: keep, because** identical reasoning to
-  the glib item above — built-in loaders work, loadable ones are a packaging
-  project with no capability gain now that the wall is gone.
-- [ ] **galculator — the real click-to-42 window with zero workaround.**
+  stock-shapedness with no capability gain, so the working built-in modules
+  are the supported static-platform disposition.
+- [x] `deps-overlay.nix` gtk3 — **KEEP** gdk-pixbuf loaders built in. The
+  PNG/JPEG/SVG loaders work; `loaders.cache` + PIC loader modules would be a
+  packaging project with no capability gain now that the wall is gone.
+- [x] **galculator — the real click-to-42 window with zero workaround.**
   galculator already carries `cb.dynsym` and its 115 `.ui` handlers resolve
   through real `gtk_builder_connect_signals(NULL)` → GModule → `dlopen(NULL)`/
-  `dlsym` today (the mechanism gap closed with widget-factory's proof). This
-  is not a delete-a-patch item — there is no galculator-specific patch left to
-  remove — it is a VERIFY-and-close-out item: a real compositor render is a
-  browser-visual check (`docs/superpowers/notes/m4-galculator-visual.md`,
-  currently PENDING). Do it once Phase 1's still-open wl_shm/#11 Remaining item
-  (above — no MMU compositor boot exists yet) gives a compositor path to test
-  against; no code change expected.
+  `dlsym` today (the mechanism gap closed with widget-factory's proof). The
+  real browser click-to-42 path passed on 2026-07-11; see
+  `docs/superpowers/notes/m4-galculator-visual.md`. There is no remaining
+  galculator-specific workaround to remove.
 
 ### Slice 3 — NOMMU-memory accommodations (gated on CONFIG_MMU=y default)
 
