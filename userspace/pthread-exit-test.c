@@ -28,6 +28,7 @@ static int test_fallocate(const char *path) {
   const off_t len = 8192;
   const off_t expected_size = base + len;
   const off_t expected_offset = 7;
+  const off_t marker_offset = base + 123;
   const unsigned char marker = 0x5a;
   unsigned char actual = 0;
   struct stat st;
@@ -39,7 +40,10 @@ static int test_fallocate(const char *path) {
   }
 
   int failed = 0;
-  if (write(fd, &marker, 1) != 1 || lseek(fd, expected_offset, SEEK_SET) != expected_offset) {
+  /* Pre-size part-way into the requested allocation range. posix_fallocate()
+   * must preserve existing bytes in that range, not merely bytes before it. */
+  if (pwrite(fd, &marker, 1, marker_offset) != 1 ||
+      lseek(fd, expected_offset, SEEK_SET) != expected_offset) {
     printf("FALLOCATE-TEST: %s setup failed: %s FAIL\n", path, strerror(errno));
     failed = 1;
     goto out;
@@ -72,8 +76,8 @@ static int test_fallocate(const char *path) {
     failed = 1;
     goto out;
   }
-  if (lseek(fd, 0, SEEK_CUR) != expected_offset || pread(fd, &actual, 1, 0) != 1 ||
-      actual != marker) {
+  if (lseek(fd, 0, SEEK_CUR) != expected_offset ||
+      pread(fd, &actual, 1, marker_offset) != 1 || actual != marker) {
     printf("FALLOCATE-TEST: %s offset/content preservation FAIL\n", path);
     failed = 1;
     goto out;
