@@ -444,14 +444,15 @@ in
   sqlite = whenWasm
     (p: p.overrideAttrs (o: {
       configureFlags = (o.configureFlags or [ ]) ++ [ "--static-cli-shell" ];
-      # WAL journaling needs a shared-memory `-shm` file (mmap) the wasm/NOMMU
-      # guest fs can't provide → Nix's store DB writes fail with SQLITE_IOERR
-      # ("disk I/O error" on the first store op). Disable WAL + threadsafe
-      # mutexing (single-threaded guest) + load-extension — the proven config
-      # for this target's filesystem.
+      # #131: keep loadable extensions disabled (the guest is statically linked),
+      # but restore SQLite's default WAL support and serialized mutexing. The
+      # MMU profile uses WAL. NOMMU keeps the same full SQLite build and real
+      # mutexes, but Nix selects its supported truncate-journal mode at runtime:
+      # SQLite's WAL-index protocol still returns SQLITE_IOERR on that kernel.
+      # The mode-specific concurrency and real store-DB gates cover both.
       env = (o.env or { }) // {
         NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
-          + " -DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION";
+          + " -DSQLITE_OMIT_LOAD_EXTENSION";
       };
     }))
     prev.sqlite;

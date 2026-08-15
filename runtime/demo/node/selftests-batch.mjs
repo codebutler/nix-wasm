@@ -6,6 +6,7 @@
 //
 // Covered (each entry is an exact in-guest command plus output assertion):
 //   pthread-exit-test       — ramfs posix_fallocate + detached __unmapself (#131)
+//   sqlite-wal-test          — profile journal mode + serialized mutexes on both ramfs mounts (#131)
 //   glib-selftest            — gobject + libffi double marshaller (M3a)
 //   libffi-selftest          — libffi raw wasm backend (f32/f64/i64 by-value)
 //   pango-text --selftest    — pango_cairo layout → fontconfig → cairo-ft (M3a)
@@ -42,6 +43,12 @@ const TESTS = [
     // check fails, so the final marker cannot mask an earlier failure.
     re: /FALLOCATE-TEST: \/tmp\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*FALLOCATE-TEST: \/dev\/shm\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*PTHREAD-EXIT-TEST: spawned\+exited 16 detached threads OK/,
     ms: 30000,
+  },
+  {
+    name: "sqlite-concurrency",
+    cmd: "/bin/sqlite-wal-test",
+    re: /SQLITE-MODE-TEST: \/tmp\/sqlite-wal-test\.db threadsafe=[12] journal=(?:wal|truncate) rows=96 profile=(?:mmu-wal|nommu-rollback) (?:wal\+shm|rollback)=OK[\s\S]*SQLITE-MODE-TEST: \/dev\/shm\/sqlite-wal-test\.db threadsafe=[12] journal=(?:wal|truncate) rows=96 profile=(?:mmu-wal|nommu-rollback) (?:wal\+shm|rollback)=OK/,
+    ms: 60000,
   },
   {
     name: "glib",

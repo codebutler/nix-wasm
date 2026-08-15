@@ -286,6 +286,19 @@
         inherit cross;
       };
 
+      # #131: serialized-threading regression in both profiles. MMU selects WAL;
+      # NOMMU uses truncate journaling because SQLite's WAL-index shared-memory
+      # protocol still returns SQLITE_IOERR on that kernel even on direct ramfs.
+      sqliteWalTest = import ./userspace/sqlite-wal-test.nix {
+        inherit cross;
+        sqlite = cross.sqlite;
+      };
+      sqliteRollbackTest = import ./userspace/sqlite-wal-test.nix {
+        inherit cross;
+        sqlite = cross.sqlite;
+        expectWal = false;
+      };
+
       # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery on
       # the wasm/NOMMU guest (issue #35). See userspace/sigalrm-test.c.
       # mmu-init — minimal instrumented PID-1 for the software-MMU smoke (#128).
@@ -670,6 +683,7 @@
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
         extraSystemPackages = sharedAppPackages;
+        useSQLiteWAL = false;
       };
       wasmPasswd = import ./userspace/passwd.nix {
         lib = cross.lib; pkgs = cross; config = wasmSystem.config;
@@ -729,7 +743,7 @@
       initramfsExtraShare = [ { name = "alsa"; path = "${cross.alsa-lib}/share/alsa"; } ];
       wasmInitramfs = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusybox; init = wasmBootstrap;
-        extraBins = initramfsExtraBins;
+        extraBins = initramfsExtraBins ++ [ sqliteRollbackTest ];
         extraShare = initramfsExtraShare;
       };
       # #131 prove-then-flip: the same initramfs with the REAL-FORK busybox +
@@ -739,7 +753,7 @@
       # each binary at load.
       wasmInitramfsFork = import ./userspace/initramfs.nix {
         inherit pkgs; busybox = wasmBusyboxFork; init = wasmBootstrapFork;
-        extraBins = initramfsExtraBins;
+        extraBins = initramfsExtraBins ++ [ sqliteWalTest ];
         extraShare = initramfsExtraShare;
       };
 
@@ -827,6 +841,7 @@
         # audit.md's slice-1 REVERT list.
         toolchain = [ nixWasmForkClean ];
         nixPackage = nixWasmForkClean;
+        useSQLiteWAL = true;
         # Shared app/X11 package set (sharedAppPackages, defined above) — was
         # `[ wasmDltest ]` alone, the drift that caused the fork guest's
         # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
@@ -951,7 +966,7 @@
         inherit pkgs;
         name = "guest-spawn-contract-nommu";
         profile = "nommu-spawn";
-        roots = [ wasmBusybox wasmToplevel wasmBootstrap ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
+        roots = [ wasmBusybox wasmToplevel wasmBootstrap sqliteRollbackTest ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
         # MEASURED (2026-08-13, against real already-built store paths
         # covering the busybox/toplevel/initramfs-extraBins portion of this
         # root set — busybox-wasm32-nommu, nix-wasm, ash, and every
@@ -986,7 +1001,7 @@
         inherit pkgs;
         name = "guest-spawn-contract-fork";
         profile = "mmu-fork";
-        roots = [ wasmBusyboxFork wasmToplevelFork wasmBootstrapFork ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
+        roots = [ wasmBusyboxFork wasmToplevelFork wasmBootstrapFork sqliteWalTest ] ++ initramfsExtraBins ++ guestSweepCommonRoots;
         # MEASURED (2026-08-13, against real already-built store paths, via
         # two independent methods — a direct store-path sweep of the fork
         # toplevel's system-path + initramfs extraBins, and a from-scratch
@@ -1141,6 +1156,11 @@
         # Regression test for detached-thread exit on wasm (patches/musl/0008) →
         # $out/bin/pthread-exit-test.
         pthread-exit-test = pthreadExitTest;
+
+        # #131: mode-specific SQLite concurrency probes. MMU uses WAL; NOMMU
+        # uses truncate journaling while keeping serialized threading enabled.
+        sqlite-wal-test = sqliteWalTest;
+        sqlite-rollback-test = sqliteRollbackTest;
 
         # Regression test for async SIGALRM / setitimer(ITIMER_REAL) delivery
         # on the wasm guest (#35) → $out/bin/sigalrm-test.

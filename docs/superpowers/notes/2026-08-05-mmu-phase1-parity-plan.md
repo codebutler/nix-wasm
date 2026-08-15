@@ -712,14 +712,18 @@ Closed dispositions:
   1.75–2 GiB guest. Patch 0007 likewise remains a NOMMU hard ceiling and the
   MMU initial stack-VMA size. Shared patch/config assertions plus both modes'
   wrapperless-cc, large-install, core, and GTK boot gates verify the decision.
-- [ ] `nix-wasm.nix`/`deps-overlay.nix` sqlite `-DSQLITE_OMIT_WAL`
-  (`+ THREADSAFE=0`). **Provisional: attempt re-enable, VERIFY under real
-  concurrent load.** WAL's `-shm` needs a real growable `MAP_SHARED` file;
-  ramfs already supports `MAP_SHARED` (proven by the `/dev/shm` wl_shm path)
-  independent of MMU, so this may have never been strictly an MMU gap either
-  — re-test with WAL + THREADSAFE=1 under a real `nix-env` store-DB write
-  workload (the original failure mode) before concluding it's safe, and
-  revert with the specific new failure recorded if it still breaks.
+- [x] **RESTORE SERIALIZED THREADING IN BOTH; WAL IN MMU.**
+  `SQLITE_THREADSAFE=0` and `SQLITE_OMIT_WAL` are gone from the shared SQLite
+  build; only the orthogonal static-build `SQLITE_OMIT_LOAD_EXTENSION` remains.
+  Live NOMMU boot diagnosis proved that selecting WAL still reaches
+  `SQLITE_IOERR` during the first table write even on a direct ramfs mount, so
+  the NOMMU Nix profile sets upstream's `use-sqlite-wal = false` and uses
+  truncate journaling. The MMU profile keeps WAL. Mode-specific tests run four
+  contending serialized connections on `/tmp` and `/dev/shm`, verify 96 rows,
+  and, for MMU, require both `-wal`/`-shm` sidecars. The full-system smoke then
+  performs the real `nix-env` store-DB write and requires WAL on MMU or the
+  rollback-journal default observed by a fresh NOMMU connection. Both modes
+  remain supported without globally weakening SQLite.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
   9P `cache=loose,ignoreqv`). **Provisional: VERIFY both, may flip.**
   `cache=loose` exists because NOMMU can't `get_user_pages` on a user buffer

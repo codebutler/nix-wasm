@@ -7,7 +7,8 @@
 # pinned nixpkgs rev (which modules declare/read which options moves between
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
-{ nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix, extraSystemPackages ? [ ] }:
+{ nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix
+, extraSystemPackages ? [ ], useSQLiteWAL ? true }:
 let
   lib = cross.lib;
   modulesPath = nixpkgs + "/nixos/modules";
@@ -344,6 +345,12 @@ let
         # and `nix-env -iA guest-clang-wasm32` install from the cache like any other
         # package (fixes the `wrapperless-cc-e2e` install path).
         nix.settings.always-allow-substitutes = true;
+        # The MMU profile uses Nix's default WAL mode. NOMMU still returns
+        # SQLITE_IOERR from SQLite's WAL-index shared-memory protocol even on
+        # direct ramfs, so its caller passes false and Nix uses upstream's
+        # supported truncate-journal path. Serialized SQLite mutexing remains
+        # enabled in both profiles.
+        nix.settings.use-sqlite-wal = useSQLiteWAL;
         nix.settings.sandbox = false;
         # Single-user guest: build/realize as the calling user (root). Empty
         # build-users-group disables build-user isolation — otherwise nix aborts
