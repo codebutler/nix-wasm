@@ -1,0 +1,24 @@
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_3f579ea376334e 639-645,661-664
+  s_5c319dde45a577::t_c4386bd37e9f3c 646-647,653-658
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_3a77eec31a30e7 30-32
+  s_5c319dde45a577::t_c4386bd37e9f3c 22,34-35,42-48,68-69,73-76,224-228
+  s_5c319dde45a577::t_3f579ea376334e 80-83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "585f0522e1ccb79b0ef2240dac3858ae48aa41f2",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
