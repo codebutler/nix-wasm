@@ -223,6 +223,7 @@ jobs:
             '.#wasm-initramfs-nommu' \
             '.#wasm-initramfs-fork' \
             '.#linux-image' \
+            '.#linux-image-nommu' \
             '.#kernel-nommu' \
             '.#kernel-mmu' \
             '.#kernel-mmu-a2' \
@@ -811,9 +812,9 @@ jobs:
           run_smoke demo/node/exec-reject-smoke.mjs
           run_smoke demo/node/blk-rw-smoke.mjs
 
-  # --- nix-boot-smoke-nommu: bounded compatibility coverage ------------------
-  # The former default full-system job now keeps the explicit NOMMU artifacts
-  # healthy during their Phase-3 deprecation window. It remains the regression gate for the
+  # --- nix-boot-smoke-nommu: supported alternate-mode coverage ----------------
+  # The former default full-system job keeps the explicit NOMMU artifacts
+  # healthy as yore-pc's supported non-MMU mode. It remains the regression gate for the
   # virtio-device-enum patch fix: if patches 0017-0020 ever drop the 9P device
   # registration again (a silent patch-fuzz hazard the kernel.nix build-time
   # assertion already guards), `9pnet_virtio` finds "no channels available for
@@ -823,7 +824,7 @@ jobs:
   # base.squashfs + wasm-binary-cache); `needs: artifacts` so they are built +
   # pushed to Cachix first and this job substitutes them.
   nix-boot-smoke-nommu:
-    name: NOMMU deprecation smoke (core + gtk)
+    name: NOMMU mode smoke (core + gtk)
     needs: [changes, toolchain, artifacts]
     # Run on a world OR engine change. `!failure() && !cancelled()` lets it run
     # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
@@ -837,7 +838,7 @@ jobs:
     # queueing separately for an `md` runner (real CI history showed 25-65 min
     # queue waits in this wave). Merging means the substitution happens ONCE and
     # both smoke groups reuse it. The browser gate moved to the MMU default job.
-    # Keep the established budget for the core + GTK compatibility suite.
+    # Keep the established budget for the core + GTK alternate-mode suite.
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -1212,7 +1213,7 @@ jobs:
           # NOMMU (every access is a 2-level walk; page-crossing accesses split
           # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
           # budget than the shared 180s default so the (correct, slower) install
-          # can finish. The NOMMU deprecation job keeps the 180s default.
+          # can finish. The NOMMU mode job keeps the 180s default.
           NIX_MAKE_TIMEOUT_MS: "600000"
         run: |
           run_smoke() {
@@ -1319,8 +1320,8 @@ jobs:
             run_smoke demo/node/rsvg-smoke.mjs
 
       # Browser-only regressions (#137/#139) must gate the shipped default,
-      # which is now this MMU/fork artifact set rather than the NOMMU
-      # deprecation job above.
+      # which is now this MMU/fork artifact set rather than the NOMMU mode job
+      # above.
       - name: Install Chromium
         working-directory: runtime
         run: bunx playwright install --with-deps chromium

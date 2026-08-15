@@ -5,7 +5,7 @@ name: Deploy PR preview
 # content-addresses them into cas/<buildhash>/, syncs the runtime/ frontend into
 # pr-<N>/, and comments the URL. Teardown purges pr-<N>/ on close.
 #
-# It also builds + publishes a SECOND artifact set — the retired NOMMU guest —
+# It also builds + publishes a SECOND artifact set — the supported NOMMU guest —
 # into its own cas/<hash>/ prefix, pointed at by preview.json's
 # "variants.nommu" entry. Open it at `…/demo/web/?variant=nommu` (main.js reads
 # the query param); the PR comment links it whenever that build succeeds. This is
@@ -126,15 +126,15 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         run: bash scripts/preview-publish.sh "${PR}"
 
-      # NOMMU deprecation preview: the default build above is now the software-
-      # MMU/real-fork guest. Keep the former NOMMU artifact set reachable under
-      # the SAME three file names during the deprecation window; baseUrl is the
+      # NOMMU alternate-mode preview: the default build above is the software-
+      # MMU/real-fork guest. Keep the NOMMU artifact set reachable under the
+      # SAME three file names; baseUrl is the
       # only thing that differs. See main.js's `?variant=` handling. The nix-cache/ catalog
       # tree is intentionally NOT duplicated here — it's shared with (and outside
       # the scope of) the default preview per infra/preview-worker/README.md.
       #
       # This must not take down the already-working default-guest preview + its
-      # PR comment below — it's additive compatibility coverage, not the headline
+      # PR comment below — it's additive alternate-mode coverage, not the headline
       # preview — which needs BOTH of:
       #   - continue-on-error: bounds FAILURE. A NOMMU-specific build break fails
       #     only this step; steps.nommu-preview.outcome (the pre-continue-on-error
@@ -226,7 +226,7 @@ jobs:
             const url = `${base.replace(/\/+$/,'')}/pr-${process.env.PR}/demo/web/`;
             const marker = '<!-- nix-wasm-preview -->';
             const sha = (process.env.PR_COMMIT || '').slice(0, 8);
-            // The retired NOMMU variant publishes to the SAME preview URL space
+            // The supported NOMMU variant publishes to the SAME preview URL space
             // via preview.json's "variants" map — see main.js's `?variant=`
             // handling. Link it here only when its build
             // step actually succeeded (the step's continue-on-error + its own
@@ -235,7 +235,7 @@ jobs:
             // default link).
             const nommuLine =
               process.env.NOMMU_OUTCOME === 'success'
-                ? `\n<sub>NOMMU deprecation variant: ${url}?variant=nommu</sub>`
+                ? `\n<sub>NOMMU variant: ${url}?variant=nommu</sub>`
                 : process.env.NOMMU_OUTCOME === 'failure'
                   ? `\n<sub>NOMMU variant: not published for this build (build failed or timed out).</sub>`
                   : '';

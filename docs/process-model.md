@@ -4,8 +4,9 @@ The published/default wasm guest is a **software-MMU system**: processes share
 one `WebAssembly.Memory`, while the checked two-level page-table walk gives each
 process an isolated, copy-on-write address space. Fork-capable binaries use the
 asyncify seam to return twice; ordinary binaries continue to use
-`posix_spawn`. The former single-arena NOMMU guest remains available only
-through explicitly `-nommu`-suffixed artifacts during its deprecation window.
+`posix_spawn`. The single-arena NOMMU guest remains a supported, selectable
+yore-pc mode through explicitly `-nommu`-suffixed artifacts and the production
+channel's `variants.nommu` image.
 
 This document is the authoritative description of the **spawn contract**. Its
 purpose: the busybox/ash/glib spawn patches are **one documented platform port**,
@@ -65,10 +66,10 @@ correctly (8 `fork-*` acceptance programs). It was shelved (#32/#25/#29) when
 every fork paid an eager whole-RSS copy; **Track A's software-MMU COW removed
 that cliff**, and **#129 (Track B)** generalized the seam into a cross-stdenv
 flag so opting a package into real `fork()` is a build option, not a bespoke
-derivation. The design confines the asyncify tax to fork-using
-binaries (shells, `make`, daemons) — everything else stays `posix_spawn` and
-pays nothing — and then retires the forkshell `ash` and the
-`posix_spawn`-only accommodations below.
+derivation. The design confines the asyncify tax to fork-using binaries
+(shells, `make`, daemons) — everything else stays `posix_spawn` and pays
+nothing. The forkshell `ash` and clone-with-fn accommodations remain isolated
+to the independently supported NOMMU mode; the MMU mode does not carry them.
 
 The libc default is now fork-capable, but an executable still opts into the
 fork build pipeline, and it must run with the software-MMU+COW kernel. Do not
@@ -110,7 +111,7 @@ on the host, hermetically, by `.#autotools-fixture-hush-check` against a real
 generated `configure` (including a sabotaged-compiler negative case pinned to
 exit 77). Full record: CLAUDE.md's hush learnings entry.
 
-**(ii) NOMMU deprecation guest — `.#kernel-nommu`,
+**(ii) Supported NOMMU guest — `.#kernel-nommu`,
 `.#wasm-initramfs-nommu`, and `.#wasm-base-squashfs-nommu`.** It retains the
 busybox/ash/glib spawn-port accommodations and ordinary programs use
 `posix_spawn`. No module may import `capture_stack`;
@@ -128,12 +129,12 @@ stood in the way (the shell half closed earlier the same day via
 `nix-wasm.yml`'s default `nix-boot-smoke` `core` shard — no soak step remains
 for it. Full record: the root `CLAUDE.md`'s autotools caveat and the
 2026-08-05 parity-plan note's "Real-fork autotools proof" item (see "Full
-status record" just below). Retiring the `posix_spawn`-only accommodation
-layer itself (forkshell ash, the busybox/glib spawn-port patches below) is
-issue #131 slice 1, and that retirement has not started — but groundwork for
-it has: hush is already `/bin/sh` on the fork variant (above), and the fork
-initramfs build (`userspace/busybox-fork.nix`) already runs the shared
-`scripts/wasm-check-imports.py` import-contract check ("#131 slice-1 PR-2").
+status record" just below). Issue #131's Slice‑1 disposition is profile-local:
+the MMU image already uses stock BusyBox fork sites with hush as `/bin/sh`,
+while the supported NOMMU image retains forkshell ash and the clone-with-fn
+spawn port. The fork initramfs build (`userspace/busybox-fork.nix`) runs the
+shared `scripts/wasm-check-imports.py` import-contract check, and the NOMMU
+profile has its own closure-wide no-`capture_stack` gate.
 
 Full status record: `docs/superpowers/specs/2026-07-01-cleanup-131-audit.md`,
 `docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md`, and the
@@ -157,8 +158,9 @@ one of these — in order of preference — and **never** add a stub that links:
      feature; libpcre2 does not).
    - **ncurses** — `buildFlags = [ "libs" "progs" ]` so `make` skips the `test/`
      demos (`ditto.c` et al. fork); libncursesw + tic/tput do not.
-   - **busybox** — disable the IFUP/IFDOWN/TELNETD applets (network daemons,
-     unused on the networkless guest) in `userspace/busybox.nix`.
+   - **busybox NOMMU** — disable IFUP/IFDOWN/TELNETD because their vfork sites
+     cannot use the NOMMU process model. The MMU BusyBox build enables all
+     three and asserts that configuration during its build.
 
 2. **It's a real spawn API in a library we need → port it to `posix_spawn`.**
    Force the library's existing `posix_spawn` codepath and compile out the raw
@@ -201,8 +203,9 @@ one of these — in order of preference — and **never** add a stub that links:
 ### The busybox/ash spawn port (the labeled platform port)
 
 busybox's spawn is centralized in `libbb` (`vfork_daemon_rexec.c` + a few applet
-sites); ash's is its own forkshell. These patches ARE the busybox-on-wasm spawn
-port — kept and labeled, not removed:
+sites); ash's is its own forkshell. These patches are the supported NOMMU
+busybox-on-wasm spawn port—kept and labeled, and absent from the MMU BusyBox
+recipe:
 
 - `patches/busybox/0001-wasm-arch-and-clone-spawn.patch` — the wasm arch +
   convert `run_pipe`/spawn to clone-with-a-fn.
@@ -217,7 +220,7 @@ port — kept and labeled, not removed:
 - `patches/busybox/ash/*` + `userspace/ash.nix` — the forkshell ash (NOMMU
   fork-without-exec over `posix_spawn`), promoted to `/bin/sh`.
 
-Result: a curated, `posix_spawn`-clean userspace. Programs using
+NOMMU result: a curated, `posix_spawn`-clean userspace. Programs using
 `posix_spawn`/`system`/`popen` run unmodified; raw-`fork`/`vfork` holdouts are
 either not built or ported via one of the three rules above. No silent
 per-package hacks; no symbol that links but aborts at runtime.
@@ -253,8 +256,8 @@ per-package hacks; no symbol that links but aborts at runtime.
   shipped a booted, CI-gated software-MMU + real-fork guest on top of this
   cost, consistent with CLAUDE.md's "permanent ~2-3× per-access-walk cost"
   framing. It is not a per-process-Memory-style dead end — it is a second,
-  working guest shape and is now the published default; NOMMU remains only as
-  the bounded deprecation profile described above.
+  working guest shape and is now the published default; NOMMU remains the
+  separately selectable, supported profile described above.
 
 Full rationale and the investigation record:
 `docs/superpowers/specs/2026-06-21-clean-nommu-memory-design.md`. Per-holdout

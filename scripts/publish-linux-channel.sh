@@ -3,18 +3,18 @@
 # pc resolves at runtime (`js/packages/linux-channel.js` → `packages/linux/latest.json`).
 #
 # This is the channel republish from `vendor/linux-wasm/SOURCE.md` §"Republish the
-# guest", automated: build the boot bundle + toolchain cache, upload them under a
-# NEW immutable version, then flip the `latest.json` pointer. A guest change reaches
-# the live site with NO pc deploy — pc fetches latest.json (served no-cache) on the
-# next Linux-app open.
+# guest", automated: build the MMU and NOMMU boot bundles plus the shared
+# toolchain cache, upload them under immutable content hashes, then flip the
+# `latest.json` pointer. A guest change reaches the live site with NO pc deploy —
+# pc fetches latest.json (served no-cache) on the next Linux-app open.
 #
 # R2 layout — the DEDICATED `pc-packages` bucket (pc#416), served by
 # infra/preview-worker with CORP+CORS. Keys are FLATTENED (no `packages/` prefix):
 # the worker's `/packages/<id>/…` route drops the `/packages` segment and reads
 # `<id>/…` from env.PACKAGES, so the R2 key for the linux channel is `linux/…`
 # while the public URL pc fetches stays `…/packages/linux/…`.
-#   linux/<v>/linux.iso        — the channel image (.#linux-image): vmlinux.wasm +
-#                                initramfs.cpio.gz + base.squashfs + manifest.json
+#   linux/<mmu-v>/linux.iso    — default MMU image (.#linux-image)
+#   linux/<nommu-v>/linux.iso  — selectable NOMMU image (.#linux-image-nommu)
 #   linux/<v>/nix-cache/       — ONLY pkgs.nix + paths.nix (the nix-wasm `nix-env
 #                                -iA` / new-CLI catalogs, NOT in Cachix). The heavy
 #                                nars + *.narinfo + nix-cache-info are NOT uploaded
@@ -23,8 +23,10 @@
 #   linux/latest.json          — the pointer pc reads (no-cache route);
 #                                its nixCacheBaseUrl points at /cachix/<v>
 #
-# <v> = the linux.iso sha256 (content-addressed → immutable, safe to cache forever;
-# republishing identical bytes is idempotent, new bytes get a fresh key).
+# <*-v> = that linux.iso's sha256 (content-addressed → immutable, safe to cache
+# forever; republishing identical bytes is idempotent, new bytes get a fresh key).
+# `latest.json` retains the legacy top-level MMU fields for older yore-pc builds
+# and adds `defaultVariant` + `variants.{mmu,nommu}` for dual-mode clients.
 #
 # minEngine is parsed from runtime/abi.js (the SAME source .#linux-image bakes into
 # the image's manifest.json) so the channel guard can never drift from the engine
@@ -41,7 +43,8 @@
 # write, then exits 0 — uploading nothing.
 #
 # PRECONDITION (nix-wasm#123): nix-wasm.yml's `artifacts` job must already have
-# pushed this commit's .#linux-image + .#wasm-binary-cache to Cachix. The
+# pushed this commit's .#linux-image + .#linux-image-nommu +
+# .#wasm-binary-cache to Cachix. The
 # artifact-provenance gate below asserts that in seconds and fails fast if not,
 # so a publish raced against an in-flight (or cancelled) artifacts run can no
 # longer quietly build and ship an image CI never vetted. ALLOW_UNPUBLISHED=true
@@ -183,7 +186,7 @@ _cache_probe() { # $1 = /nix/store/<hash>-name, $2 = label for messages
 # --max-jobs 0 unless the gate is explicitly overridden (see below).
 NIX_BUILD_MODE="--max-jobs 0"
 GATE_MISSING=""
-for _attr in linux-image wasm-binary-cache; do
+for _attr in linux-image linux-image-nommu wasm-binary-cache; do
   # Pure evaluation: `.outPath` needs no build, so a missing artifact costs
   # seconds here rather than an hour of `nix build`.
   # shellcheck disable=SC2086
@@ -287,27 +290,40 @@ if [ -n "$GATE_MISSING" ]; then
   fi
 fi
 
-echo "==> Building .#linux-image …"
+echo "==> Building .#linux-image (MMU) …"
 # --max-jobs 0 (unless overridden above): substitute-only. The gate just proved
-# both outputs are in the cache, so nothing legitimately needs building — and if
+# all outputs are in the cache, so nothing legitimately needs building — and if
 # anything does, that means the premise changed under us and a hard failure is
 # the correct outcome, not an unvetted local rebuild.
 # shellcheck disable=SC2086
-IMG_STORE=$(eval "$NIX build .#linux-image $NIX_BUILD_MODE --print-out-paths --no-link")
+IMG_STORE_MMU=$(eval "$NIX build .#linux-image $NIX_BUILD_MODE --print-out-paths --no-link")
 # make-iso9660-image emits the iso under $out/iso/; locate it robustly.
-ISO=$(find "$IMG_STORE" -name linux.iso -type f | head -1)
-[ -n "$ISO" ] && [ -f "$ISO" ] || { echo "ERROR: linux.iso not found under $IMG_STORE" >&2; exit 1; }
+ISO_MMU=$(find "$IMG_STORE_MMU" -name linux.iso -type f | head -1)
+[ -n "$ISO_MMU" ] && [ -f "$ISO_MMU" ] || {
+  echo "ERROR: MMU linux.iso not found under $IMG_STORE_MMU" >&2; exit 1;
+}
+
+echo "==> Building .#linux-image-nommu …"
+# shellcheck disable=SC2086
+IMG_STORE_NOMMU=$(eval "$NIX build .#linux-image-nommu $NIX_BUILD_MODE --print-out-paths --no-link")
+ISO_NOMMU=$(find "$IMG_STORE_NOMMU" -name linux.iso -type f | head -1)
+[ -n "$ISO_NOMMU" ] && [ -f "$ISO_NOMMU" ] || {
+  echo "ERROR: NOMMU linux.iso not found under $IMG_STORE_NOMMU" >&2; exit 1;
+}
 
 echo "==> Building .#wasm-binary-cache …"
 # shellcheck disable=SC2086
 CACHE=$(eval "$NIX build .#wasm-binary-cache $NIX_BUILD_MODE --print-out-paths --no-link")
 
 # ---------------------------------------------------------------------------
-# 2. Version (= image content hash) + minEngine (from runtime/abi.js)
+# 2. Versions (= per-image content hashes) + minEngine (from runtime/abi.js)
 # ---------------------------------------------------------------------------
-SHA=$(sha256sum "$ISO" | cut -d' ' -f1)
-BYTES=$(stat -c%s "$ISO")
-VERSION="$SHA"
+SHA_MMU=$(sha256sum "$ISO_MMU" | cut -d' ' -f1)
+BYTES_MMU=$(stat -c%s "$ISO_MMU")
+VERSION="$SHA_MMU"
+SHA_NOMMU=$(sha256sum "$ISO_NOMMU" | cut -d' ' -f1)
+BYTES_NOMMU=$(stat -c%s "$ISO_NOMMU")
+VERSION_NOMMU="$SHA_NOMMU"
 
 # Parse the ACTUAL `export const ENGINE_ABI = N;` line (not the comment lines that
 # also mention ENGINE_ABI) — matches linux-image.nix's parse exactly.
@@ -315,26 +331,66 @@ MIN_ENGINE=$(grep -oE '^[[:space:]]*export const ENGINE_ABI = [0-9]+;' "$ROOT/ru
   | grep -oE '[0-9]+' | head -1)
 [ -n "$MIN_ENGINE" ] || { echo "ERROR: could not parse ENGINE_ABI from runtime/abi.js" >&2; exit 1; }
 
-IMG_URL="$PUBLIC_BASE_URL/packages/linux/$VERSION/linux.iso"
+IMG_URL_MMU="$PUBLIC_BASE_URL/packages/linux/$VERSION/linux.iso"
+IMG_URL_NOMMU="$PUBLIC_BASE_URL/packages/linux/$VERSION_NOMMU/linux.iso"
 # The guest's nix-cache.js uses ONE baseUrl for nix-cache-info / *.narinfo / nar/*
 # AND pkgs.nix / paths.nix. The worker's /cachix/<v> route unifies them: catalogs
 # from R2 (packages/linux/<v>/nix-cache/), everything else proxied from
 # nix-wasm.cachix.org (nix-wasm#78). Point at it, NOT the raw R2 nix-cache path.
 NIX_CACHE_URL="$PUBLIC_BASE_URL/cachix/$VERSION"
 
-# latest.json — exactly the shape js/packages/linux-channel.js resolves:
-#   { version, minEngine, nixCacheBaseUrl, image: { url, bytes, sha256 } }
-LATEST_JSON=$(printf '{"version":"%s","minEngine":%s,"nixCacheBaseUrl":"%s","image":{"url":"%s","bytes":%s,"sha256":"%s"}}\n' \
-  "$VERSION" "$MIN_ENGINE" "$NIX_CACHE_URL" "$IMG_URL" "$BYTES" "$SHA")
+# latest.json keeps the original top-level MMU pointer byte-for-field compatible
+# with old yore-pc builds, then adds an explicit dual-mode map for new clients.
+# Both modes use the same catalog/Cachix endpoint; the ISO bytes themselves are
+# independently content-addressed.
+LATEST_JSON=$(python3 - \
+  "$VERSION" "$MIN_ENGINE" "$NIX_CACHE_URL" "$IMG_URL_MMU" "$BYTES_MMU" "$SHA_MMU" \
+  "$VERSION_NOMMU" "$IMG_URL_NOMMU" "$BYTES_NOMMU" "$SHA_NOMMU" <<'PY'
+import json
+import sys
+
+(
+    mmu_version,
+    min_engine,
+    cache_url,
+    mmu_url,
+    mmu_bytes,
+    mmu_sha,
+    nommu_version,
+    nommu_url,
+    nommu_bytes,
+    nommu_sha,
+) = sys.argv[1:]
+
+def variant(version, url, size, sha):
+    return {
+        "version": version,
+        "minEngine": int(min_engine),
+        "nixCacheBaseUrl": cache_url,
+        "image": {"url": url, "bytes": int(size), "sha256": sha},
+    }
+
+mmu = variant(mmu_version, mmu_url, mmu_bytes, mmu_sha)
+nommu = variant(nommu_version, nommu_url, nommu_bytes, nommu_sha)
+pointer = {
+    "schemaVersion": 2,
+    "defaultVariant": "mmu",
+    **mmu,
+    "variants": {"mmu": mmu, "nommu": nommu},
+}
+print(json.dumps(pointer, separators=(",", ":")))
+PY
+)
 
 echo ""
-echo "linux.iso path  : $ISO"
-echo "linux.iso bytes : $BYTES"
-echo "linux.iso sha256: $SHA"
-echo "version <v>      : $VERSION"
-echo "minEngine        : $MIN_ENGINE"
-echo "nix-cache path   : $CACHE"
-echo "latest.json      : $LATEST_JSON"
+echo "MMU linux.iso path    : $ISO_MMU"
+echo "MMU bytes / sha256    : $BYTES_MMU / $SHA_MMU"
+echo "NOMMU linux.iso path  : $ISO_NOMMU"
+echo "NOMMU bytes / sha256  : $BYTES_NOMMU / $SHA_NOMMU"
+echo "default version <v>   : $VERSION"
+echo "minEngine            : $MIN_ENGINE"
+echo "nix-cache path       : $CACHE"
+echo "latest.json          : $LATEST_JSON"
 echo ""
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -342,10 +398,14 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "## linux channel republished"
     echo "| field | value |"
     echo "|-------|-------|"
-    echo "| version | \`$VERSION\` |"
+    echo "| default mode | \`mmu\` |"
+    echo "| MMU version | \`$VERSION\` |"
+    echo "| NOMMU version | \`$VERSION_NOMMU\` |"
     echo "| minEngine | \`$MIN_ENGINE\` |"
-    echo "| bytes | \`$BYTES\` |"
-    echo "| image | \`$IMG_URL\` |"
+    echo "| MMU bytes | \`$BYTES_MMU\` |"
+    echo "| NOMMU bytes | \`$BYTES_NOMMU\` |"
+    echo "| MMU image | \`$IMG_URL_MMU\` |"
+    echo "| NOMMU image | \`$IMG_URL_NOMMU\` |"
     echo ""
     echo "pc resolves \`packages/linux/latest.json\` on the next Linux-app open — no pc deploy needed."
   } >> "$GITHUB_STEP_SUMMARY"
@@ -357,8 +417,11 @@ fi
 if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "==> DRY-RUN (CLOUDFLARE_API_TOKEN unset or DRY_RUN=true) — wrangler commands that WOULD run:"
   echo ""
-  echo "  # rclone (not wrangler): the image is >300 MiB, wrangler's hard cap"
-  echo "  rclone copyto \"$ISO\" \"r2:$BUCKET/linux/$VERSION/linux.iso\" \\"
+  echo "  # rclone (not wrangler): the images exceed wrangler's 300 MiB hard cap"
+  echo "  rclone copyto \"$ISO_MMU\" \"r2:$BUCKET/linux/$VERSION/linux.iso\" \\"
+  echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
+  echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
+  echo "  rclone copyto \"$ISO_NOMMU\" \"r2:$BUCKET/linux/$VERSION_NOMMU/linux.iso\" \\"
   echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
   echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo ""
@@ -373,7 +436,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "  printf '%s' '<latest.json above>' | bunx $WRANGLER r2 object put \\"
   echo "    \"$BUCKET/linux/latest.json\" --file - --content-type application/json --remote"
   echo ""
-  echo "==> version=$VERSION minEngine=$MIN_ENGINE bytes=$BYTES"
+  echo "==> mmu=$VERSION nommu=$VERSION_NOMMU minEngine=$MIN_ENGINE"
   exit 0
 fi
 
@@ -395,7 +458,7 @@ case "$WRANGLER_OUT" in
 esac
 echo "    wrangler $WRANGLER_OUT"
 
-echo "==> Uploading linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
+echo "==> Uploading MMU linux.iso → $BUCKET/linux/$VERSION/linux.iso …"
 # rclone, NOT wrangler: `wrangler r2 object put` hard-caps at 300 MiB, and the
 # channel image crossed that when the X11 stack (Xwayland/sommelier/GTK2/XChat)
 # landed -- it is ~340 MiB now and only grows. rclone talks R2's S3 endpoint and
@@ -465,7 +528,12 @@ export RCLONE_CONFIG_R2_ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflare
 #                          cannot list the bucket -- so the first upload of any
 #                          new version would fail. Skipping it is right anyway:
 #                          the key is immutable and content-addressed.
-rclone copyto "$ISO" "r2:$BUCKET/linux/$VERSION/linux.iso" \
+rclone copyto "$ISO_MMU" "r2:$BUCKET/linux/$VERSION/linux.iso" \
+  --header-upload "Content-Type: application/x-iso9660-image" \
+  --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
+
+echo "==> Uploading NOMMU linux.iso → $BUCKET/linux/$VERSION_NOMMU/linux.iso …"
+rclone copyto "$ISO_NOMMU" "r2:$BUCKET/linux/$VERSION_NOMMU/linux.iso" \
   --header-upload "Content-Type: application/x-iso9660-image" \
   --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
 
@@ -492,7 +560,16 @@ echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$
 # image (a publish raced ahead of the artifacts landing in Cachix, rebuilt the
 # OLD image, and the version-only verify passed against the already-live pointer).
 PREV_LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
-PREV_VERSION="$(printf '%s' "$PREV_LIVE" | sed -n 's/.*"version":"\([0-9a-f]*\)".*/\1/p')"
+PREV_VERSION=$(python3 - "$PREV_LIVE" <<'PY'
+import json
+import sys
+
+try:
+    print(json.loads(sys.argv[1]).get("version", ""))
+except (IndexError, json.JSONDecodeError, TypeError):
+    print("")
+PY
+)
 
 echo "==> Flipping pointer → $BUCKET/linux/latest.json …"
 TMP_LATEST="$(mktemp)"
@@ -503,27 +580,33 @@ bunx "$WRANGLER" r2 object put "$BUCKET/linux/latest.json" \
 
 # Verify the flip actually landed (latest.json is served no-cache). Belt-and-
 # suspenders against a silent wrangler no-op: re-fetch the live pointer and assert
-# it carries the FULL new pointer — BOTH the version AND the nixCacheBaseUrl we
-# wrote, not just the version substring. The version-only check passed spuriously
+# it carries the FULL new pointer — both mode versions, the default-mode marker,
+# and the shared nixCacheBaseUrl we wrote, not just one version substring. The
+# version-only check passed spuriously
 # when a no-op flip left the OLD pointer live and that pointer already happened to
 # carry $VERSION (the stale-image race). Requiring nixCacheBaseUrl too means a
 # flip that didn't actually rewrite the object fails the job: an old R2-base
 # pointer (or any other version) no longer satisfies the new /cachix-base assert.
-echo "==> Verifying latest.json went live (version + nixCacheBaseUrl) …"
+echo "==> Verifying latest.json went live (MMU + NOMMU + nixCacheBaseUrl) …"
 for attempt in 1 2 3 4 5; do
   LIVE="$(curl -fsS "$PUBLIC_BASE_URL/packages/linux/latest.json" 2>/dev/null || true)"
   ok=1
   [ -n "$LIVE" ] || ok=0
   case "$LIVE" in *"\"version\":\"$VERSION\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"defaultVariant\":\"mmu\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"nommu\":{\"version\":\"$VERSION_NOMMU\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"url\":\"$IMG_URL_NOMMU\""*) ;; *) ok=0 ;; esac
   case "$LIVE" in *"\"nixCacheBaseUrl\":\"$NIX_CACHE_URL\""*) ;; *) ok=0 ;; esac
   if [ "$ok" = 1 ]; then
-    echo "    verified: latest.json → version $VERSION"
-    echo "    nixCacheBaseUrl       → $NIX_CACHE_URL"
+    echo "    verified: MMU version   → $VERSION"
+    echo "              NOMMU version → $VERSION_NOMMU"
+    echo "              nix cache     → $NIX_CACHE_URL"
     break
   fi
   if [ "$attempt" = 5 ]; then
     echo "ERROR: latest.json did not fully update after the flip." >&2
-    echo "  expected version       : $VERSION" >&2
+    echo "  expected MMU version   : $VERSION" >&2
+    echo "  expected NOMMU version : $VERSION_NOMMU" >&2
     echo "  expected nixCacheBaseUrl: $NIX_CACHE_URL" >&2
     echo "  live latest.json was   : $LIVE" >&2
     exit 1
@@ -546,6 +629,7 @@ else
 fi
 
 echo ""
-echo "==> PUBLISHED linux channel: version=$VERSION minEngine=$MIN_ENGINE"
-echo "==> image: $IMG_URL"
+echo "==> PUBLISHED dual-mode linux channel: mmu=$VERSION nommu=$VERSION_NOMMU minEngine=$MIN_ENGINE"
+echo "==> MMU image: $IMG_URL_MMU"
+echo "==> NOMMU image: $IMG_URL_NOMMU"
 echo "==> pc will resolve it on the next Linux-app open (latest.json is no-cache)."

@@ -1,9 +1,10 @@
 name: publish-linux-channel
 
 # Republish the versioned `linux` guest channel pc resolves at runtime
-# (packages/linux/latest.json). Build the boot bundle (.#linux-image) + the
-# toolchain cache (.#wasm-binary-cache), upload them under a new immutable
-# version, then flip latest.json — see scripts/publish-linux-channel.sh and
+# (packages/linux/latest.json). Build both boot bundles (.#linux-image and
+# .#linux-image-nommu) + the shared toolchain cache (.#wasm-binary-cache),
+# upload them under immutable versions, then flip latest.json — see
+# scripts/publish-linux-channel.sh and
 # vendor/linux-wasm/SOURCE.md §"Republish the guest".
 #
 # Deliberate release only — never on push. Two equivalent kicks:
@@ -12,7 +13,7 @@ name: publish-linux-channel
 #   contents:write but not actions:write — same live publish, dry_run false)
 #
 # PRECONDITION (#123): nix-wasm.yml's `artifacts` job must have COMPLETED on this
-# commit — it pushes .#linux-image + .#wasm-binary-cache to Cachix. The publish
+# commit — it pushes both linux-image outputs + .#wasm-binary-cache to Cachix. The publish
 # script's artifact-provenance gate checks that in seconds and fails fast
 # otherwise, so a publish dispatched against an in-flight or cancelled artifacts
 # run can no longer build a locally-made image and ship it green (#121).
