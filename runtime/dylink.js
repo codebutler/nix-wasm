@@ -47,6 +47,7 @@
 // compilation is unrestricted.
 
 import { genCanonicalThunk } from "./ffi-codegen.js";
+import { genFaultBridge, instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
 
 const textDecoder = new TextDecoder("utf-8");
 
@@ -431,16 +432,43 @@ export class DynamicLoader {
    *   baseEnv: Record<string, unknown>,
    *   archBits?: number,
    *   log?: (msg: string) => void,
+   *   mmu?: {
+   *     ptBase: number,
+   *     syscall2: Function,
+   *     stackPointer: WebAssembly.Global,
+   *     getTlsBase: Function,
+   *   },
    * }} opts baseEnv = the worker's host-provided env import object (syscalls,
    *   abort, lsan stubs, …) — the FINAL fallback for a side module's unresolved
    *   env imports, exactly the set the main module gets.
    */
-  constructor({ memory, table, baseEnv, archBits = 32, log = () => {} }) {
+  constructor({ memory, table, baseEnv, archBits = 32, log = () => {}, mmu }) {
     this.memory = memory;
     this.table = table;
     this.baseEnv = baseEnv;
     this.archBits = archBits;
     this.log = log;
+    this.mmu = mmu || null;
+    this.faultTableIndex = null;
+    this.faultBridgeInstance = null;
+    if (this.mmu) {
+      // Side modules already import this shared table. Install one wasm-typed
+      // bridge for the process so checked instrumentation can fault through a
+      // call_indirect without adding imports and renumbering every defined
+      // function in an arbitrary module.
+      this.faultBridgeInstance = new WebAssembly.Instance(
+        new WebAssembly.Module(/** @type {BufferSource} */ (genFaultBridge())),
+        {
+          env: {
+            __wasm_syscall_2: this.mmu.syscall2,
+            __stack_pointer: this.mmu.stackPointer,
+            __get_tls_base: this.mmu.getTlsBase,
+          },
+        },
+      );
+      this.faultTableIndex = this.table.grow(1);
+      this.table.set(this.faultTableIndex, this.faultBridgeInstance.exports.fault);
+    }
     /** @type {DlModule[]} */
     this.modules = [];
     /**
@@ -679,7 +707,14 @@ export class DynamicLoader {
       // Always compile from an owned, non-shared copy: `bytes` may be a view
       // over the guest's SharedArrayBuffer-backed memory, which the
       // WebAssembly.Module constructor rejects.
-      module = new WebAssembly.Module(/** @type {BufferSource} */ (record.bytes));
+      let moduleBytes = /** @type {Uint8Array} */ (record.bytes);
+      if (this.mmu && !isInstrumented(moduleBytes)) {
+        moduleBytes = softmmuInstrument(moduleBytes, {
+          checked: true,
+          faultTableIndex: /** @type {number} */ (this.faultTableIndex),
+        });
+      }
+      module = new WebAssembly.Module(/** @type {BufferSource} */ (moduleBytes));
     } catch (e) {
       this.log(`[dylink] load(${name}): compile failed: ${e}`);
       return -DL_ERRNO.ENOEXEC;
@@ -784,6 +819,12 @@ export class DynamicLoader {
       return -DL_ERRNO.ENOEXEC;
     }
     record.instance = instance;
+
+    if (this.mmu) {
+      const ex = /** @type {any} */ (instance.exports);
+      ex.__mmu_pt_base.value = this.mmu.ptBase;
+      if (ex.__mmu_start) ex.__mmu_start();
+    }
 
     // Apply the module's own data relocations + run its ctors — but NOT on
     // fork/clone replay, where the (shared or copied) memory already holds the

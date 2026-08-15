@@ -1200,11 +1200,11 @@ jobs:
         # smokes' worst case: autotools-fork-smoke.mjs alone budgets up to 3
         # panic-retries at ~47m each internal budget (NIX_MAKE_TIMEOUT_MS
         # install 10m + CFGRC 25m + MAKERC 10m + boot/staging ~2m, per its own
-        # comment history) ≈ 141m, plus the seven other `core` smokes (smoke,
+        # comment history) ≈ 141m, plus the eight other `core` smokes (smoke,
         # build-from-source-e2e, selftests-batch, profile-install-e2e,
-        # wrapperless-cc-e2e, exec-churn-smoke, rsvg-smoke) at a conservative
-        # ~3m each ≈ 20m ⇒ ≈161m worst case — comfortably inside 200, and the
-        # job-level 330 budget below leaves room for `gtk`'s step after it.
+        # wrapperless-cc-e2e, exec-churn-smoke, dlopen-smoke, rsvg-smoke) at a
+        # conservative ~3m each ≈ 20m ⇒ ≈161m worst case — comfortably inside
+        # 200, and the job-level 330 budget below leaves room for `gtk`'s step.
         timeout-minutes: 200
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
@@ -1266,6 +1266,13 @@ jobs:
             # here they boot on .#kernel-mmu-a2, softmmu-instrumented at load.
             # Ran on this job's core-only predecessor — keeps hard-gating.
             run_smoke demo/node/selftests-batch.mjs
+            # #185: real raw-signature and fpcast'd SIDE_MODULEs under the
+            # shipped software MMU. Both variants exercise side-module data,
+            # relocations, constructors, direct/GOT imports, table entries,
+            # and a demand fault through the checked-mode bridge. Promoted
+            # after its first-attempt green in PR #223, workflow run
+            # 31854237946, job 94940712326 (2026-08-14).
+            run_smoke demo/node/dlopen-smoke.mjs
             # exec-reject-smoke is deliberately NOT run here — see this job's
             # header comment ("exec-reject-smoke stays OUT of `core`"):
             # boot-smoke's mmu-devices shard already boots it on the identical
