@@ -1,9 +1,10 @@
 /* pthread-exit-test — musl memory-compat regression test on wasm Linux.
  *
  * First prove why the local posix_fallocate emulation remains necessary on
- * both supported kernels: their /tmp and /dev/shm are ramfs, whose native
- * fallocate(2) returns EOPNOTSUPP, while posix_fallocate() must still grow a
- * regular file without changing its offset or contents.
+ * both supported kernels: /tmp remains ramfs, whose native fallocate(2) returns
+ * EOPNOTSUPP, while posix_fallocate() must still grow a regular file without
+ * changing its offset or contents. /dev/shm is ramfs on NOMMU and normal tmpfs
+ * on MMU; the test requires native fallocate to match that actual filesystem.
  *
  * A DETACHED pthread that returns/exits goes through musl __pthread_exit →
  * __unmapself, which on the generic path does a native stack-pointer switch
@@ -21,7 +22,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
+
+#define RAMFS_MAGIC 0x858458f6
+#define TMPFS_MAGIC 0x01021994
 
 static int test_fallocate(const char *path) {
   const off_t base = 4096;
@@ -32,6 +37,7 @@ static int test_fallocate(const char *path) {
   const unsigned char marker = 0x5a;
   unsigned char actual = 0;
   struct stat st;
+  struct statfs fs;
 
   int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
   if (fd < 0) {
@@ -49,14 +55,31 @@ static int test_fallocate(const char *path) {
     goto out;
   }
 
-  errno = 0;
-  if (fallocate(fd, 0, base, len) == 0 || (errno != EOPNOTSUPP && errno != ENOSYS)) {
-    printf("FALLOCATE-TEST: %s raw fallocate unexpectedly rc/errno=%d FAIL\n", path,
-           errno);
+  if (fstatfs(fd, &fs) != 0) {
+    printf("FALLOCATE-TEST: %s fstatfs failed: %s FAIL\n", path,
+           strerror(errno));
     failed = 1;
     goto out;
   }
+  if (fs.f_type != RAMFS_MAGIC && fs.f_type != TMPFS_MAGIC) {
+    printf("FALLOCATE-TEST: %s unexpected filesystem type=%lx FAIL\n", path,
+           (unsigned long)fs.f_type);
+    failed = 1;
+    goto out;
+  }
+
+  errno = 0;
+  int raw_rc = fallocate(fd, 0, base, len);
   int raw_errno = errno;
+  if ((fs.f_type == TMPFS_MAGIC && raw_rc != 0) ||
+      (fs.f_type == RAMFS_MAGIC &&
+       (raw_rc == 0 || (raw_errno != EOPNOTSUPP && raw_errno != ENOSYS)))) {
+    printf("FALLOCATE-TEST: %s raw fallocate rc=%d errno=%d mismatches fs=%s FAIL\n",
+           path, raw_rc, raw_errno,
+           fs.f_type == TMPFS_MAGIC ? "tmpfs" : "ramfs");
+    failed = 1;
+    goto out;
+  }
 
   int rc = posix_fallocate(fd, base, len);
   if (rc != 0) {
@@ -83,8 +106,12 @@ static int test_fallocate(const char *path) {
     goto out;
   }
 
-  printf("FALLOCATE-TEST: %s raw=%s posix=OK size=%lld offset/content=OK\n", path,
-         raw_errno == EOPNOTSUPP ? "EOPNOTSUPP" : "ENOSYS", (long long)st.st_size);
+  const char *fs_name = fs.f_type == TMPFS_MAGIC ? "tmpfs" : "ramfs";
+  const char *raw_name = raw_rc == 0
+                             ? "OK"
+                             : (raw_errno == EOPNOTSUPP ? "EOPNOTSUPP" : "ENOSYS");
+  printf("FALLOCATE-TEST: %s fs=%s raw=%s posix=OK size=%lld offset/content=OK\n",
+         path, fs_name, raw_name, (long long)st.st_size);
 
 out:
   close(fd);

@@ -5,8 +5,8 @@
 // sequence, amortising the one squashfs+cache substitution over all of them.
 //
 // Covered (each entry is an exact in-guest command plus output assertion):
-//   pthread-exit-test       — ramfs posix_fallocate + detached __unmapself (#131)
-//   sqlite-wal-test          — profile journal mode + serialized mutexes on both ramfs mounts (#131)
+//   pthread-exit-test       — filesystem fallocate + detached __unmapself (#131)
+//   sqlite-wal-test          — profile journal mode + serialized mutexes on both mounts (#131)
 //   glib-selftest            — gobject + libffi double marshaller (M3a)
 //   libffi-selftest          — libffi raw wasm backend (f32/f64/i64 by-value)
 //   pango-text --selftest    — pango_cairo layout → fontconfig → cairo-ft (M3a)
@@ -39,9 +39,9 @@ const TESTS = [
     name: "musl-memory",
     cmd: "/bin/pthread-exit-test",
     // One ordered assertion covers both fallocate probes and the final detached
-    // thread marker. The binary exits before the pthread half if either ramfs
+    // thread marker. The binary exits before the pthread half if either filesystem
     // check fails, so the final marker cannot mask an earlier failure.
-    re: /FALLOCATE-TEST: \/tmp\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*FALLOCATE-TEST: \/dev\/shm\/posix-fallocate-test raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*PTHREAD-EXIT-TEST: spawned\+exited 16 detached threads OK/,
+    re: /FALLOCATE-TEST: \/tmp\/posix-fallocate-test fs=ramfs raw=(?:EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*FALLOCATE-TEST: \/dev\/shm\/posix-fallocate-test fs=(?:ramfs|tmpfs) raw=(?:OK|EOPNOTSUPP|ENOSYS) posix=OK size=12288 offset\/content=OK[\s\S]*PTHREAD-EXIT-TEST: spawned\+exited 16 detached threads OK/,
     ms: 30000,
   },
   {

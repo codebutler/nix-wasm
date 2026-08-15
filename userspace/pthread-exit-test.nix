@@ -1,6 +1,7 @@
 # pthread-exit-test — regression test for the two wasm musl memory accommodations:
-# ramfs posix_fallocate emulation plus detached-thread __unmapself without the
-# native CRTJMP stack switch. Statically linked into both initramfs variants.
+# profile-specific filesystem fallocate behavior plus detached-thread __unmapself
+# without the native CRTJMP stack switch. Statically linked into both initramfs
+# variants.
 { cross }:
 cross.stdenv.mkDerivation {
   pname = "pthread-exit-test";
@@ -17,5 +18,5 @@ cross.stdenv.mkDerivation {
     install -Dm755 pthread-exit-test $out/bin/pthread-exit-test
     runHook postInstall
   '';
-  meta.description = "ramfs fallocate and detached pthread exit regression test, wasm32";
+  meta.description = "filesystem fallocate and detached pthread exit regression test, wasm32";
 }

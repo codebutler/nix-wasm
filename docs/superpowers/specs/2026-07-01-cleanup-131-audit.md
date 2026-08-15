@@ -222,8 +222,9 @@ Gated on the CONFIG_MMU=y kernel arch layer
   `patches/musl/0008` `__unmapself` no-stack-switch. The shared
   `selftests-batch` musl-memory case now hard-gates both supported kernels. On
   both NOMMU and MMU it proves native `fallocate(2)` returns
-  `EOPNOTSUPP`/`ENOSYS` on the ramfs-backed `/tmp` and `/dev/shm`, while
-  `posix_fallocate()` succeeds and preserves offset/content. It then returns 16
+  `EOPNOTSUPP`/`ENOSYS` on ramfs-backed `/tmp` and NOMMU `/dev/shm`; MMU's
+  tmpfs-backed `/dev/shm` instead accepts native fallocate. `posix_fallocate()`
+  succeeds and preserves offset/content in every case. It then returns 16
   detached pthreads through `__unmapself` without the generic wasm `CRTJMP`
   abort. These are respectively ramfs and wasm execution-model constraints,
   not NOMMU constraints.
@@ -253,8 +254,13 @@ Gated on the CONFIG_MMU=y kernel arch layer
   `use-sqlite-wal = false` truncate-journal path. MMU uses WAL. Profile-specific
   four-writer tests cover `/tmp` and `/dev/shm`, and the regular full-system
   smoke verifies the real Nix store DB after `nix-env` in both modes.
-- [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`, 9P
-  `cache=loose`) — revisit.
+- [x] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
+  9P `cache=loose`) — **MMU FLIPPED; NOMMU KEPT.** The MMU profile mounts normal
+  tmpfs at `/dev/shm` and uses direct 9P reads. NOMMU retains ramfs plus
+  `cache=loose,ignoreqv`, because its shmem and `get_user_pages` limitations are
+  unchanged. Boot smoke checks the actual filesystem and mount options, then a
+  real `nix-env` substitution/store write exercises the read path; the full GTK
+  gates exercise `wl_shm` on both profiles.
 
 ## Explicitly KEPT (orthogonal to the three walls — do NOT remove)
 

@@ -24,8 +24,8 @@
 # <this path> {}`; null → no nixpkgs channel (busybox-only / toolchain-only boots).
 #
 # forkMode (#131 prove-then-flip) — this init runs on the software-MMU real-fork
-# guest (.#kernel-mmu-a2 + busybox-fork). Its only effect is to SKIP the
-# forkshell-ash promotion below.
+# guest (.#kernel-mmu-a2 + busybox-fork). It selects the normal MMU shared-memory
+# and 9P read paths, and skips the forkshell-ash promotion below.
 { pkgs, nixpkgsChannel ? null, forkMode ? false }:
 pkgs.writeText "init" ''
   #!/bin/sh
@@ -41,11 +41,12 @@ pkgs.writeText "init" ''
   # window buffers via open_shared_memory() → memfd_create(), which is ENOSYS on
   # the wasm kernel, so gdk falls back to shm_open("/dev/shm/..."); without this
   # mount that fails ENOENT → no wl_shm buffer → an empty (0x0) window + a per-frame
-  # "Gdk-CRITICAL: create_shm_surface" (gtk-wayland-render-blocker). Use RAMFS, not
-  # tmpfs: ramfs has explicit NOMMU MAP_SHARED mmap support (fs/ramfs/file-nommu.c)
-  # — the same backing /tmp uses (proven by the wl-anim shm client) — whereas
-  # shmem/tmpfs lacks reliable shared-writable mmap on NOMMU.
-  mkdir -p /dev/shm && mount -t ramfs none /dev/shm 2>/dev/null
+  # "Gdk-CRITICAL: create_shm_surface" (gtk-wayland-render-blocker). NOMMU must
+  # use ramfs: it has the architecture's explicit MAP_SHARED implementation,
+  # while mainline shmem/tmpfs is MMU-only. The real-MMU profile uses normal
+  # tmpfs instead, so its shared-memory path no longer inherits a NOMMU-only
+  # accommodation.
+  mkdir -p /dev/shm && mount -t ${if forkMode then "tmpfs" else "ramfs"} none /dev/shm 2>/dev/null
 
   M="trans=virtio,version=9p2000.L,msize=524288"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
@@ -54,8 +55,9 @@ pkgs.writeText "init" ''
   # ("netfs: Couldn't get user pages (rc=-14)") — that broke `nix-env -iA`. Buffered
   # reads fill kernel page-cache pages then copy_to_user (works). cache=none (the
   # default) forces P9L_DIRECT; so does qid.version==0 (which the JS 9p servers
-  # report) unless ignoreqv is set — hence BOTH. Read-only exports, so loose is safe.
-  RO="$M,cache=loose,ignoreqv"
+  # report) unless ignoreqv is set — hence BOTH on NOMMU. MMU has working
+  # get_user_pages(), so use the normal direct-read path there.
+  RO="$M${pkgs.lib.optionalString (!forkMode) ",cache=loose,ignoreqv"}"
 
   # pc's VFS (user files) at /mnt/yore.
   mkdir -p /mnt/yore
@@ -64,6 +66,24 @@ pkgs.writeText "init" ''
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
   mount -t 9p -o "$RO,aname=nixcache" nixcache /nix-cache 2>/dev/null || true
+
+  # Hard, console-visible profile proof consumed by smoke.mjs. Check the actual
+  # mounted filesystem/options, not merely the branch this generated script took.
+  SHM_TYPE=$(stat -f -c %T /dev/shm 2>/dev/null)
+  NIXCACHE_OPTS=$(awk '$2 == "/nix-cache" { print $4 }' /proc/mounts)
+  ${pkgs.lib.optionalString forkMode ''
+    case "$NIXCACHE_OPTS" in
+      *cache=0xf*|*ignoreqv*) ;;
+      *) [ "$SHM_TYPE" = tmpfs ] && echo "yore: profile-fs=mmu shm=tmpfs nixcache=direct" ;;
+    esac
+  ''}
+  ${pkgs.lib.optionalString (!forkMode) ''
+    CACHE_LOOSE= QV_IGNORED=
+    case "$NIXCACHE_OPTS" in *cache=0xf*) CACHE_LOOSE=1 ;; esac
+    case "$NIXCACHE_OPTS" in *ignoreqv*) QV_IGNORED=1 ;; esac
+    [ "$SHM_TYPE" = ramfs ] && [ -n "$CACHE_LOOSE" ] && [ -n "$QV_IGNORED" ] \
+      && echo "yore: profile-fs=nommu shm=ramfs nixcache=loose"
+  ''}
 
   # ---- /nix: installed state disk vs seed installer vs legacy overlay --------
   # Stamp file written after a successful seed copy. Presence ⇒ mount vdb as /nix

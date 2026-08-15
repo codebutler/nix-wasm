@@ -673,8 +673,10 @@ Closed dispositions:
   on ANY kernel, MMU or not (`fs/ramfs/file-nommu.c` / `file-mmu.c` both lack
   it; glibc emulates on every real system for the same reason). The shared
   `selftests-batch` musl-memory case hard-gates NOMMU and MMU boots and proves raw
-  `fallocate(2)` fails on both `/tmp` and `/dev/shm`, while the emulated
-  `posix_fallocate()` succeeds with the required size/offset/content semantics.
+  `fallocate(2)` fails on ramfs-backed `/tmp` in both modes and on NOMMU's ramfs
+  `/dev/shm`; MMU's tmpfs `/dev/shm` accepts it. The emulated
+  `posix_fallocate()` succeeds with the required size/offset/content semantics
+  in every case.
 - [x] **KEEP** `patches/musl/0008` `__unmapself` no-stack-switch. The underlying
   limitation is wasm's own operand-stack model (`CRTJMP` needs a native SP swap
   that no wasm engine
@@ -724,18 +726,14 @@ Closed dispositions:
   performs the real `nix-env` store-DB write and requires WAL on MMU or the
   rollback-journal default observed by a fresh NOMMU connection. Both modes
   remain supported without globally weakening SQLite.
-- [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
-  9P `cache=loose,ignoreqv`). **Provisional: VERIFY both, may flip.**
-  `cache=loose` exists because NOMMU can't `get_user_pages` on a user buffer
-  (netfs's `cache=none` unbuffered-read path needs it); a real MMU restores
-  `get_user_pages` in the normal way, so `cache=none` may become viable again
-  — re-test rather than assume `loose` must stay "because it always has."
-  Similarly, mainline Linux's `tmpfs`/`shmem` `MAP_SHARED` restriction is
-  specifically a NOMMU limitation (`CONFIG_MMU` gates real shmem `mmap`); the
-  ramfs-not-tmpfs choice for `/dev/shm`/`/tmp` may be revisable to stock tmpfs
-  under CONFIG_MMU=y. Do not change either without a GTK-shm boot proof — a
-  regression here reproduces exactly the "empty 0×0 window" failure mode the
-  original fix diagnosed.
+- [x] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
+  9P `cache=loose,ignoreqv`). **MMU FLIPPED; NOMMU KEPT.** The real-MMU profile
+  now mounts normal tmpfs at `/dev/shm` and omits the NOMMU-only 9P cache flags,
+  exercising direct reads backed by working `get_user_pages`. NOMMU retains
+  ramfs plus `cache=loose,ignoreqv`, because its shmem and direct-user-page
+  limitations remain. Core boot smoke validates the actual mounted filesystem
+  and options, then performs a real Nix substitution/store-DB write. The full
+  GTK gates in both profiles prove that `wl_shm` still produces working windows.
 
 ### Explicitly kept, unconditionally
 
