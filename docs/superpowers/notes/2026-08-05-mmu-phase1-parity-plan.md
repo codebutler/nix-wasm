@@ -683,14 +683,16 @@ Closed dispositions:
   two-mode `selftests-batch` musl-memory case returns 16 detached threads through
   this path; losing the patch takes musl's generic `CRTJMP` abort and prevents
   the required `PTHREAD-EXIT-TEST` success marker.
-- [ ] `patches/kernel/0016` (RO-shared-mmap copy) + `0022` (ramfs-regrow-
-  shared-mmap). **Provisional: delete + boot-verify.** These exist
+- [x] `patches/kernel/0016` (RO-shared-mmap copy) + `0022` (ramfs-regrow-
+  shared-mmap) — **NOMMU ONLY.** `kernel.nix` now excludes both from every
+  `mmu = true` derivation and asserts their absence from the MMU patched source,
+  while asserting their presence for NOMMU. These exist
   specifically because NOMMU mmap has no demand-paging/COW to fall back on;
-  Track A2 (checked translate + present/write-bit COW, already boot-verified
-  in `mmu-smoke-a2`) is the general mechanism these patches special-cased
-  around. VERIFY via the GTK/wl_shm smokes that originally motivated them
-  (`gtk-smoke`, `widget-factory-smoke` — real window renders, not just
-  `--selftest`) plus a squashfs mmap-exec round-trip. (The #131 slice-3 audit
+  Track A2's checked translate + present/write-bit COW and the kernel's normal
+  MMU `file-mmu.c` path are the general mechanisms these patches special-cased
+  around. The existing default-MMU core/GTK/wl_shm gates and NOMMU core/GTK
+  gates boot-verify the split; NOMMU's squashfs mmap-exec path remains covered
+  by the supported image and patch-selection assertion. (The #131 slice-3 audit
   this table follows also names a third patch here, `0025` — "file-mmap eager
   bounce" — but that reference is now STALE: `patches/kernel/0025` was
   repurposed on 2026-07-21 (#168) as `0025-mmu-debug-trace.patch`, the MMUSEGV

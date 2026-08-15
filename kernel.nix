@@ -69,12 +69,15 @@ pkgs.stdenv.mkDerivation {
     # sys_wasm32_futex trampoline (mirroring the sys_wasm32_* u64-split overrides)
     # forwards to sys_futex with the requeue args zeroed. Unblocks glib (M3a/GTK).
     ./patches/kernel/0015-wasm-futex-time64-4arg-trampoline.patch
+  ] ++ pkgs.lib.optionals (!mmu) [
     # !MMU: a read-only MAP_SHARED file mmap (e.g. libxkbcommon's XKB rules,
     # SQLite mmap, fontconfig) has nothing to share-write, so satisfy it with a
     # private copy when the backing (9p / the served Nix store) can't be mapped
     # directly, instead of failing with -ENODEV. File mmap then works like a
-    # normal system — the correct shared fix, NOT a per-package workaround.
+    # normal system — the correct shared fix, NOT a per-package workaround. This
+    # edits mm/nommu.c and is deliberately absent from CONFIG_MMU derivations.
     ./patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
+  ] ++ [
     # Squashfs/virtio-blk spike (#43 Task 1): register VW_DEV_BLK (index 3) on
     # the wasm virtio transport so CONFIG_VIRTIO_BLK can drive a squashfs image
     # served via a host-side virtio-blk device (VIRTIO_ID_BLOCK = 2).
@@ -113,6 +116,7 @@ pkgs.stdenv.mkDerivation {
     # restart happens AFTER the handler (transparent SA_RESTART, real replies, no
     # -EINTR). In-kernel change only — no host/engine ABI change.
     ./patches/kernel/0021-wasm-sa-restart-deliver-signal.patch
+  ] ++ pkgs.lib.optionals (!mmu) [
     # #94: !MMU ramfs can't re-mmap a GROWN file — it allocates one contiguous
     # block at first-map time (size==0) and a later grow only truncate_setsize()s,
     # so mmap() of the grown file fails -ENODEV. libwayland-cursor's cursor-theme
@@ -120,7 +124,9 @@ pkgs.stdenv.mkDerivation {
     # failed ("Unable to load <name> from the cursor theme"). Fix: on a grow of an
     # inode set up for shared mmap, re-allocate a larger contiguous block and copy
     # the data across (only marked inodes; ordinary ramfs growth is unaffected).
+    # This edits file-nommu.c and is deliberately absent from CONFIG_MMU builds.
     ./patches/kernel/0022-wasm-nommu-ramfs-regrow-shared-mmap.patch
+  ] ++ [
     # Issue #145 (guest audio): register a virtio-snd device (VIRTIO_ID_SOUND =
     # 25) on the wasm virtio transport so the stock mainline virtio-snd driver
     # (sound/virtio/, CONFIG_SND_VIRTIO) gives the guest a sound card —
@@ -191,6 +197,28 @@ pkgs.stdenv.mkDerivation {
   # loop), not a per-device VW_DEV_CONSOLE call.
   postPatch = ''
     vw=drivers/virtio/virtio_wasm.c
+
+    # #131 Slice 3: 0016 and 0022 are supported NOMMU behavior, not MMU source
+    # modifications. Assert the patch selection itself because MMU builds do not
+    # compile mm/nommu.c or fs/ramfs/file-nommu.c, so a successful kernel build
+    # alone cannot prove these patches were actually removed from that profile.
+    ${if mmu then ''
+      if grep -qF 'read-only MAP_SHARED file mapping has nothing to share-write' mm/nommu.c \
+        || grep -qF 'ramfs_nommu_regrow_for_mapping' fs/ramfs/file-nommu.c; then
+        echo "ERROR: NOMMU mmap patches 0016/0022 leaked into an MMU kernel source tree" >&2
+        exit 1
+      fi
+    '' else ''
+      grep -qF 'read-only MAP_SHARED file mapping has nothing to share-write' mm/nommu.c || {
+        echo "ERROR: NOMMU mmap patch 0016 is missing from the NOMMU kernel" >&2
+        exit 1
+      }
+      grep -qF 'ramfs_nommu_regrow_for_mapping' fs/ramfs/file-nommu.c || {
+        echo "ERROR: NOMMU ramfs patch 0022 is missing from the NOMMU kernel" >&2
+        exit 1
+      }
+    ''}
+
     echo "== virtio_wasm.c device enum (post-patch) =="
     awk '/^enum \{/{f=1} f{print} f&&/VW_DEV_COUNT/{exit}' "$vw"
     echo "== virtio_wasm_register() calls (post-patch) =="

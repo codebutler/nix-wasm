@@ -227,11 +227,13 @@ Gated on the CONFIG_MMU=y kernel arch layer
   detached pthreads through `__unmapself` without the generic wasm `CRTJMP`
   abort. These are respectively ramfs and wasm execution-model constraints,
   not NOMMU constraints.
-- [ ] `patches/kernel/0016` (RO-shared-mmap copy) and `0022`
-  (ramfs-regrow-shared-mmap) — demand-paged/COW mmap may replace these in the
-  MMU kernel, while the supported NOMMU kernel still requires them. The old
-  `0025` "file-mmap eager bounce" reference was stale: `0025` is now the
-  MMU-debug trace patch and must not be removed.
+- [x] `patches/kernel/0016` (RO-shared-mmap copy) and `0022`
+  (ramfs-regrow-shared-mmap) — **NOMMU ONLY.** `kernel.nix` now selects both
+  only when `mmu = false`, with patch-selection assertions for both profiles.
+  They remain required for the supported NOMMU kernel; the MMU kernel uses its
+  normal demand-paged/COW mmap and `file-mmu.c` paths. The old `0025`
+  "file-mmap eager bounce" reference was stale: `0025` is the MMU-debug trace
+  patch and remains intact.
 - [ ] `kernel.nix` — `CONFIG_BOOT_MEM_PAGES` / `CONFIG_ARCH_FORCE_MAX_ORDER`
   contiguous-alloc bumps + `patches/kernel/0007` (4 MiB user stack) — real VM
   removes the contiguous-alloc pressure (paging replaces contiguity).
