@@ -1,0 +1,40 @@
+userspace/system.nix
+  s_5c319dde45a577::t_4cb02dcc915cc1 10-11,348-353
+userspace/sqlite-wal-test.c
+  s_5c319dde45a577::t_1451969303319c 249-250
+  s_5c319dde45a577::t_7ff8c2840b384b 10-11
+  s_5c319dde45a577::t_ed25a369462c22 4-7,23-36,181-182,226-227,232,236-245,266-269,273-274,281-282
+runtime/demo/node/selftests-batch.mjs
+  s_5c319dde45a577::t_f58977c179c114 48,50
+  s_5c319dde45a577::t_f04e619a637a66 9
+runtime/demo/node/smoke.mjs
+  s_5c319dde45a577::t_f58977c179c114 4,112-115,119,122
+userspace/sqlite-wal-test.nix
+  s_5c319dde45a577::t_ed25a369462c22 1-3,5,11,23
+flake.nix
+  s_5c319dde45a577::t_4cb02dcc915cc1 289-291,296-300,686,739,746,756,844
+  s_5c319dde45a577::t_a2d42ffa32fc96 969,1004
+  s_5c319dde45a577::t_173a03fd3686a5 1160-1161,1163
+deps-overlay.nix
+  s_5c319dde45a577::t_a9510248019f11 448-452
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_29ad9a78c59604 248-255
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_a9510248019f11 715-725
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6464c21ea6aeb5dda6621c26801974c75821aba7",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
