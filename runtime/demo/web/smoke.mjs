@@ -35,7 +35,10 @@ async function waitFor(fn, timeoutMs, pollMs = 500) {
 
 async function runShellCommand(page, command, outputPattern, timeoutMs = 30_000) {
   const start = await page.evaluate(() => (window._termLog || "").length);
-  await page.click("#term");
+  // A mapped Wayland window can cover the terminal's center and intercept a
+  // Playwright pointer click. The terminal is a focusable textbox; focus it
+  // directly so post-GTK shell probes do not depend on desktop window layout.
+  await page.locator("#term").focus();
   await page.keyboard.type(command);
   await page.keyboard.press("Enter");
   return waitFor(async () => {
