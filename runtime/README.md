@@ -166,7 +166,8 @@ node demo/web/serve.mjs [port]   # default port 8090
 # open http://localhost:8090/web/
 ```
 
-Headless Playwright smoke (asserts `WEB_OK` appears in the terminal):
+Headless Playwright smoke (requires executed shell markers, moving compositor
+`wl_shm` pixels, and the GTK `dlopen` workload):
 
 ```sh
 cd runtime

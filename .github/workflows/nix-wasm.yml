@@ -1328,7 +1328,7 @@ jobs:
         working-directory: runtime
         run: bunx playwright install --with-deps chromium
 
-      - name: Browser boot + dlopen smoke
+      - name: Browser boot + compositor wl_shm + dlopen smoke
         working-directory: runtime
         run: |
           ln -sfn "${{ github.workspace }}/.artifacts-nix-mmu" demo/web/artifacts

@@ -374,7 +374,7 @@ MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm \
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
-# Headless Playwright smoke (asserts WEB_OK):
+# Headless Playwright smoke (executed shell markers + compositor wl_shm + GTK):
 node demo/web/smoke.mjs
 ```
 
@@ -2060,18 +2060,25 @@ CI / the linux box, per the design's "ship what works" scope):
   historical-SIGBUS-signature check is kept as a standing regression
   diagnostic, not the passing condition. `nix-wasm.yml`'s "MMU smokes" step
   promoted this from its earlier non-gating XFAIL form to a hard
-  `run_smoke` gate. Item 5 (waylandproxyd's mmap+copy resync) is STILL
-  unverified — that logic lives in the Sommelier Wayland-client bridge path,
-  unreached without a real compositor boot. Items 4 (the dropped upstream
-  `vmalloc`/`find_vm_area` large-buffer-send branch) and 6 (waylandproxyd's
-  single-process/no-fork design) aren't addressed by this shard set at all (a
-  restore-or-keep call and a Track-B-fork follow-on, respectively — full
-  six-item disposition in the parity-plan doc's close-out map). Every
-  same-repo PR preview also now
-  publishes a SECOND artifact set (`pr-preview.yml` + `runtime/demo/web/
-  main.js`'s `?variant=mmu`), so a human CAN boot the MMU/fork guest in a real
-  browser from any PR — the closest thing to a wl_shm-on-MMU check today, and
-  it's a manual one, not a CI gate. None of this touches
+  `run_smoke` gate. **Item 5 (Sommelier's mmap+copy resync) is now verified
+  and permanently browser-gated too**: `runtime/demo/web/smoke.mjs` boots the
+  shipped MMU/fork guest against the real Greenfield compositor, launches the
+  self-animating `wl-anim` client through Sommelier, and reads the compositor's
+  canvas after Greenfield imports the intermediate virtwl allocation. It
+  requires the exact client frame contents (a 48x48 box: 2,304 pixels, over a
+  36,096-pixel background) and then a second frame with the same pixel counts
+  but a different full-frame hash. The guest's ordinary wl_shm file is not the
+  fd Greenfield receives: Sommelier maps it separately and
+  `copy_damaged_rect()` copies damage into the host-visible intermediate
+  allocation on every commit. Therefore changing, exact compositor-side pixels
+  directly prove that resynchronization path is working and necessary; **KEEP
+  it**. The check hard-gates the default-MMU browser job alongside the existing
+  dlopen workload. Items 4 (the dropped upstream vmalloc/DMA-shaped branch) and
+  6 (the single-process proxy) retain their recorded KEEP dispositions: this
+  identity-mapped transport gains no demonstrated benefit from either rewrite.
+  Every same-repo PR preview also publishes both guest variants
+  (`pr-preview.yml` + `runtime/demo/web/main.js`'s `?variant=mmu`) for manual
+  follow-up. None of this touches
   `.#linux-image`/`.#kernel`/`ENGINE_ABI` — it is additive coverage on the
   existing `-mmu`/`-fork`-suffixed attrs only. Full 4-phase plan (this parity
   proof → #131 slice-1 default-flip, a batched world rebuild → the ship flip
