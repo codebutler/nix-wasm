@@ -1,0 +1,22 @@
+runtime/demo/node/smoke.mjs
+  s_5c319dde45a577::t_a9f6e833f35b62 16-20,22-24,70-71
+  s_5c319dde45a577::t_120940f964378f 21
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_a9f6e833f35b62 893,1213
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "4e03203138d4c79ae64973b596fcfdf84d84f06b",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
