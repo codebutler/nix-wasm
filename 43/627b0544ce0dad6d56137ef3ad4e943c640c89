@@ -1,0 +1,27 @@
+patches/kernel/0007-wasm-enlarge-user-stack.patch
+  s_5c319dde45a577::t_de85f8f17349fc 5-9,20-21,24-26
+  s_5c319dde45a577::t_82819630f65433 13
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_de85f8f17349fc 237-247
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_de85f8f17349fc 703-714
+kernel.nix
+  s_5c319dde45a577::t_de85f8f17349fc 9-12,14-15,43-45,47-49,206-213,573-580,592-597,674-680
+  s_5c319dde45a577::t_9e31d73bb31494 681
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "43627b0544ce0dad6d56137ef3ad4e943c640c89",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
