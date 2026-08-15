@@ -1,0 +1,21 @@
+runtime/demo/web/wayland-compositor.js
+  s_5c319dde45a577::t_0ce77030b68ed2 165-168,484,492
+runtime/demo/web/smoke.mjs
+  s_5c319dde45a577::t_0ce77030b68ed2 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "664b719aa7035aec3a8f897bb0848fb529fcf525",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
