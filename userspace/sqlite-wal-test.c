@@ -27,10 +27,12 @@
 #if SQLITE_EXPECT_WAL
 #define JOURNAL_PRAGMA "PRAGMA journal_mode=WAL"
 #define JOURNAL_MODE "wal"
+#define STORE_JOURNAL_MODE "wal"
 #define PROFILE_NAME "mmu-wal"
 #else
 #define JOURNAL_PRAGMA "PRAGMA journal_mode=TRUNCATE"
 #define JOURNAL_MODE "truncate"
+#define STORE_JOURNAL_MODE "delete"
 #define PROFILE_NAME "nommu-rollback"
 #endif
 
@@ -263,7 +265,9 @@ static int probe_store_db(const char *path) {
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL);
   if (rc == SQLITE_OK)
     rc = query_journal_mode(db, mode);
-  if (rc != SQLITE_OK || strcmp(mode, JOURNAL_MODE) != 0 ||
+  /* WAL persists in the database header. Rollback modes are connection-local,
+   * so Nix's truncate-mode connection reopens through SQLite's delete default. */
+  if (rc != SQLITE_OK || strcmp(mode, STORE_JOURNAL_MODE) != 0 ||
       sqlite3_threadsafe() == 0) {
     printf("SQLITE-STORE-DB: %s threadsafe=%d journal=%s profile=%s rc=%d FAIL\n",
            path, sqlite3_threadsafe(), mode, PROFILE_NAME, rc);

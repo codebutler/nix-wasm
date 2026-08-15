@@ -116,7 +116,7 @@ try {
   s.send("/bin/sqlite-wal-test --probe-db /nix/var/nix/db/db.sqlite\n");
   check(
     await s.waitForOutput(
-      /SQLITE-STORE-DB: \/nix\/var\/nix\/db\/db\.sqlite threadsafe=[12] journal=(?:wal|truncate) profile=(?:mmu-wal|nommu-rollback) OK/,
+      /SQLITE-STORE-DB: \/nix\/var\/nix\/db\/db\.sqlite threadsafe=[12] journal=(?:wal|delete) profile=(?:mmu-wal|nommu-rollback) OK/,
       30000,
     ),
     "Nix store DB uses the profile journal mode with serialized SQLite",

@@ -721,8 +721,9 @@ Closed dispositions:
   truncate journaling. The MMU profile keeps WAL. Mode-specific tests run four
   contending serialized connections on `/tmp` and `/dev/shm`, verify 96 rows,
   and, for MMU, require both `-wal`/`-shm` sidecars. The full-system smoke then
-  performs the real `nix-env` store-DB write and requires WAL on MMU or truncate
-  mode on NOMMU. Both modes remain supported without globally weakening SQLite.
+  performs the real `nix-env` store-DB write and requires WAL on MMU or the
+  rollback-journal default observed by a fresh NOMMU connection. Both modes
+  remain supported without globally weakening SQLite.
 - [ ] ramfs-mandatory-for-shared-mmap assumptions (`bootstrap.nix` `/dev/shm`,
   9P `cache=loose,ignoreqv`). **Provisional: VERIFY both, may flip.**
   `cache=loose` exists because NOMMU can't `get_user_pages` on a user buffer
