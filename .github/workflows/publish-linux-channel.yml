@@ -10,11 +10,22 @@ name: publish-linux-channel
 #   workflow_dispatch (Actions UI / `gh workflow run`) with optional dry_run
 #   repository_dispatch type `publish-linux-channel` (integrations with
 #   contents:write but not actions:write — same live publish, dry_run false)
+#
+# PRECONDITION (#123): nix-wasm.yml's `artifacts` job must have COMPLETED on this
+# commit — it pushes .#linux-image + .#wasm-binary-cache to Cachix. The publish
+# script's artifact-provenance gate checks that in seconds and fails fast
+# otherwise, so a publish dispatched against an in-flight or cancelled artifacts
+# run can no longer build a locally-made image and ship it green (#121).
+# `dry_run: true` runs the gate too — use it to check the coast is clear.
 on:
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Build + print the wrangler commands, but upload nothing"
+        type: boolean
+        default: false
+      allow_unpublished:
+        description: "DANGER: publish even if CI has not built these artifacts (builds them here, takes hours)"
         type: boolean
         default: false
   repository_dispatch:
@@ -79,6 +90,14 @@ jobs:
         env:
           # DRY_RUN=true → the script builds + prints but uploads nothing.
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          # #123 escape hatch. Defaults false, and repository_dispatch can never
+          # set it — an automated kick must not be able to opt out of the gate.
+          ALLOW_UNPUBLISHED: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unpublished || false }}
+          # Mirrors nix-wasm.yml's "Push wasm-tools .drv closures to Cachix" step,
+          # which is `if: github.ref == 'refs/heads/master'`. Off master CI never
+          # pushes them by design, so requiring them there would make every branch
+          # publish unsatisfiable; on master they are part of a complete channel.
+          REQUIRE_DRV_ROOTS: ${{ github.ref == 'refs/heads/master' }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           # linux.iso goes up via rclone (it is ~340 MiB; `wrangler r2 object

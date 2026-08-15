@@ -113,6 +113,24 @@ jobs:
               # change as this comment — keep both lists in sync if either
               # changes.
               - 'scripts/**'
+              # runtime/abi.js is a REAL nix build input, not engine JS: both
+              # flake.nix and userspace/linux-image.nix `builtins.readFile` it to
+              # parse ENGINE_ABI, and linux-image.nix bakes the result into the
+              # image's manifest.json as `minEngine` — so bumping it produces a
+              # NEW .#linux-image store path. Without this entry an ABI bump that
+              # touches ONLY runtime/ (a pure engine-side device-model or loader
+              # change, which the ABI-BUMP RULE still requires bumping for) left
+              # `nix` false, skipped the `artifacts` job, and never built or
+              # pushed that new image — so `publish-linux-channel`'s
+              # artifact-provenance gate (#123) would reject the release with no
+              # CI-backed way to satisfy it. `runtime/**` is already in the
+              # top-level on.push/on.pull_request paths above, so this needs no
+              # matching top-level entry (keep that in mind for the sync rule the
+              # scripts/** comment states). Deliberately abi.js ONLY, not
+              # runtime/**: it is the sole file under runtime/ that any .nix
+              # reads, and widening it would fire the whole from-source matrix on
+              # every engine JS edit.
+              - 'runtime/abi.js'
             runtime:
               - 'runtime/**'
 

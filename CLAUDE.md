@@ -167,7 +167,37 @@ live-channel flip is a deliberate release; pass `dry_run: true` first to build +
 print the exact wrangler commands and `latest.json` without touching R2). It runs
 `scripts/publish-linux-channel.sh`, which builds `.#linux-image` + `.#wasm-binary-cache`
 (substituting from Cachix), uploads under a new immutable version (= the image
-**content hash**, so no manual version bump), and flips `latest.json`. **No
+**content hash**, so no manual version bump), and flips `latest.json`.
+**WAIT FOR `nix-wasm.yml`'s `artifacts` job to COMPLETE on the commit you are
+publishing** (#123): it is what pushes those two paths to Cachix, and a publish
+dispatched into that window used to silently BUILD the image on the publish
+runner and ship bytes no CI job ever built or boot-smoked — the #121 stale-image
+incident, still visible at `ef7e64dc` (publish dispatched 6 min after its
+`nix-wasm.yml` started; that run was then CANCELLED by a newer master push, and
+the publish built + pushed `wasm-binary-cache` itself and went green). The
+script's **artifact-provenance gate** now evaluates both store paths (pure eval,
+seconds) and asserts each is already in `nix-wasm.cachix.org` — **plus every
+toolchain `.drv` root** (read from `.#wasm-cache-drv-roots`, the same file CI's
+push step reads, so they cannot drift), since that push is a SEPARATE LATER step
+of the artifacts job and the outputs alone can read present while it is still in
+flight, which would flip the pointer to a cache where in-guest `nix-env -iA
+wasm-tools.*` fails. It fails fast with the remedy if any are absent; the two
+builds then run `--max-jobs 0` (substitute-only) so a residual gap is a hard
+failure rather than an unvetted local rebuild. `REQUIRE_DRV_ROOTS` mirrors that
+CI step's own master-only condition, so branch publishes stay possible (with a
+loud NOTICE) instead of being unsatisfiable.
+**A runtime-only ABI bump is a full `nix` change**: `runtime/abi.js` is
+`builtins.readFile`d by both `flake.nix` and `userspace/linux-image.nix` (baked
+into the image manifest as `minEngine`), so it is now in `nix-wasm.yml`'s `nix`
+paths-filter — without that entry a pure engine-side ABI bump skipped the
+`artifacts` job entirely and the gate would reject the release with no CI-backed
+way to satisfy it. `dry_run:
+true` runs the gate too — use it to check the coast is clear. Override, for a
+deliberate publish of un-CI'd artifacts, is the `allow_unpublished` input
+(`ALLOW_UNPUBLISHED=true`; `repository_dispatch` can never set it). The gate
+proves the artifacts were BUILT BY CI, not that HEAD is the newest master — a
+publish from a stale-but-CI-built checkout still passes it, which is what the
+version-unchanged NOTICE after the flip is there to catch. **No
 `runtime/sync-to-pc.sh` and no pc deploy are needed for a normal guest change**
 (new initramfs binary, userspace, kernel) — only when `ENGINE_ABI`
 (`runtime/abi.js`, which the script stamps as `minEngine`) moves does the engine
@@ -623,9 +653,12 @@ system). Four workflows:
   them as real gates: a `format:check` failure on one edited `demo/node/` file
   is exactly what turned #204's first run red.
 - `.github/workflows/publish-linux-channel.yml` — **the one-button guest
-  republish to pc** (`workflow_dispatch`-only, `dry_run` input). Builds
-  `.#linux-image` + `.#wasm-binary-cache`, uploads under a new content-hash
-  version, flips `packages/linux/latest.json` (`scripts/publish-linux-channel.sh`).
+  republish to pc** (`workflow_dispatch`-only, `dry_run` + `allow_unpublished`
+  inputs). Builds `.#linux-image` + `.#wasm-binary-cache`, uploads under a new
+  content-hash version, flips `packages/linux/latest.json`
+  (`scripts/publish-linux-channel.sh`). Gated on those two paths already being
+  in Cachix — i.e. on `nix-wasm.yml`'s `artifacts` job having finished for this
+  commit (#123; see "pc-facing delivery" above).
   This is how a merged guest change (new app, userspace, kernel) reaches the live
   Linux app — see the `publish-linux-channel` pointer in "pc-facing delivery" above.
 
