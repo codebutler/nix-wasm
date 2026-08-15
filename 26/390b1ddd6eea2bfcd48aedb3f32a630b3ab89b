@@ -1,0 +1,23 @@
+runtime/demo/node/smoke.mjs
+  s_5c319dde45a577::t_a7fbdc0cfbcb3a 119
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_a7fbdc0cfbcb3a 724-726
+userspace/sqlite-wal-test.c
+  s_5c319dde45a577::t_a7fbdc0cfbcb3a 30,35,268-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "26390b1ddd6eea2bfcd48aedb3f32a630b3ab89b",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
