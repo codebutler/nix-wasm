@@ -13,6 +13,15 @@ const vfs = MemVfs.from({
   Home: { "pc-9p-proof.txt": "written by pc's vfs.write\n" },
 });
 
+const expectedProfile = process.env.YORE_EXPECT_PROFILE;
+const profileMarkers = {
+  mmu: "yore: profile-fs=mmu shm=tmpfs nixcache=direct",
+  nommu: "yore: profile-fs=nommu shm=ramfs nixcache=loose",
+};
+if (!Object.hasOwn(profileMarkers, expectedProfile)) {
+  throw new Error("YORE_EXPECT_PROFILE must be either 'mmu' or 'nommu'");
+}
+
 let pass = true;
 const check = (ok, label, extra = "") => {
   console.log(`  ${ok ? "ok" : "FAIL"}  ${label}${extra}`);
@@ -58,10 +67,8 @@ try {
     "9P-over-virtio transport mounted",
   );
   check(
-    /yore: profile-fs=(?:mmu shm=tmpfs nixcache=direct|nommu shm=ramfs nixcache=loose)/.test(
-      s.snapshot(),
-    ),
-    "profile-specific /dev/shm and 9P cache policy",
+    s.snapshot().includes(profileMarkers[expectedProfile]),
+    `${expectedProfile} /dev/shm and 9P cache policy`,
   );
 
   // read path

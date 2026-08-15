@@ -890,6 +890,7 @@ jobs:
         working-directory: runtime
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix/
+          YORE_EXPECT_PROFILE: nommu
         run: |
           run_smoke() {
             local script="$1" attempt rc
@@ -1209,6 +1210,7 @@ jobs:
         timeout-minutes: 200
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
+          YORE_EXPECT_PROFILE: mmu
           # The software-MMU guest runs the substitute+unpack ~2-3x slower than
           # NOMMU (every access is a 2-level walk; page-crossing accesses split
           # byte-wise). Give smoke.mjs's `nix-env -iA make-wasm32` step a longer
