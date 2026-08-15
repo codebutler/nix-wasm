@@ -374,7 +374,7 @@ MMU_VMLINUX=$(nix build .#kernel-mmu-a2 --print-out-paths)/vmlinux.wasm \
 
 # Browser demo (serves runtime/demo/web/ with COOP/COEP for SharedArrayBuffer):
 ln -sfn /path/to/artifacts demo/web/artifacts && node demo/web/serve.mjs [port]
-# Headless Playwright smoke (asserts WEB_OK):
+# Headless Playwright smoke (executed shell markers + compositor wl_shm + GTK):
 node demo/web/smoke.mjs
 ```
 
