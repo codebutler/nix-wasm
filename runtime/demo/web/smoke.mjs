@@ -49,7 +49,12 @@ async function runShellCommand(page, command, outputPattern, timeoutMs = 30_000)
 
 async function animatedSurfaceState(page) {
   return page.evaluate(() => {
-    const win = document.querySelector('.wl-win[data-wayland-app-id="be.udev.anim"]');
+    // Sommelier may namespace a guest app ID for the host desktop
+    // (`org.chromium.guest_os.termina.wayland.<guest-id>`). Match the exact
+    // guest ID or that namespaced suffix, while still selecting this app only.
+    const win = document.querySelector(
+      '.wl-win[data-wayland-app-id="be.udev.anim"], .wl-win[data-wayland-app-id$=".be.udev.anim"]',
+    );
     const canvas = win?.querySelector("canvas");
     if (!canvas || canvas.width !== 240 || canvas.height !== 160) return null;
 
