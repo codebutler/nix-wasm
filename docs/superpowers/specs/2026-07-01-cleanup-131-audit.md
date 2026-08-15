@@ -218,9 +218,15 @@ here.
 Gated on the CONFIG_MMU=y kernel arch layer
 (`2026-07-01-softmmu-kernel-design.md`). Specified for the box:
 
-- [ ] `toolchain/musl.nix` — `posix_fallocate` emulation + `patches/musl/0008`
-  `__unmapself` no-stack-switch — revisit under real VM (both may become
-  unnecessary or change shape).
+- [x] `toolchain/musl.nix` — **KEEP** the `posix_fallocate` emulation and
+  `patches/musl/0008` `__unmapself` no-stack-switch. The shared
+  `selftests-batch` musl-memory case now hard-gates both supported kernels. On
+  both NOMMU and MMU it proves native `fallocate(2)` returns
+  `EOPNOTSUPP`/`ENOSYS` on the ramfs-backed `/tmp` and `/dev/shm`, while
+  `posix_fallocate()` succeeds and preserves offset/content. It then returns 16
+  detached pthreads through `__unmapself` without the generic wasm `CRTJMP`
+  abort. These are respectively ramfs and wasm execution-model constraints,
+  not NOMMU constraints.
 - [ ] `patches/kernel/0016` (RO-shared-mmap copy) and `0022`
   (ramfs-regrow-shared-mmap) — demand-paged/COW mmap may replace these in the
   MMU kernel, while the supported NOMMU kernel still requires them. The old
