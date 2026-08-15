@@ -341,6 +341,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       ffi_trampolines = new FfiTrampolines({
         memory,
         table: user_executable_imports.env.__indirect_function_table,
+        mmu: own_pt_base
+          ? {
+              ptBase: own_pt_base,
+              syscall2: user_executable_imports.env.__wasm_syscall_2,
+              stackPointer: user_executable_imports.env.__stack_pointer,
+              getTlsBase: user_executable_instance.exports.__get_tls_base,
+            }
+          : undefined,
       });
     }
     return ffi_trampolines;
@@ -1518,41 +1526,40 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             // Canonical-thunk targets (fpcast'd modules) get the (i64×128)->i64
             // ABI; the loader decides from which module owns table[funcIndex].
             __wasm_ffi_call: (funcIndex, argPtr, retPtr, sigPtr, sigLen) => {
-              // Software-MMU gap, same shape as __wasm_dlopen's (loud, clean):
-              // the generated trampoline is a runtime wasm module whose loads/
-              // stores at argPtr/retPtr are NOT softmmu-instrumented, so under
-              // a nonzero pt_base it would read args from / write the result to
-              // the wrong physical bytes. Refuse — the C backend turns a
-              // nonzero return into its loud wasm_ffi_unsupported() abort
-              // ("runtime trampoline call failed"), the existing never-mis-call
-              // contract. The static trampoline table (compiled INTO the
-              // calling binary, instrumented with it) is unaffected and covers
-              // every in-tree caller. Tracked with side-module instrumentation
-              // in nix-wasm#185.
-              if (own_pt_base) {
-                console.error(
-                  `[ffi ${runner_name}] __wasm_ffi_call: runtime trampolines are not yet ` +
-                    `softmmu-instrumented — refusing under the software MMU ` +
-                    `(pt_base=0x${own_pt_base.toString(16)}); the static-table fast path is unaffected`,
+              try {
+                // sigPtr is a user VA too. Gather it through host soft-uaccess;
+                // the generated trampoline then translates argPtr/retPtr itself
+                // through the checked pass and this process's pt_base.
+                const len = Number(sigLen) >>> 0;
+                // The descriptor starts with two bytes and has a one-byte
+                // parameter count, so 257 is its absolute representable max.
+                // Reject nonsense before readUser can allocate from it.
+                if (len < 2 || len > 257) return 1;
+                const sig = readUser(memory.buffer, own_pt_base, Number(sigPtr), len);
+                const CODES = [null, "i32", "i64", "f32", "f64"];
+                const np = sig[0];
+                if (sig.length !== 2 + np || sig[1] >= CODES.length) return 1;
+                const ret = CODES[sig[1]];
+                const params = [];
+                for (let i = 0; i < np; i++) {
+                  const p = CODES[sig[2 + i]];
+                  if (!p) return 1;
+                  params.push(p);
+                }
+                const canonical = ensure_dyn_loader().isCanonicalSlot(Number(funcIndex));
+                ensure_ffi().call(
+                  { params, result: ret },
+                  canonical,
+                  Number(funcIndex),
+                  Number(argPtr),
+                  Number(retPtr),
                 );
+                return 0;
+              } catch (e) {
+                if (!(e instanceof UserFault)) throw e;
+                console.error(`[ffi ${runner_name}] __wasm_ffi_call: ${e.message}`);
                 return 1;
               }
-              const u8 = new Uint8Array(memory.buffer);
-              const base = Number(sigPtr);
-              const CODES = [null, "i32", "i64", "f32", "f64"];
-              const np = u8[base];
-              const ret = CODES[u8[base + 1]];
-              const params = [];
-              for (let i = 0; i < np; i++) params.push(CODES[u8[base + 2 + i]]);
-              const canonical = ensure_dyn_loader().isCanonicalSlot(Number(funcIndex));
-              ensure_ffi().call(
-                { params, result: ret },
-                canonical,
-                Number(funcIndex),
-                Number(argPtr),
-                Number(retPtr),
-              );
-              return 0;
             },
 
             // __lsan_disable / __lsan_enable / __lsan_ignore_object — glib's

@@ -1,6 +1,7 @@
 /* libffi-selftest.c — in-guest unit test for the raw wasm FFI_WASM32 backend.
-   Proves f32/f64/i64 by-value ARGUMENTS call correctly (M1). Prints exactly
-   "LIBFFI-SELFTEST: ALL PASS" on success. */
+   Proves f32/f64/i64 by-value ARGUMENTS call correctly, including a signature
+   beyond the static trampoline table that must use the runtime fallback.
+   Prints exactly "LIBFFI-SELFTEST: ALL PASS" on success. */
 #include <ffi.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +15,7 @@ static int failed = 0;
 static int      t_iii(int a, int b, int c)            { return a + b + c; }
 static double   t_pdi(void *p, double d, int i)       { return (double)((intptr_t)p) + d + i; }
 static double   t_dd(double a, double b)              { return a + b; }
+static double   t_ddd(double a, double b, double c)    { return a + b + c; }
 static int64_t  t_Ii(int64_t a, int i)                { return a + i; }
 static float    t_fpf(float a, void *p, float b)      { return a + b + (float)((intptr_t)p); }
 static int64_t  t_pId(void *p, int64_t a, double d)   { return (int64_t)((intptr_t)p) + a + (int64_t)d; }
@@ -35,14 +37,23 @@ static void c_pdi(void) {
   r_ok = (r == 103.5); CHECK("pdi", r_ok);
 }
 static void c_dd(void) {
-  /* two adjacent double args — within the M=MAX_NON_I32(=2) generated bound.
-     (NB: a 4-double call would exceed M and is the boundary that aborts loud;
-     proving multi-double-arg dispatch needs only 2 within bounds.) */
+  /* Two adjacent double args: the edge of the static M=MAX_NON_I32(=2)
+     generated bound. */
   ffi_cif cif; ffi_type *at[2]={&ffi_type_double,&ffi_type_double};
   CHECK("prep_dd", ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 2, &ffi_type_double, at) == FFI_OK);
   double a=3.5,b=6.5,r=0; void *av[2]={&a,&b};
   ffi_call(&cif,(void(*)(void))t_dd,&r,av);
   CHECK("dd", r == 10.0);
+}
+static void c_ddd_runtime(void) {
+  /* Three non-i32 args exceed the static M=2 table and therefore must cross
+     __wasm_ffi_call. Under the default MMU boot this also proves that the
+     generated trampoline translates its arg/result virtual addresses. */
+  ffi_cif cif; ffi_type *at[3]={&ffi_type_double,&ffi_type_double,&ffi_type_double};
+  CHECK("prep_ddd_runtime", ffi_prep_cif(&cif, FFI_DEFAULT_ABI, 3, &ffi_type_double, at) == FFI_OK);
+  double a=1.25,b=2.5,c=4.25,r=0; void *av[3]={&a,&b,&c};
+  ffi_call(&cif,(void(*)(void))t_ddd,&r,av);
+  CHECK("ddd_runtime", r == 8.0);
 }
 static void c_Ii(void) {
   ffi_cif cif; ffi_type *at[2]={&ffi_type_sint64,&ffi_type_sint32};
@@ -74,7 +85,7 @@ static void c_only_d(void) {
 }
 
 int main(void) {
-  c_iii(); c_pdi(); c_dd(); c_Ii(); c_fpf(); c_pId(); c_only_d();
+  c_iii(); c_pdi(); c_dd(); c_ddd_runtime(); c_Ii(); c_fpf(); c_pId(); c_only_d();
   if (!failed) printf("LIBFFI-SELFTEST: ALL PASS\n");
   return failed;
 }
