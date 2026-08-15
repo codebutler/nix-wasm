@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CC="${CC:-clang}"
 LDFLAGS="-shared -Bsymbolic --no-entry --export-all --import-memory --import-table --allow-undefined"
+LDFLAGS_SHARED="$LDFLAGS --shared-memory --max-memory=4294967296"
 
 fpcast() {
   wasm-opt --enable-threads --enable-bulk-memory --enable-mutable-globals \
@@ -20,6 +21,15 @@ for m in main side side2; do
   "$CC" -target wasm32-unknown-unknown -fPIC -O2 -matomics -mbulk-memory -c $m.c -o $m.o
   wasm-ld $LDFLAGS $m.o -o $m.wasm
   rm $m.o
+done
+
+# Production-shape pair for the checked-MMU loader test. Shared-memory wasm
+# uses passive data segments plus __wasm_init_memory, letting the soft-MMU pass
+# translate initialization after the loader sets __mmu_pt_base.
+for m in main side; do
+  "$CC" -target wasm32-unknown-unknown -fPIC -O2 -matomics -mbulk-memory -c $m.c -o $m.shared.o
+  wasm-ld $LDFLAGS_SHARED $m.shared.o -o $m.shared.wasm
+  rm $m.shared.o
 done
 
 # main.fpcast.wasm — fpcast WITHOUT dynsym injection: documents the #33 trap

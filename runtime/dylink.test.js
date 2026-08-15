@@ -8,6 +8,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.js";
 import { genCanonicalThunk, CANONICAL_PARAMS } from "./ffi-codegen.js";
+import { translateUser } from "./mmu-uaccess.js";
+import { NR_MMU_FAULT } from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/dylink/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIX)));
@@ -21,7 +23,9 @@ const MAIN_TABLE_BASE = 1; // slot 0 stays null (the NULL function pointer)
  */
 function bootMain(name) {
   const bytes = fixture(name);
-  const memory = new WebAssembly.Memory({ initial: 32 });
+  const memory = name.includes(".shared.")
+    ? new WebAssembly.Memory({ initial: 32, maximum: 0x10000, shared: true })
+    : new WebAssembly.Memory({ initial: 32 });
   const info = parseDylinkModule(bytes);
   const table = new WebAssembly.Table({
     initial: Math.max(64, MAIN_TABLE_BASE + info.tableImportInitial),
@@ -69,6 +73,57 @@ function dlopen(h, name, opts = {}) {
   const handle = h.loader.load(bytes, memoryBase, { name, ...opts });
   expect(handle).toBeGreaterThan(1);
   return { handle, memoryBase, probed };
+}
+
+/**
+ * Re-wrap the ordinary main fixture in an MMU-aware loader. Low virtual memory
+ * stays identity mapped for main's data; side-module VA 0x00100000 is mapped
+ * to a deliberately different physical arena.
+ */
+function bootMmuMain(name) {
+  const h = bootMain(name);
+  const ptBase = 0x10000;
+  const lowPtes = 0x11000;
+  const sideVa = 0x00100000;
+  const sidePhys = 0x20000;
+  const dv = new DataView(h.memory.buffer);
+  dv.setUint32(ptBase, lowPtes, true); // virtual 0..4 MiB identity mapped
+  for (let page = 0; page < 512; page++) {
+    dv.setUint32(lowPtes + page * 4, (page << 12) | 7, true);
+  }
+  for (let page = 0; page < 16; page++) {
+    const va = sideVa + page * 0x1000;
+    dv.setUint32(lowPtes + (((va >>> 12) & 0x3ff) << 2), (sidePhys + page * 0x1000) | 7, true);
+  }
+  const faults = [];
+  const logs = [];
+  const loader = new DynamicLoader({
+    memory: h.memory,
+    table: h.table,
+    baseEnv: h.baseEnv,
+    log: (message) => logs.push(message),
+    mmu: {
+      ptBase,
+      syscall2: (...args) => {
+        faults.push(args);
+        const va = Number(args[3]) >>> 0;
+        const pageVa = va & ~0xfff;
+        const pagePhys =
+          pageVa >= sideVa && pageVa < sideVa + 16 * 0x1000 ? sidePhys + (pageVa - sideVa) : pageVa;
+        dv.setUint32(lowPtes + (((va >>> 12) & 0x3ff) << 2), pagePhys | 7, true);
+        return 0;
+      },
+      stackPointer: h.baseEnv.__stack_pointer,
+      getTlsBase: () => 0x7000,
+    },
+  });
+  loader.registerMain({
+    instance: h.instance,
+    bytes: h.bytes,
+    memoryBase: MAIN_MEMORY_BASE,
+    tableBase: MAIN_TABLE_BASE,
+  });
+  return { ...h, loader, ptBase, sideVa, sidePhys, faults, logs };
 }
 
 describe("parseDylinkModule", () => {
@@ -188,6 +243,103 @@ describe("DynamicLoader.load", () => {
     const h = bootMain("main.wasm");
     expect(h.loader.probe(new Uint8Array([0, 1, 2]))).toBe(-22);
     expect(h.loader.load(new Uint8Array([0, 1, 2]), 0)).toBe(-22);
+  });
+});
+
+describe("DynamicLoader.load under checked software MMU", () => {
+  test("side data, relocations, ctor, and imports use non-identity translation", () => {
+    const h = bootMmuMain("main.shared.wasm");
+    const bytes = fixture("side.shared.wasm");
+    const handle = h.loader.load(bytes, h.sideVa, { name: "side.shared.wasm" });
+    if (handle < 0) throw new Error(h.logs.join("\n"));
+    expect(handle).toBeGreaterThan(1);
+    const side = h.loader.modules[handle - 1];
+
+    expect(side.instance.exports.side_fn(1, 2)).toBe(45);
+    expect(side.instance.exports.call_main(5)).toBe(2005);
+
+    const ctorAddr = h.loader.dlsym(handle, "ctor_ran");
+    const relocAddr = h.loader.dlsym(handle, "side_reloc_ptr");
+    const dataAddr = h.loader.dlsym(handle, "side_data");
+    const dv = new DataView(h.memory.buffer);
+    expect(dv.getInt32(translateUser(dv, h.ptBase, ctorAddr), true)).toBe(1);
+    expect(dv.getUint32(translateUser(dv, h.ptBase, relocAddr), true)).toBe(dataAddr);
+    expect(dv.getInt32(translateUser(dv, h.ptBase, dataAddr), true)).toBe(42);
+    expect(h.faults).toEqual([]);
+
+    // Evict the data page, then prove the loader-installed bridge reaches the
+    // kernel-style fault path and the instrumented side module retries.
+    const pteOff = 0x11000 + (((dataAddr >>> 12) & 0x3ff) << 2);
+    dv.setUint32(pteOff, 0, true);
+    expect(side.instance.exports.side_fn(1, 2)).toBe(45);
+    expect(h.faults).toHaveLength(1);
+    expect(Number(h.faults[0][2])).toBe(NR_MMU_FAULT);
+    expect(Number(h.faults[0][4])).toBe(0); // load
+  });
+
+  test("fpcast side-module table entries survive checked instrumentation", () => {
+    const h = bootMmuMain("main.dynsym.fpcast.wasm");
+    const bytes = fixture("side.dynsym.fpcast.wasm");
+    const handle = h.loader.load(bytes, h.sideVa, { name: "side.dynsym.fpcast.wasm" });
+    if (handle < 0) throw new Error(h.logs.join("\n"));
+    expect(handle).toBeGreaterThan(1);
+
+    const idx = h.loader.dlsym(handle, "side_taken");
+    const args = Array.from({ length: 8 }, () => 0n);
+    args[0] = 9n;
+    expect(h.table.get(idx)(...args)).toBe(4n);
+    expect(h.faults).toEqual([]);
+  });
+
+  test("fork replay reserves the same fault-bridge and side-module table slots", () => {
+    const parent = bootMmuMain("main.shared.wasm");
+    const bytes = fixture("side.shared.wasm");
+    const handle = parent.loader.load(bytes, parent.sideVa, { name: "side.shared.wasm" });
+    if (handle < 0) throw new Error(parent.logs.join("\n"));
+    const takenIdx = parent.loader.dlsym(handle, "side_taken");
+    const dynamicIdx = parent.loader.dlsym(handle, "side_fn");
+    const snap = parent.loader.snapshot();
+
+    const mainBytes = fixture("main.shared.wasm");
+    const info = parseDylinkModule(mainBytes);
+    const table = new WebAssembly.Table({
+      initial: Math.max(64, MAIN_TABLE_BASE + info.tableImportInitial),
+      element: "anyfunc",
+    });
+    const baseEnv = { ...parent.baseEnv, __indirect_function_table: table };
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(mainBytes), {
+      env: baseEnv,
+      "GOT.mem": new Proxy(
+        {},
+        { get: () => new WebAssembly.Global({ value: "i32", mutable: true }, 0) },
+      ),
+      "GOT.func": new Proxy(
+        {},
+        { get: () => new WebAssembly.Global({ value: "i32", mutable: true }, 0) },
+      ),
+    });
+    const child = new DynamicLoader({
+      memory: parent.memory,
+      table,
+      baseEnv,
+      mmu: {
+        ptBase: parent.ptBase,
+        syscall2: () => -1,
+        stackPointer: baseEnv.__stack_pointer,
+        getTlsBase: () => 0x7000,
+      },
+    });
+    child.registerMain({
+      instance,
+      bytes: mainBytes,
+      memoryBase: MAIN_MEMORY_BASE,
+      tableBase: MAIN_TABLE_BASE,
+    });
+    child.replay(snap);
+
+    expect(child.dlsym(handle, "side_taken")).toBe(takenIdx);
+    expect(child.dlsym(handle, "side_fn")).toBe(dynamicIdx);
+    expect(child.modules[handle - 1].instance.exports.side_fn(1, 2)).toBe(45);
   });
 });
 

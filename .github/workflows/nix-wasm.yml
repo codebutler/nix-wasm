@@ -1311,6 +1311,18 @@ jobs:
             # pango/cairo → cairo-png, headless).
             run_smoke demo/node/rsvg-smoke.mjs
 
+      # #185 prove-then-promote cycle: the two real side-module variants now
+      # run under the shipped MMU/fork guest. Keep this bounded and non-gating
+      # for its first CI observation; after a clean first attempt it moves into
+      # the core run_smoke list above like the completed #131 soak cycle did.
+      - name: MMU dlopen side-module soak (#185, non-gating)
+        continue-on-error: true
+        timeout-minutes: 15
+        working-directory: runtime
+        env:
+          LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-nix-mmu/
+        run: node demo/node/dlopen-smoke.mjs
+
       # Browser-only regressions (#137/#139) must gate the shipped default,
       # which is now this MMU/fork artifact set rather than the NOMMU
       # deprecation job above.

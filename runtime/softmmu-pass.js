@@ -211,11 +211,14 @@ const STORE_TOI64 = {
 // `__SYSCALL_HEAD` pushes `__stack_pointer`/`__tls_base` ahead of the
 // syscall args), not extra plumbing invented by this pass.
 //
-// CONTRACT CHOICE (documented per the task): `checked: true` REQUIRES the
-// module to already import `__wasm_syscall_2` (type `(i32,i32,i32,i32,i32)
-// -> i32`) plus the `__stack_pointer`/`__tls_base` globals, and THROWS a
-// clear error if any are absent, rather than splicing a new function import
-// into the module. Splicing a function import would shift every existing
+// CONTRACT CHOICE (documented per the task): ordinary `checked: true` REQUIRES
+// the module to already import `__wasm_syscall_2` (type
+// `(i32,i32,i32,i32,i32) -> i32`) plus the `__stack_pointer` global and export
+// `__get_tls_base`, and THROWS a clear error if any are absent. Runtime-loaded
+// SIDE_MODULEs are the deliberate exception: they receive a
+// `faultTableIndex`, pointing at an embedder-installed `(i32,i32)->i32` bridge
+// in their already-shared table. This avoids splicing a function import, which
+// would shift every existing
 // defined-function index by one everywhere a `call`/`call_indirect`/
 // `ref.func`/element-segment/export refers to a function by index — a
 // whole-module renumbering pass, for an import that (per the ABI note
@@ -234,6 +237,70 @@ const STORE_TOI64 = {
 // carry AHEAD of the syscall imports, so the syscalls went unseen. Handling tag
 // imports (below) restored the invariant; NO musl keep-alive is needed.
 export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unistd.h)
+
+/**
+ * Build the tiny wasm function installed in a process table for checked side
+ * modules. `fault(va, kind)` supplies the main image's live SP/TLS values to
+ * the existing syscall2 trap and returns its result. The side module calls it
+ * indirectly, so no function import/index renumbering is required.
+ *
+ * @returns {Uint8Array}
+ */
+export function genFaultBridge() {
+  const name = (v) => vec([...v].map((c) => c.charCodeAt(0)));
+  const sec = (id, body) => [id, ...u(body.length), ...body];
+  const functype = (params, results) => [0x60, ...vec(params), ...vec(results)];
+  const types = sec(
+    1,
+    vec([
+      functype([VT.i32, VT.i32, VT.i32, VT.i32, VT.i32], [VT.i32]),
+      functype([], [VT.i32]),
+      functype([VT.i32, VT.i32], [VT.i32]),
+    ]),
+  );
+  const imports = sec(
+    2,
+    vec([
+      [...name("env"), ...name("__wasm_syscall_2"), 0x00, ...u(0)],
+      [...name("env"), ...name("__get_tls_base"), 0x00, ...u(1)],
+      [...name("env"), ...name("__stack_pointer"), 0x03, VT.i32, 0x01],
+    ]),
+  );
+  const funcs = sec(3, vec([[...u(2)]]));
+  const exports = sec(7, vec([[...name("fault"), 0x00, ...u(2)]]));
+  const code = [
+    ...u(0), // no locals
+    0x23,
+    ...u(0), // global.get __stack_pointer
+    0x10,
+    ...u(1), // call __get_tls_base
+    0x41,
+    ...s(NR_MMU_FAULT),
+    0x20,
+    ...u(0), // local.get va
+    0x20,
+    ...u(1), // local.get kind
+    0x10,
+    ...u(0), // call __wasm_syscall_2
+    0x0b,
+  ];
+  const codes = sec(10, vec([[...u(code.length), ...code]]));
+  return new Uint8Array([
+    0x00,
+    0x61,
+    0x73,
+    0x6d,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    ...types,
+    ...imports,
+    ...funcs,
+    ...exports,
+    ...codes,
+  ]);
+}
 
 /** Fault `kind` for an atomic op: RMW/cmpxchg/store need write permission. */
 function atomicFaultKind(sub) {
@@ -317,6 +384,17 @@ function parseTypeEntries(typeBody) {
 }
 
 /**
+ * @typedef {{
+ *   syscallFuncIdx?: number,
+ *   spGlobalIdx?: number,
+ *   tlsFuncIdx?: number,
+ *   faultTableIndex?: number,
+ *   faultTypeIdx?: number,
+ *   checkedTranslateFunc?: number,
+ * }} CheckedContext
+ */
+
+/**
  * Resolve + validate the three imports `checked: true` requires. Throws a
  * clear, specific error (never silently degrades to unchecked) when any is
  * missing or has an unexpected signature.
@@ -324,7 +402,7 @@ function parseTypeEntries(typeBody) {
  * @param {{id:number, body:Uint8Array}|undefined} importSec
  * @param {{id:number, body:Uint8Array}|undefined} typeSec
  * @param {{id:number, body:Uint8Array}|undefined} exportSec
- * @returns {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}}
+ * @returns {CheckedContext}
  *   `checkedTranslateFunc` is NOT set by this function — `instrument()`
  *   attaches it afterward, once the appended `__mmu_translate_ck` function's
  *   index is known, so `rewriteFuncBody`'s inline checked path (#202 §6.2)
@@ -871,7 +949,7 @@ function skipAtomic(b, i) {
  * @param {number} numParams
  * @param {number} ptBaseGlobal
  * @param {{memcpy:number, memfill:number, meminit:Map<number,number>}|null} bulkFns
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number, checkedTranslateFunc?:number}|null} [checked]
+ * @param {CheckedContext|null} [checked]
  *   A2 present-check context (from `resolveCheckedImports`, with
  *   `checkedTranslateFunc` attached by `instrument()` — see that function's
  *   doc comment; the inline checked path, #202 §6.2, calls it as its combined
@@ -1825,7 +1903,7 @@ function storeBytesHelperBody(translateFunc, ckFunc = null) {
  * bulk callers pass a fresh `(va, kind)` per page-chunk via `call`.
  *
  * @param {number} ptBaseGlobal the pt_base global index
- * @param {{syscallFuncIdx:number, spGlobalIdx:number, tlsFuncIdx:number}} checkedCtx
+ * @param {CheckedContext} checkedCtx
  */
 function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const VA = 0;
@@ -1836,12 +1914,20 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
   const o = [];
   o.push(...u(1), ...u(3), VT.i32); // locals: pgd_e, pte, need (all i32)
   const emitFault = () => {
-    o.push(0x23, ...u(checkedCtx.spGlobalIdx)); // global.get __stack_pointer
-    o.push(0x10, ...u(checkedCtx.tlsFuncIdx)); // call __get_tls_base -> tp
+    if (checkedCtx.faultTableIndex != null) {
+      o.push(0x20, ...u(VA)); // local.get va
+      o.push(0x20, ...u(KIND)); // local.get kind
+      o.push(0x41, ...s(checkedCtx.faultTableIndex)); // bridge table index
+      o.push(0x11, ...u(Number(checkedCtx.faultTypeIdx)), ...u(0)); // call_indirect type, table 0
+      o.push(0x1a); // drop syscall result
+      return;
+    }
+    o.push(0x23, ...u(Number(checkedCtx.spGlobalIdx))); // global.get __stack_pointer
+    o.push(0x10, ...u(Number(checkedCtx.tlsFuncIdx))); // call __get_tls_base -> tp
     o.push(0x41, ...s(NR_MMU_FAULT)); // i32.const NR_MMU_FAULT
     o.push(0x20, ...u(VA)); // local.get va
     o.push(0x20, ...u(KIND)); // local.get kind
-    o.push(0x10, ...u(checkedCtx.syscallFuncIdx)); // call __wasm_syscall_2
+    o.push(0x10, ...u(Number(checkedCtx.syscallFuncIdx))); // call __wasm_syscall_2
     o.push(0x1a); // drop
   };
   o.push(0x02, VT.i32); // block $done (result i32)
@@ -1909,7 +1995,8 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
 
 /**
  * True iff `bytes` is ALREADY a softmmu-instrumented module — an instrumented
- * image always exports `__mmu_start` (and `__mmu_pt_base`). Used by the engine's
+ * image always exports `__mmu_pt_base` (`__mmu_start` exists only when the
+ * input had a start section). Used by the engine's
  * instrument-on-load path to avoid double-instrumenting a pre-instrumented
  * binary (e.g. a test fixture). Scans only the export section; no full decode.
  *
@@ -1934,7 +2021,7 @@ export function isInstrumented(bytes) {
       let len;
       [len, j] = readU(bytes, j);
       const name = new TextDecoder().decode(bytes.subarray(j, j + len));
-      if (name === "__mmu_start") return true;
+      if (name === "__mmu_pt_base") return true;
       j += len;
       j++; // export kind
       [, j] = readU(bytes, j); // export index
@@ -1970,7 +2057,15 @@ function moduleName(bytes) {
  * Instrument a wasm module with the inlined software-MMU translate.
  *
  * @param {Uint8Array} bytes
- * @param {{ exportControls?: boolean, checked?: boolean, inlineLimit?: number }} [opts]
+ * @param {{
+ *   exportControls?: boolean,
+ *   checked?: boolean,
+ *   inlineLimit?: number,
+ *   faultTableIndex?: number,
+ * }} [opts]
+ *   `faultTableIndex` selects the side-module checked-mode contract: invoke an
+ *   embedder-installed `(i32,i32)->i32` fault bridge through table 0 instead
+ *   of requiring syscall/SP/TLS imports in this module.
  *   `inlineLimit` (#164): the byte size above which a function's inline
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
@@ -2000,9 +2095,14 @@ export function instrument(bytes, opts = {}) {
   // module — a few hundred bytes) or a real program (KiB+). That discriminates
   // "a non-libc generated module reached the exec/instrument path" from "a real
   // program lost its keep-alive import".
+  /** @type {CheckedContext|null} */
   let checkedCtx;
   try {
-    checkedCtx = opts.checked ? resolveCheckedImports(importSec, typeSec, byId(7)) : null;
+    checkedCtx = opts.checked
+      ? opts.faultTableIndex != null
+        ? { faultTableIndex: opts.faultTableIndex }
+        : resolveCheckedImports(importSec, typeSec, byId(7))
+      : null;
   } catch (e) {
     if (e instanceof Error) {
       e.message += ` [binary: ${bytes.length} bytes, module="${moduleName(bytes) ?? "?"}"]`;
@@ -2039,6 +2139,9 @@ export function instrument(bytes, opts = {}) {
   const translateType = nTypes;
   const bulkType = nTypes + 1;
   const checkedTranslateType = nTypes + 2;
+  if (checkedCtx && checkedCtx.faultTableIndex != null) {
+    checkedCtx.faultTypeIdx = checkedTranslateType;
+  }
   const translateFunc = nImpFuncs + nDefFuncs;
   const bulkFns = {
     memcpy: translateFunc + 1,

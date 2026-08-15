@@ -10,7 +10,14 @@
 //   4. it refuses (loud) on atomics/SIMD it doesn't yet translate.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ByteSink, NR_MMU_FAULT, concatBytes, instrument, scanUnhandled } from "./softmmu-pass.js";
+import {
+  ByteSink,
+  NR_MMU_FAULT,
+  concatBytes,
+  genFaultBridge,
+  instrument,
+  scanUnhandled,
+} from "./softmmu-pass.js";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
@@ -606,6 +613,56 @@ describe("checked (A2 present-check) translate", () => {
     ]);
   }
 
+  // A side-module-shaped fixture: memory + table are imports, but the module
+  // deliberately has no syscall/SP/TLS fault imports. `faultTableIndex` is the
+  // checked pass's embedder-supplied contract for this shape.
+  function buildTableCheckedFixture() {
+    const types = [
+      funcType([I32], [I32]), // load_u8(va) -> i32
+      funcType([I32, I32], []), // store_u8(va, v)
+    ];
+    const typeSec = sectb(1, vecb(types));
+    const importSec = sectb(
+      2,
+      vecb([
+        [...strb("env"), ...strb("memory"), 0x02, 0x00, ...leb_u(32)],
+        [...strb("env"), ...strb("__indirect_function_table"), 0x01, 0x70, 0x00, ...leb_u(1)],
+      ]),
+    );
+    const funcSec = sectb(3, vecb([leb_u(0), leb_u(1)]));
+    const exportSec = sectb(
+      7,
+      vecb([
+        [...strb("load_u8"), 0x00, ...leb_u(0)],
+        [...strb("store_u8"), 0x00, ...leb_u(1)],
+      ]),
+    );
+    const readBody = [...leb_u(0), 0x20, 0x00, 0x2d, 0x00, 0x00, 0x0b];
+    const writeBody = [...leb_u(0), 0x20, 0x00, 0x20, 0x01, 0x3a, 0x00, 0x00, 0x0b];
+    const codeSec = sectb(
+      10,
+      vecb([
+        [...leb_u(readBody.length), ...readBody],
+        [...leb_u(writeBody.length), ...writeBody],
+      ]),
+    );
+    return new Uint8Array([
+      0,
+      0x61,
+      0x73,
+      0x6d,
+      1,
+      0,
+      0,
+      0,
+      ...typeSec,
+      ...importSec,
+      ...funcSec,
+      ...exportSec,
+      ...codeSec,
+    ]);
+  }
+
   const PT = 0x40000;
   const HEAP = 0x100000;
 
@@ -735,6 +792,49 @@ describe("checked (A2 present-check) translate", () => {
   test("instrument({checked:true}) throws on a module missing the required imports", () => {
     const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
     expect(() => instrument(prog, { checked: true })).toThrow(/__wasm_syscall_2/);
+  });
+
+  test("faultTableIndex checks a side-module shape through the embedder bridge", () => {
+    const memory = new WebAssembly.Memory({ initial: 32 });
+    const table = new WebAssembly.Table({ initial: 1, element: "anyfunc" });
+    const sp = new WebAssembly.Global({ value: "i32", mutable: true }, 0x7654);
+    const calls = [];
+    const PT = 0x40000;
+    const V = 0x100000;
+    const t = new Uint32Array(memory.buffer);
+    const pages = memory.buffer.byteLength / PAGE;
+    for (let g = 0; g < Math.ceil(pages / 1024); g++) {
+      const pteTable = PT + 0x1000 + g * 0x1000;
+      t[PT / 4 + g] = pteTable;
+      for (let k = 0; k < 1024; k++) {
+        const p = g * 1024 + k;
+        t[pteTable / 4 + k] = p < pages ? (p << 12) | 7 : 0;
+      }
+    }
+    const pteTable = t[PT / 4 + (V >>> 22)] & ~0xfff;
+    t[pteTable / 4 + ((V >>> 12) & 0x3ff)] = 0;
+
+    const bridge = new WebAssembly.Instance(new WebAssembly.Module(genFaultBridge()), {
+      env: {
+        __stack_pointer: sp,
+        __get_tls_base: () => 0x1234,
+        __wasm_syscall_2: (stack, tls, nr, va, kind) => {
+          calls.push({ stack, tls, nr, va, kind });
+          t[pteTable / 4 + ((V >>> 12) & 0x3ff)] = V | 7;
+          return 0;
+        },
+      },
+    });
+    table.set(0, bridge.exports.fault);
+    const bytes = instrument(buildTableCheckedFixture(), { checked: true, faultTableIndex: 0 });
+    const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+      env: { memory, __indirect_function_table: table },
+    });
+    inst.exports.__mmu_pt_base.value = PT;
+
+    inst.exports.store_u8(V, 0x5a);
+    expect(inst.exports.load_u8(V)).toBe(0x5a);
+    expect(calls).toEqual([{ stack: 0x7654, tls: 0x1234, nr: NR_MMU_FAULT, va: V, kind: 1 }]);
   });
 
   test("instrument({checked:true}) throws on a module missing the __get_tls_base export", () => {

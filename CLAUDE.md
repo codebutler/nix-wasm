@@ -1037,10 +1037,13 @@ cross-compile; all in `wasm-cross.nix` / `deps-overlay.nix`):**
   kernel's fault path, so a non-present page is a loud clean per-call failure).
   Boot-verified: widget-factory-smoke PASS on `.#kernel-mmu-a2`, dltest `self=1`,
   NOMMU byte-identical (identity path). The OTHER half of the same finding —
-  runtime-instantiated side modules and ffi trampolines are UN-instrumented guest
-  code — is refused loudly for now (`-ENOEXEC` dlerror / the C `wasm_ffi_unsupported`
-  abort, never silent corruption; the checked pass needs imports a side module
-  doesn't have — full design constraints in #185). New host-import rule going
+  runtime-instantiated side modules and ffi trampolines — is handled by checked
+  instrumentation too (#185): generated FFI modules carry the normal syscall/SP/TLS
+  contract; arbitrary side modules call an embedder-installed wasm fault bridge
+  through their existing shared table, avoiding function-import index renumbering.
+  The loader sets their page-table root before manual start/data initialization,
+  relocs, and ctors, and reserves the same bridge/table layout on fork replay.
+  New host-import rule going
   forward: any import taking a guest pointer must state whether it's a KERNEL
   (identity) or USER (translate via mmu-uaccess) address, and use the walk for user
   ones. (Engine edits → pc sync via `sync-to-pc.sh` before any pc deploy, as ever.)

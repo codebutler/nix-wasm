@@ -13,9 +13,10 @@
 // VA → garbage → "Symbol not found" (the widget-factory GModule failure on
 // .#kernel-mmu-a2), and __wasm_dl_probe/__wasm_dlopen read the module image at
 // the untranslated VA → "not a wasm dylink module". Correct on NOMMU only
-// because VA == linear-memory offset there. (The other half of the same
-// finding — runtime-instantiated side modules / ffi trampolines being
-// un-instrumented guest code — is refused loudly for now: nix-wasm#185.)
+// because VA == linear-memory offset there. The companion #185 guest-code
+// half is now checked too: runtime FFI modules carry the pass's normal fault
+// imports, while side modules fault through a wasm-typed bridge installed in
+// their shared table (avoiding import/index surgery).
 //
 // Walk format — MUST match arch/wasm's 2-level tables and softmmu-pass.js's
 // emitTranslate bit-for-bit (the A2 keystone lesson: the present TEST DIFFERS

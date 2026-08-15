@@ -320,6 +320,14 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         baseEnv: user_executable_imports.env,
         archBits: arch_bits,
         log: (m) => log(m),
+        mmu: own_pt_base
+          ? {
+              ptBase: own_pt_base,
+              syscall2: user_executable_imports.env.__wasm_syscall_2,
+              stackPointer: user_executable_imports.env.__stack_pointer,
+              getTlsBase: user_executable_instance.exports.__get_tls_base,
+            }
+          : undefined,
       });
       dyn_loader.registerMain({
         instance: user_executable_instance,
@@ -1470,22 +1478,6 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             },
             __wasm_dlopen: (bufPtr, bufLen, memoryBase, flags) => {
               if (Number(bufPtr) === 0) return 1; // dlopen(NULL) → the main program
-              // Software-MMU gap (loud, clean — never silent corruption): a
-              // REAL side module's code is instantiated by DynamicLoader
-              // without softmmu instrumentation, so under a nonzero pt_base
-              // its own loads/stores would bypass translation entirely and
-              // read/write the wrong physical bytes. Refuse the load until
-              // side-module instrumentation lands (nix-wasm#185;
-              // dlopen(NULL)+dlsym — the GModule/GtkBuilder path — is
-              // fully supported above/below, the main image IS instrumented).
-              if (own_pt_base) {
-                console.error(
-                  `[dl ${runner_name}] __wasm_dlopen: side modules are not yet ` +
-                    `softmmu-instrumented — refusing load under the software MMU ` +
-                    `(pt_base=0x${own_pt_base.toString(16)}); dlopen(NULL)/dlsym is unaffected`,
-                );
-                return -8; // -ENOEXEC → a clean dlerror, not a mis-executing module
-              }
               try {
                 const b = readUser(memory.buffer, own_pt_base, Number(bufPtr), Number(bufLen));
                 // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
