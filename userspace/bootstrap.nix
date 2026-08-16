@@ -255,9 +255,9 @@ pkgs.writeText "init" ''
       "$selected" | head -n 1)
     selected_system=$(sed -n 's/.*"system"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$selected" | head -n 1)
-    case "$selected_gen" in *[!0-9]*|'') selected_gen= ;; esac
+    case "$selected_gen" in *[!0-9]*|"") selected_gen= ;; esac
     case "$selected_mode" in mmu|nommu) ;; *) selected_gen= ;; esac
-    case "$selected_abi" in *[!0-9]*|'') selected_gen= ;; esac
+    case "$selected_abi" in *[!0-9]*|"") selected_gen= ;; esac
     if [ -n "$selected_gen" ]; then
       gen_link="/nix/var/nix/profiles/system-$selected_gen-link"
       gen_sys=$(readlink "$gen_link" 2>/dev/null || true)

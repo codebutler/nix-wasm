@@ -1,5 +1,14 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readlinkSync, readFileSync, rmSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  readlinkSync,
+  readFileSync,
+  rmSync,
+  chmodSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -28,7 +37,9 @@ describe("installed system generations", () => {
     mkdirSync(store, { recursive: true });
     mkdirSync(hostLinux, { recursive: true });
 
-    writeFileSync(fakeNixEnv, `#!/bin/sh
+    writeFileSync(
+      fakeNixEnv,
+      `#!/bin/sh
 set -e
 profile=
 while [ "$#" -gt 0 ]; do
@@ -56,7 +67,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 exit 2
-`);
+`,
+    );
     chmodSync(fakeNixEnv, 0o755);
     env = {
       ...process.env,
@@ -81,10 +93,7 @@ exit 2
       join(sys, "boot/manifest.json"),
       JSON.stringify({ kernelAbi: abi, system: sys, mode }),
     );
-    writeFileSync(
-      join(sys, "activate"),
-      `#!/bin/sh\nexec sh '${bootloader}' "$1"\n`,
-    );
+    writeFileSync(join(sys, "activate"), `#!/bin/sh\nexec sh '${bootloader}' "$1"\n`);
     return sys;
   }
 
@@ -101,26 +110,40 @@ exit 2
 
     const seed = run(bootloader, [sys1]);
     expect(seed.status, seed.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8"))).toEqual({
-      kernelAbi: 14,
-      generation: 1,
-      system: sys1,
-      mode: "mmu",
-    });
+    expect(JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8"))).toEqual(
+      {
+        kernelAbi: 14,
+        generation: 1,
+        system: sys1,
+        mode: "mmu",
+      },
+    );
 
     const switched = run(systemTool, ["switch", sys2]);
     expect(switched.status, switched.stderr).toBe(0);
     expect(readlinkSync(join(profiles, "system"))).toBe("system-2-link");
-    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe("kernel-system-two");
-    expect(JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8")).generation).toBe(2);
-    expect(readFileSync(join(hostLinux, "boot/generation-1/vmlinux.wasm"), "utf8")).toBe("kernel-system-one");
+    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe(
+      "kernel-system-two",
+    );
+    expect(
+      JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8")).generation,
+    ).toBe(2);
+    expect(readFileSync(join(hostLinux, "boot/generation-1/vmlinux.wasm"), "utf8")).toBe(
+      "kernel-system-one",
+    );
 
     const rolled = run(systemTool, ["rollback"]);
     expect(rolled.status, rolled.stderr).toBe(0);
     expect(readlinkSync(join(profiles, "system"))).toBe("system-1-link");
-    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe("kernel-system-one");
-    expect(JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8")).generation).toBe(1);
-    expect(readFileSync(join(hostLinux, "boot/generation-2/vmlinux.wasm"), "utf8")).toBe("kernel-system-two");
+    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe(
+      "kernel-system-one",
+    );
+    expect(
+      JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8")).generation,
+    ).toBe(1);
+    expect(readFileSync(join(hostLinux, "boot/generation-2/vmlinux.wasm"), "utf8")).toBe(
+      "kernel-system-two",
+    );
   });
 
   test("switch refuses a different memory mode or engine ABI", () => {
