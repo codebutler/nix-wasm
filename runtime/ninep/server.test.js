@@ -53,6 +53,59 @@ async function walk(c, fromFid, names) {
   return { fid: newFid, qids: r.qids };
 }
 
+function streamingVfs(base, stats) {
+  return new Proxy(base, {
+    get(target, prop) {
+      if (prop === "readBlob") {
+        return async (path) => {
+          stats.reads++;
+          return target.readBlob(path);
+        };
+      }
+      if (prop === "openWrite") {
+        return async (path, opts = {}) => {
+          stats.opens++;
+          stats.deferred = opts.deferPersistence === true;
+          let bytes = opts.append
+            ? new Uint8Array(await (await target.readBlob(path)).arrayBuffer())
+            : new Uint8Array(0);
+          if (!opts.append) await target.write(path, { type: "file", blob: new Blob([]), size: 0 });
+          let closed = false;
+          const save = () =>
+            target.write(path, { type: "file", blob: new Blob([bytes]), size: bytes.length });
+          return {
+            path,
+            get size() {
+              return bytes.length;
+            },
+            async write(data) {
+              if (closed) throw new Error("closed");
+              const chunk = new Uint8Array(await new Blob([data]).arrayBuffer());
+              const next = new Uint8Array(bytes.length + chunk.length);
+              next.set(bytes);
+              next.set(chunk, bytes.length);
+              bytes = next;
+              stats.writes++;
+              await save();
+            },
+            async truncate(size) {
+              bytes = bytes.slice(0, size);
+              await save();
+            },
+            async close() {
+              if (closed) return;
+              closed = true;
+              stats.closes++;
+            },
+          };
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 let vfs, srv, c;
 beforeEach(() => {
   vfs = MemVfs.from({
@@ -199,6 +252,32 @@ describe("write round-trips to the VFS", () => {
     });
     const blob = await vfs.readBlob("/Home/new.txt");
     expect(dec(new Uint8Array(await blob.arrayBuffer()))).toBe("fresh");
+  });
+
+  test("sequential writes use one openWrite stream instead of whole-file reads", async () => {
+    const base = vfs;
+    const stats = { opens: 0, writes: 0, closes: 0, reads: 0, deferred: false };
+    vfs = streamingVfs(base, stats);
+    srv = createNinePServer({ vfs });
+    c = client(srv);
+    const root = await mount(c);
+    const { fid } = await walk(c, root, ["Home"]);
+    await c.rpc({
+      type: P9.Tlcreate,
+      fid,
+      name: "large.bin",
+      flags: 0,
+      mode: 0o644,
+      gid: 0,
+    });
+    const chunk = new Uint8Array(32 * 1024).fill(0x5a);
+    for (let i = 0; i < 32; i++) {
+      const reply = await c.rpc({ type: P9.Twrite, fid, offset: i * chunk.length, data: chunk });
+      expect(reply.type).toBe(P9.Rwrite);
+    }
+    await c.rpc({ type: P9.Tclunk, fid });
+    expect(stats).toEqual({ opens: 1, writes: 32, closes: 1, reads: 0, deferred: true });
+    expect((await base.readBlob("/Home/large.bin")).size).toBe(1024 * 1024);
   });
 });
 
