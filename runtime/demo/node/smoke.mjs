@@ -58,21 +58,15 @@ try {
   // Offline CI: substitute from the local /nix-cache (the baked guest config is
   // Cachix-only, which has no egress here). Test-only; see primeLocalNixCache.
   await primeLocalNixCache(s);
-  // The 9P-over-virtio transport negotiated a mount (printed per mount when the
-  // guest clamps msize to the device max). This gates the #87 regression — if the
-  // 9P virtio devices fail to register there is no mount and this line never prints
-  // — and it is robust to the #83 console change: stock virtio-console attaches
-  // hvc0 LATER than the retired hvc_wasm (no earlycon / hvc_instantiate, so the
-  // pre-attach boot-log buffer is not replayed), which drops the earlier
-  // "9pnet: Installing 9P2000 support" core-init line from the console. The
-  // msize-clamp line is printed at boot mount time, after hvc0 is up, so it is
-  // console-visible — and proves the *virtio* transport specifically, not just the
-  // 9P protocol core. (9P function is independently proven by the read/write checks
-  // below.)
-  check(
-    /9pnet:.*Limiting 'msize'.*supported by transport virtio/.test(s.snapshot()),
-    "9P-over-virtio transport mounted",
+  // Gate the #87 transport regression by inspecting the live mount rather than a
+  // kernel warning. The warning was only emitted when the requested msize exceeded
+  // the transport ceiling; requesting the exact ceiling is successful but silent.
+  // This proves the yoreroot export is mounted specifically over virtio, while the
+  // read/write checks below prove the mounted filesystem works in both directions.
+  s.send(
+    "grep -E '^yoreroot /mnt/yore 9p .*[, ]trans=virtio([, ]|$)' /proc/mounts >/dev/null && echo YORE_9P_VIRTIO_OK\n",
   );
+  check(await s.waitForOutput(/YORE_9P_VIRTIO_OK/), "9P-over-virtio transport mounted");
   check(
     s.snapshot().includes(profileMarkers[expectedProfile]),
     `${expectedProfile} /dev/shm and 9P cache policy`,
