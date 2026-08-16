@@ -311,7 +311,7 @@ pkgs.writeText "init" ''
   sys=$(readlink "$profile" 2>/dev/null)
   case "$sys" in
     /*) ;;
-    '') ;;
+    "") ;;
     *) sys=$(readlink "/nix/var/nix/profiles/$sys" 2>/dev/null) ;;
   esac
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
