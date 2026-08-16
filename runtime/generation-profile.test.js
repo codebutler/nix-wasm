@@ -36,7 +36,10 @@ describe("installed system generations", () => {
     fakeNixEnv = join(root, "nix-env");
     mkdirSync(profiles, { recursive: true });
     mkdirSync(store, { recursive: true });
-    mkdirSync(hostLinux, { recursive: true });
+    // The product explicitly prepares boot/ before enabling large guest exports.
+    // A Linux/home-only tree is intentionally not enough (the boot smoke uses it
+    // to prove offline home without copying 50+ MiB of generation artifacts).
+    mkdirSync(join(hostLinux, "boot"), { recursive: true });
 
     writeFileSync(
       fakeNixEnv,
@@ -101,6 +104,18 @@ exit 2
   function run(script, args) {
     return spawnSync("sh", [script, ...args], { env, encoding: "utf8" });
   }
+
+  test("an offline-home-only host tree does not enable large boot exports", () => {
+    rmSync(join(hostLinux, "boot"), { recursive: true, force: true });
+    mkdirSync(join(hostLinux, "home"), { recursive: true });
+    const sys1 = makeSystem("system-one");
+    symlinkSync(sys1, join(profiles, "system-1-link"));
+    symlinkSync("system-1-link", join(profiles, "system"));
+
+    const exported = run(bootloader, [sys1]);
+    expect(exported.status, exported.stderr).toBe(0);
+    expect(existsSync(join(hostLinux, "boot"))).toBe(false);
+  });
 
   test("switch exports a numbered mirror and rollback restores profile plus boot files", () => {
     const sys1 = makeSystem("system-one");
