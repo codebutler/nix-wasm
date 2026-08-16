@@ -131,7 +131,12 @@ export async function bootLinux(opts) {
   // so big reads (e.g. a nix-env NAR fetch) aren't round-trip-bound on tiny
   // chunks. The server is transport-agnostic — it speaks bytes-in/bytes-out via
   // handle(frame, cid); the per-mount cid keeps each connection's state isolated.
-  const NINEP_MSIZE = 512 * 1024;
+  // Boot mirrors contain multi-megabyte kernel/initramfs blobs. Each 9P write
+  // is a synchronous guest sleep + host interrupt round trip, so 512 KiB made
+  // a 45 MiB initramfs take roughly 90 RPCs. Linux virtio-9p can scatter this
+  // 4 MiB request across the queue; negotiate the larger size to reduce the
+  // activation/export path to about one eighth as many round trips.
+  const NINEP_MSIZE = 4 * 1024 * 1024;
   // Register the user VFS at the root aname; the /nix-cache binary cache is
   // a second export when provided (#141).
   const exports = { "/": vfs };

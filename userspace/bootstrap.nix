@@ -48,7 +48,7 @@ pkgs.writeText "init" ''
   # accommodation.
   mkdir -p /dev/shm && mount -t ${if forkMode then "tmpfs" else "ramfs"} none /dev/shm 2>/dev/null
 
-  M="trans=virtio,version=9p2000.L,msize=524288"
+  M="trans=virtio,version=9p2000.L,msize=4194304"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
   # of netfs UNBUFFERED/direct reads. Direct reads call iov_iter_extract_pages /
   # get_user_pages on the user buffer, which fails EFAULT on this NOMMU/wasm guest
@@ -62,6 +62,19 @@ pkgs.writeText "init" ''
   # pc's VFS (user files) at /mnt/yore.
   mkdir -p /mnt/yore
   mount -t 9p -o "$M,aname=/" yoreroot /mnt/yore 2>/dev/null || echo "yore: /mnt/yore 9p mount failed"
+
+  # #177 offline home: the appliance logs in as root, so make /root itself the
+  # host-visible home instead of copying it out only at shutdown. Files written
+  # here live directly under pc's /Home/Library/Linux/home and remain browsable
+  # after the guest stops. Older/minimal harnesses without the prepared Linux
+  # tree keep their initramfs-local /root.
+  HOST_HOME=/mnt/yore/Home/Library/Linux/home
+  if [ -d /mnt/yore/Home/Library/Linux ]; then
+    mkdir -p "$HOST_HOME" /root
+    mount --bind "$HOST_HOME" /root 2>/dev/null \
+      && echo "yore: home=/root host=/Home/Library/Linux/home" \
+      || echo "yore: host home bind failed"
+  fi
 
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
