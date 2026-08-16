@@ -258,10 +258,9 @@ export function createNinePServer(opts) {
       return new Uint8Array(0);
     }
   }
-  // The VFS has no partial-write API, so writes are read-modify-write of the
-  // whole record (same trade V1's vfs-adapter makes). Byte writes from Linux
-  // land as a `file` record regardless of the prior type — Linux is
-  // byte-oriented; the typed editors own their own save paths.
+  // Backends without openWrite() use read-modify-write of the whole record.
+  // Byte writes from Linux land as a `file` record regardless of the prior
+  // type — Linux is byte-oriented; typed editors own their own save paths.
   async function writeBytes(vfs, path, bytes) {
     await vfs.write(path, {
       type: "file",
@@ -269,6 +268,28 @@ export function createNinePServer(opts) {
       mime: "application/octet-stream",
       size: bytes.length,
     });
+  }
+
+  // pc's IndexedDB VFS exposes openWrite() so sequential guest writes can
+  // append Blob parts without reading and rewriting the complete file for
+  // every 9P packet. Keep the writer on the fid: Linux normally sends cp(1)
+  // output as monotonically increasing Twrites and Tclunk is the close seam.
+  async function closeWriter(f) {
+    const writer = f?.writer;
+    f.writer = null;
+    if (writer) await writer.close();
+  }
+
+  async function openWriter(f, append) {
+    if (typeof f.vfs.openWrite !== "function") return null;
+    await closeWriter(f);
+    f.writer = await f.vfs.openWrite(f.path, {
+      append,
+      mime: "application/octet-stream",
+      versioning: false,
+      deferPersistence: true,
+    });
+    return f.writer;
   }
 
   // Build the dirent list for an open directory, including synthetic "." and
@@ -297,6 +318,7 @@ export function createNinePServer(opts) {
       case P9.Tversion: {
         const c = conn(cid);
         c.msize = Math.min(m.msize || 8192, maxMsize);
+        await Promise.all([...c.fids.values()].map(closeWriter));
         c.fids.clear(); // Tversion resets this connection's state
         negotiatedMsize = c.msize;
         const version = String(m.version || "").startsWith("9P2000.L") ? DOTL_VERSION : "unknown";
@@ -368,6 +390,11 @@ export function createNinePServer(opts) {
       case P9.Tsetattr: {
         const f = getFid(cid, m.fid);
         if (m.valid & SETATTR_SIZE) {
+          if (f.writer && m.size <= f.writer.size) {
+            await f.writer.truncate(m.size);
+            return { type: P9.Rsetattr };
+          }
+          await closeWriter(f);
           const rec = await f.vfs.stat(f.path);
           if (rec && rec.type !== "folder") {
             const cur = await readBytes(f.vfs, f.path);
@@ -388,9 +415,17 @@ export function createNinePServer(opts) {
         // Best-effort — a read-only target just stays as-is.
         if (m.flags & O_TRUNC && rec.type !== "folder") {
           try {
-            await writeBytes(f.vfs, f.path, new Uint8Array(0));
+            if (!(await openWriter(f, false))) {
+              await writeBytes(f.vfs, f.path, new Uint8Array(0));
+            }
           } catch {
             /* RO / device */
+          }
+        } else if (rec.type !== "folder") {
+          try {
+            await openWriter(f, true);
+          } catch {
+            /* Backend has no writable streaming path; Twrite maps the error. */
           }
         }
         f.opened = true;
@@ -401,9 +436,12 @@ export function createNinePServer(opts) {
       case P9.Tlcreate: {
         const f = getFid(cid, m.fid); // a dir fid; becomes the new file on success
         const path = joinName(f.path, m.name);
-        await writeBytes(f.vfs, path, new Uint8Array(0));
-        const rec = await f.vfs.stat(path);
+        await closeWriter(f);
         f.path = path;
+        if (!(await openWriter(f, false))) {
+          await writeBytes(f.vfs, path, new Uint8Array(0));
+        }
+        const rec = await f.vfs.stat(path);
         f.opened = true;
         f.dirents = null;
         return { type: P9.Rlcreate, qid: qidOf(rec), iounit: 0 };
@@ -445,8 +483,15 @@ export function createNinePServer(opts) {
 
       case P9.Twrite: {
         const f = getFid(cid, m.fid);
-        const cur = await readBytes(f.vfs, f.path);
         const data = m.data;
+        if (f.writer && m.offset === f.writer.size) {
+          await f.writer.write(data);
+          return { type: P9.Rwrite, count: data.length };
+        }
+        // A seek/random write cannot use the append-only seam. Close it and
+        // preserve the existing read-modify-write behavior for that fid.
+        await closeWriter(f);
+        const cur = await readBytes(f.vfs, f.path);
         const out = new Uint8Array(Math.max(cur.length, m.offset + data.length));
         out.set(cur);
         out.set(data, m.offset);
@@ -470,12 +515,14 @@ export function createNinePServer(opts) {
       }
 
       case P9.Tclunk: {
+        await closeWriter(getFid(cid, m.fid));
         conn(cid).fids.delete(m.fid);
         return { type: P9.Rclunk };
       }
 
       case P9.Tremove: {
         const f = getFid(cid, m.fid);
+        await closeWriter(f);
         await f.vfs.remove(f.path);
         conn(cid).fids.delete(m.fid); // remove clunks the fid even on success
         return { type: P9.Rremove };
@@ -491,6 +538,7 @@ export function createNinePServer(opts) {
         const f = getFid(cid, m.fid);
         const d = getFid(cid, m.dfid);
         const dst = joinName(d.path, m.name);
+        await closeWriter(f);
         await f.vfs.move(f.path, dst);
         f.path = dst;
         return { type: P9.Rrename };
@@ -523,7 +571,8 @@ export function createNinePServer(opts) {
         return { type: P9.Rflush };
 
       case P9.Tfsync: {
-        getFid(cid, m.fid);
+        const f = getFid(cid, m.fid);
+        if (f.writer) await f.writer.flush();
         return { type: P9.Rfsync };
       }
 

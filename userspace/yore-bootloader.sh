@@ -44,18 +44,26 @@ case "$mode" in mmu|nommu) ;; *) echo "yore-bootloader: invalid boot mode" >&2; 
 manifest=$(printf '{"kernelAbi":%s,"generation":%s,"system":"%s","mode":"%s"}\n' \
   "$kernel_abi" "$gen" "$sys" "$mode")
 
+# BusyBox cp copies regular files in small blocks. Across the synchronous 9P
+# mount that turns a 45 MiB initramfs into thousands of request/reply cycles.
+# dd's 1 MiB input buffer lets the kernel split each large write at the
+# negotiated msize instead, preserving identical bytes with far fewer RPCs.
+copy_boot_blob() {
+  dd if="$1" of="$2" bs=1048576 2>/dev/null
+}
+
 gen_dir="$BOOT/generation-$gen"
 cur_dir="$BOOT/current"
 mkdir -p "$gen_dir" "$cur_dir"
 
 # Retain every generation for recovery. Write manifest last: it is the commit
 # marker consumed by the host, after both boot binaries are complete.
-cp -f "$sys/boot/vmlinux.wasm" "$gen_dir/vmlinux.wasm"
-cp -f "$sys/boot/initramfs.cpio.gz" "$gen_dir/initramfs.cpio.gz"
+copy_boot_blob "$sys/boot/vmlinux.wasm" "$gen_dir/vmlinux.wasm"
+copy_boot_blob "$sys/boot/initramfs.cpio.gz" "$gen_dir/initramfs.cpio.gz"
 printf '%s' "$manifest" > "$gen_dir/manifest.json.tmp"
 mv -f "$gen_dir/manifest.json.tmp" "$gen_dir/manifest.json"
 
-cp -f "$gen_dir/vmlinux.wasm" "$cur_dir/vmlinux.wasm"
-cp -f "$gen_dir/initramfs.cpio.gz" "$cur_dir/initramfs.cpio.gz"
+copy_boot_blob "$gen_dir/vmlinux.wasm" "$cur_dir/vmlinux.wasm"
+copy_boot_blob "$gen_dir/initramfs.cpio.gz" "$cur_dir/initramfs.cpio.gz"
 printf '%s' "$manifest" > "$cur_dir/manifest.json.tmp"
 mv -f "$cur_dir/manifest.json.tmp" "$cur_dir/manifest.json"
