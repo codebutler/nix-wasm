@@ -682,7 +682,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
         useSQLiteWAL = false;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -693,6 +693,7 @@
       wasmInittab = import ./userspace/init.nix { lib = cross.lib; pkgs = cross; };
       wasmActivate = import ./userspace/activate.nix { pkgs = cross; };
       wasmYoreBootloader = import ./userspace/yore-bootloader.nix { pkgs = cross; };
+      wasmYoreSystem = import ./userspace/yore-system.nix { pkgs = cross; };
 
       # #177 G6: stamp ENGINE_ABI into the system boot manifest (same parse as
       # linux-image.nix) so the host refuses a generation whose kernel ABI
@@ -847,7 +848,7 @@
         # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
         # sharedAppPackages' comment above for the full diagnosis). Fixed
         # 2026-08-13.
-        extraSystemPackages = sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
       };
       wasmPasswdFork = import ./userspace/passwd.nix {
         lib = cross.lib;

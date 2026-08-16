@@ -123,8 +123,12 @@ pkgs.writeText "init" ''
         if [ -f "/mnt/state$STAMP" ] && [ -d /mnt/state/nix/store ]; then
           echo "yore: installed system on /dev/vdb — mounting /nix directly"
           # Bind the store tree to /nix (state disk root holds /nix + /home + stamp).
-          mount --bind /mnt/state/nix /nix \
-            || { echo "yore: bind /nix from state disk failed"; mount_seed_overlay; }
+          if mount --bind /mnt/state/nix /nix; then
+            NIX_ON_STATE=1
+          else
+            echo "yore: bind /nix from state disk failed"
+            mount_seed_overlay
+          fi
         else
           # Mounted but unstamped / incomplete — treat as needs (re)install.
           umount /mnt/state 2>/dev/null || true
@@ -203,14 +207,74 @@ pkgs.writeText "init" ''
         date -u +"installed=%Y-%m-%dT%H:%M:%SZ" > "/mnt/state$STAMP" 2>/dev/null \
           || echo "installed=1" > "/mnt/state$STAMP"
         sync
-        mount --bind /mnt/state/nix /nix \
-          || { echo "yore: post-install bind /nix failed"; mount_seed_overlay; }
-        echo "yore: install complete — /nix is on /dev/vdb"
+        if mount --bind /mnt/state/nix /nix; then
+          NIX_ON_STATE=1
+          echo "yore: install complete — /nix is on /dev/vdb"
+        else
+          echo "yore: post-install bind /nix failed"
+          mount_seed_overlay
+        fi
       fi
     fi
   else
     # No state disk (pre-ABI-12 engine): legacy overlay.
     mount_seed_overlay
+  fi
+
+  # Migrate pre-generation installs in place. Older images used a direct
+  # system -> /nix/store/... symlink. Preserve that selection as generation 1
+  # so current disks gain normal Nix generation semantics without a reset.
+  profile=/nix/var/nix/profiles/system
+  if [ -n "$NIX_ON_STATE" ]; then
+    legacy_system=$(readlink "$profile" 2>/dev/null || true)
+    case "$legacy_system" in
+      /nix/store/*)
+        if [ ! -e /nix/var/nix/profiles/system-1-link ]; then
+          ln -s "$legacy_system" /nix/var/nix/profiles/system-1-link
+        fi
+        ln -sfn system-1-link "$profile"
+        echo "yore: migrated installed system profile to generation 1"
+        ;;
+    esac
+  fi
+
+  # Host-selected rollback. yore-pc writes selected.json only when it actually
+  # chose a retained boot mirror for this boot. Synchronize the installed Nix
+  # system profile to that same generation before activation, so rolling the
+  # host kernel/initramfs back cannot accidentally activate newer userspace.
+  # Validate mode + ABI against the selected generation's immutable manifest;
+  # a stale or tampered selection is ignored rather than cross-booted.
+  if [ -n "$NIX_ON_STATE" ] \
+     && [ -f /mnt/yore/Home/Library/Linux/boot/selected.json ]; then
+    selected=/mnt/yore/Home/Library/Linux/boot/selected.json
+    selected_gen=$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$selected" | head -n 1)
+    selected_mode=$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$selected" | head -n 1)
+    selected_abi=$(sed -n 's/.*"kernelAbi"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$selected" | head -n 1)
+    selected_system=$(sed -n 's/.*"system"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$selected" | head -n 1)
+    case "$selected_gen" in *[!0-9]*|"") selected_gen= ;; esac
+    case "$selected_mode" in mmu|nommu) ;; *) selected_gen= ;; esac
+    case "$selected_abi" in *[!0-9]*|"") selected_gen= ;; esac
+    if [ -n "$selected_gen" ]; then
+      gen_link="/nix/var/nix/profiles/system-$selected_gen-link"
+      gen_sys=$(readlink "$gen_link" 2>/dev/null || true)
+      gen_manifest="$gen_sys/boot/manifest.json"
+      gen_mode=$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$gen_manifest" 2>/dev/null | head -n 1)
+      gen_abi=$(sed -n 's/.*"kernelAbi"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+        "$gen_manifest" 2>/dev/null | head -n 1)
+      if [ -n "$gen_sys" ] && [ "$gen_sys" = "$selected_system" ] \
+         && [ "$gen_mode" = "$selected_mode" ] \
+         && [ "$gen_abi" = "$selected_abi" ]; then
+        ln -sfn "system-$selected_gen-link" /nix/var/nix/profiles/system
+        echo "yore: host selected system generation $selected_gen"
+      else
+        echo "yore: ignoring invalid host boot generation $selected_gen"
+      fi
+    fi
   fi
 
   # Auto-configure networking via DHCP before handing off to init, so BOTH the
@@ -242,10 +306,14 @@ pkgs.writeText "init" ''
   # (nix + multi-call entry points, clang, wasm-ld, cc, make) is now part of the
   # activated system profile (/run/current-system/sw/bin, on PATH via /etc/profile)
   # — there is NO host-provided /opt/bin seam anymore.
-  # The profile symlink is a DIRECT absolute pointer to the store path (one level;
-  # see store-manifest.py), so a plain readlink resolves it — no `-f`/realpath
-  # canonicalization (musl realpath corrupts long targets read over 9p/overlay).
-  sys=$(readlink /nix/var/nix/profiles/system 2>/dev/null)
+  # Resolve the standard two-link Nix profile without realpath. musl realpath
+  # has historically corrupted long overlay/9P targets in this guest.
+  sys=$(readlink "$profile" 2>/dev/null)
+  case "$sys" in
+    /*) ;;
+    "") ;;
+    *) sys=$(readlink "/nix/var/nix/profiles/$sys" 2>/dev/null) ;;
+  esac
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
 
