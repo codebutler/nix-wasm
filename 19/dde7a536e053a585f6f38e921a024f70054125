@@ -1,0 +1,21 @@
+userspace/bootstrap.nix
+  s_5c319dde45a577::t_683ff060905c5f 258,260
+runtime/generation-profile.test.js
+  s_5c319dde45a577::t_21dae9bf20307b 2-11,40-42,70-71,96,113-120,125-133,138-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "19dde7a536e053a585f6f38e921a024f70054125",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
