@@ -3,3 +3,5 @@
 #
 # 2026-06-26: validate the #75 `transparent` ping-pace-probe case on the guest
 # (added in 8c4afa8 — proves SA_RESTART read() returns data, not -EINTR).
+# 2026-08-16: materialize same-commit Linux channel artifacts after the
+# runtime-only #239 smoke correction, preserving the publisher provenance gate.
