@@ -46,10 +46,10 @@ manifest=$(printf '{"kernelAbi":%s,"generation":%s,"system":"%s","mode":"%s"}\n'
 
 # BusyBox cp copies regular files in small blocks. Across the synchronous 9P
 # mount that turns a 45 MiB initramfs into thousands of request/reply cycles.
-# dd's 1 MiB input buffer lets the kernel split each large write at the
-# negotiated msize instead, preserving identical bytes with far fewer RPCs.
+# dd's 4 MiB input buffer lets the kernel fill the negotiated 4 MiB msize,
+# preserving identical bytes with far fewer RPCs.
 copy_boot_blob() {
-  dd if="$1" of="$2" bs=1048576 2>/dev/null
+  dd if="$1" of="$2" bs=4194304 2>/dev/null
 }
 
 gen_dir="$BOOT/generation-$gen"
@@ -63,7 +63,10 @@ copy_boot_blob "$sys/boot/initramfs.cpio.gz" "$gen_dir/initramfs.cpio.gz"
 printf '%s' "$manifest" > "$gen_dir/manifest.json.tmp"
 mv -f "$gen_dir/manifest.json.tmp" "$gen_dir/manifest.json"
 
-copy_boot_blob "$gen_dir/vmlinux.wasm" "$cur_dir/vmlinux.wasm"
-copy_boot_blob "$gen_dir/initramfs.cpio.gz" "$cur_dir/initramfs.cpio.gz"
+# current/ is a tiny committed pointer to the retained generation. The host
+# resolves its binaries from generation-N using this manifest; copying the same
+# 52+ MiB payload here doubled activation time and storage for no new recovery
+# value. Remove legacy flattened blobs before flipping the pointer.
+rm -f "$cur_dir/vmlinux.wasm" "$cur_dir/initramfs.cpio.gz"
 printf '%s' "$manifest" > "$cur_dir/manifest.json.tmp"
 mv -f "$cur_dir/manifest.json.tmp" "$cur_dir/manifest.json"

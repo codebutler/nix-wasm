@@ -6,6 +6,7 @@ import {
   symlinkSync,
   readlinkSync,
   readFileSync,
+  existsSync,
   rmSync,
   chmodSync,
 } from "node:fs";
@@ -122,9 +123,10 @@ exit 2
     const switched = run(systemTool, ["switch", sys2]);
     expect(switched.status, switched.stderr).toBe(0);
     expect(readlinkSync(join(profiles, "system"))).toBe("system-2-link");
-    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe(
+    expect(readFileSync(join(hostLinux, "boot/generation-2/vmlinux.wasm"), "utf8")).toBe(
       "kernel-system-two",
     );
+    expect(existsSync(join(hostLinux, "boot/current/vmlinux.wasm"))).toBe(false);
     expect(
       JSON.parse(readFileSync(join(hostLinux, "boot/current/manifest.json"), "utf8")).generation,
     ).toBe(2);
@@ -135,7 +137,7 @@ exit 2
     const rolled = run(systemTool, ["rollback"]);
     expect(rolled.status, rolled.stderr).toBe(0);
     expect(readlinkSync(join(profiles, "system"))).toBe("system-1-link");
-    expect(readFileSync(join(hostLinux, "boot/current/vmlinux.wasm"), "utf8")).toBe(
+    expect(readFileSync(join(hostLinux, "boot/generation-1/vmlinux.wasm"), "utf8")).toBe(
       "kernel-system-one",
     );
     expect(

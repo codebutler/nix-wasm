@@ -48,7 +48,7 @@ pkgs.writeText "init" ''
   # accommodation.
   mkdir -p /dev/shm && mount -t ${if forkMode then "tmpfs" else "ramfs"} none /dev/shm 2>/dev/null
 
-  M="trans=virtio,version=9p2000.L,msize=524288"
+  M="trans=virtio,version=9p2000.L,msize=4194304"
   # cache=loose + ignoreqv route 9p reads through the page cache (buffered) instead
   # of netfs UNBUFFERED/direct reads. Direct reads call iov_iter_extract_pages /
   # get_user_pages on the user buffer, which fails EFAULT on this NOMMU/wasm guest
