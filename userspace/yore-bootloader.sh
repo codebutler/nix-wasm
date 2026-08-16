@@ -9,8 +9,10 @@ PROFILE=${YORE_SYSTEM_PROFILE:-/nix/var/nix/profiles/system}
 HOST_LINUX=${YORE_HOST_LINUX:-/mnt/yore/Home/Library/Linux}
 BOOT="$HOST_LINUX/boot"
 
-# Harness boots without the host-prepared Linux tree intentionally skip export.
-[ -d "$HOST_LINUX" ] || exit 0
+# Harness boots may expose only the offline home. Require the product-prepared
+# boot directory before exporting large blobs so that merely mounting the home
+# tree cannot turn a boot smoke into a 50+ MiB persistence test.
+[ -d "$BOOT" ] || exit 0
 [ -f "$sys/boot/vmlinux.wasm" ] || exit 0
 [ -f "$sys/boot/initramfs.cpio.gz" ] || exit 0
 [ -f "$sys/boot/manifest.json" ] || exit 0
@@ -46,10 +48,10 @@ manifest=$(printf '{"kernelAbi":%s,"generation":%s,"system":"%s","mode":"%s"}\n'
 
 # BusyBox cp copies regular files in small blocks. Across the synchronous 9P
 # mount that turns a 45 MiB initramfs into thousands of request/reply cycles.
-# dd's 4 MiB input buffer lets the kernel fill the negotiated 4 MiB msize,
-# preserving identical bytes with far fewer RPCs.
+# dd's 1 MiB input buffer lets the kernel split each write at virtio-9p's
+# 500 KiB ceiling, preserving identical bytes without BusyBox cp's tiny blocks.
 copy_boot_blob() {
-  dd if="$1" of="$2" bs=4194304 2>/dev/null
+  dd if="$1" of="$2" bs=1048576 2>/dev/null
 }
 
 gen_dir="$BOOT/generation-$gen"
