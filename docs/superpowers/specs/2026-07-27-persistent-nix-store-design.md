@@ -67,14 +67,14 @@ Mounted when installed:
 ```
 /Home/Library/Discs/linux.iso              # installer/recovery image (channel)
 /Home/Library/Linux/
-  state.json                               # installed?, generation, kernel ABI, disk size
-  disks/vdb                                # sparse dirty overlay over state disk (CBHD-class)
+  state.json                               # installed?, generation, kernel ABI, boot mode, disk size
+  disks/vdb                                # append-built stream of incremental CBHD dirties
   boot/                                    # host-readable bootloader mirror (see §4)
     current -> generation-N/
     generation-N/
       vmlinux.wasm
       initramfs.cpio.gz
-      manifest.json                        # { system, kernelAbi, nixosVersion?, … }
+      manifest.json                        # { system, kernelAbi, mode, nixosVersion?, … }
   home/                                    # optional host-visible home (§6)
 ```
 
@@ -113,7 +113,7 @@ Copy, not overlay: after this point the squashfs is irrelevant until reset.
 ### 3b. Normal boot (installed)
 
 1. pc loads `state.json` + applies `disks/vdb` dirties onto the state image.  
-2. **Bootloader:** read `/Home/Library/Linux/boot/current/{vmlinux.wasm,initramfs.cpio.gz}`; ABI-check vs `ENGINE_ABI`.  
+2. **Bootloader:** read `/Home/Library/Linux/boot/current/{vmlinux.wasm,initramfs.cpio.gz}`; require both ABI and `mode` to match the selected MMU/NOMMU runtime.
 3. Boot that kernel/initramfs with `vdb` attached; `vda` seed may be omitted or attached unused.  
 4. Init sees install stamp → mount `vdb`’s `/nix` directly → `readlink` profile → `activate` → `exec $sys/init`.  
 5. No squashfs overlay. No ramfs upper for `/nix`.
@@ -217,6 +217,7 @@ Keep `publish-linux-channel` + `.#linux-image`, with clarified semantics:
 | Cachix `nix-wasm` | **Primary update channel** for installed systems |
 | `latest.json` | Points at newest **installer**; not “please rebase your overlay” |
 | `minEngine` / `ENGINE_ABI` | Guard on whatever kernel binary is about to boot (ISO or boot mirror) |
+| generation manifest `mode` | Prevent an MMU generation mirror from booting as NOMMU, or the reverse |
 
 Docs/runbooks change from “republish guest to ship fixes” → “push to Cachix for installed systems; republish ISO for seed/recovery/ABI install media.”
 
