@@ -38,6 +38,13 @@ let
   kernelModel = reqProcessModel "kernel" kernel;
   initramfsModel = reqProcessModel "initramfs" initramfs;
   busyboxModel = reqProcessModel "busybox" busybox;
+  # Stable host-facing vocabulary. Generation boot manifests travel through
+  # /Home/Library/Linux/boot/current; yore-pc refuses a mirror whose mode does
+  # not match the user's selected Linux memory model.
+  bootMode =
+    if kernelModel == "mmu-fork" then "mmu"
+    else if kernelModel == "nommu-spawn" then "nommu"
+    else throw "userspace/toplevel.nix: unsupported process model `${kernelModel}`";
   # A PLAIN `let processModel = if ... then ... else throw ...;` bound only
   # into `passthru.processModel` does NOT force this check: `passthru` is
   # merged into the derivation attrset lazily by `mkDerivation`/`runCommand`,
@@ -66,7 +73,10 @@ let
     '';
 in
 assert processModelCoherent;
-pkgs.runCommand "wasm-system" { passthru.processModel = kernelModel; } ''
+pkgs.runCommand "wasm-system" {
+  passthru.processModel = kernelModel;
+  passthru.bootMode = bootMode;
+} ''
   mkdir -p $out $out/boot
   # Real /etc = module-generated etc + our static passwd/group + profile inittab.
   # Preserve the store symlinks inside etc (resolved in-guest, /nix mounted).
@@ -90,6 +100,6 @@ pkgs.runCommand "wasm-system" { passthru.processModel = kernelModel; } ''
   # for the seed profile (single system symlink); bump when real system-N-link
   # generations exist.
   cat > $out/boot/manifest.json <<EOF
-{"kernelAbi":${toString kernelAbi},"generation":1,"system":"$out"}
+{"kernelAbi":${toString kernelAbi},"generation":1,"system":"$out","mode":"${bootMode}"}
 EOF
 ''
