@@ -8,30 +8,4 @@
 # writeText (not writeShellScript): same rationale as activate.nix — avoid
 # dragging host bash into the guest closure. Invoked as `sh "$script" "$sys"`.
 { pkgs }:
-pkgs.writeText "yore-bootloader" ''
-  #!/bin/sh
-  set -e
-  sys="$1"
-  [ -n "$sys" ] || exit 0
-  # Require the host-prepared Linux library tree (pc ensureLinuxTree). Harness
-  # MemVfs boots expose /mnt/yore/Home for 9P tests only — copying multi-MB
-  # vmlinux.wasm there during activate blocks the shell past CI prompt budgets.
-  [ -d /mnt/yore/Home/Library/Linux ] || exit 0
-  [ -f "$sys/boot/vmlinux.wasm" ] || exit 0
-  [ -f "$sys/boot/initramfs.cpio.gz" ] || exit 0
-  [ -f "$sys/boot/manifest.json" ] || exit 0
-
-  BOOT=/mnt/yore/Home/Library/Linux/boot
-  mkdir -p "$BOOT/current" || exit 0
-
-  # Generation number: prefer manifest, else basename of a system-N-link, else 1.
-  gen=$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
-    "$sys/boot/manifest.json" 2>/dev/null | head -n 1)
-  [ -n "$gen" ] || gen=1
-
-  mkdir -p "$BOOT/generation-$gen" || true
-  for f in vmlinux.wasm initramfs.cpio.gz manifest.json; do
-    cp -f "$sys/boot/$f" "$BOOT/current/$f" || exit 0
-    cp -f "$sys/boot/$f" "$BOOT/generation-$gen/$f" || true
-  done
-''
+pkgs.writeText "yore-bootloader" (builtins.readFile ./yore-bootloader.sh)

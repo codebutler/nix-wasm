@@ -96,10 +96,10 @@ pkgs.runCommand "wasm-system" {
   # even if the kernel/initramfs store paths move across rebuilds.
   cp ${kernel}/vmlinux.wasm $out/boot/vmlinux.wasm
   cp ${initramfs}/initramfs.cpio.gz $out/boot/initramfs.cpio.gz
-  # Manifest stamped with this closure's store path + ENGINE_ABI. generation=1
-  # for the seed profile (single system symlink); bump when real system-N-link
-  # generations exist.
+  # Immutable system metadata. Generation is profile state, so the host-facing
+  # exporter derives it from the active system-N-link instead of baking it into
+  # a closure that may be generation N on one disk and M on another.
   cat > $out/boot/manifest.json <<EOF
-{"kernelAbi":${toString kernelAbi},"generation":1,"system":"$out","mode":"${bootMode}"}
+{"kernelAbi":${toString kernelAbi},"system":"$out","mode":"${bootMode}"}
 EOF
 ''
