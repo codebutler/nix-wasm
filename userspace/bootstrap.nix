@@ -63,6 +63,19 @@ pkgs.writeText "init" ''
   mkdir -p /mnt/yore
   mount -t 9p -o "$M,aname=/" yoreroot /mnt/yore 2>/dev/null || echo "yore: /mnt/yore 9p mount failed"
 
+  # #177 offline home: the appliance logs in as root, so make /root itself the
+  # host-visible home instead of copying it out only at shutdown. Files written
+  # here live directly under pc's /Home/Library/Linux/home and remain browsable
+  # after the guest stops. Older/minimal harnesses without the prepared Linux
+  # tree keep their initramfs-local /root.
+  HOST_HOME=/mnt/yore/Home/Library/Linux/home
+  if [ -d /mnt/yore/Home/Library/Linux ]; then
+    mkdir -p "$HOST_HOME" /root
+    mount --bind "$HOST_HOME" /root 2>/dev/null \
+      && echo "yore: home=/root host=/Home/Library/Linux/home" \
+      || echo "yore: host home bind failed"
+  fi
+
   # Nix binary cache (substituter for `nix-env -iA`), read-only.
   mkdir -p /nix-cache
   mount -t 9p -o "$RO,aname=nixcache" nixcache /nix-cache 2>/dev/null || true

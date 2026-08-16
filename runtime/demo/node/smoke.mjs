@@ -10,7 +10,14 @@ import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs"
 import { MemVfs } from "../../ninep/mem-vfs.js";
 
 const vfs = MemVfs.from({
-  Home: { "pc-9p-proof.txt": "written by pc's vfs.write\n" },
+  Home: {
+    "pc-9p-proof.txt": "written by pc's vfs.write\n",
+    Library: {
+      Linux: {
+        home: { "from-host.txt": "host home survives while Linux is down\n" },
+      },
+    },
+  },
 });
 
 const expectedProfile = process.env.YORE_EXPECT_PROFILE;
@@ -77,11 +84,11 @@ try {
 
   // write / overwrite / append round-trip back to the host VFS
   const FILE = "/Home/smoke-wtest.txt";
-  const readVfs = async () => (await vfs.readBlob(FILE)).text();
-  const writeCheck = async (cmd, expect, label) => {
+  const readVfs = async (path = FILE) => (await vfs.readBlob(path)).text();
+  const writeCheck = async (cmd, expect, label, path = FILE) => {
     s.send(cmd);
     await new Promise((r) => setTimeout(r, 2500));
-    const got = await readVfs().catch((e) => "ERR:" + e.message);
+    const got = await readVfs(path).catch((e) => "ERR:" + e.message);
     check(
       got === expect,
       label,
@@ -93,6 +100,21 @@ try {
   await writeCheck(`echo hello-from-linux > /mnt/yore${FILE}\n`, "hello-from-linux\n", "write");
   await writeCheck(`echo hi > /mnt/yore${FILE}\n`, "hi\n", "overwrite (O_TRUNC)");
   await writeCheck(`echo more >> /mnt/yore${FILE}\n`, "hi\nmore\n", "append");
+
+  // #177 offline home: /root is a bind of the host-visible Linux/home tree.
+  // Prove both directions: a file staged while the guest is down appears in
+  // /root, and a normal shell write is immediately readable from the host VFS.
+  s.send("cat /root/from-host.txt\n");
+  check(
+    await s.waitForOutput(/host home survives while Linux is down/),
+    "host offline-home file is visible at /root",
+  );
+  await writeCheck(
+    "echo guest-home-is-offline-visible > /root/from-guest.txt\n",
+    "guest-home-is-offline-visible\n",
+    "guest /root write lands in host offline home",
+    "/Home/Library/Linux/home/from-guest.txt",
+  );
 
   // directory read-back
   s.send("ls /mnt/yore/Home\n");
