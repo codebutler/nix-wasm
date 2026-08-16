@@ -6,6 +6,8 @@ import {
   dirtyBitmapBytes,
   markDirty,
   dirtySectorCount,
+  createStateDiskBacking,
+  STATE_DISK_COPY_MAX_BYTES,
 } from "./blk-disk.js";
 
 describe("blk-disk journal", () => {
@@ -48,5 +50,51 @@ describe("blk-disk journal", () => {
     const restored = new Uint8Array(image.length);
     applyDirtyOverlay(restored, overlay);
     expect(restored[BLK_SECTOR]).toBe(2);
+  });
+
+  it("treats a populated attached image as the clean baseline", () => {
+    const baseline = new Uint8Array(BLK_SECTOR * 2);
+    baseline[0] = 0xaa;
+    const backing = createStateDiskBacking(baseline);
+    const image = new Uint8Array(backing.imageBuffer);
+    const bitmap = new Uint8Array(backing.dirtyBuffer);
+
+    const clean = packDirtySectors(image, bitmap, { clear: true });
+    expect(new DataView(clean.buffer).getUint32(12, true)).toBe(0);
+
+    // A dirty sector must be journaled even when its current content is zero.
+    image.fill(0, BLK_SECTOR, BLK_SECTOR * 2);
+    markDirty(bitmap, 1, 1);
+    const changed = packDirtySectors(image, bitmap, { clear: true });
+    expect(new DataView(changed.buffer).getUint32(12, true)).toBe(1);
+  });
+
+  it("reuses a full aligned SharedArrayBuffer", () => {
+    const image = new SharedArrayBuffer(BLK_SECTOR * 2);
+    const backing = createStateDiskBacking(image);
+    expect(backing.imageBuffer).toBe(image);
+    expect(backing.persistable).toBe(true);
+  });
+
+  it("copies small compatibility images into shared memory", () => {
+    const image = new Uint8Array(BLK_SECTOR * 2);
+    image[3] = 0x7a;
+    const backing = createStateDiskBacking(image);
+    expect(backing.imageBuffer).not.toBe(image.buffer);
+    expect(new Uint8Array(backing.imageBuffer)[3]).toBe(0x7a);
+  });
+
+  it("rejects a large non-shared image instead of duplicating it", () => {
+    const image = new Uint8Array(BLK_SECTOR * 2);
+    expect(() => createStateDiskBacking(image, { maxCopyBytes: BLK_SECTOR })).toThrow(
+      /must be supplied as a full SharedArrayBuffer/,
+    );
+    expect(STATE_DISK_COPY_MAX_BYTES).toBe(64 * 1024 * 1024);
+  });
+
+  it("rejects misaligned images instead of silently truncating them", () => {
+    expect(() => createStateDiskBacking(new Uint8Array(BLK_SECTOR + 1))).toThrow(
+      /multiple of 512 bytes/,
+    );
   });
 });

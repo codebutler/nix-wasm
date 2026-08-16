@@ -13,6 +13,10 @@
 export const BLK_SECTOR = 512;
 export const DISK_OVERLAY_MAGIC = "CBHD";
 export const DISK_OVERLAY_VERSION = 1;
+// Small compatibility images (tests, recovery tools) may arrive as ordinary
+// ArrayBuffers.  Production state disks are 1-2 GiB and must already be shared:
+// copying one beside the guest's ~2 GiB WebAssembly.Memory can OOM the host.
+export const STATE_DISK_COPY_MAX_BYTES = 64 * 1024 * 1024;
 
 function isShared(bitmap) {
   return typeof SharedArrayBuffer !== "undefined" && bitmap.buffer instanceof SharedArrayBuffer;
@@ -109,6 +113,75 @@ export function applyDirtyOverlay(image, overlay) {
 export function dirtyBitmapBytes(capacityBytes) {
   const sectors = Math.floor(capacityBytes / BLK_SECTOR);
   return (sectors + 7) >> 3;
+}
+
+/**
+ * Prepare the shared backing used by the RW virtio-blk state device.
+ *
+ * The returned dirty bitmap starts empty: `image` is the caller-owned baseline,
+ * and saveDisk() journals only guest T_OUT writes made after attachment.  This
+ * is what keeps autosaves incremental even when the baseline is populated.
+ *
+ * @param {ArrayBuffer|SharedArrayBuffer|Uint8Array|null|undefined} image
+ * @param {{ stubBytes?: number, maxCopyBytes?: number }} [opts]
+ * @returns {{ imageBuffer: SharedArrayBuffer, dirtyBuffer: SharedArrayBuffer, persistable: boolean }}
+ */
+export function createStateDiskBacking(image, opts = {}) {
+  const stubBytes = opts.stubBytes ?? 1024 * 1024;
+  const maxCopyBytes = opts.maxCopyBytes ?? STATE_DISK_COPY_MAX_BYTES;
+
+  if (image == null) {
+    if (!Number.isSafeInteger(stubBytes) || stubBytes <= 0 || stubBytes % BLK_SECTOR !== 0) {
+      throw new RangeError(`state disk stub must be a positive multiple of ${BLK_SECTOR} bytes`);
+    }
+    const imageBuffer = new SharedArrayBuffer(stubBytes);
+    return {
+      imageBuffer,
+      dirtyBuffer: new SharedArrayBuffer(dirtyBitmapBytes(stubBytes)),
+      persistable: false,
+    };
+  }
+
+  let source;
+  let reusable = null;
+  if (image instanceof SharedArrayBuffer) {
+    source = new Uint8Array(image);
+    reusable = image;
+  } else if (image instanceof Uint8Array) {
+    source = image;
+    if (
+      image.buffer instanceof SharedArrayBuffer &&
+      image.byteOffset === 0 &&
+      image.byteLength === image.buffer.byteLength
+    ) {
+      reusable = image.buffer;
+    }
+  } else if (image instanceof ArrayBuffer) {
+    source = new Uint8Array(image);
+  } else {
+    throw new TypeError("stateDisk.image must be an ArrayBuffer, SharedArrayBuffer, or Uint8Array");
+  }
+
+  if (source.byteLength === 0 || source.byteLength % BLK_SECTOR !== 0) {
+    throw new RangeError(`stateDisk.image must be a non-empty multiple of ${BLK_SECTOR} bytes`);
+  }
+
+  let imageBuffer = reusable;
+  if (!imageBuffer) {
+    if (source.byteLength > maxCopyBytes) {
+      throw new RangeError(
+        `stateDisk.image is ${source.byteLength} bytes; images larger than ${maxCopyBytes} bytes must be supplied as a full SharedArrayBuffer to avoid duplicating the disk`,
+      );
+    }
+    imageBuffer = new SharedArrayBuffer(source.byteLength);
+    new Uint8Array(imageBuffer).set(source);
+  }
+
+  return {
+    imageBuffer,
+    dirtyBuffer: new SharedArrayBuffer(dirtyBitmapBytes(imageBuffer.byteLength)),
+    persistable: true,
+  };
 }
 
 /**
