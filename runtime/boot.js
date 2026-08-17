@@ -80,7 +80,7 @@ const enc = new TextEncoder();
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
  *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
- *   saveDisk(): Blob|null,
+ *   saveDisk(): Uint8Array|null,
  *   hasStateDisk(): boolean,
  *   kill(): void,
  * }>}
@@ -189,7 +189,7 @@ export async function bootLinux(opts) {
     // Absent on a --no-nix / busybox-only boot (the blk device mounts empty).
     squashfs: opts.squashfs,
     // #177: RW state disk (/dev/vdb). Optional; when present, saveDisk() returns
-    // a CBHD Blob of dirty sectors for host persistence.
+    // CBHD bytes for host persistence.
     stateDisk: opts.stateDisk,
     wayland,
     // Issue #10 option 3: the virtio-vsock /Ctl bridge hook (passed straight
@@ -273,7 +273,7 @@ export async function bootLinux(opts) {
      */
     net: os.net,
 
-    /** #177: pack and clear incremental RW state-disk dirties (CBHD Blob), or null. */
+    /** #177: pack and clear incremental RW state-disk dirties (CBHD bytes), or null. */
     saveDisk() {
       return os.saveDisk ? os.saveDisk() : null;
     },
