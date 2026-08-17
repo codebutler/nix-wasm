@@ -172,23 +172,32 @@ pkgs.writeText "init" ''
             # install step — after this, squashfs is irrelevant until Reset.
             #
             # Keep store paths as separate copy operations so a failure cannot
-            # leave the remainder of one opaque tree looking installed. The seed
-            # is capacity-gated at build time and must install without VM cache
-            # manipulation in the production-sized smoke.
+            # leave the remainder of one opaque tree looking installed. After
+            # each path, sync the state filesystem and release only that path's
+            # source/destination cache pages. This keeps the 2 GiB NOMMU guest
+            # from retaining the whole expanded seed twice, without manipulating
+            # the global VM drop_caches control.
             echo "yore: copying seed store (this may take a while)…"
             mkdir -p /mnt/state/nix/store
             COPY_FAIL=
             for p in /mnt/nix-ro/store/*; do
               [ -e "$p" ] || continue
               cp -a "$p" /mnt/state/nix/store/ || { COPY_FAIL=1; break; }
+              base=''${p##*/}
+              seed-cache-release /mnt/state "$p" "/mnt/state/nix/store/$base" \
+                || { COPY_FAIL=1; break; }
             done
             if [ -z "$COPY_FAIL" ]; then
               for p in /mnt/nix-ro/*; do
-                base=$(basename "$p")
+                base=''${p##*/}
                 [ "$base" = store ] && continue
                 cp -a "$p" /mnt/state/nix/ || { COPY_FAIL=1; break; }
+                seed-cache-release /mnt/state "$p" "/mnt/state/nix/$base" \
+                  || { COPY_FAIL=1; break; }
               done
             fi
+            [ -z "$COPY_FAIL" ] \
+              && echo "yore: seed copy used bounded per-file page cache"
             if [ -n "$COPY_FAIL" ]; then
               echo "yore: seed copy failed"
               umount /mnt/nix-ro 2>/dev/null

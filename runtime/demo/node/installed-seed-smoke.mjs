@@ -42,11 +42,17 @@ async function main() {
     if (!reached) throw new Error("full seed install did not reach a prompt");
 
     let transcript = session.snapshot();
+    if (/Unable to allocate RAM for stack|nommu: Allocation of length .* failed/.test(transcript)) {
+      throw new Error("seed install exhausted or fragmented guest memory");
+    }
     if (/seed copy failed|No space left on device|Total free blocks count 0/.test(transcript)) {
-      throw new Error("seed install reported ENOSPC/copy failure");
+      throw new Error("seed install reported a copy/capacity failure");
     }
     if (!transcript.includes("yore: install complete — /nix is on /dev/vdb")) {
       throw new Error("guest did not confirm the direct vdb /nix install");
+    }
+    if (!transcript.includes("yore: seed copy used bounded per-file page cache")) {
+      throw new Error("guest did not confirm bounded seed-copy cache handling");
     }
     const drops = transcript.match(/drop_caches:/g)?.length ?? 0;
     if (drops !== 0) throw new Error(`seed installer manipulated drop_caches (${drops} lines)`);

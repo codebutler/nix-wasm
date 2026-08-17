@@ -425,6 +425,13 @@
         inherit cross;
       };
 
+      # The first-boot seed installer copies roughly a GiB from squashfs to the
+      # state disk. Bound that copy's page-cache footprint on the 2 GiB NOMMU
+      # guest with per-file POSIX_FADV_DONTNEED, not global drop_caches writes.
+      seedCacheRelease = import ./userspace/seed-cache-release.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -754,7 +761,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon seedCacheRelease fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -1233,6 +1240,9 @@
         # Read-only 9P rootfs server for pc's /Linux mount (pc#472) →
         # $out/bin/ninepd.
         ninepd = ninepdDaemon;
+
+        # First-boot installer cache bounding helper → $out/bin/seed-cache-release.
+        seed-cache-release = seedCacheRelease;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;
