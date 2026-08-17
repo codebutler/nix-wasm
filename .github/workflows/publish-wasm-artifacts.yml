@@ -35,6 +35,13 @@ jobs:
           name: nix-wasm
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
+      # Wrangler requires Node >= 22. Namespace currently exposes Node 20 to
+      # shell steps even though GitHub-hosted JavaScript actions themselves are
+      # forced onto Node 24, so install a supported shell-visible runtime.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       # Install bun so `bunx wrangler` is available in publish-to-r2.sh.
       - uses: oven-sh/setup-bun@v2
 
@@ -45,4 +52,9 @@ jobs:
         # publish-to-r2.sh prints bytes/sha256/version to stdout; tee appends to
         # the step summary so the values are visible in the Actions UI for the
         # pc registry.js bump (see docs/superpowers/notes/deploy-r2.md).
-        run: bash scripts/publish-to-r2.sh | tee -a "$GITHUB_STEP_SUMMARY"
+        # Preserve the publisher's failure through tee. Without pipefail,
+        # Wrangler can reject every upload while tee exits 0 and marks the job
+        # green despite publishing nothing.
+        run: |
+          set -o pipefail
+          bash scripts/publish-to-r2.sh | tee -a "$GITHUB_STEP_SUMMARY"
