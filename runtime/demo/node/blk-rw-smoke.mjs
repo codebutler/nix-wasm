@@ -92,17 +92,16 @@ async function main() {
     s1.kill();
     process.exit(1);
   }
-  const blob = s1.handle.saveDisk();
-  if (!blob || blob.size <= 16) {
+  const overlay = s1.handle.saveDisk();
+  if (!overlay || overlay.byteLength <= 16) {
     console.error(
       "FAIL: saveDisk() returned empty overlay (size=%s dirties=%d)",
-      blob?.size,
+      overlay?.byteLength,
       dirtyN,
     );
     s1.kill();
     process.exit(1);
   }
-  const overlay = new Uint8Array(await blob.arrayBuffer());
   const overlayCount = new DataView(
     overlay.buffer,
     overlay.byteOffset,
@@ -113,11 +112,11 @@ async function main() {
     s1.kill();
     process.exit(1);
   }
-  const secondBlob = s1.handle.saveDisk();
-  if (!secondBlob || secondBlob.size !== 16) {
+  const secondOverlay = s1.handle.saveDisk();
+  if (!secondOverlay || secondOverlay.byteLength !== 16) {
     console.error(
       "FAIL: second save re-emitted the populated baseline (size=%s, expected=16)",
-      secondBlob?.size,
+      secondOverlay?.byteLength,
     );
     s1.kill();
     process.exit(1);
