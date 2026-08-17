@@ -1254,8 +1254,8 @@ jobs:
             # (its core-only predecessor) — keeps hard-gating.
             run_smoke demo/node/smoke.mjs
             # #177 capacity gate: the complete MMU seed must finish its real
-            # 1.75 GiB direct-vdb install with >=512 MiB free (no ENOSPC and no
-            # per-store-path drop_caches printk flood).
+            # 1.75 GiB direct-vdb install with >=512 MiB free, no ENOSPC, and no
+            # drop_caches manipulation.
             run_smoke demo/node/installed-seed-smoke.mjs
             # #175 headline: nix's local-derivation-goal FORKS a builder
             # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm

@@ -49,7 +49,7 @@ async function main() {
       throw new Error("guest did not confirm the direct vdb /nix install");
     }
     const drops = transcript.match(/drop_caches:/g)?.length ?? 0;
-    if (drops > 1) throw new Error(`drop_caches printk flood (${drops} lines)`);
+    if (drops !== 0) throw new Error(`seed installer manipulated drop_caches (${drops} lines)`);
 
     session.send(
       "test -f /mnt/state/.yore-linux-installed && " +
@@ -71,10 +71,9 @@ async function main() {
       throw new Error(`state filesystem block size is ${blockSize}, want 1024`);
 
     console.log(
-      "PASS: complete seed installed on 1.75 GiB vdb (%d KiB free, block=%d, drop_caches lines=%d)",
+      "PASS: complete seed installed on 1.75 GiB vdb (%d KiB free, block=%d, no drop_caches)",
       free,
       blockSize,
-      drops,
     );
   } catch (error) {
     console.error("FAIL:", error.message || error);

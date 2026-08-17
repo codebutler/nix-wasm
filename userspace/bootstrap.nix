@@ -171,25 +171,16 @@ pkgs.writeText "init" ''
             # Copy seed store + nix db/profiles onto the state disk. This is the
             # install step — after this, squashfs is irrelevant until Reset.
             #
-            # Path-at-a-time + drop_caches: a single `cp -a` of the multi-hundred-MB
-            # seed fills the guest page cache and OOMs (stack alloc errno -12 /
-            # kill init) before the disk fills. Sync + drop_caches between store
-            # paths keeps the buddy allocator breathing under CONFIG_BOOT_MEM_PAGES.
+            # Keep store paths as separate copy operations so a failure cannot
+            # leave the remainder of one opaque tree looking installed. The seed
+            # is capacity-gated at build time and must install without VM cache
+            # manipulation in the production-sized smoke.
             echo "yore: copying seed store (this may take a while)…"
             mkdir -p /mnt/state/nix/store
             COPY_FAIL=
             for p in /mnt/nix-ro/store/*; do
               [ -e "$p" ] || continue
               cp -a "$p" /mnt/state/nix/store/ || { COPY_FAIL=1; break; }
-              # Drop page cache after every store path. A single `cp -a` of the
-              # multi-hundred-MB seed (or even every-16th drops) fills ~1.5 GiB
-              # of file cache and OOMs PID 1 (stack alloc errno -12). Avoid
-              # `sync` here — sync itself needs contiguous RAM under pressure.
-              # Bit 4 suppresses the kernel's per-write informational printk;
-              # bits 1+2 still drop page cache and reclaimable slab. The first
-              # write may print once, rather than flooding the boot console once
-              # per store path.
-              echo 7 > /proc/sys/vm/drop_caches 2>/dev/null || true
             done
             if [ -z "$COPY_FAIL" ]; then
               for p in /mnt/nix-ro/*; do
