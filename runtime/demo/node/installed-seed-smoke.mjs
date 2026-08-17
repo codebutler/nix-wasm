@@ -67,7 +67,8 @@ async function main() {
     if (!Number.isFinite(free) || free < MIN_FREE_KIB) {
       throw new Error(`seed left ${free || 0} KiB free; require at least ${MIN_FREE_KIB} KiB`);
     }
-    if (blockSize !== 1024) throw new Error(`state filesystem block size is ${blockSize}, want 1024`);
+    if (blockSize !== 1024)
+      throw new Error(`state filesystem block size is ${blockSize}, want 1024`);
 
     console.log(
       "PASS: complete seed installed on 1.75 GiB vdb (%d KiB free, block=%d, drop_caches lines=%d)",
