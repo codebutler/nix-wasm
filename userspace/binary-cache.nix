@@ -35,8 +35,8 @@
   devPaths,
   # Extra store paths to PUBLISH in the cache (closure included) but NOT add to the
   # nix-env / nix profile install catalogs (pkgs.nix / paths.nix). Used for the
-  # pinned nixpkgs source, which the guest substitutes on demand (via <nixpkgs>) to
-  # evaluate nixpkgs packages against the wasm cross — see
+  # pinned nixpkgs source, which the guest's fixed-output fetchTarball substitutes
+  # on demand to evaluate packages against the wasm cross — see
   # userspace/wasm-nixpkgs-channel.nix. Defaults to [] so existing callers are
   # unaffected.
   extraRootPaths ? [ ],

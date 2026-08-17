@@ -921,6 +921,10 @@ jobs:
           # 9P transport + legacy `nix-env -iA` substitution (reads /mnt/yore over
           # yoreroot 9P, installs make-wasm32 over nixcache 9P).
           run_smoke demo/node/smoke.mjs
+          # #177: expand the COMPLETE seed onto pc's real 1.75 GiB vdb and
+          # require a direct installed /nix with >=512 MiB free. This catches
+          # compressed-squashfs growth that the tiny blk-rw smoke cannot see.
+          run_smoke demo/node/installed-seed-smoke.mjs
           # The new CLI: `nix profile install` of a REAL-derivation catalog entry
           # substitutes its prebuilt output (issue #1 — substitute=true + .drv-aware
           # cache), then compiles + runs a C program. Gating.
@@ -1249,6 +1253,10 @@ jobs:
             # software-MMU guest. Previously the only smoke this job ran
             # (its core-only predecessor) — keeps hard-gating.
             run_smoke demo/node/smoke.mjs
+            # #177 capacity gate: the complete MMU seed must finish its real
+            # 1.75 GiB direct-vdb install with >=512 MiB free (no ENOSPC and no
+            # per-store-path drop_caches printk flood).
+            run_smoke demo/node/installed-seed-smoke.mjs
             # #175 headline: nix's local-derivation-goal FORKS a builder
             # in-guest — the path that SIGSEGV'd on the clone-vfork nix.wasm
             # under the software MMU (a CLONE_VM child gets a private page

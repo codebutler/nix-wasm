@@ -15,20 +15,25 @@
 # + a generated `default.nix`, ~1.3 MB) baked into the base squashfs (base-squashfs.nix
 # adds it as a closure root) — a real on-disk dir so directory traversal works, unlike
 # the flat binary-cache 9P export. The guest's `~/.nix-defexpr/nixpkgs` is `import
-# <this store path> {}` (bootstrap.nix bakes the path). nixpkgs itself is reached via
-# the `<nixpkgs>` NIX_PATH lookup (baked in system.nix) and substituted on demand from
-# the cache only when a nixpkgs attribute is actually evaluated — so the separate
-# `wasm-tools` toolchain channel (the pkgs.nix catalog) stays fast and never pulls
-# nixpkgs. The channel's own closure is just itself (the .nix text files); <nixpkgs>
-# is not a closure reference, so baking it adds no real weight to the squashfs.
+# <this store path> {}` (bootstrap.nix bakes the path).
+#
+# The pinned nixpkgs source is deliberately fetched by default.nix only when this
+# channel is evaluated. Putting its /nix/store path in the system environment made
+# closureInfo seed the entire source tree: 52,840 files consumed ~338 MiB of 4 KiB
+# ext2 blocks and pushed the 1.75 GiB browser state disk into ENOSPC on first boot.
+# `fetchTarball` keeps ordinary boot/toolchain use small while retaining the normal
+# `nix-env -iA nixpkgs.<pkg>` behavior. The source is pinned by both revision and NAR
+# hash, and the public binary cache roots the same source for reproducibility.
 #
 # The set returned is exactly `cross` (the wasm cross package set). The wasm-specific
 # toolchain (guest-cc/guest-cxx/guest-clang/make-wasm32) stays in its own `wasm-tools`
 # channel — it is NOT a nixpkgs package, so it does not belong in the nixpkgs channel.
 #
 # self        — the flake source (for the cross config files; `${self}/toolchain`…)
-# localSystem — the build/publish host system, pinned so guest .drv hashes match.
-{ pkgs, self, localSystem }:
+# localSystem    — the build/publish host system, pinned so guest .drv hashes match.
+# nixpkgsRev     — exact flake input revision used by the host build.
+# nixpkgsNarHash — exact normalized source hash for the lazy guest fetch.
+{ pkgs, self, localSystem, nixpkgsRev, nixpkgsNarHash }:
 pkgs.runCommand "wasm-nixpkgs-channel" { } ''
   mkdir -p $out
   cp -r ${self}/toolchain ${self}/patches ${self}/userspace $out/
@@ -40,9 +45,12 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
   # default expression. Returns the wasm cross package set: `nix-env -iA nixpkgs.<pkg>`.
   { system ? "${localSystem}" }:
   let
-    # <nixpkgs> resolves via the guest NIX_PATH (baked in system.nix) and is
-    # substituted lazily — only forced when a nixpkgs attribute is evaluated.
-    nixpkgs = <nixpkgs>;
+    # Do not bake the resulting source store path into the boot closure. It is
+    # fetched/realised only when a user evaluates this channel.
+    nixpkgs = builtins.fetchTarball {
+      url = "https://github.com/NixOS/nixpkgs/archive/${nixpkgsRev}.tar.gz";
+      sha256 = "${nixpkgsNarHash}";
+    };
     pkgs = import nixpkgs { inherit system; };
     compilerRt = import ./toolchain/compiler-rt.nix { inherit pkgs; };
     musl = import ./toolchain/musl.nix { inherit pkgs compilerRt; };

@@ -56,6 +56,25 @@ pkgs.runCommand "base-squashfs"
     ln -s ${toplevel} root/nix/var/nix/profiles/system-1-link
     ln -s system-1-link root/nix/var/nix/profiles/system
 
+    # The browser state disk is capped at 1.75 GiB (Chromium rejects a 2 GiB
+    # SharedArrayBuffer). Gate the *expanded* seed, not the compressed squashfs:
+    # the latter hid a 2+ GiB ext2 install behind a ~458 MiB image until the real
+    # first boot failed ENOSPC. `du` on the build host's 4 KiB filesystem is a
+    # conservative estimate for the guest's 1 KiB ext2 allocation.
+    seed_bytes=$(du -s --block-size=1 root/nix | cut -f1)
+    seed_inodes=$(find root/nix -xdev | wc -l)
+    max_seed_bytes=$((1280 * 1024 * 1024))
+    max_seed_inodes=100000
+    echo "base.squashfs expanded seed: $seed_bytes bytes, $seed_inodes inodes"
+    if [ "$seed_bytes" -gt "$max_seed_bytes" ]; then
+      echo "ERROR: expanded seed exceeds 1280 MiB state-disk budget" >&2
+      exit 1
+    fi
+    if [ "$seed_inodes" -gt "$max_seed_inodes" ]; then
+      echo "ERROR: expanded seed exceeds 100000-inode state-disk budget" >&2
+      exit 1
+    fi
+
     mkdir -p $out
     mksquashfs root/nix $out/base.squashfs \
       -comp zstd -b ${toString blockSize} \
