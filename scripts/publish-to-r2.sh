@@ -70,20 +70,6 @@ echo "version             : $VERSION"
 echo "binary-cache path   : $CACHE"
 echo ""
 
-# Emit as GitHub step summary (no-op outside CI — GITHUB_STEP_SUMMARY is unset)
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-  {
-    echo "## wasm artifacts published"
-    echo "| field | value |"
-    echo "|-------|-------|"
-    echo "| bytes | \`$BYTES\` |"
-    echo "| sha256 | \`$SHA\` |"
-    echo "| version | \`$VERSION\` |"
-    echo ""
-    echo "Update \`pc js/packages/registry.js\` with these values (see deploy-r2.md)."
-  } >> "$GITHUB_STEP_SUMMARY"
-fi
-
 # ---------------------------------------------------------------------------
 # 3. Guard: dry-run when no Cloudflare credentials are present
 # ---------------------------------------------------------------------------
@@ -140,3 +126,19 @@ echo ""
 echo "==> PUBLISHED nix-wasm-base version=$VERSION"
 echo "==> bytes=$BYTES sha256=$SHA version=$VERSION"
 echo "==> update pc js/packages/registry.js: bytes=$BYTES sha256=$SHA version=$VERSION"
+
+# Emit the success summary only after every upload above has completed. Keeping
+# this at the end prevents a failed Wrangler invocation from leaving a false
+# "published" summary behind.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "## wasm artifacts published"
+    echo "| field | value |"
+    echo "|-------|-------|"
+    echo "| bytes | \`$BYTES\` |"
+    echo "| sha256 | \`$SHA\` |"
+    echo "| version | \`$VERSION\` |"
+    echo ""
+    echo "Update \`pc js/packages/registry.js\` with these values (see deploy-r2.md)."
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
