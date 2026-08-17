@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const repo = resolve(import.meta.dir, "..");
 const bootloader = join(repo, "userspace/yore-bootloader.sh");
@@ -105,6 +105,14 @@ exit 2
     return spawnSync("sh", [script, ...args], { env, encoding: "utf8" });
   }
 
+  const waitFor = async (predicate, timeout = 5_000) => {
+    const deadline = Date.now() + timeout;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error("timed out waiting for bootloader state");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+
   test("an offline-home-only host tree does not enable large boot exports", () => {
     rmSync(join(hostLinux, "boot"), { recursive: true, force: true });
     mkdirSync(join(hostLinux, "home"), { recursive: true });
@@ -161,6 +169,38 @@ exit 2
     expect(readFileSync(join(hostLinux, "boot/generation-2/vmlinux.wasm"), "utf8")).toBe(
       "kernel-system-two",
     );
+  });
+
+  test("a capable host releases activation only after acknowledging the durable generation", async () => {
+    const sys1 = makeSystem("system-one", "nommu");
+    symlinkSync(sys1, join(profiles, "system-1-link"));
+    symlinkSync("system-1-link", join(profiles, "system"));
+    writeFileSync(
+      join(hostLinux, "boot/host-capabilities.json"),
+      JSON.stringify({ durableBootCommit: 1 }),
+    );
+
+    const child = spawn("sh", [bootloader, sys1], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const current = join(hostLinux, "boot/current");
+    await waitFor(() => existsSync(join(current, "manifest.json")));
+    expect(child.exitCode).toBeNull();
+    writeFileSync(
+      join(current, "committed.json"),
+      JSON.stringify({
+        kernelAbi: 14,
+        generation: 1,
+        system: sys1,
+        mode: "nommu",
+      }),
+    );
+    const status = await new Promise((resolve) => child.once("exit", resolve));
+    expect(status, stderr).toBe(0);
   });
 
   test("switch refuses a different memory mode or engine ABI", () => {

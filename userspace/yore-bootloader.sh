@@ -8,6 +8,11 @@ sys="$1"
 PROFILE=${YORE_SYSTEM_PROFILE:-/nix/var/nix/profiles/system}
 HOST_LINUX=${YORE_HOST_LINUX:-/mnt/yore/Home/Library/Linux}
 BOOT="$HOST_LINUX/boot"
+ack_required=0
+if grep -q '"durableBootCommit"[[:space:]]*:[[:space:]]*1' \
+    "$BOOT/host-capabilities.json" 2>/dev/null; then
+  ack_required=1
+fi
 
 # Harness boots may expose only the offline home. Require the product-prepared
 # boot directory before exporting large blobs so that merely mounting the home
@@ -58,6 +63,14 @@ gen_dir="$BOOT/generation-$gen"
 cur_dir="$BOOT/current"
 mkdir -p "$gen_dir" "$cur_dir"
 
+# A capable host promises not to expose this generation until its state-disk
+# sectors and metadata are durable. Flush Linux's page cache first, then remove
+# old equal-generation commit markers before publishing the new manifest.
+if [ "$ack_required" = 1 ]; then
+  sync
+  rm -f "$cur_dir/committed.json" "$cur_dir/manifest.json" "$gen_dir/manifest.json"
+fi
+
 # Retain every generation for recovery. Write manifest last: it is the commit
 # marker consumed by the host, after both boot binaries are complete.
 copy_boot_blob "$sys/boot/vmlinux.wasm" "$gen_dir/vmlinux.wasm"
@@ -72,3 +85,19 @@ mv -f "$gen_dir/manifest.json.tmp" "$gen_dir/manifest.json"
 rm -f "$cur_dir/vmlinux.wasm" "$cur_dir/initramfs.cpio.gz"
 printf '%s' "$manifest" > "$cur_dir/manifest.json.tmp"
 mv -f "$cur_dir/manifest.json.tmp" "$cur_dir/manifest.json"
+
+# Old hosts never advertise the capability and retain the existing behavior.
+# Bound the wait so a storage failure cannot permanently wedge init; the host
+# will safely retry an incomplete install on the next boot.
+if [ "$ack_required" = 1 ]; then
+  i=0
+  while [ "$i" -lt 300 ]; do
+    ack_gen=$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+      "$cur_dir/committed.json" 2>/dev/null | head -n 1)
+    ack_mode=$(sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$cur_dir/committed.json" 2>/dev/null | head -n 1)
+    [ "$ack_gen" = "$gen" ] && [ "$ack_mode" = "$mode" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+fi
