@@ -811,8 +811,10 @@ export const linux = async ({
       },
     },
 
-    // #177: pack dirty sectors from the RW state disk into a CBHD Blob (Machines
-    // contract). Clears the dirty bitmap so the next save is incremental.
+    // #177: pack dirty sectors from the RW state disk into CBHD bytes. Clears
+    // the dirty bitmap so the next save is incremental. Keep this as a typed
+    // array: Chromium may spill a very large Blob to transient backing storage
+    // and later reject reads from it with NotReadableError.
     // Returns null when no persistable state disk was attached (harness stub).
     //
     // The caller-provided image is the baseline. Guest T_OUT requests mark the
@@ -822,8 +824,7 @@ export const linux = async ({
       if (!state_persistable || !state_sab || !state_dirty_sab) return null;
       const image = new Uint8Array(state_sab);
       const dirty = new Uint8Array(state_dirty_sab);
-      const bytes = packDirtySectors(image, dirty, { clear: true });
-      return new Blob([bytes]);
+      return packDirtySectors(image, dirty, { clear: true });
     },
 
     /** True when a caller-provided (persistable) RW state disk was attached. */
