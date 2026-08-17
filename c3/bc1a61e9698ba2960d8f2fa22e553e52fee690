@@ -1,0 +1,22 @@
+runtime/generation-profile.test.js
+  s_5c319dde45a577::t_f470e4ca1bad3a 15,100-103,111-119,141-150,155-159,162-164,166-168,174-179,181-207,209,215
+  s_5c319dde45a577::t_c23f5027e29ff3 208,210-212,214,243-245
+userspace/yore-bootloader.sh
+  s_5c319dde45a577::t_ecd04df9a1e847 11-15,66-73,88-103
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c3bc1a61e9698ba2960d8f2fa22e553e52fee690",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
