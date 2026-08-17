@@ -425,6 +425,13 @@
         inherit cross;
       };
 
+      # The first-boot seed installer copies roughly a GiB from squashfs to the
+      # state disk. Bound that copy's page-cache footprint on the 2 GiB NOMMU
+      # guest with per-file POSIX_FADV_DONTNEED, not global drop_caches writes.
+      seedCacheRelease = import ./userspace/seed-cache-release.nix {
+        inherit cross;
+      };
+
       # Diagnostic for the GTK render heap-corruption crash: does --fpcast-emu
       # dispatch rodata (static const) fn pointers correctly? See
       # userspace/fpcast-vtable-test.c.
@@ -487,6 +494,23 @@
         freetype = cross.freetype; fribidi = cross.fribidi; pixman = cross.pixman;
         libffi = cross.libffi; zlib = cross.zlib;
       };
+
+      # gtk2-hello is a statically linked acceptance probe. Its final wasm still
+      # contains dead build-time store strings from pkg-config/static archives;
+      # closureInfo followed those strings through GTK2's -dev graph into native
+      # Python and ~80 other build-only paths, costing hundreds of MiB on the
+      # installed ext2 seed. The probe has no runtime store-path data dependency,
+      # so publish the same binary with references scrubbed (the already-proven
+      # nixWasmClean pattern below). Both headless and live-X smokes execute this
+      # exact cleaned copy through the system profile.
+      gtk2HelloClean = pkgs.runCommand "gtk2-hello-runtime"
+        { nativeBuildInputs = [ pkgs.nukeReferences ]; }
+        ''
+          mkdir -p $out/bin
+          cp ${gtk2Hello}/bin/gtk2-hello $out/bin/gtk2-hello
+          chmod u+w $out/bin/gtk2-hello
+          nuke-refs $out/bin/gtk2-hello
+        '';
 
       # #33: gtk3-widget-factory — the headline GTK3 app. GTK's own widget showcase,
       # built standalone against the cross gtk3. Proves GtkBuilder signal autoconnect
@@ -672,7 +696,7 @@
       #   the misleading "no substituter that can build it" -- see nix system
       #   smoke (core). Every gtk2 smoke boots nix:true, so the squashfs copy
       #   is on PATH and is evictable.
-      sharedAppPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2Hello ];
+      sharedAppPackages = [ wasmDltest xserver x11Probe xeyesApp xwdApp xdpyinfoApp xwaylandApp gtk2HelloClean ];
 
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
@@ -737,7 +761,7 @@
         nixpkgsChannel = wasmNixpkgsChannel;
         forkMode = true;
       };
-      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
+      initramfsExtraBins = [ wasmWlTest wasmWlHandshake wlEyes wlAnim westonFlowers wlInputProbe libffiSelftest wlText glibSelftest pangoText gtkHello cross.galculator pthreadExitTest sigalrmTest killWakeTest pingPaceTest pingPaceProbe yorectlAgent ninepdDaemon seedCacheRelease fpcastVtableTest widgetFactory gtkDemo wlServerFfi sommelier wlPoolChurn wasmDltest alsaTone execRejectTest spawnCanaryTest ];
       # Issue #145: alsa-lib's runtime config tree for the busybox-only boot
       # (the snd smoke points ALSA_CONFIG_DIR/ALSA_CONFIG_PATH at it; a
       # nix:true boot resolves the compiled-in /nix/store datadir instead).
@@ -896,6 +920,8 @@
       wasmNixpkgsChannel = import ./userspace/wasm-nixpkgs-channel.nix {
         inherit pkgs self;
         localSystem = system;
+        nixpkgsRev = nixpkgs.rev;
+        nixpkgsNarHash = nixpkgs.narHash;
       };
 
       # Curated set of nixpkgs packages PUBLISHED for `nix-env -iA nixpkgs.<pkg>`
@@ -913,8 +939,9 @@
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = wasmDevPaths;
-        # Publish the pinned nixpkgs source (so <nixpkgs> substitutes on demand when
-        # a nixpkgs attribute is evaluated) + the curated package outputs above.
+        # Publish the pinned nixpkgs source so the channel's fixed-output
+        # fetchTarball can substitute the identical content-addressed store path
+        # when a nixpkgs attribute is evaluated, plus the curated outputs above.
         # (The channel TREE is baked into the squashfs instead — it needs directory
         # traversal, which the flat binary-cache 9P export does not provide.)
         extraRootPaths = [ nixpkgs.outPath ] ++ builtins.concatMap allOutputs wasmPublishedPkgs;
@@ -1213,6 +1240,9 @@
         # Read-only 9P rootfs server for pc's /Linux mount (pc#472) →
         # $out/bin/ninepd.
         ninepd = ninepdDaemon;
+
+        # First-boot installer cache bounding helper → $out/bin/seed-cache-release.
+        seed-cache-release = seedCacheRelease;
 
         # Diagnostic: --fpcast-emu rodata-vtable dispatch test → $out/bin/fpcast-vtable-test.
         fpcast-vtable-test = fpcastVtableTest;

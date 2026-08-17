@@ -172,14 +172,10 @@ let
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
-        # NIX_PATH for the in-guest `nixpkgs` channel (userspace/wasm-nixpkgs-channel.nix):
-        # the channel's default.nix reaches nixpkgs via `<nixpkgs>`, which resolves
-        # to this pinned source store path and is substituted on demand from the
-        # nix-cache the first time a nixpkgs attribute is evaluated. Baking the exact
-        # store path (not a channel symlink) makes `nix-env -iA nixpkgs.<pkg>`
-        # reproducible against the host-published wasm outputs. Flows to the shell
-        # via /etc/set-environment → /etc/profile like the vars below.
-        environment.variables.NIX_PATH = "nixpkgs=${nixpkgs}";
+        # The in-guest nixpkgs channel pins and lazily fetches its own nixpkgs
+        # source. Do not put `${nixpkgs}` in /etc/set-environment: closureInfo
+        # follows that textual store reference and would copy the complete
+        # 52k-file source tree into every first-boot seed install.
         # UTF-8 locale: musl has C.UTF-8 built in (no glibcLocales / i18n.* stack,
         # which would pull the wrong libc). This is what busybox ash's
         # CHECK_UNICODE_IN_ENV reads to turn on width-aware line editing. Flows the

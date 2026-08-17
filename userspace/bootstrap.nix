@@ -155,12 +155,11 @@ pkgs.writeText "init" ''
       if [ -n "$NEED_INSTALL" ]; then
         echo "yore: installing seed /nix onto /dev/vdb (first boot / reset)"
         # busybox mkfs.ext2 (CONFIG_MKFS_EXT2=y). EXT4 driver mounts the result.
-        # Seed squashfs carries ~100k+ inodes (one per store path). Default
-        # bytes-per-inode for ≥512 MiB disks is 16384 → only ~32k inodes on a
-        # 512 MiB vdb, and cp then dies with ENOSPC (inode exhaustion). Force
-        # -i 4096 (minimum for 4k blocks) so a 512 MiB disk gets ~131k inodes.
-        # -m 1 keeps a small reserved pool without eating install headroom.
-        mkfs.ext2 -F -q -i 4096 -m 1 /dev/vdb \
+        # Nix closures contain many tiny files, so the 4 KiB default wastes
+        # hundreds of MiB in tail blocks. A 1 KiB block and one inode per 8 KiB
+        # give this 1.75 GiB disk ~229k inodes while keeping the measured seed
+        # near its ~1 GiB logical size. -m 1 retains a small recovery reserve.
+        mkfs.ext2 -F -q -b 1024 -i 8192 -m 1 /dev/vdb \
           || { echo "yore: mkfs.ext2 /dev/vdb failed — falling back to seed overlay"; mount_seed_overlay; NEED_INSTALL=; }
       fi
 
@@ -172,29 +171,33 @@ pkgs.writeText "init" ''
             # Copy seed store + nix db/profiles onto the state disk. This is the
             # install step — after this, squashfs is irrelevant until Reset.
             #
-            # Path-at-a-time + drop_caches: a single `cp -a` of the multi-hundred-MB
-            # seed fills the guest page cache and OOMs (stack alloc errno -12 /
-            # kill init) before the disk fills. Sync + drop_caches between store
-            # paths keeps the buddy allocator breathing under CONFIG_BOOT_MEM_PAGES.
+            # Keep store paths as separate copy operations so a failure cannot
+            # leave the remainder of one opaque tree looking installed. After
+            # each path, sync the state filesystem and release only that path's
+            # source/destination cache pages. This keeps the 2 GiB NOMMU guest
+            # from retaining the whole expanded seed twice, without manipulating
+            # the global VM drop_caches control.
             echo "yore: copying seed store (this may take a while)…"
             mkdir -p /mnt/state/nix/store
             COPY_FAIL=
             for p in /mnt/nix-ro/store/*; do
               [ -e "$p" ] || continue
               cp -a "$p" /mnt/state/nix/store/ || { COPY_FAIL=1; break; }
-              # Drop page cache after every store path. A single `cp -a` of the
-              # multi-hundred-MB seed (or even every-16th drops) fills ~1.5 GiB
-              # of file cache and OOMs PID 1 (stack alloc errno -12). Avoid
-              # `sync` here — sync itself needs contiguous RAM under pressure.
-              echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+              base=''${p##*/}
+              seed-cache-release /mnt/state "$p" "/mnt/state/nix/store/$base" \
+                || { COPY_FAIL=1; break; }
             done
             if [ -z "$COPY_FAIL" ]; then
               for p in /mnt/nix-ro/*; do
-                base=$(basename "$p")
+                base=''${p##*/}
                 [ "$base" = store ] && continue
                 cp -a "$p" /mnt/state/nix/ || { COPY_FAIL=1; break; }
+                seed-cache-release /mnt/state "$p" "/mnt/state/nix/$base" \
+                  || { COPY_FAIL=1; break; }
               done
             fi
+            [ -z "$COPY_FAIL" ] \
+              && echo "yore: seed copy used bounded per-file page cache"
             if [ -n "$COPY_FAIL" ]; then
               echo "yore: seed copy failed"
               umount /mnt/nix-ro 2>/dev/null
