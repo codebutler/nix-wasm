@@ -1,10 +1,10 @@
-# Persistent `/nix` — installed NixOS (seed from ISO, updates via Nix)
+# Persistent `/nix` — installed NixOS (preseeded disk, updates via Nix)
 
 > Canonical design promoted from [nix-wasm#177](https://github.com/codebutler/nix-wasm/issues/177).
 > pc companion: codebutler/pc `docs/superpowers/specs/2026-07-27-linux-nixos-persistence-design.md`.
 
 **Date:** 2026-07-27  
-**Status:** Implementation in progress (G2–G6 landed on `cursor/linux-nixos-persistence-eab8`; G1 smoke pending CI — Node worker/Atomics hang in some agents)  
+**Status:** Implemented; schema-3 preseeded-baseline production acceptance pending
 **Repos:** `nix-wasm` (guest, seed image, init, engine blk) + `pc` (state disk flush/store, host bootloader)  
 **Supersedes (for persistence):** live-media “squashfs lower + durable overlay upper” brainstorming. That path is rejected.  
 **Builds on:** #43 (squashfs-on-virtio-blk), channel `linux-image` (pc#315), Cachix-over-Wisp substitution, `userspace/bootstrap.nix` system-profile activation.
@@ -35,8 +35,8 @@ We want that.
 | # | Decision |
 |---|---|
 | D1 | **Model = installed NixOS.** Durable `/nix` on a RW disk. System = profile generations. Updates = Nix (Cachix / `nix-env` / `nix profile` / later `nixos-rebuild`). |
-| D2 | **`linux.iso` is installer + recovery only.** It carries the initial seed (kernel, initramfs, seed store image). It is **not** the ongoing lowerdir of a running install. Day-to-day updates do **not** require a new ISO. |
-| D3 | **First boot copies the seed out** onto the state disk; later boots mount the state disk’s `/nix` directly (no overlay on squashfs). |
+| D2 | **The channel image is installer + recovery only.** Current clients receive an already-installed ext2 baseline; legacy clients retain the SquashFS seed. Neither is the ongoing lowerdir of a running install. Day-to-day updates do **not** require a new ISO. |
+| D3 | **Release CI installs the initial seed.** pc streams the immutable sparse baseline into the state disk, then journals only later sector writes. Boots mount the state disk’s `/nix` directly (no overlay on squashfs). |
 | D4 | **Host JS is the bootloader.** After install, `vmlinux` / initramfs come from the **current system generation** on the state disk (mirrored into a small host-readable boot area), not from the ISO — same role as systemd-boot reading `/nix/var/nix/profiles/system`. |
 | D5 | **ISO republish remains** for: brand-new installs, factory reset seed, and recovery when the state disk is missing/corrupt — **not** for routine package/system updates. |
 | D6 | **Engine ABI** stays exact-match between vendored engine JS and the **kernel binary being booted**. Kernel packages in the store carry ABI metadata; the host refuses to boot a generation whose kernel ABI ≠ `ENGINE_ABI` (recovery path below). |
@@ -50,7 +50,7 @@ We want that.
 ### Guest (after install)
 
 ```
-/dev/vda  RO  seed squashfs from ISO     # used ONLY when state disk uninitialised
+/dev/vda  RO  legacy seed squashfs       # absent on current preseeded installs
 /dev/vdb  RW  state filesystem           # the installed system
 
 Mounted when installed:
@@ -67,7 +67,7 @@ Mounted when installed:
 ```
 /Home/Library/Discs/linux.iso              # installer/recovery image (channel)
 /Home/Library/Linux/
-  state.json                               # installed?, generation, kernel ABI, boot mode, disk size
+  state.json                               # installed?, generation, ABI, mode, disk size, immutable base identity
   disks/vdb                                # append-built stream of incremental CBHD dirties
   boot/                                    # host-readable bootloader mirror (see §4)
     current -> generation-N/
@@ -78,17 +78,19 @@ Mounted when installed:
   home/                                    # optional host-visible home (§6)
 ```
 
-### ISO contents (channel image — role change, not abandonment)
+### Channel image contents
 
 ```
-linux.iso
+linux-installed.iso
   vmlinux.wasm           # recovery / first-boot kernel (also the seed default)
-  initramfs.cpio.gz      # installer init (seed copy + activate)
-  base.squashfs          # SEED store closure (copied onto vdb once)
-  manifest.json          # { version, minEngine, seedLabel, … }
+  initramfs.cpio.gz      # installer/recovery init
+  state-baseline.cbhd.gz # deterministic sparse ext2 filesystem with generation 1
+  manifest.json          # format, mode, disk size, system path, ABI
 ```
 
-`base.squashfs` remains the NixOS-native “whole store as one artifact” (#43). Its job after this design is **install media**, not live lowerdir.
+`linux.iso` + `base.squashfs` remain parallel legacy install media for deployed
+pc clients. Schema 3 adds `installedVariants` without changing the schema-2
+`variants` map.
 
 ---
 
@@ -96,23 +98,18 @@ linux.iso
 
 ### 3a. First boot / factory reset (no valid state disk)
 
-1. pc ensures `linux.iso` (existing channel), creates empty `vdb` (quota-checked), boots kernel+initramfs **from the ISO**.  
-2. Passes `vda` = seed squashfs, `vdb` = empty RW state disk.  
-3. Installer init (`bootstrap` install mode):
-   - `mkfs` on `vdb` (ext4 or the writable FS we enable — **gate G1**)  
-   - mount seed RO, mount `vdb`  
-   - **copy** seed `/nix` onto `vdb` (store + `var/nix` including `profiles/system` + nix db)  
-   - create `/home`, `/var` as needed  
-   - write install stamp  
-   - activate system profile; hand off to `$sys/init` as today  
-4. Host bootloader sync (§4): after first successful activate (or via a guest→host ctl), mirror current generation’s kernel/initrd into `/Home/Library/Linux/boot/`.  
-5. Mark `state.json` installed.
+1. pc selects the mode's `installedVariants` image and quota-checks its declared disk size.
+2. It streams the gzip CBHD baseline directly into the shared `vdb`, with no expanded intermediate Blob.
+3. It writes `state.json` with the exact content-addressed base descriptor before boot, then boots the image kernel/initramfs with that installed disk.
+4. Init sees the stamp already present, mounts `vdb` directly, activates generation 1, and hands off to `$sys/init`.
+5. Host bootloader sync (§4) mirrors the activated generation, then the host commits later disk dirties before marking the install complete.
 
-Copy, not overlay: after this point the squashfs is irrelevant until reset.
+The browser no longer runs `mkfs`, copies the store, or recompresses the whole
+installed disk. The legacy flow remains as a compatibility fallback.
 
 ### 3b. Normal boot (installed)
 
-1. pc loads `state.json` + applies `disks/vdb` dirties onto the state image.  
+1. pc resolves the immutable base pinned in `state.json`, applies it, then replays `disks/vdb` dirties.
 2. **Bootloader:** read `/Home/Library/Linux/boot/current/{vmlinux.wasm,initramfs.cpio.gz}`; require both ABI and `mode` to match the selected MMU/NOMMU runtime.
 3. Boot that kernel/initramfs with `vdb` attached; `vda` seed may be omitted or attached unused.  
 4. Init sees install stamp → mount `vdb`’s `/nix` directly → `readlink` profile → `activate` → `exec $sys/init`.  
@@ -153,7 +150,7 @@ Mechanism (pick one in implementation; both are NixOS-shaped):
 | Upgrade installed packages | same, against Cachix / channel — **no ISO** |
 | Ship a new base/system closure | **Push outputs (+ drvs as needed) to `nix-wasm.cachix.org`** (and channel expr). Users upgrade with Nix. |
 | New kernel for existing installs | Kernel derivation in store → profile switch → bootloader mirror update → reboot |
-| Brand-new user / Reset | Channel `linux.iso` seed copy (3a) |
+| Brand-new user / Reset | Current channel preseeded baseline (3a) |
 | Engine JS ABI break | Deploy new pc engine; publish kernel built for that ABI to Cachix; users who can’t boot get recovery ISO path + upgrade or Reset |
 
 **Channel `latest.json` ISO bumps are not the update mechanism for installed systems.** They refresh installer/recovery media. Optional UX: “Update Linux” in the tray runs the in-guest Nix upgrade (ensure online / Wisp), then offers reboot if the boot generation changed.
@@ -212,8 +209,8 @@ Keep `publish-linux-channel` + `.#linux-image`, with clarified semantics:
 
 | Artifact | Role after this design |
 |---|---|
-| `linux.iso` | Installer + recovery + factory-reset seed |
-| `base.squashfs` inside ISO | Seed store copied once onto `vdb` |
+| `linux-installed.iso` | Current installer + recovery image with an already-installed disk baseline |
+| `linux.iso` + `base.squashfs` | Compatibility installer for deployed clients |
 | Cachix `nix-wasm` | **Primary update channel** for installed systems |
 | `latest.json` | Points at newest **installer**; not “please rebase your overlay” |
 | `minEngine` / `ENGINE_ABI` | Guard on whatever kernel binary is about to boot (ISO or boot mirror) |
@@ -225,7 +222,7 @@ Docs/runbooks change from “republish guest to ship fixes” → “push to Cac
 
 ## 10. Definition of done
 
-1. First launch installs seed from ISO onto `vdb`; subsequent boots do not use squashfs as `/nix` lower.  
+1. First launch materializes the published baseline onto `vdb`; no guest seed copy or whole-disk first save occurs, and subsequent boots do not use squashfs as `/nix` lower.
 2. `nix-env` / `nix profile` / store db changes survive Shut Down + relaunch.  
 3. Upgrading a package via Cachix requires **no** ISO download.  
 4. Switching a generation updates the host boot mirror; reboot runs the new kernel/initrd when those changed.  
@@ -235,6 +232,11 @@ Docs/runbooks change from “republish guest to ship fixes” → “push to Cac
 8. Second tab cannot dual-write `vdb`.  
 9. Offline: home visible under `/Home/Library/Linux/home`; live: full tree at `/Linux`.  
 10. No `compatEpoch` / overlay-keep policy — generations and GC are the contract.
+
+The base descriptor is part of the persistence contract. Existing installed
+zero-based journals are never applied to a baseline. A channel update changes
+only new installs and resets; every current installation continues resolving
+the immutable URL/hash/ABI beneath its journal.
 
 ---
 

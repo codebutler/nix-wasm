@@ -321,6 +321,8 @@ jobs:
             '.#wasm-initramfs-fork' \
             '.#linux-image' \
             '.#linux-image-nommu' \
+            '.#linux-installed-image' \
+            '.#linux-installed-image-nommu' \
             '.#kernel-nommu' \
             '.#kernel-mmu' \
             '.#kernel-mmu-a2' \
