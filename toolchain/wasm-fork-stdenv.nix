@@ -39,6 +39,7 @@
 { pkgs, cross, muslFork, binaryen ? pkgs.buildPackages.binaryen }:
 let
   baseCC = cross.stdenv.cc;
+  allowUndefined = import ./wasm-host-imports.nix { inherit pkgs; };
 
   # The fork call-graph addlist: every frame from a host entry (_start /
   # __libc_clone_callback) down to _Fork (the GOT-indirect caller of
@@ -87,13 +88,24 @@ in
   # A helper that packages `overrideAttrs` onto themselves:
   enableForkFor = drv:
     drv.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ binaryen ];
-      NIX_LDFLAGS = "${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
+      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ binaryen pkgs.python3 ];
+      # The shared cc-wrapper allow-list deliberately excludes capture_stack.
+      # --import-undefined is therefore required for this one fork-capable link;
+      # the final-module audit below restores the strict no-undef contract after
+      # asyncify (the same local-extension pattern as busybox-fork.nix).
+      NIX_LDFLAGS = "-Wl,--import-undefined ${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
       postFixup = (o.postFixup or "") + ''
         ${forkShellFn}
         if [ -d "$out/bin" ]; then
           for f in "$out"/bin/*; do
-            case "$f" in *.wasm|*) fork_asyncify "$f" || true ;; esac
+            # Only transform real wasm executables. Packages commonly install
+            # shell scripts and symlinks beside their binary; feeding either to
+            # wasm-opt used to hide failures behind `|| true`.
+            if [ -f "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
+              fork_asyncify "$f"
+              python3 ${../scripts/wasm-check-imports.py} \
+                "$f" ${allowUndefined} capture_stack
+            fi
           done
         fi
       '';

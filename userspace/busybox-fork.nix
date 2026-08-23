@@ -189,6 +189,20 @@ cross.stdenv.mkDerivation {
     grep -q '^# CONFIG_NOMMU is not set' build/.config \
       || { echo "ERROR: CONFIG_NOMMU not disabled" >&2; exit 1; }
 
+    # #173 native stdenv uses this MMU BusyBox as its compact coreutils suite.
+    # Enable its archive writer as a bootstrap fallback (LLVM ar/ranlib are the
+    # canonical tools); this also keeps basic archive builds working if a package
+    # invokes plain `ar` before the compiler setup hook is sourced.
+    sed -i \
+      -e 's/^# CONFIG_AR is not set$/CONFIG_AR=y/' \
+      -e 's/^# CONFIG_FEATURE_AR_LONG_FILENAMES is not set$/CONFIG_FEATURE_AR_LONG_FILENAMES=y/' \
+      -e 's/^# CONFIG_FEATURE_AR_CREATE is not set$/CONFIG_FEATURE_AR_CREATE=y/' \
+      build/.config
+    for c in AR FEATURE_AR_LONG_FILENAMES FEATURE_AR_CREATE; do
+      grep -q "^CONFIG_$c=y" build/.config \
+        || { echo "ERROR: CONFIG_$c not enabled in .config" >&2; exit 1; }
+    done
+
     # #131 slice-1 invariant asserts (mirrors the CONFIG_NOMMU idiom above and
     # userspace/busybox.nix's configurePhase asserts, PR-2 hardening). These all
     # hold BY CONSTRUCTION today (wasm_defconfig ships them this way and this
