@@ -39,7 +39,10 @@ extern char **environ;
   # target type sizes. LLVM's wasm readelf prints a structured symbol block,
   # so teach the cross configure probe to read its Size field.
   fixPerlReadelf = p: p.overrideAttrs (o: {
-    patches = (o.patches or [ ]) ++ [ ../patches/perl-cross-wasm-readelf.patch ];
+    patches = (o.patches or [ ]) ++ [
+      ../patches/perl-cross-wasm-readelf.patch
+      ../patches/perl-static-re-symbols.patch
+    ];
     # perl-cross's byte-order probe dumps ELF .data/.sdata sections. WebAssembly
     # has neither; wasm32 is unconditionally little-endian.
     configureFlags = (o.configureFlags or [ ]) ++ [
