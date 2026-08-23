@@ -59,6 +59,10 @@ try {
     s.kill();
     process.exit(1);
   }
+  check(
+    s.snapshot().includes("yore: registered seed Nix closure"),
+    "seed closure registered in the guest Nix database",
+  );
   await primeLocalNixCache(s);
 
   // M1: no source or compiler is needed; this exercises genericBuild/setup.sh

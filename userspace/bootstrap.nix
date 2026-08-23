@@ -332,6 +332,26 @@ pkgs.writeText "init" ''
     *) sys=$(readlink "/nix/var/nix/profiles/$sys" 2>/dev/null) ;;
   esac
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
+    # The seed image contains real store paths plus closureInfo's canonical
+    # registration stream. Populate Nix's validity database before activation
+    # exposes an interactive shell that can run nix-env/nix-build. Copying store
+    # bytes alone is insufficient: an unregistered path is treated as invalid,
+    # and restoring an overlapping substitute then tries to remove the existing
+    # squashfs lower directory through overlayfs (which fails with EIO). On an
+    # installed state disk the database persists; the ephemeral overlay loads it
+    # again on each boot. A non-empty database belongs to an existing install and
+    # must not be replaced.
+    seed_registration=/nix/var/nix/seed-registration
+    nix_db=/nix/var/nix/db/db.sqlite
+    if [ -s "$seed_registration" ] && [ ! -s "$nix_db" ]; then
+      mkdir -p /nix/var/nix/db
+      if "$sys/sw/bin/nix-store" --load-db < "$seed_registration"; then
+        echo "yore: registered seed Nix closure"
+      else
+        echo "yore: seed Nix closure registration failed"
+      fi
+    fi
+
     sh "$sys/activate" "$sys"
 
     # Promote the autoconf-capable forkshell ash to /bin/sh (the initramfs bakes
