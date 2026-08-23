@@ -35,13 +35,13 @@ extern char **environ;
     '';
   });
 
-  # perl-cross assumes GNU readelf's one-line ELF symbol table when deriving
-  # target type sizes. LLVM's wasm readelf prints a structured symbol block,
-  # so teach the cross configure probe to read its Size field.
-  fixPerlReadelf = p: p.overrideAttrs (o: {
+  # Perl needs narrow adaptations for perl-cross's ELF-only probes, the static
+  # regex extension's private symbol namespace, and clang's wasm main ABI.
+  fixPerlSeed = p: p.overrideAttrs (o: {
     patches = (o.patches or [ ]) ++ [
       ../patches/perl-cross-wasm-readelf.patch
       ../patches/perl-static-re-symbols.patch
+      ../patches/perl-wasm-main-abi.patch
     ];
     # perl-cross's byte-order probe dumps ELF .data/.sdata sections. WebAssembly
     # has neither; wasm32 is unconditionally little-endian.
@@ -71,5 +71,5 @@ else
     # libuuid is a selected output of util-linux; adapting it rebuilds and audits
     # every output of that multi-output derivation via wasm-fork-stdenv.
     libuuid = fork prev.libuuid;
-    perl = fork (fixPerlReadelf prev.perl);
+    perl = fork (fixPerlSeed prev.perl);
   }
