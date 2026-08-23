@@ -1,0 +1,21 @@
+.github/workflows/publish-linux-channel.yml
+  s_5c319dde45a577::t_a5e10d82fd3b26 32-35,101-104
+scripts/publish-linux-channel.sh
+  s_5c319dde45a577::t_a5e10d82fd3b26 86-89,97-126,224-231,272-288,290-304,376-383,415-419,490-494,538-549,673-683
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "7c24a2ec7729ff7370194ca5bcade1fb98fc012f",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
