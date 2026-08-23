@@ -83,12 +83,46 @@ CACHIX_URL="${CACHIX_URL:-https://nix-wasm.cachix.org}"
 # Escape hatch for the gate (workflow input `allow_unpublished`). Only for a
 # DELIBERATE publish of artifacts CI has not built — see the gate's own header.
 ALLOW_UNPUBLISHED="${ALLOW_UNPUBLISHED:-false}"
+# Release system images independently from the optional in-guest compiler
+# catalog. When true, keep the currently-live nixCacheBaseUrl and require only
+# the four boot/install images for this commit to be present in Cachix.
+REUSE_LIVE_NIX_CACHE="${REUSE_LIVE_NIX_CACHE:-false}"
 # The dedicated disc-packages bucket (pc#416). The linux channel image + pointer
 # live here, NOT in pc-previews (which now only holds the site preview overlay).
 BUCKET="${PACKAGES_BUCKET:-pc-packages}"
 # Public origin the worker serves R2 under (used to build the absolute URLs pc fetches).
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-https://pc-previews.eric-c6b.workers.dev}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+LIVE_NIX_CACHE_URL=""
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  echo "==> resolving currently-live Nix cache …"
+  _live_pointer=$(curl -fsS --max-time 30 --retry 3 --retry-delay 2 \
+    "$PUBLIC_BASE_URL/packages/linux/latest.json") || {
+      echo "ERROR: cannot read the live Linux channel to reuse its Nix cache." >&2
+      exit 1
+    }
+  LIVE_NIX_CACHE_URL=$(python3 - "$_live_pointer" <<'PY'
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1]).get("nixCacheBaseUrl", "")
+except (IndexError, json.JSONDecodeError, TypeError):
+    value = ""
+print(value if isinstance(value, str) else "")
+PY
+  )
+  case "$LIVE_NIX_CACHE_URL" in
+    "$PUBLIC_BASE_URL"/cachix/*) ;;
+    *)
+      echo "ERROR: live nixCacheBaseUrl is missing or outside $PUBLIC_BASE_URL/cachix/." >&2
+      echo "       got: ${LIVE_NIX_CACHE_URL:-<empty>}" >&2
+      exit 1
+      ;;
+  esac
+  echo "    reusing $LIVE_NIX_CACHE_URL"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Build the channel image + toolchain cache
@@ -187,10 +221,14 @@ _cache_probe() { # $1 = /nix/store/<hash>-name, $2 = label for messages
 # --max-jobs 0 unless the gate is explicitly overridden (see below).
 NIX_BUILD_MODE="--max-jobs 0"
 GATE_MISSING=""
-for _attr in \
-  linux-image linux-image-nommu \
-  linux-installed-image linux-installed-image-nommu \
-  wasm-binary-cache; do
+_provenance_attrs=(
+  linux-image linux-image-nommu
+  linux-installed-image linux-installed-image-nommu
+)
+if [ "$REUSE_LIVE_NIX_CACHE" != "true" ]; then
+  _provenance_attrs+=(wasm-binary-cache)
+fi
+for _attr in "${_provenance_attrs[@]}"; do
   # Pure evaluation: `.outPath` needs no build, so a missing artifact costs
   # seconds here rather than an hour of `nix build`.
   # shellcheck disable=SC2086
@@ -231,35 +269,39 @@ done
 # requiring them there would make every branch publish unsatisfiable. Default
 # true — the live-channel flow is the one that must be safe by default.
 REQUIRE_DRV_ROOTS="${REQUIRE_DRV_ROOTS:-true}"
-# shellcheck disable=SC2086
-_drv_roots=$(eval "$NIX build .#wasm-cache-drv-roots --no-link --print-out-paths") || {
-  echo "ERROR: could not build .#wasm-cache-drv-roots (the toolchain .drv list)." >&2
-  exit 1
-}
-_drv_missing=""
-while IFS= read -r _drv; do
-  [ -n "$_drv" ] || continue
-  _cache_probe "$_drv" "drv $_drv"
-  if [ "$CACHE_STATUS" = present ]; then
-    echo "    PRESENT  drv → $_drv"
-  else
-    echo "    MISSING  drv → $_drv"
-    _drv_missing="$_drv_missing
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  echo "    REUSED   compiler catalog + .drv closures → $LIVE_NIX_CACHE_URL"
+else
+  # shellcheck disable=SC2086
+  _drv_roots=$(eval "$NIX build .#wasm-cache-drv-roots --no-link --print-out-paths") || {
+    echo "ERROR: could not build .#wasm-cache-drv-roots (the toolchain .drv list)." >&2
+    exit 1
+  }
+  _drv_missing=""
+  while IFS= read -r _drv; do
+    [ -n "$_drv" ] || continue
+    _cache_probe "$_drv" "drv $_drv"
+    if [ "$CACHE_STATUS" = present ]; then
+      echo "    PRESENT  drv → $_drv"
+    else
+      echo "    MISSING  drv → $_drv"
+      _drv_missing="$_drv_missing
   drv → $_drv"
-  fi
-done < "$_drv_roots"
+    fi
+  done < "$_drv_roots"
 
-if [ -n "$_drv_missing" ]; then
-  if [ "$REQUIRE_DRV_ROOTS" = "true" ]; then
-    GATE_MISSING="$GATE_MISSING$_drv_missing"
-  else
-    echo ""
-    echo "==> NOTICE: toolchain .drv closures are not in $CACHIX_URL, and"
-    echo "    REQUIRE_DRV_ROOTS=false (CI pushes them on master only). The published"
-    echo "    channel will BOOT, but in-guest \`nix-env -iA wasm-tools.<tool>\` will not"
-    echo "    resolve against it. Expected for a branch publish; wrong for a live flip."
-    echo "    Missing:$_drv_missing"
-    echo ""
+  if [ -n "$_drv_missing" ]; then
+    if [ "$REQUIRE_DRV_ROOTS" = "true" ]; then
+      GATE_MISSING="$GATE_MISSING$_drv_missing"
+    else
+      echo ""
+      echo "==> NOTICE: toolchain .drv closures are not in $CACHIX_URL, and"
+      echo "    REQUIRE_DRV_ROOTS=false (CI pushes them on master only). The published"
+      echo "    channel will BOOT, but in-guest \`nix-env -iA wasm-tools.<tool>\` will not"
+      echo "    resolve against it. Expected for a branch publish; wrong for a live flip."
+      echo "    Missing:$_drv_missing"
+      echo ""
+    fi
   fi
 fi
 
@@ -331,9 +373,14 @@ INST_ISO_NOMMU=$(find "$INST_STORE_NOMMU" -name linux.iso -type f | head -1)
   echo "ERROR: NOMMU preseeded linux.iso not found under $INST_STORE_NOMMU" >&2; exit 1;
 }
 
-echo "==> Building .#wasm-binary-cache …"
-# shellcheck disable=SC2086
-CACHE=$(eval "$NIX build .#wasm-binary-cache $NIX_BUILD_MODE --print-out-paths --no-link")
+CACHE=""
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  echo "==> Reusing live compiler catalog at $LIVE_NIX_CACHE_URL"
+else
+  echo "==> Building .#wasm-binary-cache …"
+  # shellcheck disable=SC2086
+  CACHE=$(eval "$NIX build .#wasm-binary-cache $NIX_BUILD_MODE --print-out-paths --no-link")
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Versions (= per-image content hashes) + minEngine (from runtime/abi.js)
@@ -365,7 +412,11 @@ INST_URL_NOMMU="$PUBLIC_BASE_URL/packages/linux/$INST_VERSION_NOMMU/linux-instal
 # AND pkgs.nix / paths.nix. The worker's /cachix/<v> route unifies them: catalogs
 # from R2 (packages/linux/<v>/nix-cache/), everything else proxied from
 # nix-wasm.cachix.org (nix-wasm#78). Point at it, NOT the raw R2 nix-cache path.
-NIX_CACHE_URL="$PUBLIC_BASE_URL/cachix/$VERSION"
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  NIX_CACHE_URL="$LIVE_NIX_CACHE_URL"
+else
+  NIX_CACHE_URL="$PUBLIC_BASE_URL/cachix/$VERSION"
+fi
 
 # latest.json keeps the original top-level MMU pointer byte-for-field compatible
 # with old yore-pc builds, then adds an explicit dual-mode map for new clients.
@@ -436,7 +487,11 @@ echo "NOMMU preseeded image : $INST_ISO_NOMMU"
 echo "NOMMU preseed bytes/sha: $INST_BYTES_NOMMU / $INST_SHA_NOMMU"
 echo "default version <v>   : $VERSION"
 echo "minEngine            : $MIN_ENGINE"
-echo "nix-cache path       : $CACHE"
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  echo "nix-cache reused     : $NIX_CACHE_URL"
+else
+  echo "nix-cache path       : $CACHE"
+fi
 echo "latest.json          : $LATEST_JSON"
 echo ""
 
@@ -480,13 +535,18 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
   echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo ""
-  echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
-  ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
-      REL="${f#./}"
-      echo "  bunx $WRANGLER r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
-      echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
-    done )
-  echo ""
+  if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+    echo "  # Reuse compiler catalog: $NIX_CACHE_URL"
+    echo ""
+  else
+    echo "  # ONLY the nix-wasm catalogs (pkgs.nix + paths.nix); nars come from Cachix (#78)"
+    ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
+        REL="${f#./}"
+        echo "  bunx $WRANGLER r2 object put \"$BUCKET/linux/$VERSION/nix-cache/$REL\" \\"
+        echo "    --file \"$CACHE/$REL\" --content-type application/octet-stream --remote"
+      done )
+    echo ""
+  fi
   echo "  # flip the pointer LAST (served no-cache → picked up immediately)"
   echo "  printf '%s' '<latest.json above>' | bunx $WRANGLER r2 object put \\"
   echo "    \"$BUCKET/linux/latest.json\" --file - --content-type application/json --remote"
@@ -610,13 +670,17 @@ rclone copyto "$INST_ISO_NOMMU" "r2:$BUCKET/linux/$INST_VERSION_NOMMU/linux-inst
 # already does. Precondition: nix-wasm CI pushed the .#wasm-binary-cache closure
 # to nix-wasm.cachix.org — the nix-wasm.yml artifacts job does, on this commit;
 # this publish substitutes that same closure, so it is guaranteed present.
-echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$VERSION/nix-cache/ …"
-( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
-    REL="${f#./}"
-    echo "  uploading nix-cache/$REL …"
-    bunx "$WRANGLER" r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
-      --file "$CACHE/$REL" --content-type application/octet-stream --remote
-  done )
+if [ "$REUSE_LIVE_NIX_CACHE" = "true" ]; then
+  echo "==> Keeping live compiler catalog → $NIX_CACHE_URL"
+else
+  echo "==> Uploading nix-wasm catalogs (pkgs.nix + paths.nix) → $BUCKET/linux/$VERSION/nix-cache/ …"
+  ( cd "$CACHE" && find . -maxdepth 1 -type f \( -name pkgs.nix -o -name paths.nix \) -print0 | while IFS= read -r -d '' f; do
+      REL="${f#./}"
+      echo "  uploading nix-cache/$REL …"
+      bunx "$WRANGLER" r2 object put "$BUCKET/linux/$VERSION/nix-cache/$REL" \
+        --file "$CACHE/$REL" --content-type application/octet-stream --remote
+    done )
+fi
 
 # Capture the CURRENTLY-live version first, so the verify can report the actual
 # old→new transition. Drift visibility: if this equals $VERSION, the build
