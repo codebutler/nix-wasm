@@ -36,6 +36,12 @@ pkgs.writeText "init" ''
   mount -t sysfs none /sys
   mount -t devtmpfs none /dev 2>/dev/null
   mkdir -p /dev/pts && mount -t devpts none /dev/pts 2>/dev/null
+  # Bash process substitution opens /dev/fd/N. devtmpfs does not create these
+  # conventional descriptors, so expose the procfs-backed aliases explicitly.
+  ln -snf /proc/self/fd /dev/fd
+  ln -snf /proc/self/fd/0 /dev/stdin
+  ln -snf /proc/self/fd/1 /dev/stdout
+  ln -snf /proc/self/fd/2 /dev/stderr
 
   # /dev/shm for POSIX shared memory. GTK/gdk's wayland backend allocates its
   # window buffers via open_shared_memory() → memfd_create(), which is ENOSYS on

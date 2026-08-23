@@ -95,6 +95,7 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
     };
     seedBash = seedCross.bashNonInteractive;
     seedMake = seedCross.gnumake;
+    seedTools = [ seedCross.findutils seedCross.gnutar seedCross.lzip ];
     seedPackages = {
       inherit (seedCross)
         gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
@@ -117,7 +118,7 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
       inherit pkgs guestClang seedBash ccSysroot;
     };
     native = import ./userspace/wasm-native.nix {
-      inherit nixpkgs cross seedBash seedMake seedPackages bootstrapBusybox nativeCC;
+      inherit nixpkgs cross seedBash seedMake seedTools seedPackages bootstrapBusybox nativeCC;
       overlays = [
         (import ./deps-overlay.nix {
           inherit kernelHeaders libffiTrampolines;

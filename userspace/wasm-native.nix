@@ -8,6 +8,7 @@
   seedMake,
   bootstrapBusybox,
   nativeCC,
+  seedTools ? [ ],
   seedPackages ? { },
   overlays ? [ ],
 }:
@@ -23,16 +24,17 @@ let
 
   # Re-tie the already-working generic cross stdenv around a native wasm platform
   # and replace every executable in its bootstrap path with a guest module. GNU
-  # Bash is mandatory because generic/setup.sh is Bash; BusyBox supplies the
-  # coreutils/find/sed/grep/awk/tar/compression suite, seedMake is cross-built GNU
-  # Make, and nativeCC wraps guest clang + LLVM bintools.
+  # Bash is mandatory because generic/setup.sh is Bash. Seed tools provide the
+  # GNU find/tar behavior setup.sh and source unpackers require; BusyBox supplies
+  # the remaining coreutils/sed/grep/awk/compression suite, seedMake is
+  # cross-built GNU Make, and nativeCC wraps guest clang + LLVM bintools.
   seedStdenv = cross.stdenv.override {
     name = "wasm-native-stdenv";
     buildPlatform = wasmPlatform;
     hostPlatform = wasmPlatform;
     targetPlatform = wasmPlatform;
     shell = "${seedBash}/bin/bash";
-    initialPath = [ bootstrapBusybox seedMake seedBash nativeCC ];
+    initialPath = seedTools ++ [ bootstrapBusybox seedMake seedBash nativeCC ];
     cc = nativeCC;
     # The cross stdenv's final stage carries host patchelf/autotools hooks and a
     # disallowed reference to its old bootstrap-tools closure. Neither belongs

@@ -111,6 +111,11 @@
       };
       wasmNativeSeedBash = wasmNativeSeedCross.bashNonInteractive;
       wasmNativeSeedMake = wasmNativeSeedCross.gnumake;
+      wasmNativeSeedTools = [
+        wasmNativeSeedCross.findutils
+        wasmNativeSeedCross.gnutar
+        wasmNativeSeedCross.lzip
+      ];
       wasmNativeSeedPackages = {
         inherit (wasmNativeSeedCross)
           gettext
@@ -140,6 +145,7 @@
         seedMake = wasmNativeSeedMake;
         bootstrapBusybox = wasmBusyboxFork;
         nativeCC = wasmNativeCC;
+        seedTools = wasmNativeSeedTools;
         seedPackages = wasmNativeSeedPackages;
         overlays = [
           (import ./deps-overlay.nix {
@@ -1045,7 +1051,7 @@
         libffiTrampolines
         cross.curlMinimal
         cross.cacert
-      ] ++ builtins.attrValues wasmNativeSeedPackages;
+      ] ++ wasmNativeSeedTools ++ builtins.attrValues wasmNativeSeedPackages;
       wasmNativeSeedPaths = builtins.concatMap allOutputs wasmNativeSeedDrvs;
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;

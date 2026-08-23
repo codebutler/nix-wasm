@@ -91,7 +91,9 @@ else
     bash = fork (fixBashSjlj prev.bash);
     bashNonInteractive = fork (fixBashSjlj prev.bashNonInteractive);
     coreutils = fork prev.coreutils;
+    findutils = fork prev.findutils;
     gnumake = fork (fixMakeMain prev.gnumake);
+    gnutar = fork prev.gnutar;
     # libuuid is a selected output of util-linux; adapting it rebuilds and audits
     # every output of that multi-output derivation via wasm-fork-stdenv.
     libuuid = fork prev.libuuid;
