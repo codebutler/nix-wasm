@@ -1,0 +1,22 @@
+runtime/demo/node/native-nixpkgs-e2e.mjs
+  s_d4348d5b4c1e44::t_d2cea5e4c7794e 78
+patches/musl/0010-fork-asyncify-seam.patch
+  s_d4348d5b4c1e44::t_d2cea5e4c7794e 8,115
+  s_d4348d5b4c1e44::t_5e5e2e120560ea 23-28,109-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "dcec0873d44943c7667f0d5cf5907ef61c4c87b2",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
