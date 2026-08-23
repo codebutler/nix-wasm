@@ -35,23 +35,23 @@ EOF
 
     cat > $out/nix-support/setup-hook <<'EOF'
 wasmNativeCCAddCVars() {
-  local role_post
-  getHostRoleEnvHook
   if [ -d "$1/include" ]; then
-    export NIX_CFLAGS_COMPILE''${role_post}+=" -isystem $1/include"
+    export NIX_CFLAGS_COMPILE+=" -isystem $1/include"
   fi
   if [ -d "$1/lib" ]; then
-    export NIX_LDFLAGS''${role_post}+=" -L$1/lib"
+    export NIX_LDFLAGS+=" -L$1/lib"
   fi
 }
 
-getTargetRole
-getTargetRoleWrapper
-addEnvHooks "$targetOffset" wasmNativeCCAddCVars
-export NIX_CC''${role_post}=@out@
-export CC''${role_post}=cc
-export CXX''${role_post}=c++
-unset -v role_post
+# This facade is used only by the fully native wasm stdenv: build, host, and
+# target are all wasm32-linux, so there is exactly one unsuffixed compiler role.
+# Avoid cc-wrapper's cross-role helpers here. They are not part of the reduced
+# seed stdenv, and propagated cross outputs such as gettext can redefine them
+# with wrapper-template placeholders that are intentionally unresolved.
+addEnvHooks 0 wasmNativeCCAddCVars
+export NIX_CC=@out@
+export CC=cc
+export CXX=c++
 EOF
     substituteInPlace $out/nix-support/setup-hook --replace-fail @out@ "$out"
   '';
