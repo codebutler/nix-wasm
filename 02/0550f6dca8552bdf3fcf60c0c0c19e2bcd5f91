@@ -1,0 +1,23 @@
+userspace/bootstrap.nix
+  s_d4348d5b4c1e44::t_8701caa3ee9715 335-354
+userspace/base-squashfs.nix
+  s_d4348d5b4c1e44::t_8701caa3ee9715 54-62
+runtime/demo/node/native-nixpkgs-e2e.mjs
+  s_d4348d5b4c1e44::t_abfde1eccf36a0 62-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "020550f6dca8552bdf3fcf60c0c0c19e2bcd5f91",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
