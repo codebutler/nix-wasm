@@ -90,10 +90,15 @@ in
     drv.overrideAttrs (o: {
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ binaryen pkgs.python3 ];
       # The shared cc-wrapper allow-list deliberately excludes capture_stack.
-      # --import-undefined is therefore required for this one fork-capable link;
-      # the final-module audit below restores the strict no-undef contract after
-      # asyncify (the same local-extension pattern as busybox-fork.nix).
-      NIX_LDFLAGS = "-Wl,--import-undefined ${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
+      # --import-undefined is therefore required for this fork-capable link, but
+      # it must not be active during configure: a blanket undefined-symbol pass
+      # makes every Autoconf function probe a false positive. Add the seam only
+      # once the package proper starts linking. Nix's cc-wrapper turns each
+      # NIX_LDFLAGS entry into a linker argument, so this is deliberately the raw
+      # option rather than `-Wl,--import-undefined`.
+      preBuild = (o.preBuild or "") + ''
+        export NIX_LDFLAGS="--import-undefined ${muslFork}/lib/libc.a ''${NIX_LDFLAGS:-}"
+      '';
       postFixup = (o.postFixup or "") + ''
         ${forkShellFn}
         if [ -d "$out/bin" ]; then
@@ -101,7 +106,7 @@ in
             # Only transform real wasm executables. Packages commonly install
             # shell scripts and symlinks beside their binary; feeding either to
             # wasm-opt used to hide failures behind `|| true`.
-            if [ -f "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
+            if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
               fork_asyncify "$f"
               python3 ${../scripts/wasm-check-imports.py} \
                 "$f" ${allowUndefined} capture_stack
