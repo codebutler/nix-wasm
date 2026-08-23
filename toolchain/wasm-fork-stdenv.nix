@@ -58,7 +58,9 @@ let
       --asyncify \
       --pass-arg=asyncify-imports@env.capture_stack \
       ${if onlylist != null then "--pass-arg=asyncify-onlylist@${onlylist}" else ""} \
-      "$1" -o "$1.fork" && mv "$1.fork" "$1"
+      "$1" -o "$1.fork" \
+      && chmod --reference="$1" "$1.fork" \
+      && mv "$1.fork" "$1"
   '';
 
   # A cc-wrapper wrapper: prepend muslFork's libc.a to every link, and run the
@@ -110,6 +112,10 @@ in
               # wasm-opt used to hide failures behind `|| true`.
               if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
                 fork_asyncify "$f"
+                if [ ! -x "$f" ]; then
+                  echo "wasm-fork-stdenv: transformed binary lost executable mode: $f" >&2
+                  exit 1
+                fi
                 python3 ${../scripts/wasm-check-imports.py} \
                   "$f" ${allowUndefined} capture_stack
               fi
