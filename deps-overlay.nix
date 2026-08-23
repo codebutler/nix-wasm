@@ -2,10 +2,15 @@
 # WHY. Correct cross-compilation handling, NOT stubs or shortcuts.
 #
 # SCOPING: an overlay applies to BOTH the cross (wasm) set AND buildPackages
-# (native). We must only touch the wasm builds — overriding native zlib/openssl
-# (depended on by half of nixpkgs) forces the whole native build toolchain to
-# rebuild from source instead of substituting. So every override is guarded by
-# `prev.stdenv.hostPlatform.isWasm`, true only in the wasm cross set.
+# (native). We must only touch the wasm outputs — overriding host zlib/openssl
+# (depended on by half of nixpkgs) forces the whole host toolchain to rebuild
+# instead of substituting. Every target override is therefore guarded by
+# `prev.stdenv.hostPlatform.isWasm`.
+#
+# The native wasm package set (#173) has wasm build *and* host platforms. Its
+# package fixes still apply, but cross-only redirects to `final.buildPackages`
+# must become no-ops there: buildPackages is the set itself, so such a redirect
+# would recurse and would also replace a required guest tool with itself.
 #
 # STATIC is handled at the PLATFORM level, not here: the crossSystem sets
 # `isStatic = true` (see wasm-cross.nix), so nixpkgs applies `makeStatic`
@@ -16,12 +21,21 @@
 # linking a CLI against a separate wasm .so hits wasm-ld's general-dynamic TLS
 # path → musl's non-TLS `__musl_tp`. So the entries below are only the
 # NON-static, per-package cross fixes that isStatic can't express.
-{ kernelHeaders, muslWasm }:
+{
+  kernelHeaders,
+  muslWasm,
+  exposeGuestBuildTools ? false,
+  libffiTrampolines ? null,
+}:
 final: prev:
 let
   isWasm = prev.stdenv.hostPlatform.isWasm or false;
+  isWasmCross = isWasm && !(prev.stdenv.buildPlatform.isWasm or false);
   # Apply f only in the wasm cross set; leave native packages untouched (cached).
   whenWasm = f: p: if isWasm then f p else p;
+  # Apply build-host redirects only while cross compiling. In the native wasm
+  # set these tools must be real guest packages and buildPackages == final.
+  whenWasmCross = f: p: if isWasmCross then f p else p;
 
   # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
@@ -101,15 +115,19 @@ in
   # — which fails to build (and is pointless: these scripts run on the BUILD host,
   # or aren't used by nix.wasm at all). Point the shell machinery at the native
   # bash. A guest shell, when needed, is a separate user package.
-  bash = whenWasm (_: final.buildPackages.bash) prev.bash;
-  bashNonInteractive = whenWasm (_: final.buildPackages.bashNonInteractive) prev.bashNonInteractive;
+  bash =
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash else prev.bash;
+  bashNonInteractive =
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive else prev.bashNonInteractive;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
-  gnugrep = whenWasm (_: final.buildPackages.gnugrep) prev.gnugrep;
-  runtimeShellPackage = if isWasm then final.buildPackages.bashNonInteractive else prev.runtimeShellPackage;
+  gnugrep =
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.gnugrep else prev.gnugrep;
+  runtimeShellPackage =
+    if isWasmCross then final.buildPackages.bashNonInteractive else prev.runtimeShellPackage;
   runtimeShell =
-    if isWasm
+    if isWasmCross
     then "${final.buildPackages.bashNonInteractive}${final.buildPackages.bashNonInteractive.shellPath}"
     else prev.runtimeShell;
 
@@ -221,13 +239,34 @@ in
   # mis-call. See patches/libffi/wasm32-raw-ffi.c for the full rationale.
   libffi = whenWasm
     (p: p.overrideAttrs (o: {
-      nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ final.buildPackages.python3 ];
+      # A native wasm libffi cannot use native Python to generate this include:
+      # Python itself depends on libffi. Generate it on the publish host and
+      # substitute that source-only output as part of the stdenv seed closure.
+      nativeBuildInputs = (o.nativeBuildInputs or [ ])
+        ++ final.lib.optional isWasmCross final.buildPackages.python3;
       postPatch = (o.postPatch or "") + ''
         cp ${./patches/libffi/wasm32-raw-ffi.c} src/wasm/ffi.c
-        python3 ${./patches/libffi/gen-trampolines.py} > src/wasm/wasm-ffi-trampolines.inc
+        ${if isWasmCross then
+          "python3 ${./patches/libffi/gen-trampolines.py} > src/wasm/wasm-ffi-trampolines.inc"
+        else
+          assert libffiTrampolines != null;
+          "cp ${libffiTrampolines} src/wasm/wasm-ffi-trampolines.inc"}
       '';
     }))
     prev.libffi;
+
+  # wget's upstream suite needs a local HTTP daemon and Python and is not useful
+  # while building the target CLI in the guest. It also introduces a Python →
+  # libffi bootstrap cycle in a single-stage native set. The installed wget is
+  # still built normally; only its package tests are disabled on wasm.
+  wget = whenWasm
+    (p: p.overrideAttrs (o: {
+      doCheck = false;
+      patches = (o.patches or [ ]) ++ [
+        ./patches/wget/0001-wasm-disable-background-fork.patch
+      ];
+    }))
+    prev.wget;
 
   # --- alsa-lib: the guest ALSA userspace (issue #145 guest audio) ------------
   # Cross-builds against the virtio-snd sound card (kernel patch 0027 +

@@ -1,0 +1,16 @@
+diff --git a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -2176,0 +2177,4 @@ main (int argc, char **argv)
++#ifdef __wasm__
++      fprintf (stderr, _("--background is unavailable on wasm\n"));
++      exit (WGET_EXIT_GENERIC_ERROR);
++#else
+@@ -2180,0 +2185 @@ main (int argc, char **argv)
++#endif
+diff --git a/src/utils.c b/src/utils.c
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -468 +468 @@ fork_to_background (void)
+-#if !defined(WINDOWS) && !defined(MSDOS)
++#if !defined(WINDOWS) && !defined(MSDOS) && !defined(__wasm__)

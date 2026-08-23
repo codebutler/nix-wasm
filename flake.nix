@@ -37,6 +37,11 @@
       kernelHeaders = import ./toolchain/kernel-headers.nix { inherit pkgs; };
       libcxx = import ./toolchain/libcxx.nix { inherit pkgs musl kernelHeaders compilerRt; };
       sysroot = import ./toolchain/sysroot.nix { inherit pkgs musl kernelHeaders; };
+      libffiTrampolines = pkgs.runCommand "wasm-libffi-trampolines.inc" {
+        nativeBuildInputs = [ pkgs.python3 ];
+      } ''
+        python3 ${./patches/libffi/gen-trampolines.py} > $out
+      '';
 
       # ---- kernel-only patched LLVM-21 scope: stock LLVM-21 carrying BOTH the
       # joelseverin wasm-ld GNU linker-script patch (lld) AND the WasmAsmParser
@@ -85,6 +90,96 @@
         localSystem = system;
         overlays = [ (import ./deps-overlay.nix { inherit kernelHeaders; muslWasm = musl; }) ];
       };
+
+      # The host-crossed bootstrap subset for #173. Unlike the normal cross set,
+      # this one exposes real guest Bash/Make outputs. They are seed tools only:
+      # their drv hashes remain pinned to the publish host and are substituted
+      # before a native build begins in the guest.
+      wasmNativeSeedCross = import ./wasm-cross.nix {
+        inherit nixpkgs sysroot compilerRt libcxx;
+        localSystem = system;
+        overlays = [
+          (import ./deps-overlay.nix {
+            inherit kernelHeaders;
+            muslWasm = musl;
+            exposeGuestBuildTools = true;
+          })
+        ];
+      };
+      wasmNativeSeedBash = forkStdenv.enableForkFor wasmNativeSeedCross.bashNonInteractive;
+      wasmNativeSeedMake = forkStdenv.enableForkFor wasmNativeSeedCross.gnumake;
+      wasmNativeSeedPackages = {
+        inherit (wasmNativeSeedCross)
+          gettext
+          libiconv
+          libidn2
+          libintl
+          libuuid
+          lzip
+          nukeReferences
+          openssl
+          pcre2
+          perl
+          zlib
+          ;
+        pkg-config = wasmNativeSeedCross.pkg-config-unwrapped;
+      };
+      wasmNativeCC = import ./toolchain/native-bootstrap-cc.nix {
+        inherit pkgs guestClang ccSysroot;
+        seedBash = wasmNativeSeedBash;
+      };
+
+      # #173: a native wasm32 nixpkgs instantiation whose entire stdenv bootstrap
+      # closure consists of cross-built guest tools.
+      wasmNative = import ./userspace/wasm-native.nix {
+        inherit nixpkgs cross;
+        seedBash = wasmNativeSeedBash;
+        seedMake = wasmNativeSeedMake;
+        bootstrapBusybox = wasmBusyboxFork;
+        nativeCC = wasmNativeCC;
+        seedPackages = wasmNativeSeedPackages;
+        overlays = [
+          (import ./deps-overlay.nix {
+            inherit kernelHeaders libffiTrampolines;
+            muslWasm = musl;
+          })
+        ];
+      };
+      wasmNativeEvalProbe = wasmNative.stdenv.mkDerivation {
+        name = "wasm-native-eval-probe";
+        dontUnpack = true;
+        installPhase = "mkdir -p $out";
+      };
+      # Keep the probe drvPath for inspection without retaining its string
+      # context: `nix flake check` must evaluate the wasm drv, not try to build
+      # the native stdenv probe on the CI host.
+      wasmNativeEvalCheck =
+        assert wasmNative.stdenv.buildPlatform.system == "wasm32-linux";
+        assert wasmNative.stdenv.hostPlatform.system == "wasm32-linux";
+        assert wasmNativeEvalProbe.system == "wasm32-linux";
+        assert wasmNativeHello.system == "wasm32-linux";
+        assert wasmNativeHello.src.system == "wasm32-linux";
+        assert wasmNativeWget.system == "wasm32-linux";
+        assert wasmNativeWget.src.system == "wasm32-linux";
+        assert toString wasmNativeHelloSource == toString wasmNativeHello.src;
+        assert toString wasmNativeWgetSource == toString wasmNativeWget.src;
+        pkgs.writeText "wasm-native-eval-check" (
+          builtins.concatStringsSep "\n" (map builtins.unsafeDiscardStringContext [
+            wasmNativeEvalProbe.drvPath
+            wasmNativeHello.drvPath
+            wasmNativeWget.drvPath
+          ]) + "\n"
+        );
+      wasmNativeHello = wasmNative.hello;
+      wasmNativeWget = wasmNative.wget;
+      # The CI guest is intentionally offline. Build path-identical fixed-output
+      # sources on the host and publish them in the local cache; the actual
+      # hello/wget derivations remain absent and must compile in-guest.
+      hostFetchNativeSource = src: pkgs.fetchurl {
+        inherit (src) name url hash;
+      };
+      wasmNativeHelloSource = hostFetchNativeSource wasmNativeHello.src;
+      wasmNativeWgetSource = hostFetchNativeSource wasmNativeWget.src;
 
       # #129 Track B: the reusable fork-enabled cross-stdenv adapter. Links
       # muslFork's libc.a first (so the asyncify-seam _Fork wins) + runs
@@ -935,7 +1030,20 @@
       # to cross-build to wasm32-NOMMU.
       wasmPublishedPkgs = [ cross.file cross.hello ];
       allOutputs = drv: map (o: drv.${o}) drv.outputs;
-
+      # Cross-built bootstrap outputs are the only host-built executables the
+      # native stdenv needs. Fixed-output sources are rooted separately below;
+      # the guest channel instantiates native derivations itself, so their .drv
+      # files and unrealised outputs must not enter the host-built cache.
+      wasmNativeSeedDrvs = [
+        wasmBusyboxFork
+        wasmNativeSeedBash
+        wasmNativeSeedMake
+        wasmNativeCC
+        libffiTrampolines
+        cross.curlMinimal
+        cross.cacert
+      ] ++ builtins.attrValues wasmNativeSeedPackages;
+      wasmNativeSeedPaths = builtins.concatMap allOutputs wasmNativeSeedDrvs;
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;
         devPaths = wasmDevPaths;
@@ -944,7 +1052,11 @@
         # when a nixpkgs attribute is evaluated, plus the curated outputs above.
         # (The channel TREE is baked into the squashfs instead — it needs directory
         # traversal, which the flat binary-cache 9P export does not provide.)
-        extraRootPaths = [ nixpkgs.outPath ] ++ builtins.concatMap allOutputs wasmPublishedPkgs;
+        extraRootPaths =
+          [ nixpkgs.outPath ]
+          ++ builtins.concatMap allOutputs wasmPublishedPkgs
+          ++ wasmNativeSeedPaths
+          ++ [ wasmNativeHelloSource wasmNativeWgetSource ];
       };
 
       # ---- the versioned `linux` boot bundles (pc#315 / dual-mode channel) ---
@@ -1079,6 +1191,10 @@
           # enumerating it in `packages` below.
           legacyPackages = cross;
 
+          checks = {
+            wasm-native-eval = wasmNativeEvalCheck;
+          };
+
           packages = {
         # Sanity anchor: the stock-LLVM-21 pin the whole plan rests on.
         llvmCheck = pkgs.writeText "llvm-version" pkgs.llvmPackages_21.clang.version;
@@ -1124,6 +1240,16 @@
         # headers — exposed for build/inspection before wiring into the system.
         # The in-guest compiler: $out/bin/{clang,wasm-ld} (+ lib/clang resource dir).
         guest-clang = guestClang;
+
+        # #173 native-in-guest package set and its host-crossed bootstrap roots.
+        # `wasm-native-hello`/`wget` are exposed for drv inspection only: their
+        # system is wasm32-linux, so they must be realised by the booted guest.
+        wasm-native-stdenv = wasmNative.stdenv;
+        wasm-native-seed-bash = wasmNativeSeedBash;
+        wasm-native-seed-make = wasmNativeSeedMake;
+        wasm-native-bootstrap-cc = wasmNativeCC;
+        wasm-native-hello = wasmNativeHello;
+        wasm-native-wget = wasmNativeWget;
 
         # Opt-in ccache build variants of the two from-source LLVM derivations —
         # for the dev iteration loop only (need `extra-sandbox-paths`; CLAUDE.md
@@ -1580,5 +1706,6 @@
     {
       packages = builtins.mapAttrs (_: v: v.packages) perSystem;
       legacyPackages = builtins.mapAttrs (_: v: v.legacyPackages) perSystem;
+      checks = builtins.mapAttrs (_: v: v.checks) perSystem;
     };
 }

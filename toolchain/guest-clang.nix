@@ -1,5 +1,6 @@
 # The in-guest compiler: LLVM-21 clang + lld cross-compiled to the wasm32 guest →
-# $out/bin/{clang,wasm-ld} (+ $out/lib/clang resource dir). This is what
+# $out/bin/{clang,wasm-ld,llvm-ar,llvm-nm,llvm-objcopy,...} (+ $out/lib/clang
+# resource dir). This is what
 # lets the guest COMPILE in-browser, not just install pre-built packages.
 #
 # Faithful Nix port of pc's `build_guest_clang` (build.sh) — clang+lld for
@@ -190,7 +191,10 @@ pkgs.stdenv.mkDerivation ({
       -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF \
       -DCLANG_ENABLE_ARCMT=OFF -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
       -DCLANG_PLUGIN_SUPPORT=OFF
-    cmake --build build --target clang lld
+    # Native nixpkgs builds need the archive/object utilities normally supplied
+    # by a cc-wrapper's bintools. Build them into the same guest LLVM closure so
+    # ar/ranlib/nm/strip are actual wasm executables, never host ELF tools.
+    cmake --build build --target clang lld llvm-ar llvm-nm llvm-objcopy
     runHook postBuild
   '';
 
@@ -202,7 +206,22 @@ pkgs.stdenv.mkDerivation ({
     # (bin/clang, bin/wasm-ld) — there is no longer a `.wasm` loose-vendored copy.
     cp build/bin/clang-21 $out/bin/clang
     cp build/bin/lld      $out/bin/wasm-ld
+    cp build/bin/llvm-ar  $out/bin/llvm-ar
+    cp build/bin/llvm-nm  $out/bin/llvm-nm
+    cp build/bin/llvm-objcopy $out/bin/llvm-objcopy
     cp -a build/lib/clang $out/lib/clang
+
+    # llvm-ar/llvm-objcopy dispatch their companion modes through argv[0].
+    # Provide both LLVM and conventional tool names for Autoconf/libtool.
+    ln -s llvm-ar $out/bin/llvm-ranlib
+    ln -s llvm-objcopy $out/bin/llvm-strip
+    for pair in \
+      ar:llvm-ar ranlib:llvm-ranlib nm:llvm-nm \
+      objcopy:llvm-objcopy strip:llvm-strip; do
+      name=''${pair%%:*}
+      target=''${pair#*:}
+      ln -s "$target" "$out/bin/$name"
+    done
 
     # Make clang its own driver (#3): a `clang++` entrypoint (clang dispatches C++
     # mode on the `++` in argv[0]) and the auto-loaded config files next to the
