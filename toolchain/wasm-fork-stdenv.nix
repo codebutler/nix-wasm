@@ -54,7 +54,7 @@ let
     wasm-opt \
       --enable-threads --enable-bulk-memory --enable-mutable-globals \
       --enable-nontrapping-float-to-int --enable-sign-ext \
-      --enable-reference-types --enable-multivalue \
+      --enable-reference-types --enable-multivalue --enable-exception-handling \
       --asyncify \
       --pass-arg=asyncify-imports@env.capture_stack \
       ${if onlylist != null then "--pass-arg=asyncify-onlylist@${onlylist}" else ""} \

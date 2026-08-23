@@ -11,6 +11,30 @@ final: prev:
 let
   fork = forkStdenv.enableForkFor;
 
+  # musl-wasm's setjmp is a no-op and its longjmp deliberately aborts. Bash
+  # uses sigsetjmp/siglongjmp for ordinary parser/error control flow, so a
+  # builder can start successfully and then die with SIGABRT as soon as that
+  # path is exercised. Compile Bash with LLVM's wasm SjLj lowering and link the
+  # same module-local WebAssembly EH runtime already proven by the guest ash.
+  fixBashSjlj = p: p.overrideAttrs (o: {
+    env = (o.env or { }) // {
+      NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "")
+        + " -mllvm -wasm-enable-sjlj";
+    };
+    configureFlags = (o.configureFlags or [ ]) ++ [
+      # LLVM's wasm SjLj pass lowers setjmp/longjmp. Do not let Bash's
+      # cross-configure default select the sigsetjmp/siglongjmp wrappers,
+      # which would bypass that lowering and reach musl's abort stub.
+      "bash_cv_func_sigsetjmp=missing"
+    ];
+    postPatch = (o.postPatch or "") + ''
+      cp ${../userspace/ash-wasm-sjlj.c} wasm_sjlj.c
+      substituteInPlace Makefile.in \
+        --replace-fail 'CSOURCES = shell.c' 'CSOURCES = wasm_sjlj.c shell.c' \
+        --replace-fail $'OBJECTS\t = shell.o' $'OBJECTS\t = wasm_sjlj.o shell.o'
+    '';
+  });
+
   # clang's wasm entry ABI only synthesizes __main_argc_argv for the portable
   # two-argument main. GNU Make already has that form for Amiga and z/OS; reuse
   # it and source envp from environ for wasm rather than leaving musl's startup
@@ -64,8 +88,8 @@ if !(prev.stdenv.hostPlatform.isWasm or false) then
   { }
 else
   {
-    bash = fork prev.bash;
-    bashNonInteractive = fork prev.bashNonInteractive;
+    bash = fork (fixBashSjlj prev.bash);
+    bashNonInteractive = fork (fixBashSjlj prev.bashNonInteractive);
     coreutils = fork prev.coreutils;
     gnumake = fork (fixMakeMain prev.gnumake);
     # libuuid is a selected output of util-linux; adapting it rebuilds and audits

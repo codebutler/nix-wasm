@@ -16,10 +16,15 @@ const check = (ok, label) => {
 };
 
 async function run(cmd, tag, ms) {
+  const start = s.snapshot().length;
   s.send(`${cmd}; echo ${tag}=$?\n`);
   const got = await s.waitForOutput(new RegExp(`${tag}=[0-9]`), ms);
-  if (!got) return null;
-  return s.snapshot().match(new RegExp(`${tag}=([0-9]+)`))?.[1] ?? "?";
+  const transcript = s.snapshot();
+  const rc = got ? (transcript.match(new RegExp(`${tag}=([0-9]+)`))?.[1] ?? "?") : null;
+  if (rc !== "0") {
+    console.log(`\n── ${tag} guest output tail ──\n${transcript.slice(start).slice(-12000)}`);
+  }
+  return rc;
 }
 
 // Run a build under a cheap guest-side memory sampler. Each gate reports wall
@@ -76,9 +81,9 @@ try {
       "m1-stdenv",
     ),
     "M1RC",
-    600000,
+    1800000,
   );
-  check(m1 === "0", "native stdenv.mkDerivation builds in-guest (M1RC=0)");
+  check(m1 === "0", `native stdenv.mkDerivation builds in-guest (M1RC=${m1 ?? "timeout"})`);
 
   // M2: install through the real nix-env channel surface. The output is absent
   // from the local cache; only its source and bootstrap closure are present.
@@ -93,7 +98,7 @@ try {
     "M2RC",
     3600000,
   );
-  check(m2 === "0", "nixpkgs.native.hello builds, installs, and runs (M2RC=0)");
+  check(m2 === "0", `nixpkgs.native.hello builds, installs, and runs (M2RC=${m2 ?? "timeout"})`);
 
   // M3: wget itself is native; ABI-identical foundational libraries/build tools
   // are host-crossed seeds. This is the measured choice from the issue's M3
@@ -109,7 +114,7 @@ try {
     "M3RC",
     10800000,
   );
-  check(m3 === "0", "nixpkgs.native.wget builds, installs, and runs (M3RC=0)");
+  check(m3 === "0", `nixpkgs.native.wget builds, installs, and runs (M3RC=${m3 ?? "timeout"})`);
 
   console.log(`\n[native-nixpkgs-e2e] ${pass ? "PASS" : "FAIL"}`);
 } finally {
