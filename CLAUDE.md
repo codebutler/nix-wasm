@@ -152,13 +152,15 @@ A `master`-based `linux` channel can only ship **after** the matching engine is
 synced into pc (`runtime/sync-to-pc.sh`) and pc is deployed; until then the higher
 `minEngine` correctly shows "reload pc".
 
-Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`, `nix-cache/`) come
+Artifacts (`vmlinux.wasm`, `initramfs.cpio.gz`, `base.squashfs`,
+`state-baseline.cbhd.gz`, `nix-cache/`) come
 from `nix build` (`.#kernel`, `.#wasm-initramfs`, `.#wasm-base-squashfs`, `.#wasm-binary-cache`). Point
 at them via `LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/` for the Node CLI, or
 symlink `demo/web/artifacts → /path/to/artifacts` for the browser demo.
 
 **pc-facing delivery:** the versioned `linux` channel — `nix build .#linux-image`
-bundles kernel + initramfs + squashfs into a channel image uploaded to R2 under
+bundles kernel + initramfs + either the legacy squashfs seed or current
+preseeded ext2 baseline into channel images uploaded to R2 under
 `packages/linux/<v>/`; `packages/linux/latest.json` (served `no-cache`) is the
 pointer pc resolves at runtime via `js/packages/linux-channel.js`.
 **To ship a guest change to pc, just run the `publish-linux-channel` workflow**

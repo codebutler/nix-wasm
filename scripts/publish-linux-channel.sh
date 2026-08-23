@@ -13,8 +13,9 @@
 # the worker's `/packages/<id>/…` route drops the `/packages` segment and reads
 # `<id>/…` from env.PACKAGES, so the R2 key for the linux channel is `linux/…`
 # while the public URL pc fetches stays `…/packages/linux/…`.
-#   linux/<mmu-v>/linux.iso    — default MMU image (.#linux-image)
-#   linux/<nommu-v>/linux.iso  — selectable NOMMU image (.#linux-image-nommu)
+#   linux/<mmu-v>/linux.iso    — legacy MMU squashfs image
+#   linux/<nommu-v>/linux.iso  — legacy NOMMU squashfs image
+#   linux/<v>/linux-installed.iso — preseeded ext2 image selected by current pc
 #   linux/<v>/nix-cache/       — ONLY pkgs.nix + paths.nix (the nix-wasm `nix-env
 #                                -iA` / new-CLI catalogs, NOT in Cachix). The heavy
 #                                nars + *.narinfo + nix-cache-info are NOT uploaded
@@ -186,7 +187,10 @@ _cache_probe() { # $1 = /nix/store/<hash>-name, $2 = label for messages
 # --max-jobs 0 unless the gate is explicitly overridden (see below).
 NIX_BUILD_MODE="--max-jobs 0"
 GATE_MISSING=""
-for _attr in linux-image linux-image-nommu wasm-binary-cache; do
+for _attr in \
+  linux-image linux-image-nommu \
+  linux-installed-image linux-installed-image-nommu \
+  wasm-binary-cache; do
   # Pure evaluation: `.outPath` needs no build, so a missing artifact costs
   # seconds here rather than an hour of `nix build`.
   # shellcheck disable=SC2086
@@ -311,6 +315,22 @@ ISO_NOMMU=$(find "$IMG_STORE_NOMMU" -name linux.iso -type f | head -1)
   echo "ERROR: NOMMU linux.iso not found under $IMG_STORE_NOMMU" >&2; exit 1;
 }
 
+echo "==> Building .#linux-installed-image (MMU) …"
+# shellcheck disable=SC2086
+INST_STORE_MMU=$(eval "$NIX build .#linux-installed-image $NIX_BUILD_MODE --print-out-paths --no-link")
+INST_ISO_MMU=$(find "$INST_STORE_MMU" -name linux.iso -type f | head -1)
+[ -n "$INST_ISO_MMU" ] && [ -f "$INST_ISO_MMU" ] || {
+  echo "ERROR: MMU preseeded linux.iso not found under $INST_STORE_MMU" >&2; exit 1;
+}
+
+echo "==> Building .#linux-installed-image-nommu …"
+# shellcheck disable=SC2086
+INST_STORE_NOMMU=$(eval "$NIX build .#linux-installed-image-nommu $NIX_BUILD_MODE --print-out-paths --no-link")
+INST_ISO_NOMMU=$(find "$INST_STORE_NOMMU" -name linux.iso -type f | head -1)
+[ -n "$INST_ISO_NOMMU" ] && [ -f "$INST_ISO_NOMMU" ] || {
+  echo "ERROR: NOMMU preseeded linux.iso not found under $INST_STORE_NOMMU" >&2; exit 1;
+}
+
 echo "==> Building .#wasm-binary-cache …"
 # shellcheck disable=SC2086
 CACHE=$(eval "$NIX build .#wasm-binary-cache $NIX_BUILD_MODE --print-out-paths --no-link")
@@ -324,6 +344,12 @@ VERSION="$SHA_MMU"
 SHA_NOMMU=$(sha256sum "$ISO_NOMMU" | cut -d' ' -f1)
 BYTES_NOMMU=$(stat -c%s "$ISO_NOMMU")
 VERSION_NOMMU="$SHA_NOMMU"
+INST_SHA_MMU=$(sha256sum "$INST_ISO_MMU" | cut -d' ' -f1)
+INST_BYTES_MMU=$(stat -c%s "$INST_ISO_MMU")
+INST_VERSION_MMU="$INST_SHA_MMU"
+INST_SHA_NOMMU=$(sha256sum "$INST_ISO_NOMMU" | cut -d' ' -f1)
+INST_BYTES_NOMMU=$(stat -c%s "$INST_ISO_NOMMU")
+INST_VERSION_NOMMU="$INST_SHA_NOMMU"
 
 # Parse the ACTUAL `export const ENGINE_ABI = N;` line (not the comment lines that
 # also mention ENGINE_ABI) — matches linux-image.nix's parse exactly.
@@ -333,6 +359,8 @@ MIN_ENGINE=$(grep -oE '^[[:space:]]*export const ENGINE_ABI = [0-9]+;' "$ROOT/ru
 
 IMG_URL_MMU="$PUBLIC_BASE_URL/packages/linux/$VERSION/linux.iso"
 IMG_URL_NOMMU="$PUBLIC_BASE_URL/packages/linux/$VERSION_NOMMU/linux.iso"
+INST_URL_MMU="$PUBLIC_BASE_URL/packages/linux/$INST_VERSION_MMU/linux-installed.iso"
+INST_URL_NOMMU="$PUBLIC_BASE_URL/packages/linux/$INST_VERSION_NOMMU/linux-installed.iso"
 # The guest's nix-cache.js uses ONE baseUrl for nix-cache-info / *.narinfo / nar/*
 # AND pkgs.nix / paths.nix. The worker's /cachix/<v> route unifies them: catalogs
 # from R2 (packages/linux/<v>/nix-cache/), everything else proxied from
@@ -345,7 +373,9 @@ NIX_CACHE_URL="$PUBLIC_BASE_URL/cachix/$VERSION"
 # independently content-addressed.
 LATEST_JSON=$(python3 - \
   "$VERSION" "$MIN_ENGINE" "$NIX_CACHE_URL" "$IMG_URL_MMU" "$BYTES_MMU" "$SHA_MMU" \
-  "$VERSION_NOMMU" "$IMG_URL_NOMMU" "$BYTES_NOMMU" "$SHA_NOMMU" <<'PY'
+  "$VERSION_NOMMU" "$IMG_URL_NOMMU" "$BYTES_NOMMU" "$SHA_NOMMU" \
+  "$INST_VERSION_MMU" "$INST_URL_MMU" "$INST_BYTES_MMU" "$INST_SHA_MMU" \
+  "$INST_VERSION_NOMMU" "$INST_URL_NOMMU" "$INST_BYTES_NOMMU" "$INST_SHA_NOMMU" <<'PY'
 import json
 import sys
 
@@ -360,6 +390,14 @@ import sys
     nommu_url,
     nommu_bytes,
     nommu_sha,
+    installed_mmu_version,
+    installed_mmu_url,
+    installed_mmu_bytes,
+    installed_mmu_sha,
+    installed_nommu_version,
+    installed_nommu_url,
+    installed_nommu_bytes,
+    installed_nommu_sha,
 ) = sys.argv[1:]
 
 def variant(version, url, size, sha):
@@ -372,11 +410,16 @@ def variant(version, url, size, sha):
 
 mmu = variant(mmu_version, mmu_url, mmu_bytes, mmu_sha)
 nommu = variant(nommu_version, nommu_url, nommu_bytes, nommu_sha)
+installed_mmu = variant(installed_mmu_version, installed_mmu_url,
+                        installed_mmu_bytes, installed_mmu_sha)
+installed_nommu = variant(installed_nommu_version, installed_nommu_url,
+                          installed_nommu_bytes, installed_nommu_sha)
 pointer = {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "defaultVariant": "mmu",
     **mmu,
     "variants": {"mmu": mmu, "nommu": nommu},
+    "installedVariants": {"mmu": installed_mmu, "nommu": installed_nommu},
 }
 print(json.dumps(pointer, separators=(",", ":")))
 PY
@@ -387,6 +430,10 @@ echo "MMU linux.iso path    : $ISO_MMU"
 echo "MMU bytes / sha256    : $BYTES_MMU / $SHA_MMU"
 echo "NOMMU linux.iso path  : $ISO_NOMMU"
 echo "NOMMU bytes / sha256  : $BYTES_NOMMU / $SHA_NOMMU"
+echo "MMU preseeded image   : $INST_ISO_MMU"
+echo "MMU preseed bytes/sha : $INST_BYTES_MMU / $INST_SHA_MMU"
+echo "NOMMU preseeded image : $INST_ISO_NOMMU"
+echo "NOMMU preseed bytes/sha: $INST_BYTES_NOMMU / $INST_SHA_NOMMU"
 echo "default version <v>   : $VERSION"
 echo "minEngine            : $MIN_ENGINE"
 echo "nix-cache path       : $CACHE"
@@ -406,6 +453,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "| NOMMU bytes | \`$BYTES_NOMMU\` |"
     echo "| MMU image | \`$IMG_URL_MMU\` |"
     echo "| NOMMU image | \`$IMG_URL_NOMMU\` |"
+    echo "| MMU preseeded image | \`$INST_URL_MMU\` |"
+    echo "| NOMMU preseeded image | \`$INST_URL_NOMMU\` |"
     echo ""
     echo "pc resolves \`packages/linux/latest.json\` on the next Linux-app open — no pc deploy needed."
   } >> "$GITHUB_STEP_SUMMARY"
@@ -422,6 +471,12 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ "${DRY_RUN:-}" = "true" ]; then
   echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
   echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo "  rclone copyto \"$ISO_NOMMU\" \"r2:$BUCKET/linux/$VERSION_NOMMU/linux.iso\" \\"
+  echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
+  echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
+  echo "  rclone copyto \"$INST_ISO_MMU\" \"r2:$BUCKET/linux/$INST_VERSION_MMU/linux-installed.iso\" \\"
+  echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
+  echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
+  echo "  rclone copyto \"$INST_ISO_NOMMU\" \"r2:$BUCKET/linux/$INST_VERSION_NOMMU/linux-installed.iso\" \\"
   echo "    --header-upload \"Content-Type: application/x-iso9660-image\" \\"
   echo "    --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest"
   echo ""
@@ -537,6 +592,16 @@ rclone copyto "$ISO_NOMMU" "r2:$BUCKET/linux/$VERSION_NOMMU/linux.iso" \
   --header-upload "Content-Type: application/x-iso9660-image" \
   --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
 
+echo "==> Uploading MMU preseeded image → $BUCKET/linux/$INST_VERSION_MMU/linux-installed.iso …"
+rclone copyto "$INST_ISO_MMU" "r2:$BUCKET/linux/$INST_VERSION_MMU/linux-installed.iso" \
+  --header-upload "Content-Type: application/x-iso9660-image" \
+  --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
+
+echo "==> Uploading NOMMU preseeded image → $BUCKET/linux/$INST_VERSION_NOMMU/linux-installed.iso …"
+rclone copyto "$INST_ISO_NOMMU" "r2:$BUCKET/linux/$INST_VERSION_NOMMU/linux-installed.iso" \
+  --header-upload "Content-Type: application/x-iso9660-image" \
+  --s3-chunk-size 64M --s3-no-check-bucket --no-check-dest
+
 # Upload ONLY the nix-wasm catalogs (pkgs.nix + paths.nix) — the `nix-env -iA` /
 # new-CLI indexes, which are nix-wasm artifacts NOT present in Cachix. The heavy
 # nars + *.narinfo + nix-cache-info are deliberately NOT uploaded: the guest
@@ -596,10 +661,16 @@ for attempt in 1 2 3 4 5; do
   case "$LIVE" in *"\"defaultVariant\":\"mmu\""*) ;; *) ok=0 ;; esac
   case "$LIVE" in *"\"nommu\":{\"version\":\"$VERSION_NOMMU\""*) ;; *) ok=0 ;; esac
   case "$LIVE" in *"\"url\":\"$IMG_URL_NOMMU\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"mmu\":{\"version\":\"$INST_VERSION_MMU\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"url\":\"$INST_URL_MMU\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"nommu\":{\"version\":\"$INST_VERSION_NOMMU\""*) ;; *) ok=0 ;; esac
+  case "$LIVE" in *"\"url\":\"$INST_URL_NOMMU\""*) ;; *) ok=0 ;; esac
   case "$LIVE" in *"\"nixCacheBaseUrl\":\"$NIX_CACHE_URL\""*) ;; *) ok=0 ;; esac
   if [ "$ok" = 1 ]; then
     echo "    verified: MMU version   → $VERSION"
     echo "              NOMMU version → $VERSION_NOMMU"
+    echo "              MMU baseline  → $INST_VERSION_MMU"
+    echo "              NOMMU baseline→ $INST_VERSION_NOMMU"
     echo "              nix cache     → $NIX_CACHE_URL"
     break
   fi
@@ -607,6 +678,8 @@ for attempt in 1 2 3 4 5; do
     echo "ERROR: latest.json did not fully update after the flip." >&2
     echo "  expected MMU version   : $VERSION" >&2
     echo "  expected NOMMU version : $VERSION_NOMMU" >&2
+    echo "  expected MMU baseline   : $INST_VERSION_MMU" >&2
+    echo "  expected NOMMU baseline : $INST_VERSION_NOMMU" >&2
     echo "  expected nixCacheBaseUrl: $NIX_CACHE_URL" >&2
     echo "  live latest.json was   : $LIVE" >&2
     exit 1
@@ -632,4 +705,6 @@ echo ""
 echo "==> PUBLISHED dual-mode linux channel: mmu=$VERSION nommu=$VERSION_NOMMU minEngine=$MIN_ENGINE"
 echo "==> MMU image: $IMG_URL_MMU"
 echo "==> NOMMU image: $IMG_URL_NOMMU"
+echo "==> MMU preseeded image: $INST_URL_MMU"
+echo "==> NOMMU preseeded image: $INST_URL_NOMMU"
 echo "==> pc will resolve it on the next Linux-app open (latest.json is no-cache)."

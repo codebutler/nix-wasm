@@ -1,12 +1,19 @@
 # linux-image.nix — one coherent process-model boot bundle (pc#315). Each
-# instantiation grafts vmlinux + initramfs + squashfs + manifest into an iso9660
-# image built with nixpkgs' standard make-iso9660-image (xorriso → reproducible).
-# The production channel instantiates this twice (MMU and NOMMU); yore-pc chooses
-# a mode, downloads that image once via the disc installer, mounts it, reads the
-# members out, and boots from the bytes. The compiler toolchain (nix-cache) is
-# shared and remains a lazily-fetched R2 cache. See
+# instantiation grafts vmlinux + initramfs + one state payload + manifest into
+# an iso9660 image built with nixpkgs' standard make-iso9660-image (xorriso →
+# reproducible). Legacy images carry the squashfs installer seed. New clients
+# select the preseeded ext2 baseline, avoiding guest-side expansion followed by
+# browser-side recompression of the whole installed filesystem.
 # docs/superpowers/specs/2026-06-24-linux-bundle-channel-design.md.
-{ pkgs, nixpkgs, kernel, initramfs, squashfs, version ? 1 }:
+{ pkgs
+, nixpkgs
+, kernel
+, initramfs
+, squashfs ? null
+, stateBaseline ? null
+, mode ? null
+, version ? 1
+}:
 let
   lib = pkgs.lib;
 
@@ -26,13 +33,19 @@ let
     + "passthru.processModel — wire it before assembling a boot image");
   kernelModel = reqProcessModel "kernel" kernel;
   initramfsModel = reqProcessModel "initramfs" initramfs;
-  squashfsModel = reqProcessModel "squashfs" squashfs;
+  payload = if stateBaseline != null then stateBaseline else squashfs;
+  payloadName = if stateBaseline != null then "stateBaseline" else "squashfs";
+  payloadModel = reqProcessModel payloadName payload;
+  payloadChoiceValid = (squashfs == null) != (stateBaseline == null) || throw
+    "userspace/linux-image.nix: supply exactly one of squashfs or stateBaseline";
+  baselineModeValid = stateBaseline == null || mode == stateBaseline.mode || throw
+    "userspace/linux-image.nix: image mode does not match state baseline mode";
   processModelCoherent =
-    if kernelModel == initramfsModel && initramfsModel == squashfsModel
+    if kernelModel == initramfsModel && initramfsModel == payloadModel
     then true
     else throw ''
       userspace/linux-image.nix: process-model MISMATCH assembling the boot
-      image: kernel=${kernelModel} initramfs=${initramfsModel} squashfs=${squashfsModel}.
+      image: kernel=${kernelModel} initramfs=${initramfsModel} ${payloadName}=${payloadModel}.
       A NOMMU spawn-contract kernel paired with a real-fork userspace (or the
       reverse) corrupts the guest's own memory model at boot. This assert
       exists so a future attr-rename (swapping in .#kernel-mmu-a2 without
@@ -51,8 +64,19 @@ let
   minEngine = lib.toInt (builtins.head (lib.throwIf (abiMatch == null)
     "linux-image.nix: could not parse ENGINE_ABI from runtime/abi.js" abiMatch));
 
-  manifest = pkgs.writeText "manifest.json"
-    (builtins.toJSON { inherit version minEngine; });
+  manifestBody = { inherit version minEngine; }
+    // lib.optionalAttrs (stateBaseline != null) {
+      format = "preseeded-state-v1";
+      stateDisk = {
+        member = "state-baseline.cbhd.gz";
+        encoding = stateBaseline.encoding;
+        diskBytes = stateBaseline.diskBytes;
+        system = stateBaseline.systemPath;
+        generation = stateBaseline.generation;
+        inherit mode;
+      };
+    };
+  manifest = pkgs.writeText "manifest.json" (builtins.toJSON manifestBody);
 
   # nixpkgs' standard data-ISO builder. callPackage fills the package deps
   # (lib/stdenv/xorriso/zstd/squashfsTools/…) from pkgs; we supply the image
@@ -64,7 +88,17 @@ let
   makeIso = args:
     pkgs.callPackage "${nixpkgs}/nixos/lib/make-iso9660-image.nix"
       (args // { syslinux = null; });
+  stateContents = lib.optional (stateBaseline != null) {
+    source = "${stateBaseline}/state-baseline.cbhd.gz";
+    target = "/state-baseline.cbhd.gz";
+  };
+  squashfsContents = lib.optional (squashfs != null) {
+    source = "${squashfs}/base.squashfs";
+    target = "/base.squashfs";
+  };
 in
+assert payloadChoiceValid;
+assert baselineModeValid;
 assert processModelCoherent;
 makeIso {
   isoName = "linux.iso";
@@ -72,7 +106,6 @@ makeIso {
   contents = [
     { source = "${kernel}/vmlinux.wasm";         target = "/vmlinux.wasm"; }
     { source = "${initramfs}/initramfs.cpio.gz";  target = "/initramfs.cpio.gz"; }
-    { source = "${squashfs}/base.squashfs";       target = "/base.squashfs"; }
     { source = manifest;                           target = "/manifest.json"; }
-  ];
+  ] ++ squashfsContents ++ stateContents;
 }

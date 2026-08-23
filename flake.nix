@@ -1078,6 +1078,37 @@
         squashfs = wasmBaseSquashfs;
       };
 
+      # Browser-ready installed-system baselines. Unlike the legacy installer
+      # images above, these carry a preformatted ext2 filesystem as a compressed
+      # sparse CBHD baseline. pc mounts it immediately and persists only later
+      # writes; legacy channel variants remain published for older clients.
+      wasmStateBaseline = import ./userspace/state-baseline.nix {
+        inherit pkgs;
+        toplevel = wasmToplevelFork;
+        channel = wasmNixpkgsChannel;
+        mode = "mmu";
+      };
+      wasmStateBaselineNommu = import ./userspace/state-baseline.nix {
+        inherit pkgs;
+        toplevel = wasmToplevel;
+        channel = wasmNixpkgsChannel;
+        mode = "nommu";
+      };
+      linuxInstalledImage = import ./userspace/linux-image.nix {
+        inherit pkgs nixpkgs;
+        kernel = kernelMmuA2;
+        initramfs = wasmInitramfsFork;
+        stateBaseline = wasmStateBaseline;
+        mode = "mmu";
+      };
+      linuxInstalledImageNommu = import ./userspace/linux-image.nix {
+        inherit pkgs nixpkgs;
+        kernel = kernel;
+        initramfs = wasmInitramfs;
+        stateBaseline = wasmStateBaselineNommu;
+        mode = "nommu";
+      };
+
       # ---- nix-wasm#202 PR-1: the spawn-contract gate (see spikes/
       # spawn-contract/check.nix + userspace/spawn-contract-sweep.nix for the
       # full rationale). Named with a hyphen (matching every other guest attr
@@ -1541,6 +1572,13 @@
 
         # Compatibility name for the now-default real-fork base squashfs.
         wasm-base-squashfs-fork = wasmBaseSquashfsFork;
+
+        # Preformatted ext2 baselines and their channel images. New pc clients
+        # prefer these; legacy squashfs images remain available in parallel.
+        wasm-state-baseline = wasmStateBaseline;
+        wasm-state-baseline-nommu = wasmStateBaselineNommu;
+        linux-installed-image = linuxInstalledImage;
+        linux-installed-image-nommu = linuxInstalledImageNommu;
 
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).

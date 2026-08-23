@@ -12,9 +12,7 @@
 # pulled in (the channel reaches it via <nixpkgs>, substituted from the cache).
 { pkgs, toplevel, channel ? null, blockSize ? 131072 }:
 let
-  closure = pkgs.closureInfo {
-    rootPaths = [ toplevel ] ++ pkgs.lib.optional (channel != null) channel;
-  };
+  seedRoot = import ./seed-root.nix { inherit pkgs toplevel channel; };
 
   # nix-wasm#202 PR-1: the process-model coherence marker, propagated from
   # `toplevel` (already coherence-checked against ITS OWN kernel/initramfs/
@@ -29,7 +27,7 @@ let
   # still catches a missing/malformed marker locally rather than trusting the
   # transitive path alone. userspace/linux-image.nix reads this passthru
   # alongside its own `kernel`/`initramfs` args for the final cross-check.
-  toplevelModel = toplevel.processModel or (throw
+  toplevelModel = seedRoot.processModel or (throw
     "userspace/base-squashfs.nix: the `toplevel` derivation has no "
     + "passthru.processModel — wire it in userspace/toplevel.nix before "
     + "building a squashfs of otherwise-ambiguous process model");
@@ -46,37 +44,8 @@ pkgs.runCommand "base-squashfs"
     passthru.processModel = toplevelModel;
   }
   ''
-    mkdir -p root/nix/store root/nix/var/nix/profiles
-    # Copy the closure's store paths to their real /nix/store locations.
-    while read -r p; do
-      cp -a "$p" root/nix/store/
-    done < ${closure}/store-paths
-    # A standard Nix profile from the first boot onward. The numbered link is
-    # the generation GC root; the unnumbered link is the mutable selection.
-    ln -s ${toplevel} root/nix/var/nix/profiles/system-1-link
-    ln -s system-1-link root/nix/var/nix/profiles/system
-
-    # The browser state disk is capped at 1.75 GiB (Chromium rejects a 2 GiB
-    # SharedArrayBuffer). Gate the *expanded* seed, not the compressed squashfs:
-    # the latter hid a 2+ GiB ext2 install behind a ~458 MiB image until the real
-    # first boot failed ENOSPC. `du` on the build host's 4 KiB filesystem is a
-    # conservative estimate for the guest's 1 KiB ext2 allocation.
-    seed_bytes=$(du -s --block-size=1 root/nix | cut -f1)
-    seed_inodes=$(find root/nix -xdev | wc -l)
-    max_seed_bytes=$((1280 * 1024 * 1024))
-    max_seed_inodes=100000
-    echo "base.squashfs expanded seed: $seed_bytes bytes, $seed_inodes inodes"
-    if [ "$seed_bytes" -gt "$max_seed_bytes" ]; then
-      echo "ERROR: expanded seed exceeds 1280 MiB state-disk budget" >&2
-      exit 1
-    fi
-    if [ "$seed_inodes" -gt "$max_seed_inodes" ]; then
-      echo "ERROR: expanded seed exceeds 100000-inode state-disk budget" >&2
-      exit 1
-    fi
-
     mkdir -p $out
-    mksquashfs root/nix $out/base.squashfs \
+    mksquashfs ${seedRoot}/nix $out/base.squashfs \
       -comp zstd -b ${toString blockSize} \
       -all-root -noappend -no-progress -reproducible
     echo "base.squashfs: $(du -h $out/base.squashfs | cut -f1)"
