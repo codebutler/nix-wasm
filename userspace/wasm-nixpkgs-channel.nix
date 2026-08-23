@@ -85,13 +85,16 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
           muslWasm = musl;
           exposeGuestBuildTools = true;
         })
+        (import ./toolchain/wasm-native-seed-overlay.nix {
+          inherit forkStdenv;
+        })
       ];
     };
     forkStdenv = import ./toolchain/wasm-fork-stdenv.nix {
       inherit pkgs cross muslFork;
     };
-    seedBash = forkStdenv.enableForkFor seedCross.bashNonInteractive;
-    seedMake = forkStdenv.enableForkFor seedCross.gnumake;
+    seedBash = seedCross.bashNonInteractive;
+    seedMake = seedCross.gnumake;
     seedPackages = {
       inherit (seedCross)
         gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl

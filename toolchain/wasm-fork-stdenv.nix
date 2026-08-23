@@ -101,18 +101,21 @@ in
       '';
       postFixup = (o.postFixup or "") + ''
         ${forkShellFn}
-        if [ -d "$out/bin" ]; then
-          for f in "$out"/bin/*; do
-            # Only transform real wasm executables. Packages commonly install
-            # shell scripts and symlinks beside their binary; feeding either to
-            # wasm-opt used to hide failures behind `|| true`.
-            if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
-              fork_asyncify "$f"
-              python3 ${../scripts/wasm-check-imports.py} \
-                "$f" ${allowUndefined} capture_stack
-            fi
-          done
-        fi
+        for outputName in $outputs; do
+          outputPath="''${!outputName}"
+          if [ -d "$outputPath/bin" ]; then
+            for f in "$outputPath"/bin/*; do
+              # Only transform real wasm executables. Packages commonly install
+              # shell scripts and symlinks beside their binary; feeding either to
+              # wasm-opt used to hide failures behind `|| true`.
+              if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(od -An -tx1 -N4 "$f" | tr -d ' \n')" = "0061736d" ]; then
+                fork_asyncify "$f"
+                python3 ${../scripts/wasm-check-imports.py} \
+                  "$f" ${allowUndefined} capture_stack
+              fi
+            done
+          fi
+        done
       '';
     });
 }

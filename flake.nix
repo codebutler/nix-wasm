@@ -104,10 +104,13 @@
             muslWasm = musl;
             exposeGuestBuildTools = true;
           })
+          (import ./toolchain/wasm-native-seed-overlay.nix {
+            inherit forkStdenv;
+          })
         ];
       };
-      wasmNativeSeedBash = forkStdenv.enableForkFor wasmNativeSeedCross.bashNonInteractive;
-      wasmNativeSeedMake = forkStdenv.enableForkFor wasmNativeSeedCross.gnumake;
+      wasmNativeSeedBash = wasmNativeSeedCross.bashNonInteractive;
+      wasmNativeSeedMake = wasmNativeSeedCross.gnumake;
       wasmNativeSeedPackages = {
         inherit (wasmNativeSeedCross)
           gettext
