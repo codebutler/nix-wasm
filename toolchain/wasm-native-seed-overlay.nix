@@ -35,13 +35,16 @@ extern char **environ;
     '';
   });
 in
-{
-  bash = fork prev.bash;
-  bashNonInteractive = fork prev.bashNonInteractive;
-  coreutils = fork prev.coreutils;
-  gnumake = fork (fixMakeMain prev.gnumake);
-  # libuuid is a selected output of util-linux; adapting it rebuilds and audits
-  # every output of that multi-output derivation via wasm-fork-stdenv.
-  libuuid = fork prev.libuuid;
-  perl = fork prev.perl;
-}
+if !(prev.stdenv.hostPlatform.isWasm or false) then
+  { }
+else
+  {
+    bash = fork prev.bash;
+    bashNonInteractive = fork prev.bashNonInteractive;
+    coreutils = fork prev.coreutils;
+    gnumake = fork (fixMakeMain prev.gnumake);
+    # libuuid is a selected output of util-linux; adapting it rebuilds and audits
+    # every output of that multi-output derivation via wasm-fork-stdenv.
+    libuuid = fork prev.libuuid;
+    perl = fork prev.perl;
+  }
