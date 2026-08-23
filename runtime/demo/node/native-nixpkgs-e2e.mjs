@@ -75,7 +75,7 @@ try {
   console.log("  [M1: trivial native stdenv derivation …]");
   const m1 = await run(
     measured(
-      `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs {}; in ` +
+      `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs; in ` +
         `p.native.stdenv.mkDerivation { name = "native-stdenv-probe"; dontUnpack = true; ` +
         `installPhase = "mkdir -p $out; echo NATIVE_STDENV_OK > $out/result"; }' 2>&1`,
       "m1-stdenv",
