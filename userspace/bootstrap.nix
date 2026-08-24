@@ -36,6 +36,12 @@ pkgs.writeText "init" ''
   mount -t sysfs none /sys
   mount -t devtmpfs none /dev 2>/dev/null
   mkdir -p /dev/pts && mount -t devpts none /dev/pts 2>/dev/null
+  # Bash process substitution opens /dev/fd/N. devtmpfs does not create these
+  # conventional descriptors, so expose the procfs-backed aliases explicitly.
+  ln -snf /proc/self/fd /dev/fd
+  ln -snf /proc/self/fd/0 /dev/stdin
+  ln -snf /proc/self/fd/1 /dev/stdout
+  ln -snf /proc/self/fd/2 /dev/stderr
 
   # /dev/shm for POSIX shared memory. GTK/gdk's wayland backend allocates its
   # window buffers via open_shared_memory() → memfd_create(), which is ENOSYS on
@@ -333,6 +339,28 @@ pkgs.writeText "init" ''
   esac
   if [ -n "$sys" ] && [ -e "$sys/init" ]; then
     sh "$sys/activate" "$sys"
+
+    # The seed image contains real store paths plus closureInfo's canonical
+    # registration stream. Populate Nix's validity database after activation
+    # installs /etc/nix/nix.conf but before the interactive shell can run
+    # nix-env/nix-build. The order is load-bearing on NOMMU: its profile disables
+    # SQLite WAL, which returns EIO on the overlay, while MMU uses the default WAL
+    # policy. Copying store bytes alone is insufficient: an unregistered path is
+    # treated as invalid, and restoring an overlapping substitute then tries to
+    # remove the existing squashfs lower directory through overlayfs (also EIO).
+    # On an installed state disk the database persists; the ephemeral overlay
+    # loads it again on each boot. A non-empty database belongs to an existing
+    # install and must not be replaced.
+    seed_registration=/nix/var/nix/seed-registration
+    nix_db=/nix/var/nix/db/db.sqlite
+    if [ -s "$seed_registration" ] && [ ! -s "$nix_db" ]; then
+      mkdir -p /nix/var/nix/db
+      if "$sys/sw/bin/nix-store" --load-db < "$seed_registration"; then
+        echo "yore: registered seed Nix closure"
+      else
+        echo "yore: seed Nix closure registration failed"
+      fi
+    fi
 
     # Promote the autoconf-capable forkshell ash to /bin/sh (the initramfs bakes
     # busybox hush there). This is a NOMMU-only accommodation, not a hush

@@ -4,10 +4,27 @@
 // The local CI cache contains only the host-crossed stdenv seeds and source-only
 // inputs. It deliberately does not contain the three outputs built below, so
 // a successful run proves local derivation goals rather than substitution.
+// CI passes one milestone per process so V8 can release the large soft-MMU
+// modules compiled by configure probes before the next package starts.
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic — retry).
 import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
 
+const milestone = process.argv[2] ?? "all";
+if (!["all", "m1", "m2", "m3"].includes(milestone)) {
+  console.error(`usage: node native-nixpkgs-e2e.mjs [m1|m2|m3]`);
+  process.exit(1);
+}
+
 const s = await bootNode({ nix: true });
+const hostMemoryMetric = setInterval(() => {
+  const m = process.memoryUsage();
+  const kib = (bytes) => Math.round(bytes / 1024);
+  console.log(
+    `NATIVE_HOST_METRIC rss_kib=${kib(m.rss)} heap_used_kib=${kib(m.heapUsed)} ` +
+      `external_kib=${kib(m.external)} array_buffers_kib=${kib(m.arrayBuffers)}`,
+  );
+}, 30000);
+hostMemoryMetric.unref();
 let pass = true;
 const check = (ok, label) => {
   console.log(`  ${ok ? "ok" : "FAIL"}  ${label}`);
@@ -16,10 +33,15 @@ const check = (ok, label) => {
 };
 
 async function run(cmd, tag, ms) {
+  const start = s.snapshot().length;
   s.send(`${cmd}; echo ${tag}=$?\n`);
   const got = await s.waitForOutput(new RegExp(`${tag}=[0-9]`), ms);
-  if (!got) return null;
-  return s.snapshot().match(new RegExp(`${tag}=([0-9]+)`))?.[1] ?? "?";
+  const transcript = s.snapshot();
+  const rc = got ? (transcript.match(new RegExp(`${tag}=([0-9]+)`))?.[1] ?? "?") : null;
+  if (rc !== "0") {
+    console.log(`\n── ${tag} guest output tail ──\n${transcript.slice(start).slice(-12000)}`);
+  }
+  return rc;
 }
 
 // Run a build under a cheap guest-side memory sampler. Each gate reports wall
@@ -59,56 +81,67 @@ try {
     s.kill();
     process.exit(1);
   }
+  check(
+    s.snapshot().includes("yore: registered seed Nix closure"),
+    "seed closure registered in the guest Nix database",
+  );
   await primeLocalNixCache(s);
 
   // M1: no source or compiler is needed; this exercises genericBuild/setup.sh
   // under the asyncified GNU Bash seed and BusyBox initialPath.
-  console.log("  [M1: trivial native stdenv derivation …]");
-  const m1 = await run(
-    measured(
-      `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs {}; in ` +
-        `p.native.stdenv.mkDerivation { name = "native-stdenv-probe"; dontUnpack = true; ` +
-        `installPhase = "mkdir -p $out; echo NATIVE_STDENV_OK > $out/result"; }' 2>&1`,
-      "m1-stdenv",
-    ),
-    "M1RC",
-    600000,
-  );
-  check(m1 === "0", "native stdenv.mkDerivation builds in-guest (M1RC=0)");
+  if (milestone === "all" || milestone === "m1") {
+    console.log("  [M1: trivial native stdenv derivation …]");
+    const m1 = await run(
+      measured(
+        `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs; in ` +
+          `p.native.stdenv.mkDerivation { name = "native-stdenv-probe"; dontUnpack = true; ` +
+          `installPhase = "mkdir -p $out; echo NATIVE_STDENV_OK > $out/result"; }' 2>&1`,
+        "m1-stdenv",
+      ),
+      "M1RC",
+      1800000,
+    );
+    check(m1 === "0", `native stdenv.mkDerivation builds in-guest (M1RC=${m1 ?? "timeout"})`);
+  }
 
   // M2: install through the real nix-env channel surface. The output is absent
   // from the local cache; only its source and bootstrap closure are present.
-  console.log("  [M2: GNU hello from source …]");
-  const m2 = await run(
-    measured(
-      `nix-env -iA nixpkgs.native.hello > /tmp/native-hello.log 2>&1; ` +
-        `rc=$?; cat /tmp/native-hello.log; [ $rc -eq 0 ] && ` +
-        `grep -q 'building .*hello-static.*drv' /tmp/native-hello.log && hello`,
-      "m2-hello",
-    ),
-    "M2RC",
-    3600000,
-  );
-  check(m2 === "0", "nixpkgs.native.hello builds, installs, and runs (M2RC=0)");
+  if (milestone === "all" || milestone === "m2") {
+    console.log("  [M2: GNU hello from source …]");
+    const m2 = await run(
+      measured(
+        `nix-env -iA nixpkgs.native.hello > /tmp/native-hello.log 2>&1; ` +
+          `rc=$?; cat /tmp/native-hello.log; [ $rc -eq 0 ] && ` +
+          `grep -q 'building .*hello-static.*drv' /tmp/native-hello.log && hello`,
+        "m2-hello",
+      ),
+      "M2RC",
+      3600000,
+    );
+    check(m2 === "0", `nixpkgs.native.hello builds, installs, and runs (M2RC=${m2 ?? "timeout"})`);
+  }
 
   // M3: wget itself is native; ABI-identical foundational libraries/build tools
   // are host-crossed seeds. This is the measured choice from the issue's M3
   // fork: reach the real package without rebuilding Perl/OpenSSL first.
-  console.log("  [M3: GNU wget from source …]");
-  const m3 = await run(
-    measured(
-      `nix-env -iA nixpkgs.native.wget > /tmp/native-wget.log 2>&1; ` +
-        `rc=$?; cat /tmp/native-wget.log; [ $rc -eq 0 ] && ` +
-        `grep -q 'building .*wget-static.*drv' /tmp/native-wget.log && wget --version`,
-      "m3-wget",
-    ),
-    "M3RC",
-    10800000,
-  );
-  check(m3 === "0", "nixpkgs.native.wget builds, installs, and runs (M3RC=0)");
+  if (milestone === "all" || milestone === "m3") {
+    console.log("  [M3: GNU wget from source …]");
+    const m3 = await run(
+      measured(
+        `nix-env -iA nixpkgs.native.wget > /tmp/native-wget.log 2>&1; ` +
+          `rc=$?; cat /tmp/native-wget.log; [ $rc -eq 0 ] && ` +
+          `grep -q 'building .*wget-static.*drv' /tmp/native-wget.log && wget --version`,
+        "m3-wget",
+      ),
+      "M3RC",
+      10800000,
+    );
+    check(m3 === "0", `nixpkgs.native.wget builds, installs, and runs (M3RC=${m3 ?? "timeout"})`);
+  }
 
   console.log(`\n[native-nixpkgs-e2e] ${pass ? "PASS" : "FAIL"}`);
 } finally {
+  clearInterval(hostMemoryMetric);
   if (!pass) {
     const oom = describeGuestOom(s.snapshot());
     if (oom) console.log(`\n[native-nixpkgs-e2e] ${oom}`);

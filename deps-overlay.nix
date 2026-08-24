@@ -106,6 +106,27 @@ let
       # fixing this attr propagates into every clang-wrapper that references it.
       compiler-rt-no-libc = fixCR lprev.compiler-rt-no-libc;
     });
+
+  # clang's wasm ABI canonicalizes main(int, char **) to __main_argc_argv, the
+  # symbol musl's weak startup bridge calls. Bash defaults to the non-portable
+  # three-argument main(argc, argv, envp), which remains a literal `main` and
+  # leaves the bridge's __main_argc_argv reference unresolved. Bash already has
+  # this portability switch for targets without the third main argument.
+  fixBashMain = p: p.overrideAttrs (o: {
+    env = (o.env or { }) // {
+      NIX_CFLAGS_COMPILE = (o.env.NIX_CFLAGS_COMPILE or "") + " -DNO_MAIN_ENV_ARG";
+    };
+    # Bash only enables NO_MAIN_ENV_ARG for OpenNT/MVS upstream, so its local
+    # `env = environ` declaration is guarded by those platform macros rather
+    # than by the capability macro itself. Make the existing path reusable.
+    postPatch = (o.postPatch or "") + ''
+      substituteInPlace shell.c \
+        --replace-fail '#if defined (__OPENNT) || defined (__MVS__)' \
+                       '#if defined (__OPENNT) || defined (__MVS__) || defined (NO_MAIN_ENV_ARG)' \
+        --replace-fail '#endif /* __OPENNT || __MVS__ */' \
+                       '#endif /* __OPENNT || __MVS__ || NO_MAIN_ENV_ARG */'
+    '';
+  });
 in
 {
   # --- runtimeShell leak: use the native shell, not a cross (wasm) bash -------
@@ -116,9 +137,13 @@ in
   # or aren't used by nix.wasm at all). Point the shell machinery at the native
   # bash. A guest shell, when needed, is a separate user package.
   bash =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash else prev.bash;
+    if isWasmCross && !exposeGuestBuildTools
+    then final.buildPackages.bash
+    else whenWasm fixBashMain prev.bash;
   bashNonInteractive =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive else prev.bashNonInteractive;
+    if isWasmCross && !exposeGuestBuildTools
+    then final.buildPackages.bashNonInteractive
+    else whenWasm fixBashMain prev.bashNonInteractive;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.

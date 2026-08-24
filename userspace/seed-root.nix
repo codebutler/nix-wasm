@@ -24,6 +24,11 @@ pkgs.runCommand "wasm-seed-root"
       cp -a "$p" $out/nix/store/
     done < ${closure}/store-paths
 
+    # Make the copied closure valid in Nix's SQLite database on first boot.
+    # bootstrap.nix consumes this before any guest Nix operation, preventing
+    # substitutions from trying to replace an unregistered lower-layer path.
+    cp ${closure}/registration $out/nix/var/nix/seed-registration
+
     ln -s ${toplevel} $out/nix/var/nix/profiles/system-1-link
     ln -s system-1-link $out/nix/var/nix/profiles/system
 

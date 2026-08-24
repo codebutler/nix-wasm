@@ -1,0 +1,30 @@
+diff --git a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+index 2de2a5f..94544f7 100644
+--- a/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
++++ b/ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm
+@@ -72,3 +72,10 @@ static PerlInterpreter *my_perl;
++/* clang's WebAssembly entry ABI lowers this portable form to
++ * __main_argc_argv, which is the symbol provided to musl's crt bridge. */
++#ifdef __wasm__
++#  ifndef NO_ENV_ARRAY_IN_MAIN
++#    define NO_ENV_ARRAY_IN_MAIN
++#  endif
++#endif
+ #ifdef NO_ENV_ARRAY_IN_MAIN
+ extern char **environ;
+ int
+diff --git a/miniperlmain.c b/miniperlmain.c
+index 54a43e5..ddfa60c 100644
+--- a/miniperlmain.c
++++ b/miniperlmain.c
+@@ -52,3 +52,10 @@ static PerlInterpreter *my_perl;
++/* clang's WebAssembly entry ABI lowers this portable form to
++ * __main_argc_argv, which is the symbol provided to musl's crt bridge. */
++#ifdef __wasm__
++#  ifndef NO_ENV_ARRAY_IN_MAIN
++#    define NO_ENV_ARRAY_IN_MAIN
++#  endif
++#endif
+ #ifdef NO_ENV_ARRAY_IN_MAIN
+ extern char **environ;
+ int
