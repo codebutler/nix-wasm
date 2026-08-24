@@ -112,7 +112,9 @@
       wasmNativeSeedBash = wasmNativeSeedCross.bashNonInteractive;
       wasmNativeSeedMake = wasmNativeSeedCross.gnumake;
       wasmNativeSeedTools = [
+        wasmNativeSeedCross.coreutils
         wasmNativeSeedCross.findutils
+        wasmNativeSeedCross.gnupatch
         wasmNativeSeedCross.gnutar
         wasmNativeSeedCross.lzip
       ];

@@ -25,8 +25,8 @@ let
   # Re-tie the already-working generic cross stdenv around a native wasm platform
   # and replace every executable in its bootstrap path with a guest module. GNU
   # Bash is mandatory because generic/setup.sh is Bash. Seed tools provide the
-  # GNU find/tar behavior setup.sh and source unpackers require; BusyBox supplies
-  # the remaining coreutils/sed/grep/awk/compression suite, seedMake is
+  # GNU coreutils/find/patch/tar behavior setup.sh and source builders require;
+  # BusyBox supplies the remaining sed/grep/awk/compression suite, seedMake is
   # cross-built GNU Make, and nativeCC wraps guest clang + LLVM bintools.
   seedStdenv = cross.stdenv.override {
     name = "wasm-native-stdenv";

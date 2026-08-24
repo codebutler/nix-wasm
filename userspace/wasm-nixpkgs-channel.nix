@@ -95,7 +95,13 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
     };
     seedBash = seedCross.bashNonInteractive;
     seedMake = seedCross.gnumake;
-    seedTools = [ seedCross.findutils seedCross.gnutar seedCross.lzip ];
+    seedTools = [
+      seedCross.coreutils
+      seedCross.findutils
+      seedCross.gnupatch
+      seedCross.gnutar
+      seedCross.lzip
+    ];
     seedPackages = {
       inherit (seedCross)
         gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
