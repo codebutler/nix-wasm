@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import {
   ByteSink,
   NR_MMU_FAULT,
+  SOFTMMU_HELPER_NOINLINE_PADDING_BYTES,
   concatBytes,
   genFaultBridge,
   instrument,
@@ -23,6 +24,43 @@ const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));
 
 const PAGE = 4096;
+
+function readULEB(bytes, offset) {
+  let value = 0;
+  let shift = 0;
+  let i = offset;
+  for (;;) {
+    const byte = bytes[i++];
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [value >>> 0, i];
+    shift += 7;
+  }
+}
+
+function codeBodySizes(bytes) {
+  let i = 8;
+  while (i < bytes.length) {
+    const id = bytes[i++];
+    let sectionSize;
+    [sectionSize, i] = readULEB(bytes, i);
+    const end = i + sectionSize;
+    if (id !== 10) {
+      i = end;
+      continue;
+    }
+    let count;
+    [count, i] = readULEB(bytes, i);
+    const sizes = [];
+    for (let f = 0; f < count; f++) {
+      let bodySize;
+      [bodySize, i] = readULEB(bytes, i);
+      sizes.push(bodySize);
+      i += bodySize;
+    }
+    return sizes;
+  }
+  throw new Error("test fixture has no code section");
+}
 
 // Instantiate a (possibly instrumented) prog module. For the instrumented one,
 // lay down an identity (or custom) single-level page table and point pt_base at
@@ -330,6 +368,18 @@ describe("helper-call translate under stress (#164 segfault triage)", () => {
     const direct = instrument(prog, { exportControls: true, forceHelper: true });
     const fallback = instrument(prog, { exportControls: true, inlineLimit: 0 });
     expect(Buffer.from(direct).equals(Buffer.from(fallback))).toBe(true);
+  });
+
+  test("appended helpers stay above the optimizing compiler's inlining budget", () => {
+    const direct = instrument(prog, { exportControls: true, forceHelper: true });
+    // Unchecked prog.wasm appends translate, memcpy, memfill, load-bytes, and
+    // store-bytes. Keeping all five large is intentional: a caller can inline
+    // a byte helper and then inline translate through it otherwise.
+    const helperSizes = codeBodySizes(direct).slice(-5);
+    expect(helperSizes).toHaveLength(5);
+    for (const size of helperSizes) {
+      expect(size).toBeGreaterThan(SOFTMMU_HELPER_NOINLINE_PADDING_BYTES);
+    }
   });
 
   test("prog.wasm via helper == original (all scalar widths + f64)", () => {
@@ -1042,14 +1092,21 @@ describe("checked (A2 present-check) translate", () => {
     expect(b.calls.some((c) => c.ea === W && c.kind === 1)).toBe(true);
   });
 
-  test("helper-call fallback yields a smaller module than the inline path (#164)", () => {
-    // The point of the fallback: the helper-call body is materially smaller than
-    // the inline walk, which is what keeps an over-limit function under V8's
-    // ceiling. A tiny inlineLimit forces the fallback; the inline build (huge
-    // limit) is the baseline. Same fixture, so any size delta is the emit mode.
+  test("helper-call fallback yields smaller application bodies than the inline path (#164)", () => {
+    // The point of the fallback: the helper-call APPLICATION bodies are smaller
+    // than the inline walk, which keeps an over-limit function under V8's
+    // ceiling. Compare those bodies directly: the whole bounded module also
+    // carries deliberate non-inline padding on its shared helpers, so total
+    // module length is no longer the relevant invariant for this tiny fixture.
     const inline = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1e9 });
     const viaHelper = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
-    expect(viaHelper.length).toBeLessThan(inline.length);
+    const inlineApplicationBytes = codeBodySizes(inline)
+      .slice(0, 3)
+      .reduce((sum, size) => sum + size, 0);
+    const helperApplicationBytes = codeBodySizes(viaHelper)
+      .slice(0, 3)
+      .reduce((sum, size) => sum + size, 0);
+    expect(helperApplicationBytes).toBeLessThan(inlineApplicationBytes);
   });
 
   test("helper-call fallback: store fault (kind=1) + COW RO-page semantics (#164)", () => {
