@@ -104,7 +104,7 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
     ];
     seedPackages = {
       inherit (seedCross)
-        gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
+        coreutils gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
         pcre2 perl zlib;
       pkg-config = seedCross.pkg-config-unwrapped;
     };

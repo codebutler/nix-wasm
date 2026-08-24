@@ -120,6 +120,7 @@
       ];
       wasmNativeSeedPackages = {
         inherit (wasmNativeSeedCross)
+          coreutils
           gettext
           libiconv
           libidn2

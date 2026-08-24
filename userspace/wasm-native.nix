@@ -82,6 +82,9 @@ let
       # Cross outputs carry __spliced alternatives for their original host
       # evaluation. If retained, nativeBuildInputs silently select the host ELF
       # alternative. Pin every splice role back to the guest-target derivation.
+      # Foundational seed tools such as coreutils are also exposed here so hooks
+      # can reuse the same guest module instead of recursively rebuilding the
+      # bootstrap toolchain inside the memory-constrained guest.
       unsplice = p:
         let
           guest = removeAttrs p [ "__spliced" ] // {
