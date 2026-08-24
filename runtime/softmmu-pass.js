@@ -2060,6 +2060,7 @@ function moduleName(bytes) {
  * @param {{
  *   exportControls?: boolean,
  *   checked?: boolean,
+ *   forceHelper?: boolean,
  *   inlineLimit?: number,
  *   faultTableIndex?: number,
  * }} [opts]
@@ -2070,6 +2071,9 @@ function moduleName(bytes) {
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
  *   fallback on small functions.
+ *   `forceHelper`: emit every function through the helper-call path directly,
+ *   without first materialising its inline form. This bounds transformation
+ *   and V8 code memory for very large executables such as clang and wasm-ld.
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -2257,9 +2261,22 @@ export function instrument(bytes, opts = {}) {
       // whole-body copy to measure from (see the ByteSink doc comment).
       const sizeOff = sink.reserve(5);
       const bodyStart = sink.len;
-      rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      if (opts.forceHelper) {
+        rewriteFuncBody(
+          body,
+          numParams,
+          ptBaseGlobal,
+          bulkFns,
+          checkedCtx,
+          helperFns,
+          splitFns,
+          sink,
+        );
+      } else {
+        rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      }
       let bodyLen = sink.len - bodyStart;
-      if (bodyLen > inlineLimit) {
+      if (!opts.forceHelper && bodyLen > inlineLimit) {
         // Discard the inline attempt (truncate back to just past the reserved
         // size field) and re-emit via the helper-call translate into the SAME
         // sink at the SAME offset — semantically identical to the old

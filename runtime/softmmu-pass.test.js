@@ -326,6 +326,12 @@ describe("helper-call translate under stress (#164 segfault triage)", () => {
   const atomics = new Uint8Array(readFileSync(new URL("atomics.wasm", FIX)));
   const viaHelper = (bytes) => instrument(bytes, { exportControls: true, inlineLimit: 1 });
 
+  test("forceHelper emits the same module as fallback without the inline attempt", () => {
+    const direct = instrument(prog, { exportControls: true, forceHelper: true });
+    const fallback = instrument(prog, { exportControls: true, inlineLimit: 0 });
+    expect(Buffer.from(direct).equals(Buffer.from(fallback))).toBe(true);
+  });
+
   test("prog.wasm via helper == original (all scalar widths + f64)", () => {
     const orig = boot(prog, {});
     const insn = boot(viaHelper(prog), { instrumented: true });
@@ -1006,14 +1012,15 @@ describe("checked (A2 present-check) translate", () => {
     expect(instrument(mod).length).toBeGreaterThan(mod.length);
   });
 
-  test("helper-call fallback (over inlineLimit) still faults + translates correctly (#164)", () => {
+  test("direct helper-call mode still faults + translates correctly (#164)", () => {
     // #164: a function whose inline instrumentation would exceed V8's max
     // function size is re-emitted with a CALL to __mmu_translate_ck instead of
-    // the inline walk. Force that path for EVERY function with inlineLimit:1,
+    // the inline walk. Force that path DIRECTLY for every function, without
+    // first materialising the inline form (the large-executable memory path),
     // then prove the checked semantics are byte-for-byte preserved: a not-
     // present page faults exactly once (right kind), then the access succeeds.
     const V = HEAP + 0x64000;
-    const bytes = instrument(buildCheckedFixture(), { checked: true, inlineLimit: 1 });
+    const bytes = instrument(buildCheckedFixture(), { checked: true, forceHelper: true });
     const b = bootChecked(bytes, V);
     new Uint8Array(b.mem.buffer)[V] = 0x42;
 

@@ -21,7 +21,7 @@ import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/con
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SndVirtioDevice } from "./virtio/snd-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
-import { shouldCacheExecModule } from "./exec-module-cache.js";
+import { shouldCacheExecModule, shouldForceHelperExecModule } from "./exec-module-cache.js";
 
 (function (console) {
   let port = self;
@@ -823,7 +823,17 @@ import { shouldCacheExecModule } from "./exec-module-cache.js";
             table_initial = hit.table_initial;
           } else {
             if (!isInstrumented(bytes)) {
-              bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+              const forceHelper = shouldForceHelperExecModule(bytes.length);
+              if (forceHelper) {
+                console.warn(
+                  `softmmu: ${bytes.length}B executable uses helper-call translation to bound host code memory`,
+                );
+              }
+              bytes = softmmuInstrument(bytes, {
+                checked: true,
+                exportControls: true,
+                forceHelper,
+              });
             }
             table_initial = table_import_initial(bytes);
             user_executable = WebAssembly.compile(bytes);
