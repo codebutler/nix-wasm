@@ -223,7 +223,13 @@ jobs:
             for attempt in 1 2 3; do
               echo "::group::native-nixpkgs-e2e $milestone (attempt $attempt)"
               set +e
-              node demo/node/native-nixpkgs-e2e.mjs "$milestone"
+              # Clang + wasm-ld expand to ~158 MiB after checked-softmmu
+              # instrumentation. Eager Liftoff compilation materializes every
+              # function in both tools and pushes the 32 GiB runner past its
+              # memory ceiling even though these smoke builds execute only a
+              # small fraction of either module. Keep normal hot-function
+              # tiering, but compile cold wasm functions lazily.
+              node --wasm-lazy-compilation demo/node/native-nixpkgs-e2e.mjs "$milestone"
               rc=$?
               set -e
               echo "::endgroup::"
