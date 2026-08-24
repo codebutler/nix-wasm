@@ -31,6 +31,12 @@ EOF
                 llvm-objcopy llvm-strip ar ranlib nm objcopy strip; do
       ln -s ${guestClang}/bin/$tool $out/bin/$tool
     done
+    # clang discovers its implicit config beside argv[0], before resolving the
+    # driver symlink.  Keep the sysroot/link ABI config beside the facade's
+    # advertised clang names too: nixpkgs configure hooks may select `clang`
+    # directly instead of the `cc` wrapper above.
+    ln -s ${guestClang}/bin/clang.cfg $out/bin/clang.cfg
+    ln -s ${guestClang}/bin/clang++.cfg $out/bin/clang++.cfg
     ln -s wasm-ld $out/bin/ld
 
     cat > $out/nix-support/setup-hook <<'EOF'
