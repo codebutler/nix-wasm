@@ -2,6 +2,8 @@ userspace/bootstrap.nix
   s_d4348d5b4c1e44::t_8701caa3ee9715 335-354
 runtime/demo/node/native-nixpkgs-e2e.mjs
   s_d4348d5b4c1e44::t_abfde1eccf36a0 62-65
+userspace/seed-root.nix
+  s_d4348d5b4c1e44::t_3cbbde70701a8b 27-31
 ---
 {
   "schema_version": "authorship/3.0.0",
