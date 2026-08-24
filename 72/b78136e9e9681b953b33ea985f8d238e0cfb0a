@@ -1,0 +1,34 @@
+runtime/softmmu-pass.test.js
+  s_d4348d5b4c1e44::t_1b6ad1b924c6bb 329-334
+  s_d4348d5b4c1e44::t_679db791a10445 1015,1018-1019,1023
+runtime/softmmu-pass.js
+  s_d4348d5b4c1e44::t_3c6e0777edc9c3 2063,2074-2076,2264-2277,2279
+runtime/exec-module-cache.js
+  s_d4348d5b4c1e44::t_317e0b415be33f 7-8,12
+  s_d4348d5b4c1e44::t_bc3cbefb40c603 9-11
+  s_d4348d5b4c1e44::t_3c6e0777edc9c3 14,19-20
+  s_d4348d5b4c1e44::t_cd7aff4228e0aa 21
+  s_d4348d5b4c1e44::t_9fbf74bfdf2bc3 22
+runtime/kernel-worker.js
+  s_d4348d5b4c1e44::t_3c6e0777edc9c3 826-836
+  s_d4348d5b4c1e44::t_cd7aff4228e0aa 24
+runtime/exec-module-cache.test.js
+  s_d4348d5b4c1e44::t_3c6e0777edc9c3 2-7,25-29
+  s_d4348d5b4c1e44::t_08af416dae034f 30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "72b78136e9e9681b953b33ea985f8d238e0cfb0a",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
