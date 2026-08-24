@@ -16,6 +16,15 @@ if (!["all", "m1", "m2", "m3"].includes(milestone)) {
 }
 
 const s = await bootNode({ nix: true });
+const hostMemoryMetric = setInterval(() => {
+  const m = process.memoryUsage();
+  const kib = (bytes) => Math.round(bytes / 1024);
+  console.log(
+    `NATIVE_HOST_METRIC rss_kib=${kib(m.rss)} heap_used_kib=${kib(m.heapUsed)} ` +
+      `external_kib=${kib(m.external)} array_buffers_kib=${kib(m.arrayBuffers)}`,
+  );
+}, 30000);
+hostMemoryMetric.unref();
 let pass = true;
 const check = (ok, label) => {
   console.log(`  ${ok ? "ok" : "FAIL"}  ${label}`);
@@ -132,6 +141,7 @@ try {
 
   console.log(`\n[native-nixpkgs-e2e] ${pass ? "PASS" : "FAIL"}`);
 } finally {
+  clearInterval(hostMemoryMetric);
   if (!pass) {
     const oom = describeGuestOom(s.snapshot());
     if (oom) console.log(`\n[native-nixpkgs-e2e] ${oom}`);

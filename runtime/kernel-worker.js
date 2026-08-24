@@ -21,6 +21,7 @@ import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/con
 import { VsockVirtioDevice } from "./virtio/vsock-device.js";
 import { SndVirtioDevice } from "./virtio/snd-device.js";
 import { SharedQueues } from "./virtio/shared-queues.js";
+import { shouldCacheExecModule } from "./exec-module-cache.js";
 
 (function (console) {
   let port = self;
@@ -137,7 +138,10 @@ import { SharedQueues } from "./virtio/shared-queues.js";
   /// crashes were fixed). WebAssembly.Module is structured-cloneable and clones
   /// share compiled code, so the host holds the canonical cache and each new
   /// worker gets a snapshot; a miss here instruments+compiles locally and posts
-  /// the module back (exec_module_add) for all future workers. Keyed on a
+  /// the module back (exec_module_add) for all future workers. Only expensive
+  /// (>=1 MiB before instrumentation) executables enter the shared cache:
+  /// Autoconf-style one-shot probes are cheap to compile but costly to retain
+  /// in V8 while clang/wasm-ld are resident. Keyed on a
   /// 2xFNV-1a content hash + length of the PRE-instrument bytes (instrumentation
   /// is deterministic, so equal inputs => equal instrumented module).
   let exec_modules = new Map();
@@ -812,7 +816,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
       try {
         if (Number(pt_base || 0) !== 0) {
           const key = exec_hash(bytes);
-          const hit = exec_modules.get(key);
+          const cacheable = shouldCacheExecModule(bytes.length);
+          const hit = cacheable ? exec_modules.get(key) : undefined;
           if (hit) {
             user_executable = Promise.resolve(hit.module);
             table_initial = hit.table_initial;
@@ -823,18 +828,20 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             table_initial = table_import_initial(bytes);
             user_executable = WebAssembly.compile(bytes);
             const ti = table_initial;
-            user_executable.then(
-              (m) => {
-                exec_modules.set(key, { module: m, table_initial: ti });
-                port.postMessage({
-                  method: "exec_module_add",
-                  hash: key,
-                  module: m,
-                  table_initial: ti,
-                });
-              },
-              () => {}, // compile errors surface via the normal await path
-            );
+            if (cacheable) {
+              user_executable.then(
+                (m) => {
+                  exec_modules.set(key, { module: m, table_initial: ti });
+                  port.postMessage({
+                    method: "exec_module_add",
+                    hash: key,
+                    module: m,
+                    table_initial: ti,
+                  });
+                },
+                () => {}, // compile errors surface via the normal await path
+              );
+            }
           }
         } else {
           user_executable = WebAssembly.compile(bytes);

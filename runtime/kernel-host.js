@@ -145,8 +145,10 @@ export const linux = async ({
   /// times, each in a fresh worker — so the boot took minutes with zero reuse.
   /// WebAssembly.Module clones share compiled code, so each new worker gets a
   /// snapshot of this Map in its init message (kernel-worker.js exec_modules)
-  /// and posts back modules it compiles (exec_module_add). Capped FIFO so a
-  /// long session's many distinct binaries can't grow it unboundedly.
+  /// and posts back expensive modules it compiles (exec_module_add). Small,
+  /// one-shot configure probes are not admitted by kernel-worker.js. Capped
+  /// FIFO as a second bound so a long session's large binaries cannot grow it
+  /// unboundedly either.
   const exec_module_cache = new Map();
   const EXEC_MODULE_CACHE_MAX = 48;
 
