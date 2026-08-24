@@ -4,8 +4,16 @@
 // The local CI cache contains only the host-crossed stdenv seeds and source-only
 // inputs. It deliberately does not contain the three outputs built below, so
 // a successful run proves local derivation goals rather than substitution.
+// CI passes one milestone per process so V8 can release the large soft-MMU
+// modules compiled by configure probes before the next package starts.
 // Exit 0 pass / 1 fail / 2 inconclusive (boot panic — retry).
 import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
+
+const milestone = process.argv[2] ?? "all";
+if (!["all", "m1", "m2", "m3"].includes(milestone)) {
+  console.error(`usage: node native-nixpkgs-e2e.mjs [m1|m2|m3]`);
+  process.exit(1);
+}
 
 const s = await bootNode({ nix: true });
 let pass = true;
@@ -72,49 +80,55 @@ try {
 
   // M1: no source or compiler is needed; this exercises genericBuild/setup.sh
   // under the asyncified GNU Bash seed and BusyBox initialPath.
-  console.log("  [M1: trivial native stdenv derivation …]");
-  const m1 = await run(
-    measured(
-      `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs; in ` +
-        `p.native.stdenv.mkDerivation { name = "native-stdenv-probe"; dontUnpack = true; ` +
-        `installPhase = "mkdir -p $out; echo NATIVE_STDENV_OK > $out/result"; }' 2>&1`,
-      "m1-stdenv",
-    ),
-    "M1RC",
-    1800000,
-  );
-  check(m1 === "0", `native stdenv.mkDerivation builds in-guest (M1RC=${m1 ?? "timeout"})`);
+  if (milestone === "all" || milestone === "m1") {
+    console.log("  [M1: trivial native stdenv derivation …]");
+    const m1 = await run(
+      measured(
+        `nix-build --no-out-link -E 'let p = import /root/.nix-defexpr/nixpkgs; in ` +
+          `p.native.stdenv.mkDerivation { name = "native-stdenv-probe"; dontUnpack = true; ` +
+          `installPhase = "mkdir -p $out; echo NATIVE_STDENV_OK > $out/result"; }' 2>&1`,
+        "m1-stdenv",
+      ),
+      "M1RC",
+      1800000,
+    );
+    check(m1 === "0", `native stdenv.mkDerivation builds in-guest (M1RC=${m1 ?? "timeout"})`);
+  }
 
   // M2: install through the real nix-env channel surface. The output is absent
   // from the local cache; only its source and bootstrap closure are present.
-  console.log("  [M2: GNU hello from source …]");
-  const m2 = await run(
-    measured(
-      `nix-env -iA nixpkgs.native.hello > /tmp/native-hello.log 2>&1; ` +
-        `rc=$?; cat /tmp/native-hello.log; [ $rc -eq 0 ] && ` +
-        `grep -q 'building .*hello-static.*drv' /tmp/native-hello.log && hello`,
-      "m2-hello",
-    ),
-    "M2RC",
-    3600000,
-  );
-  check(m2 === "0", `nixpkgs.native.hello builds, installs, and runs (M2RC=${m2 ?? "timeout"})`);
+  if (milestone === "all" || milestone === "m2") {
+    console.log("  [M2: GNU hello from source …]");
+    const m2 = await run(
+      measured(
+        `nix-env -iA nixpkgs.native.hello > /tmp/native-hello.log 2>&1; ` +
+          `rc=$?; cat /tmp/native-hello.log; [ $rc -eq 0 ] && ` +
+          `grep -q 'building .*hello-static.*drv' /tmp/native-hello.log && hello`,
+        "m2-hello",
+      ),
+      "M2RC",
+      3600000,
+    );
+    check(m2 === "0", `nixpkgs.native.hello builds, installs, and runs (M2RC=${m2 ?? "timeout"})`);
+  }
 
   // M3: wget itself is native; ABI-identical foundational libraries/build tools
   // are host-crossed seeds. This is the measured choice from the issue's M3
   // fork: reach the real package without rebuilding Perl/OpenSSL first.
-  console.log("  [M3: GNU wget from source …]");
-  const m3 = await run(
-    measured(
-      `nix-env -iA nixpkgs.native.wget > /tmp/native-wget.log 2>&1; ` +
-        `rc=$?; cat /tmp/native-wget.log; [ $rc -eq 0 ] && ` +
-        `grep -q 'building .*wget-static.*drv' /tmp/native-wget.log && wget --version`,
-      "m3-wget",
-    ),
-    "M3RC",
-    10800000,
-  );
-  check(m3 === "0", `nixpkgs.native.wget builds, installs, and runs (M3RC=${m3 ?? "timeout"})`);
+  if (milestone === "all" || milestone === "m3") {
+    console.log("  [M3: GNU wget from source …]");
+    const m3 = await run(
+      measured(
+        `nix-env -iA nixpkgs.native.wget > /tmp/native-wget.log 2>&1; ` +
+          `rc=$?; cat /tmp/native-wget.log; [ $rc -eq 0 ] && ` +
+          `grep -q 'building .*wget-static.*drv' /tmp/native-wget.log && wget --version`,
+        "m3-wget",
+      ),
+      "M3RC",
+      10800000,
+    );
+    check(m3 === "0", `nixpkgs.native.wget builds, installs, and runs (M3RC=${m3 ?? "timeout"})`);
+  }
 
   console.log(`\n[native-nixpkgs-e2e] ${pass ? "PASS" : "FAIL"}`);
 } finally {

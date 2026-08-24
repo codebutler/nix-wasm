@@ -53,8 +53,13 @@ let
       export SHELL=${seedBash}/bin/bash
       # Native autotools normally relies on config.guess because build == host.
       # uname reports the guest machine as "wasm", which upstream config.guess
-      # cannot identify, so retain the explicit flags used by the cross seed.
-      export configureFlags="--build=${wasmPlatform.config} --host=${wasmPlatform.config} ''${configureFlags-}"
+      # cannot identify. Append distinct argv entries: configureFlags can be a
+      # Bash array, and flattening it into a scalar makes config.sub consume the
+      # remaining configure options as part of the --build value.
+      configureFlagsArray+=(
+        "--build=${wasmPlatform.config}"
+        "--host=${wasmPlatform.config}"
+      )
       export AR=ar RANLIB=ranlib NM=nm STRIP=strip OBJCOPY=objcopy LD=wasm-ld
     '';
   };

@@ -218,18 +218,21 @@ jobs:
         env:
           LINUX_WASM_ARTIFACTS: file://${{ github.workspace }}/.artifacts-native-build/
         run: |
-          for attempt in 1 2 3; do
-            echo "::group::native-nixpkgs-e2e (attempt $attempt)"
-            set +e
-            node demo/node/native-nixpkgs-e2e.mjs
-            rc=$?
-            set -e
-            echo "::endgroup::"
-            if [ "$rc" -eq 0 ]; then exit 0; fi
-            if [ "$rc" -ne 2 ]; then exit "$rc"; fi
-            echo "boot panic before build — retrying"
+          for milestone in m1 m2 m3; do
+            rc=2
+            for attempt in 1 2 3; do
+              echo "::group::native-nixpkgs-e2e $milestone (attempt $attempt)"
+              set +e
+              node demo/node/native-nixpkgs-e2e.mjs "$milestone"
+              rc=$?
+              set -e
+              echo "::endgroup::"
+              if [ "$rc" -eq 0 ]; then break; fi
+              if [ "$rc" -ne 2 ]; then exit "$rc"; fi
+              echo "boot panic before $milestone — retrying"
+            done
+            if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           done
-          exit 2
 
   # --- the heavy from-source LLVM builds, one runner each, pushed to Cachix ----
   toolchain:
