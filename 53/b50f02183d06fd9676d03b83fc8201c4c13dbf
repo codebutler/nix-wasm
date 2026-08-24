@@ -1,0 +1,23 @@
+userspace/wasm-native.nix
+  s_d4348d5b4c1e44::t_c4a4c0a6b8a0bf 28-29
+userspace/wasm-nixpkgs-channel.nix
+  s_d4348d5b4c1e44::t_c4a4c0a6b8a0bf 98-104
+flake.nix
+  s_d4348d5b4c1e44::t_c4a4c0a6b8a0bf 115,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "53b50f02183d06fd9676d03b83fc8201c4c13dbf",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

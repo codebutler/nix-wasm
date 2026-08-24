@@ -1,0 +1,27 @@
+userspace/wasm-nixpkgs-channel.nix
+  s_d4348d5b4c1e44::t_d08ef9c28d1589 98,121
+toolchain/wasm-native-seed-overlay.nix
+  s_d4348d5b4c1e44::t_d08ef9c28d1589 94,96
+userspace/bootstrap.nix
+  s_d4348d5b4c1e44::t_d08ef9c28d1589 39-44
+flake.nix
+  s_d4348d5b4c1e44::t_d08ef9c28d1589 114-118,148,1054
+userspace/wasm-native.nix
+  s_d4348d5b4c1e44::t_d08ef9c28d1589 11,27-30,37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "6e0af346e6a1ede1ed6d926d4397d9980a7d67cc",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
