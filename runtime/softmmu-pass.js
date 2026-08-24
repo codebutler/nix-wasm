@@ -244,13 +244,13 @@ export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unis
 // 32-GiB host is OOM-killed even though their rewritten wire modules are small.
 // Keep each appended helper above the engine's inlining-size budget with wasm
 // `nop`s. NOPs preserve the operand stack and compile to no machine operation;
-// they change only the helper's wire size used by the inlining heuristic. V8
-// also grants a caller a proportional growth budget (about 10% of its wire
-// size). One MiB exceeds that allowance even for a function at V8's ~7.65-MiB
-// maximum, so no helper-path caller can absorb one helper. The padding is added
-// only when a module actually uses the bounded helper path; ordinary inline
-// modules and one-shot configure probes do not grow.
-export const SOFTMMU_HELPER_NOINLINE_PADDING_BYTES = 1024 * 1024;
+// they change only the helper's wire size used by the inlining heuristic. V8's
+// hard `--wasm-inlining-max-size` default is 500 wire bytes; 4 KiB leaves ample
+// headroom without making TurboFan process megabytes of NOPs when the hot helper
+// itself tiers up. The padding is added only when a module actually uses the
+// bounded helper path; ordinary inline modules and one-shot configure probes do
+// not grow.
+export const SOFTMMU_HELPER_NOINLINE_PADDING_BYTES = 4 * 1024;
 
 /**
  * Build the tiny wasm function installed in a process table for checked side
