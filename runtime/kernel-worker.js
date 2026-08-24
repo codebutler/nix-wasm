@@ -1569,6 +1569,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             __lsan_disable: () => {},
             __lsan_enable: () => {},
             __lsan_ignore_object: () => {},
+
+            // GNU gnulib's threadlib probe links and RUNS a module containing
+            // `#pragma weak fputs` followed by `fputs == NULL`. wasm-ld's
+            // dylink shape emits both GOT.func.fputs (resolved to zero by the
+            // Proxy below, which is the value the probe tests) and an env.fputs
+            // callable import even though no call is reachable. Supply only the
+            // callable required for instantiation. If a malformed module ever
+            // calls this unresolved weak symbol, fail loudly instead of hiding
+            // a real underlink behind a host-side stdio implementation.
+            fputs: () => {
+              throw new WebAssembly.RuntimeError("unresolved weak import fputs called");
+            },
           },
 
           // GOT.func / GOT.mem — wasm-ld emits a `GOT.func.<sym>` (or
