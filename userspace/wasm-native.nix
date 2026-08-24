@@ -33,11 +33,6 @@ let
     buildPlatform = wasmPlatform;
     hostPlatform = wasmPlatform;
     targetPlatform = wasmPlatform;
-    # Native autotools normally relies on config.guess because build == host.
-    # uname reports the guest machine as "wasm", which upstream config.guess
-    # cannot identify, so retain the explicit --build/--host flags that made
-    # these same packages work in the host-crossed seed set.
-    config = cross.config // { configurePlatformsByDefault = true; };
     shell = "${seedBash}/bin/bash";
     initialPath = seedTools ++ [ bootstrapBusybox seedMake seedBash nativeCC ];
     cc = nativeCC;
@@ -56,6 +51,10 @@ let
       export NIX_NO_SELF_RPATH=1
       export CONFIG_SHELL=${seedBash}/bin/bash
       export SHELL=${seedBash}/bin/bash
+      # Native autotools normally relies on config.guess because build == host.
+      # uname reports the guest machine as "wasm", which upstream config.guess
+      # cannot identify, so retain the explicit flags used by the cross seed.
+      export configureFlags="--build=${wasmPlatform.config} --host=${wasmPlatform.config} ''${configureFlags-}"
       export AR=ar RANLIB=ranlib NM=nm STRIP=strip OBJCOPY=objcopy LD=wasm-ld
     '';
   };
