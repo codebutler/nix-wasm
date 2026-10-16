@@ -102,6 +102,7 @@ export class WlDevice extends VirtioWasmDevice {
    *   sendOut: (clientId: number, data: Uint8Array, fds: (Uint8Array | { pipe: number })[]) => void,
    *   onPipeData?: (pipe: number, data: Uint8Array) => void,
    *   onPipeClose?: (pipe: number) => void,
+   *   onGuestPipe?: (pipe: number, open: boolean) => void,
    * }} [opts.waylandBridge]
    *   Phase 4f bridge hook. When present, a VFD_SEND's wayland bytes are routed
    *   OUT to the host (which feeds the main-thread Greenfield compositor) instead
@@ -122,6 +123,10 @@ export class WlDevice extends VirtioWasmDevice {
     // vq_handle_new requires the host bit, the guest allocates its own ids low.
     this._nextHostVfdId = 1;
     this.contexts = new Map(); // vfd_id -> { type, server }
+    // Host side: the guest pipes that are open now. A guest pipe's id is the
+    // guest's and is reused once closed, so the host writes only into a pipe
+    // it knows is open (see guestPipe).
+    this._guestPipes = new Set();
     this._bridge = opts.waylandBridge || null;
     // Phase 2 2c: log shm region checksums + wire opcodes to prove the pixel
     // path. Off by default; opt in via the bridge for a debug session.
@@ -279,18 +284,49 @@ export class WlDevice extends VirtioWasmDevice {
    *  VIRTWL_IOCTL_NEW_PIPE_READ and passed in a SEND, e.g. the fd of
    *  wl_data_offer.receive). The guest reads them as a byte stream. */
   pipeWrite(vfdId, data) {
+    const id = vfdId >>> 0;
+    if (!this._guestPipes.has(id)) {
+      this.log(`[virtio-wl] pipe write to closed guest pipe ${id} dropped`);
+      return;
+    }
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    if (bytes.length) this._queueIn(vfdId >>> 0, bytes);
+    if (bytes.length) this._queueIn(id, bytes);
     this._flushPendingIn();
+  }
+
+  /** Public (host side): a guest pipe opened or closed (the worker reports
+   *  both). On close, anything still queued for it is dropped: once the guest
+   *  reuses the id, those bytes would land in another vfd. */
+  guestPipe(vfdId, open) {
+    const id = vfdId >>> 0;
+    if (open) {
+      this._guestPipes.add(id);
+      return;
+    }
+    this._guestPipes.delete(id);
+    this._pendingIn = this._pendingIn.filter((entry) =>
+      entry.raw ? this._rawVfdId(entry.raw) !== id : entry.vfdId !== id,
+    );
+  }
+
+  /** The vfd a pre-built RECV or HUP addresses (null for other messages). */
+  _rawVfdId(msg) {
+    const dv = new DataView(msg.buffer, msg.byteOffset, msg.byteLength);
+    const type = dv.getUint32(0, true);
+    return type === VIRTIO_WL_CMD_VFD_RECV || type === VIRTIO_WL_CMD_VFD_HUP
+      ? dv.getUint32(8, true)
+      : null;
   }
 
   /** Public: hang up a guest-created pipe vfd: once the guest has read what
    *  was written, its read() returns 0 (end of file). */
   pipeClose(vfdId) {
+    const id = vfdId >>> 0;
+    if (!this._guestPipes.delete(id)) return;
     const b = new Uint8Array(12);
     const dv = new DataView(b.buffer);
     dv.setUint32(0, VIRTIO_WL_CMD_VFD_HUP, true);
-    dv.setUint32(8, vfdId >>> 0, true);
+    dv.setUint32(8, id, true);
     this._queueRaw(b);
     this._flushPendingIn();
   }
@@ -578,6 +614,7 @@ export class WlDevice extends VirtioWasmDevice {
             ? asked & (VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_WRITE)
             : VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ;
         this.contexts.set(vfdId, { type, flags });
+        if (type === VIRTIO_WL_CMD_VFD_NEW_PIPE) this._bridge?.onGuestPipe?.(vfdId, true);
         this.log(`[virtio-wl] NEW (type=0x${type.toString(16)}) vfd_id=${vfdId} -> RESP_VFD_NEW`);
         return {
           resp: this._vfdNew(vfdId, /*size*/ 0, /*pfn*/ 0n, flags),
@@ -616,6 +653,8 @@ export class WlDevice extends VirtioWasmDevice {
         ) {
           this._bridge?.onClose?.(vfdId);
         }
+        if (closing && closing.type === VIRTIO_WL_CMD_VFD_NEW_PIPE)
+          this._bridge?.onGuestPipe?.(vfdId, false);
         // The guest finished writing into a host pipe: the host's reader ends.
         const pipe = hostPipeOf(vfdId);
         if (pipe !== null) this._bridge?.onPipeClose?.(pipe);

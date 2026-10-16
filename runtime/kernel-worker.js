@@ -545,6 +545,9 @@ import { SharedQueues } from "./virtio/shared-queues.js";
             ),
           onPipeClose: (pipe) =>
             port.postMessage({ method: "wayland_pipe_close", dev: id, pipe: pipe >>> 0 }),
+          // A guest pipe opened or closed: the host writes only into open ones.
+          onGuestPipe: (pipe, open) =>
+            port.postMessage({ method: "wayland_guest_pipe", dev: id, pipe: pipe >>> 0, open }),
         };
         d = new WlDevice(common);
         // Wayland (idle wake): hand the main thread the address of raised_irqs[0]

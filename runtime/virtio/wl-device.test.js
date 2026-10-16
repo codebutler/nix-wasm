@@ -285,16 +285,41 @@ function buildNewPipe(vfdId, flags) {
 
 test("a guest pipe keeps its direction and crosses in a SEND as { pipe }", () => {
   const out = [];
-  const dev = makeDevice({ waylandBridge: { sendOut: (id, _data, fds) => out.push({ id, fds }) } });
+  const pipes = [];
+  const dev = makeDevice({
+    waylandBridge: {
+      sendOut: (id, _data, fds) => out.push({ id, fds }),
+      onGuestPipe: (pipe, open) => pipes.push([pipe, open]),
+    },
+  });
   const { resp } = dev._handle(buildNewPipe(5, FLAG_READ));
   expect(word(resp, 0)).toBe(RESP_VFD_NEW);
   expect(word(resp, 12)).toBe(FLAG_READ);
   dev._handle(buildSend(3, new Uint8Array(8), [5])); // wl_data_offer.receive on ctx 3
   expect(out).toEqual([{ id: 3, fds: [{ pipe: 5 }] }]);
+  dev._handle(buildVfdCmd(VFD_CLOSE, 5));
+  expect(pipes).toEqual([
+    [5, true],
+    [5, false],
+  ]);
+});
+
+test("nothing reaches a guest pipe id once that pipe has closed", () => {
+  // The guest reuses a closed vfd's id (a new ctx may get it), so a late
+  // write, or one still queued at the close, must never be delivered.
+  const dev = makeDevice({ waylandBridge: { sendOut() {} } });
+  dev.pipeWrite(5, new Uint8Array([1])); // never opened
+  dev.guestPipe(5, true);
+  dev.pipeWrite(5, new Uint8Array([2])); // queued: no IN vring here
+  dev.guestPipe(5, false);
+  dev.pipeWrite(5, new Uint8Array([3]));
+  dev.pipeClose(5);
+  expect(dev._pendingIn).toEqual([]);
 });
 
 test("the host writes into a guest pipe, then hangs it up", () => {
   const dev = makeDevice({ waylandBridge: { sendOut() {} } });
+  dev.guestPipe(5, true);
   dev.pipeWrite(5, new TextEncoder().encode("hello"));
   dev.pipeClose(5);
   const [recv, hup] = queued(dev);

@@ -602,6 +602,10 @@ export const linux = async ({
         ).catch((e) => log("[wayland] onPipeData rejected: " + (e && e.stack ? e.stack : e)));
       }
     },
+    // A guest pipe opened or closed (ordered with the SENDs that carry it).
+    wayland_guest_pipe: (message) => {
+      hostWl()?.guestPipe(message.pipe >>> 0, !!message.open);
+    },
     wayland_pipe_close: (message) => {
       if (wayland && typeof wayland.onPipeClose === "function") {
         Promise.resolve(wayland.onPipeClose(message.pipe >>> 0)).catch((e) =>
