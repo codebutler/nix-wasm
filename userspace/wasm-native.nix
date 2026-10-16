@@ -8,6 +8,7 @@
   seedMake,
   bootstrapBusybox,
   nativeCC,
+  seedTools ? [ ],
   seedPackages ? { },
   overlays ? [ ],
 }:
@@ -23,16 +24,17 @@ let
 
   # Re-tie the already-working generic cross stdenv around a native wasm platform
   # and replace every executable in its bootstrap path with a guest module. GNU
-  # Bash is mandatory because generic/setup.sh is Bash; BusyBox supplies the
-  # coreutils/find/sed/grep/awk/tar/compression suite, seedMake is cross-built GNU
-  # Make, and nativeCC wraps guest clang + LLVM bintools.
+  # Bash is mandatory because generic/setup.sh is Bash. Seed tools provide the
+  # GNU coreutils/find/patch/tar behavior setup.sh and source builders require;
+  # BusyBox supplies the remaining sed/grep/awk/compression suite, seedMake is
+  # cross-built GNU Make, and nativeCC wraps guest clang + LLVM bintools.
   seedStdenv = cross.stdenv.override {
     name = "wasm-native-stdenv";
     buildPlatform = wasmPlatform;
     hostPlatform = wasmPlatform;
     targetPlatform = wasmPlatform;
     shell = "${seedBash}/bin/bash";
-    initialPath = [ bootstrapBusybox seedMake seedBash nativeCC ];
+    initialPath = seedTools ++ [ bootstrapBusybox seedMake seedBash nativeCC ];
     cc = nativeCC;
     # The cross stdenv's final stage carries host patchelf/autotools hooks and a
     # disallowed reference to its old bootstrap-tools closure. Neither belongs
@@ -49,6 +51,15 @@ let
       export NIX_NO_SELF_RPATH=1
       export CONFIG_SHELL=${seedBash}/bin/bash
       export SHELL=${seedBash}/bin/bash
+      # Native autotools normally relies on config.guess because build == host.
+      # uname reports the guest machine as "wasm", which upstream config.guess
+      # cannot identify. Append distinct argv entries: configureFlags can be a
+      # Bash array, and flattening it into a scalar makes config.sub consume the
+      # remaining configure options as part of the --build value.
+      configureFlagsArray+=(
+        "--build=${wasmPlatform.config}"
+        "--host=${wasmPlatform.config}"
+      )
       export AR=ar RANLIB=ranlib NM=nm STRIP=strip OBJCOPY=objcopy LD=wasm-ld
     '';
   };
@@ -76,6 +87,9 @@ let
       # Cross outputs carry __spliced alternatives for their original host
       # evaluation. If retained, nativeBuildInputs silently select the host ELF
       # alternative. Pin every splice role back to the guest-target derivation.
+      # Foundational seed tools such as coreutils are also exposed here so hooks
+      # can reuse the same guest module instead of recursively rebuilding the
+      # bootstrap toolchain inside the memory-constrained guest.
       unsplice = p:
         let
           guest = removeAttrs p [ "__spliced" ] // {

@@ -5,7 +5,7 @@ Subject: [PATCH] wasm: real fork() over the asyncify double-return seam (musl-fo
 Phase 2 (musl-fork variant only — canonical musl is unchanged). The NOMMU wasm
 port cannot fork a running instance via SYS_clone, so fork() no longer issues the
 clone syscall. Instead _Fork() arms a {cur,end} asyncify control buffer over a
-static 16 KiB stack-image region and calls capture_stack(), a host import that
+static 1 MiB stack-image region and calls capture_stack(), a host import that
 unwinds this instance's call stack to the runtime; the runtime duplicates the
 address space + drives the kernel clone (wasm_fork_current) and REWINDS both this
 instance and the child, so capture_stack() returns the child pid in the parent
@@ -19,6 +19,12 @@ the fork call graph; the generic typed-syscall path stays asyncify-free, so
 posix_spawn / vfork+exec (clone-with-fn) pay no asyncify cost. The control buffer
 + stack region live in BSS so they ride along in the runtime's verbatim memory
 copy and the child rewinds the identical image.
+
+The original 16 KiB region covered focused fork probes, but whole-module
+Asyncify on Bash serializes substantially more locals. It overran into adjacent
+BSS and made native Nix builders die with SIGSEGV on their first external
+command. Reserve 1 MiB; it adds no file bytes, and COW keeps untouched pages
+cheap.
 
 Contract: docs/superpowers/specs/2026-06-20-fork-host-abi-v3.md.
 
@@ -100,13 +106,13 @@ index ac59b14..2338318 100644
 + * REWINDS both this instance and the child so capture_stack() returns the child
 + * pid here and 0 in the child. capture_stack is the sole asyncify-imports unwind
 + * point (the generic syscall path stays asyncify-free). The control buffer is a
-+ * {cur,end} cursor over a static 16 KiB stack-image region; both live in BSS, so
-+ * they ride along in the runtime's verbatim memory copy and the child rewinds
++ * {cur,end} cursor over a static 1 MiB stack-image region; both live in BSS and
++ * ride along in the runtime's verbatim memory copy so the child rewinds
 + * the identical image. Contract: docs/.../2026-06-20-fork-host-abi-v3.md.
 + */
 +extern int capture_stack(void *ctl);
 +static struct { unsigned cur, end; } __wasm_fork_ctl;
-+static char __wasm_fork_stack[16384] __attribute__((aligned(16)));
++static char __wasm_fork_stack[1024 * 1024] __attribute__((aligned(16)));
 
 -void __post_Fork(int ret)
 -{

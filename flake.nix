@@ -104,12 +104,23 @@
             muslWasm = musl;
             exposeGuestBuildTools = true;
           })
+          (import ./toolchain/wasm-native-seed-overlay.nix {
+            inherit forkStdenv;
+          })
         ];
       };
-      wasmNativeSeedBash = forkStdenv.enableForkFor wasmNativeSeedCross.bashNonInteractive;
-      wasmNativeSeedMake = forkStdenv.enableForkFor wasmNativeSeedCross.gnumake;
+      wasmNativeSeedBash = wasmNativeSeedCross.bashNonInteractive;
+      wasmNativeSeedMake = wasmNativeSeedCross.gnumake;
+      wasmNativeSeedTools = [
+        wasmNativeSeedCross.coreutils
+        wasmNativeSeedCross.findutils
+        wasmNativeSeedCross.gnupatch
+        wasmNativeSeedCross.gnutar
+        wasmNativeSeedCross.lzip
+      ];
       wasmNativeSeedPackages = {
         inherit (wasmNativeSeedCross)
+          coreutils
           gettext
           libiconv
           libidn2
@@ -137,6 +148,7 @@
         seedMake = wasmNativeSeedMake;
         bootstrapBusybox = wasmBusyboxFork;
         nativeCC = wasmNativeCC;
+        seedTools = wasmNativeSeedTools;
         seedPackages = wasmNativeSeedPackages;
         overlays = [
           (import ./deps-overlay.nix {
@@ -1042,7 +1054,7 @@
         libffiTrampolines
         cross.curlMinimal
         cross.cacert
-      ] ++ builtins.attrValues wasmNativeSeedPackages;
+      ] ++ wasmNativeSeedTools ++ builtins.attrValues wasmNativeSeedPackages;
       wasmNativeSeedPaths = builtins.concatMap allOutputs wasmNativeSeedDrvs;
       wasmBinaryCache = import ./userspace/binary-cache.nix {
         inherit pkgs;

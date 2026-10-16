@@ -1,0 +1,17 @@
+diff --git a/cnf/configure_type.sh b/cnf/configure_type.sh
+index 321d8d7..d28bc62 100644
+--- a/cnf/configure_type.sh
++++ b/cnf/configure_type.sh
+@@ -47 +47,11 @@
+-	result=`grep foo try.out | sed -r -e 's/.*: [0-9]+ +//' -e 's/ .*//' -e 's/^0+//g'`
++	# llvm-readelf prints WebAssembly symbols as structured blocks rather
++	# than the GNU ELF table parsed below.  Recover the size from the block
++	# for foo; keep the existing parser authoritative for every ELF target.
++	if grep -q '^Format: WASM$' try.out; then
++		result_hex=`sed -n '/Name: foo/,/}/s/^[[:space:]]*Size: 0x//p' try.out`
++		if [ -n "$result_hex" ]; then
++			result=`printf '%d' "0x$result_hex"`
++		fi
++	else
++		result=`grep foo try.out | sed -r -e 's/.*: [0-9]+ +//' -e 's/ .*//' -e 's/^0+//g'`
++	fi

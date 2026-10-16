@@ -1,0 +1,12 @@
+diff --git a/ext/re/re_top.h b/ext/re/re_top.h
+index 64e5fd2..6f70483 100644
+--- a/ext/re/re_top.h
++++ b/ext/re/re_top.h
+@@ -32,0 +33,7 @@
++#define Perl_reg_add_data          my_reg_add_data
++#define Perl_release_RExC_state    my_release_RExC_state
++#define Perl_populate_anyof_bitmap_from_invlist my_populate_anyof_bitmap_from_invlist
++#define Perl_set_ANYOF_arg         my_set_ANYOF_arg
++#define Perl_add_above_Latin1_folds my_add_above_Latin1_folds
++#define Perl_get_ANYOFM_contents   my_get_ANYOFM_contents
++#define Perl_get_ANYOFHbbm_contents my_get_ANYOFHbbm_contents

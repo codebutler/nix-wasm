@@ -85,16 +85,26 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
           muslWasm = musl;
           exposeGuestBuildTools = true;
         })
+        (import ./toolchain/wasm-native-seed-overlay.nix {
+          inherit forkStdenv;
+        })
       ];
     };
     forkStdenv = import ./toolchain/wasm-fork-stdenv.nix {
       inherit pkgs cross muslFork;
     };
-    seedBash = forkStdenv.enableForkFor seedCross.bashNonInteractive;
-    seedMake = forkStdenv.enableForkFor seedCross.gnumake;
+    seedBash = seedCross.bashNonInteractive;
+    seedMake = seedCross.gnumake;
+    seedTools = [
+      seedCross.coreutils
+      seedCross.findutils
+      seedCross.gnupatch
+      seedCross.gnutar
+      seedCross.lzip
+    ];
     seedPackages = {
       inherit (seedCross)
-        gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
+        coreutils gettext libiconv libidn2 libintl libuuid lzip nukeReferences openssl
         pcre2 perl zlib;
       pkg-config = seedCross.pkg-config-unwrapped;
     };
@@ -114,7 +124,7 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
       inherit pkgs guestClang seedBash ccSysroot;
     };
     native = import ./userspace/wasm-native.nix {
-      inherit nixpkgs cross seedBash seedMake seedPackages bootstrapBusybox nativeCC;
+      inherit nixpkgs cross seedBash seedMake seedTools seedPackages bootstrapBusybox nativeCC;
       overlays = [
         (import ./deps-overlay.nix {
           inherit kernelHeaders libffiTrampolines;

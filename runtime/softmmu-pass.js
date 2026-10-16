@@ -238,6 +238,20 @@ const STORE_TOI64 = {
 // imports (below) restored the invariant; NO musl keep-alive is needed.
 export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unistd.h)
 
+// V8's optimizing wasm compiler may inline the tiny translate helpers back into
+// every memory access. That defeats the helper path's memory bound: clang and
+// wasm-ld have enough accesses that top-tier code grows by multiple GiB and a
+// 32-GiB host is OOM-killed even though their rewritten wire modules are small.
+// Keep each appended helper above the engine's inlining-size budget with wasm
+// `nop`s. NOPs preserve the operand stack and compile to no machine operation;
+// they change only the helper's wire size used by the inlining heuristic. V8's
+// hard `--wasm-inlining-max-size` default is 500 wire bytes; 4 KiB leaves ample
+// headroom without making TurboFan process megabytes of NOPs when the hot helper
+// itself tiers up. The padding is added only when a module actually uses the
+// bounded helper path; ordinary inline modules and one-shot configure probes do
+// not grow.
+export const SOFTMMU_HELPER_NOINLINE_PADDING_BYTES = 4 * 1024;
+
 /**
  * Build the tiny wasm function installed in a process table for checked side
  * modules. `fault(va, kind)` supplies the main image's live SP/TLS values to
@@ -2060,6 +2074,7 @@ function moduleName(bytes) {
  * @param {{
  *   exportControls?: boolean,
  *   checked?: boolean,
+ *   forceHelper?: boolean,
  *   inlineLimit?: number,
  *   faultTableIndex?: number,
  * }} [opts]
@@ -2070,6 +2085,9 @@ function moduleName(bytes) {
  *   instrumentation is replaced by the helper-call translate (default 6 MiB,
  *   safely below V8's kV8MaxWasmFunctionSize). Lower it in tests to force the
  *   fallback on small functions.
+ *   `forceHelper`: emit every function through the helper-call path directly,
+ *   without first materialising its inline form. This bounds transformation
+ *   and V8 code memory for very large executables such as clang and wasm-ld.
  * @returns {Uint8Array}
  */
 export function instrument(bytes, opts = {}) {
@@ -2175,6 +2193,7 @@ export function instrument(bytes, opts = {}) {
   // (default 6 MiB, safely below V8's ceiling) is overridable for unit tests.
   const inlineLimit = opts.inlineLimit ?? 6_000_000;
   const helperFns = { translateFunc, checkedTranslateFunc };
+  let needsNoInlineHelpers = !!opts.forceHelper;
   const cb = codeSec.body;
   const nCode = readU(cb, 0)[0];
 
@@ -2257,15 +2276,29 @@ export function instrument(bytes, opts = {}) {
       // whole-body copy to measure from (see the ByteSink doc comment).
       const sizeOff = sink.reserve(5);
       const bodyStart = sink.len;
-      rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      if (opts.forceHelper) {
+        rewriteFuncBody(
+          body,
+          numParams,
+          ptBaseGlobal,
+          bulkFns,
+          checkedCtx,
+          helperFns,
+          splitFns,
+          sink,
+        );
+      } else {
+        rewriteFuncBody(body, numParams, ptBaseGlobal, bulkFns, checkedCtx, null, splitFns, sink);
+      }
       let bodyLen = sink.len - bodyStart;
-      if (bodyLen > inlineLimit) {
+      if (!opts.forceHelper && bodyLen > inlineLimit) {
         // Discard the inline attempt (truncate back to just past the reserved
         // size field) and re-emit via the helper-call translate into the SAME
         // sink at the SAME offset — semantically identical to the old
         // "build both, keep the smaller", but the discarded inline bytes were
         // never materialised as their own retained copy.
         sink.len = bodyStart;
+        needsNoInlineHelpers = true;
         rewriteFuncBody(
           body,
           numParams,
@@ -2292,23 +2325,40 @@ export function instrument(bytes, opts = {}) {
     // written (no retry possible — these are fixed, hand-built bodies), so
     // they keep the plain minimal-LEB length-prefix form, unchanged from
     // before #202.
-    const appendFixed = (body) => {
-      sink.push(...u(body.length));
-      sink.pushBytes(body);
+    let noInlinePadding;
+    const appendFixed = (body, noInline = false) => {
+      if (!noInline || !needsNoInlineHelpers) {
+        sink.push(...u(body.length));
+        sink.pushBytes(body);
+        return;
+      }
+      if (body.length === 0 || body[body.length - 1] !== 0x0b) {
+        throw new Error("softmmu: helper body is missing its final end opcode");
+      }
+      noInlinePadding ??= new Uint8Array(SOFTMMU_HELPER_NOINLINE_PADDING_BYTES).fill(
+        0x01, // nop
+      );
+      sink.push(...u(body.length + noInlinePadding.length));
+      sink.pushBytes(body.slice(0, -1));
+      sink.pushBytes(noInlinePadding);
+      sink.push(0x0b);
     };
-    appendFixed(translateBody);
-    appendFixed(memcpyHelperBody(translateFunc, checkedTranslateFunc));
-    appendFixed(memfillHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(translateBody, true);
+    appendFixed(memcpyHelperBody(translateFunc, checkedTranslateFunc), true);
+    appendFixed(memfillHelperBody(translateFunc, checkedTranslateFunc), true);
     for (const seg of unhandled.initSegs) {
+      // One helper per data segment (clang has ~18k): keep these compact. Each
+      // still calls the padded translate helper, so nested translate inlining
+      // cannot recreate the per-access expansion this guard prevents.
       appendFixed(meminitHelperBody(translateFunc, checkedTranslateFunc, seg));
     }
     if (checkedCtx) {
-      appendFixed(checkedTranslateBody(ptBaseGlobal, checkedCtx));
+      appendFixed(checkedTranslateBody(ptBaseGlobal, checkedCtx), true);
     }
     // #128 PAGE-CROSSING byte-wise slow-path helpers (appended last, after the
     // checked translate). Each translates every byte's page separately.
-    appendFixed(loadBytesHelperBody(translateFunc, checkedTranslateFunc));
-    appendFixed(storeBytesHelperBody(translateFunc, checkedTranslateFunc));
+    appendFixed(loadBytesHelperBody(translateFunc, checkedTranslateFunc), true);
+    appendFixed(storeBytesHelperBody(translateFunc, checkedTranslateFunc), true);
   };
 
   // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
