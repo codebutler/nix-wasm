@@ -257,3 +257,93 @@ test("CLOSE of an unknown vfd id notifies nothing", () => {
   dev._handle(buildVfdCmd(VFD_CLOSE, 0x40000001)); // host-allocated, never registered
   expect(closed).toEqual([]);
 });
+
+// --- clipboard pipes --------------------------------------------------------
+// A clipboard transfer is a pipe in each direction. Pasting INTO the guest: the
+// guest makes a READ pipe (VIRTWL_IOCTL_NEW_PIPE_READ) and passes it in
+// wl_data_offer.receive; the host writes into it and hangs it up. Copying OUT of
+// the guest: the host hands the guest a pipe of its own in wl_data_source.send
+// (vfd id HOST | PIPE | n); the guest writes into it and closes it.
+const VFD_HUP = 0x106;
+const FLAG_WRITE = 0x1;
+const FLAG_READ = 0x2;
+const VFD_HOST_PIPE_BIT = 0x20000000;
+
+const word = (bytes, offset) =>
+  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true);
+const queued = (dev) => dev._pendingIn.map((e) => e.raw ?? dev._vfdRecv(e.vfdId, e.data));
+
+/** NEW_PIPE carrying the direction the guest asked for. */
+function buildNewPipe(vfdId, flags) {
+  const b = new Uint8Array(16);
+  const dv = new DataView(b.buffer);
+  dv.setUint32(0, VFD_NEW_PIPE, true);
+  dv.setUint32(8, vfdId, true);
+  dv.setUint32(12, flags, true);
+  return b;
+}
+
+test("a guest pipe keeps its direction and crosses in a SEND as { pipe }", () => {
+  const out = [];
+  const dev = makeDevice({ waylandBridge: { sendOut: (id, _data, fds) => out.push({ id, fds }) } });
+  const { resp } = dev._handle(buildNewPipe(5, FLAG_READ));
+  expect(word(resp, 0)).toBe(RESP_VFD_NEW);
+  expect(word(resp, 12)).toBe(FLAG_READ);
+  dev._handle(buildSend(3, new Uint8Array(8), [5])); // wl_data_offer.receive on ctx 3
+  expect(out).toEqual([{ id: 3, fds: [{ pipe: 5 }] }]);
+});
+
+test("the host writes into a guest pipe, then hangs it up", () => {
+  const dev = makeDevice({ waylandBridge: { sendOut() {} } });
+  dev.pipeWrite(5, new TextEncoder().encode("hello"));
+  dev.pipeClose(5);
+  const [recv, hup] = queued(dev);
+  expect([word(recv, 0), word(recv, 8), new TextDecoder().decode(recv.subarray(SEND_HDR))]).toEqual(
+    [VFD_RECV, 5, "hello"],
+  );
+  expect([word(hup, 0), word(hup, 8), hup.length]).toEqual([VFD_HUP, 5, 12]);
+});
+
+test("a host pipe given to the guest reports its data and its close", () => {
+  const data = [];
+  const piped = [];
+  const closed = [];
+  const dev = makeDevice({
+    waylandBridge: {
+      sendOut: () => {
+        throw new Error("pipe data is not Wayland traffic");
+      },
+      onPipeData: (pipe, bytes) => data.push([pipe, new TextDecoder().decode(bytes)]),
+      onPipeClose: (pipe) => piped.push(pipe),
+      onClose: (id) => closed.push(id),
+    },
+  });
+  dev.injectIn(3, new Uint8Array(8), [{ pipe: 7 }]); // wl_data_source.send on ctx 3
+  const id = (VFD_HOST_ID_BIT | VFD_HOST_PIPE_BIT | 7) >>> 0;
+  const [created, recv] = queued(dev);
+  expect([word(created, 0), word(created, 8), word(created, 12)]).toEqual([
+    VFD_NEW,
+    id,
+    FLAG_WRITE,
+  ]);
+  expect([word(recv, 0), word(recv, 8), word(recv, 12), word(recv, 16)]).toEqual([
+    VFD_RECV,
+    3,
+    1,
+    id,
+  ]);
+  dev._handle(buildSend(id, new TextEncoder().encode("copied")));
+  dev._handle(buildVfdCmd(VFD_CLOSE, id));
+  expect(data).toEqual([[7, "copied"]]);
+  expect(piped).toEqual([7]);
+  expect(closed).toEqual([]); // a pipe is not a client
+});
+
+test("keymap vfd ids never land in the host pipe space", () => {
+  const dev = makeDevice({ waylandBridge: { sendOut() {} } });
+  dev._nextHostVfdId = VFD_HOST_PIPE_BIT + 1;
+  dev.injectIn(3, new Uint8Array(0), [new Uint8Array(4)]);
+  const id = word(queued(dev)[0], 8);
+  expect(id & VFD_HOST_ID_BIT).toBe(VFD_HOST_ID_BIT);
+  expect(id & VFD_HOST_PIPE_BIT).toBe(0);
+});

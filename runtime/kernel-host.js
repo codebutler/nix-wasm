@@ -504,8 +504,10 @@ export const linux = async ({
     // wayland_push_in (host-side WlDevice + self-wake), NOT as a reply here.
     wayland_out: (message, _worker) => {
       const clientId = message.clientId >>> 0;
-      const fds = (message.fds || []).map(
-        (f) => new Uint8Array(memory.buffer, f.byteOffset, f.length),
+      const fds = (message.fds || []).map((f) =>
+        f.pipe !== undefined
+          ? { pipe: f.pipe >>> 0 }
+          : new Uint8Array(memory.buffer, f.byteOffset, f.length),
       );
       if (wayland && typeof wayland.sendOut === "function") {
         Promise.resolve(wayland.sendOut(clientId, new Uint8Array(message.buffer), fds)).catch((e) =>
@@ -587,6 +589,23 @@ export const linux = async ({
       if (wayland && typeof wayland.onClose === "function") {
         Promise.resolve(wayland.onClose(clientId)).catch((e) =>
           log("[wayland] onClose rejected: " + (e && e.stack ? e.stack : e)),
+        );
+      }
+    },
+
+    // Wayland: the guest wrote into, or closed, a pipe the host created and
+    // passed it (a clipboard transfer out of the guest) — hand it to the bridge.
+    wayland_pipe_data: (message) => {
+      if (wayland && typeof wayland.onPipeData === "function") {
+        Promise.resolve(
+          wayland.onPipeData(message.pipe >>> 0, new Uint8Array(message.buffer)),
+        ).catch((e) => log("[wayland] onPipeData rejected: " + (e && e.stack ? e.stack : e)));
+      }
+    },
+    wayland_pipe_close: (message) => {
+      if (wayland && typeof wayland.onPipeClose === "function") {
+        Promise.resolve(wayland.onPipeClose(message.pipe >>> 0)).catch((e) =>
+          log("[wayland] onPipeClose rejected: " + (e && e.stack ? e.stack : e)),
         );
       }
     },
@@ -794,9 +813,24 @@ export const linux = async ({
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       const fdBufs =
         fds && fds.length
-          ? fds.map((f) => (f instanceof Uint8Array ? f : new Uint8Array(f)))
+          ? fds.map((f) =>
+              f instanceof Uint8Array ? f : f && f.pipe !== undefined ? f : new Uint8Array(f),
+            )
           : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
+    },
+
+    // Wayland: write into, or hang up, a GUEST pipe (a fd the guest passed in a
+    // request, e.g. wl_data_offer.receive) — a clipboard transfer into the guest.
+    wayland_pipe_write: (pipe, bytes) => {
+      const dev = hostWl();
+      if (!dev) return log("[wayland] pipe write dropped: host idle-wake not armed yet");
+      dev.pipeWrite(pipe >>> 0, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+    },
+    wayland_pipe_close: (pipe) => {
+      const dev = hostWl();
+      if (!dev) return log("[wayland] pipe close dropped: host idle-wake not armed yet");
+      dev.pipeClose(pipe >>> 0);
     },
 
     // virtio-net guest networking. `readable` emits guest-egress ethernet

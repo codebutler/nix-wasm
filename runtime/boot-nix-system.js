@@ -27,7 +27,7 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   cmdline?: string,
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
- *   wayland?: { sendOut: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void, onClose?: (clientId:number)=>void },
+ *   wayland?: { sendOut: (clientId:number, buffer:Uint8Array, fds:(Uint8Array|{pipe:number})[])=>void, onClose?: (clientId:number)=>void, onPipeData?: (pipe:number, bytes:Uint8Array)=>void, onPipeClose?: (pipe:number)=>void },  // see bootLinux
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: AF_VSOCK /Ctl bridge hook, passed through to bootLinux
  *   snd?: { onReady: (device: import("./virtio/snd-device.js").SndVirtioDevice) => void },  // issue #145: virtio-snd PCM sink hook, passed through to bootLinux
  *   _bootLinux?: typeof bootLinux,    // test seam
