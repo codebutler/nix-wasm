@@ -1,0 +1,33 @@
+runtime/kernel-host.js
+  s_6432caddebcdcf::t_76f2e4c73254c8 605-608
+runtime/kernel-worker.js
+  s_6432caddebcdcf::t_d66234273d4ba5 548-550
+runtime/virtio/wl-device.js
+  s_6432caddebcdcf::t_9bdcaf58317831 105,126-129,287-291,293,297-320,324-325,329,617,656-657
+runtime/virtio/wl-device.test.js
+  s_d1ade63152e0e3::t_116985aace0a01 288-294,300-317,322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5968abac50bc34f91e2497ca42512594f5bb9405",
+  "prompts": {},
+  "sessions": {
+    "s_6432caddebcdcf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0b72a1d9-ca72-4558-9341-d0681e495a94",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_d1ade63152e0e3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e9e8447-90fc-400e-b8d8-b8da5debcddb",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
