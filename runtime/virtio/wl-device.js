@@ -37,7 +37,7 @@ const VIRTIO_WL_CMD_VFD_SEND = 0x102;
 const VIRTIO_WL_CMD_VFD_RECV = 0x103;
 const VIRTIO_WL_CMD_VFD_NEW_CTX = 0x104;
 const VIRTIO_WL_CMD_VFD_NEW_PIPE = 0x105;
-const _VIRTIO_WL_CMD_VFD_HUP = 0x106; // (host->guest HUP; not emitted yet)
+const VIRTIO_WL_CMD_VFD_HUP = 0x106; // host->guest: a pipe's writer is done (EOF)
 const VIRTIO_WL_CMD_VFD_NEW_CTX_NAMED = 0x10a;
 
 const VIRTIO_WL_RESP_OK = 0x1000;
@@ -52,6 +52,19 @@ const VIRTIO_WL_VFD_READ = 0x2;
 // (vq_handle_new rejects ids without it) and must NOT have the illegal sign bit.
 const VFD_HOST_ID_BIT = 0x40000000;
 const VFD_ILLEGAL_SIGN_BIT = 0x80000000;
+// Host-created PIPES (the compositor's half of a clipboard transfer, e.g. the
+// fd in wl_data_source.send) also carry this bit, with the caller's pipe number
+// in the low bits: id = HOST | PIPE | n. The guest writes into such a vfd and
+// its VFD_SENDs are pipe data, not Wayland bytes. Host-created keymap vfds
+// never set it (their counter masks it off), so the two id spaces cannot meet.
+const VFD_HOST_PIPE_BIT = 0x20000000;
+const HOST_PIPE_MASK = VFD_HOST_PIPE_BIT - 1;
+
+/** The host pipe number a vfd id names, or null for any other vfd. */
+function hostPipeOf(vfdId) {
+  const id = vfdId >>> 0;
+  return id & VFD_HOST_ID_BIT && id & VFD_HOST_PIPE_BIT ? id & HOST_PIPE_MASK : null;
+}
 
 const VIRTWL_VQ_IN = 0;
 const VIRTWL_VQ_OUT = 1;
@@ -86,7 +99,10 @@ export class WlDevice extends VirtioWasmDevice {
   /**
    * @param {object} opts
    * @param {{
-   *   sendOut: (clientId: number, data: Uint8Array, fds: Uint8Array[]) => void
+   *   sendOut: (clientId: number, data: Uint8Array, fds: (Uint8Array | { pipe: number })[]) => void,
+   *   onPipeData?: (pipe: number, data: Uint8Array) => void,
+   *   onPipeClose?: (pipe: number) => void,
+   *   onGuestPipe?: (pipe: number, open: boolean) => void,
    * }} [opts.waylandBridge]
    *   Phase 4f bridge hook. When present, a VFD_SEND's wayland bytes are routed
    *   OUT to the host (which feeds the main-thread Greenfield compositor) instead
@@ -107,6 +123,10 @@ export class WlDevice extends VirtioWasmDevice {
     // vq_handle_new requires the host bit, the guest allocates its own ids low.
     this._nextHostVfdId = 1;
     this.contexts = new Map(); // vfd_id -> { type, server }
+    // Host side: the guest pipes that are open now. A guest pipe's id is the
+    // guest's and is reused once closed, so the host writes only into a pipe
+    // it knows is open (see guestPipe).
+    this._guestPipes = new Set();
     this._bridge = opts.waylandBridge || null;
     // Phase 2 2c: log shm region checksums + wire opcodes to prove the pixel
     // path. Off by default; opt in via the bridge for a debug session.
@@ -210,9 +230,11 @@ export class WlDevice extends VirtioWasmDevice {
    *  (which the worker sends synchronously); Wayland events are inherently async.
    *  @param {number} clientId  ctx vfd_id
    *  @param {Uint8Array|ArrayBuffer} data  the wire bytes
-   *  @param {Uint8Array[]} [fds]  server→client fd payloads (e.g. the keymap),
+   *  @param {(Uint8Array | { pipe: number })[]} [fds]  server→client fd payloads,
    *    each materialized as a host→guest vfd (VFD_NEW host-id) referenced by a
-   *    single VFD_RECV — the same wire contract the OUT path used to build. */
+   *    single VFD_RECV: bytes (the keymap) become a FILL vfd; `{ pipe: n }` is
+   *    host pipe n (n < 2^29), a vfd the guest writes into — its data comes back
+   *    through the bridge's onPipeData(n) and its close through onPipeClose(n). */
   injectIn(clientId, data, fds) {
     const id = clientId >>> 0;
     const bytes = data
@@ -255,6 +277,57 @@ export class WlDevice extends VirtioWasmDevice {
    *  worker forwards) — the host owns the IN vring but the kick lands on the
    *  worker. A no-op when nothing is pending. */
   flushIn() {
+    this._flushPendingIn();
+  }
+
+  /** Public: write bytes into a GUEST-created pipe vfd (one the guest made with
+   *  VIRTWL_IOCTL_NEW_PIPE_READ and passed in a SEND, e.g. the fd of
+   *  wl_data_offer.receive). The guest reads them as a byte stream. */
+  pipeWrite(vfdId, data) {
+    const id = vfdId >>> 0;
+    if (!this._guestPipes.has(id)) {
+      this.log(`[virtio-wl] pipe write to closed guest pipe ${id} dropped`);
+      return;
+    }
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    if (bytes.length) this._queueIn(id, bytes);
+    this._flushPendingIn();
+  }
+
+  /** Public (host side): a guest pipe opened or closed (the worker reports
+   *  both). On close, anything still queued for it is dropped: once the guest
+   *  reuses the id, those bytes would land in another vfd. */
+  guestPipe(vfdId, open) {
+    const id = vfdId >>> 0;
+    if (open) {
+      this._guestPipes.add(id);
+      return;
+    }
+    this._guestPipes.delete(id);
+    this._pendingIn = this._pendingIn.filter((entry) =>
+      entry.raw ? this._rawVfdId(entry.raw) !== id : entry.vfdId !== id,
+    );
+  }
+
+  /** The vfd a pre-built RECV or HUP addresses (null for other messages). */
+  _rawVfdId(msg) {
+    const dv = new DataView(msg.buffer, msg.byteOffset, msg.byteLength);
+    const type = dv.getUint32(0, true);
+    return type === VIRTIO_WL_CMD_VFD_RECV || type === VIRTIO_WL_CMD_VFD_HUP
+      ? dv.getUint32(8, true)
+      : null;
+  }
+
+  /** Public: hang up a guest-created pipe vfd: once the guest has read what
+   *  was written, its read() returns 0 (end of file). */
+  pipeClose(vfdId) {
+    const id = vfdId >>> 0;
+    if (!this._guestPipes.delete(id)) return;
+    const b = new Uint8Array(12);
+    const dv = new DataView(b.buffer);
+    dv.setUint32(0, VIRTIO_WL_CMD_VFD_HUP, true);
+    dv.setUint32(8, id, true);
+    this._queueRaw(b);
     this._flushPendingIn();
   }
 
@@ -426,8 +499,17 @@ export class WlDevice extends VirtioWasmDevice {
     const msgs = [];
     const ids = [];
     for (const payload of fdPayloads) {
+      if (payload && !(payload instanceof Uint8Array) && payload.pipe !== undefined) {
+        // A host pipe the guest writes into: a plain (non-FILL) WRITE vfd.
+        const id = (VFD_HOST_ID_BIT | VFD_HOST_PIPE_BIT | (payload.pipe & HOST_PIPE_MASK)) >>> 0;
+        ids.push(id);
+        msgs.push(this._vfdNewHost(id, 0, VIRTIO_WL_VFD_WRITE));
+        continue;
+      }
       const id =
-        (VFD_HOST_ID_BIT | (this._nextHostVfdId++ & ~(VFD_HOST_ID_BIT | VFD_ILLEGAL_SIGN_BIT))) >>>
+        (VFD_HOST_ID_BIT |
+          (this._nextHostVfdId++ &
+            ~(VFD_HOST_ID_BIT | VFD_HOST_PIPE_BIT | VFD_ILLEGAL_SIGN_BIT))) >>>
         0;
       ids.push(id);
       msgs.push(this._vfdNewHost(id, payload.length));
@@ -443,15 +525,16 @@ export class WlDevice extends VirtioWasmDevice {
 
   /** A host→guest VFD_NEW (the driver's vq_handle_new registers the vfd). 32B
    *  through the union start: hdr + vfd_id + flags + pfn(u64) + size. */
-  _vfdNewHost(id, size) {
+  _vfdNewHost(id, size, flags = VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_FILL) {
     const b = new Uint8Array(32);
     const dv = new DataView(b.buffer);
     dv.setUint32(0, VIRTIO_WL_CMD_VFD_NEW, true); // hdr.type
     dv.setUint32(4, 0, true); // hdr.flags
     dv.setUint32(8, id >>> 0, true); // vfd_id (HOST bit set)
-    // READ (the client reads the keymap) | FILL (the guest allocates the
+    // Keymap: READ (the client reads it) | FILL (the guest allocates the
     // backing; the kernel copies the streamed bytes into it so mmap succeeds).
-    dv.setUint32(12, VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_FILL, true);
+    // Host pipe: WRITE, no backing (the guest's writes come back as VFD_SENDs).
+    dv.setUint32(12, flags >>> 0, true);
     dv.setBigUint64(16, 0n, true); // pfn=0: the GUEST allocates (host pages aren't mmappable)
     dv.setUint32(24, size >>> 0, true); // size = keymap byte length
     return b;
@@ -523,15 +606,18 @@ export class WlDevice extends VirtioWasmDevice {
       case VIRTIO_WL_CMD_VFD_NEW_CTX_NAMED:
       case VIRTIO_WL_CMD_VFD_NEW_PIPE: {
         const vfdId = req.length >= 12 ? dv.getUint32(8, true) : 0;
-        this.contexts.set(vfdId, { type });
+        // A pipe is one-way: echo the direction the guest asked for (READ for
+        // NEW_PIPE_READ, WRITE for NEW_PIPE_WRITE), as a ctx is both.
+        const asked = req.length >= 16 ? dv.getUint32(12, true) : 0;
+        const flags =
+          type === VIRTIO_WL_CMD_VFD_NEW_PIPE && asked & (VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_WRITE)
+            ? asked & (VIRTIO_WL_VFD_READ | VIRTIO_WL_VFD_WRITE)
+            : VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ;
+        this.contexts.set(vfdId, { type, flags });
+        if (type === VIRTIO_WL_CMD_VFD_NEW_PIPE) this._bridge?.onGuestPipe?.(vfdId, true);
         this.log(`[virtio-wl] NEW (type=0x${type.toString(16)}) vfd_id=${vfdId} -> RESP_VFD_NEW`);
         return {
-          resp: this._vfdNew(
-            vfdId,
-            /*size*/ 0,
-            /*pfn*/ 0n,
-            VIRTIO_WL_VFD_WRITE | VIRTIO_WL_VFD_READ,
-          ),
+          resp: this._vfdNew(vfdId, /*size*/ 0, /*pfn*/ 0n, flags),
           inReply: null,
         };
       }
@@ -567,6 +653,11 @@ export class WlDevice extends VirtioWasmDevice {
         ) {
           this._bridge?.onClose?.(vfdId);
         }
+        if (closing && closing.type === VIRTIO_WL_CMD_VFD_NEW_PIPE)
+          this._bridge?.onGuestPipe?.(vfdId, false);
+        // The guest finished writing into a host pipe: the host's reader ends.
+        const pipe = hostPipeOf(vfdId);
+        if (pipe !== null) this._bridge?.onPipeClose?.(pipe);
         return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
       }
       case VIRTIO_WL_CMD_VFD_SEND: {
@@ -574,12 +665,26 @@ export class WlDevice extends VirtioWasmDevice {
         const vfdId = dv.getUint32(8, true);
         const vfdCount = dv.getUint32(12, true);
         const dataOff = SEND_HDR_SIZE + vfdCount * 4;
+        // A write into a host pipe is that pipe's data, not a Wayland message.
+        const pipe = hostPipeOf(vfdId);
+        if (pipe !== null) {
+          const bytes = req.subarray(dataOff);
+          this.log(`[virtio-wl] SEND host pipe ${pipe} ${bytes.length}B`);
+          this._bridge?.onPipeData?.(pipe, bytes.slice());
+          return { resp: this._hdr(VIRTIO_WL_RESP_OK), inReply: null };
+        }
         // Trailing vfd ids (Phase 2 / M3: a wl_shm_create_pool carries the shm
         // vfd here). Resolve each to a host fd surrogate (a Uint8Array VIEW over
         // the guest memory region the vfd backs) for Greenfield's `fds` array.
         const fds = [];
         for (let i = 0; i < vfdCount; i++) {
           const fdVfdId = dv.getUint32(SEND_HDR_SIZE + i * 4, true);
+          // A guest pipe (wl_data_offer.receive's fd) crosses as { pipe: id };
+          // the host writes into it with pipeWrite and ends it with pipeClose.
+          if (this.contexts.get(fdVfdId)?.type === VIRTIO_WL_CMD_VFD_NEW_PIPE) {
+            fds.push({ pipe: fdVfdId >>> 0 });
+            continue;
+          }
           const fd = this._resolveShmFd(fdVfdId);
           if (fd) fds.push(fd);
           else this.log(`[virtio-wl] SEND carried vfd_id=${fdVfdId} with no resolvable shm region`);

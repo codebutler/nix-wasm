@@ -69,7 +69,7 @@ const enc = new TextEncoder();
  *   stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void },  // #177: RW state disk (/dev/vdb); >64 MiB must be a full SharedArrayBuffer; saveDisk() packs incremental CBHD dirties
  *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
  *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
- *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: Uint8Array[]) => void, onClose?: (clientId: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx
+ *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: (Uint8Array | { pipe: number })[]) => void, onClose?: (clientId: number) => void, onPipeData?: (pipe: number, bytes: Uint8Array) => void, onPipeClose?: (pipe: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx; a `{ pipe }` fd is a guest pipe (write it with pipeWrite); onPipeData/onPipeClose = the guest wrote into / closed a host pipe passed to it as a `{ pipe }` pushIn fd
  *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
  *   ninepTrace?: (line: string) => void,  // #151 diagnostic: opt-in host-side 9P RPC tracer (localizes 9P I/O under the software MMU); also enabled via the NINEP_TRACE env in node/CI
  *   snd?: { onReady: (device: import("./virtio/snd-device.js").SndVirtioDevice) => void },  // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
@@ -78,7 +78,9 @@ const enc = new TextEncoder();
  *   consoleCount: number,
  *   memory: WebAssembly.Memory,
  *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
- *   pushIn(clientId: number, bytes: Uint8Array, fds?: Uint8Array[]): void,
+ *   pushIn(clientId: number, bytes: Uint8Array, fds?: (Uint8Array | { pipe: number })[]): void,
+ *   pipeWrite(pipe: number, bytes: Uint8Array): void,
+ *   pipeClose(pipe: number): void,
  *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
  *   saveDisk(): Uint8Array|null,
  *   hasStateDisk(): boolean,
@@ -164,9 +166,11 @@ export async function bootLinux(opts) {
   // (the client never blocks on its own request), and the self-wake IN path can
   // wake a parked guest, so the old synchronous round-trip is gone (it dropped
   // steady-state frame callbacks — see wl-device.js / kernel-worker.js).
-  /** @type {{ sendOut?: (clientId:number, buffer:Uint8Array, fds:Uint8Array[])=>void, onClose?: (clientId:number)=>void } | undefined} */
+  /** @type {{ sendOut?: (clientId:number, buffer:Uint8Array, fds:(Uint8Array|{pipe:number})[])=>void, onClose?: (clientId:number)=>void, onPipeData?: (pipe:number, bytes:Uint8Array)=>void, onPipeClose?: (pipe:number)=>void } | undefined} */
   const wayland = opts.wayland;
   let waylandPushIn = null; // os.wayland_push_in: the single async host→guest path
+  let waylandPipeWrite = null; // os.wayland_pipe_write / _close: guest pipes
+  let waylandPipeClose = null;
 
   const workerUrl = new URL("./kernel-worker.js", import.meta.url);
   const os = await linux({
@@ -205,7 +209,11 @@ export async function bootLinux(opts) {
 
   // Now that the boot worker exists, wire the async IN sink so the compositor
   // bridge can deliver server→client messages (incl fds) to the guest.
-  if (wayland) waylandPushIn = os.wayland_push_in;
+  if (wayland) {
+    waylandPushIn = os.wayland_push_in;
+    waylandPipeWrite = os.wayland_pipe_write;
+    waylandPipeClose = os.wayland_pipe_close;
+  }
 
   let alive = true;
   return {
@@ -258,10 +266,28 @@ export async function bootLinux(opts) {
      * is parked in poll()/dispatch. No-op if the wayland bridge is not wired.
      * @param {number} clientId guest ctx vfd_id
      * @param {Uint8Array} bytes wire bytes
-     * @param {Uint8Array[]} [fds] server→client fd payloads (keymap)
+     * @param {(Uint8Array | { pipe: number })[]} [fds] server→client fd payloads:
+     *   bytes (the keymap), or `{ pipe: n }`, host pipe n (n < 2^29) the guest
+     *   writes into (wl_data_source.send) — reported through the bridge's
+     *   onPipeData(n) and onPipeClose(n)
      */
     pushIn(clientId, bytes, fds) {
       waylandPushIn?.(clientId, bytes, fds);
+    },
+
+    /**
+     * Write into a guest pipe: a `{ pipe }` fd the guest passed in a request
+     * (wl_data_offer.receive's fd, a clipboard paste into the guest).
+     * @param {number} pipe the `{ pipe }` id the bridge's sendOut carried
+     * @param {Uint8Array} bytes
+     */
+    pipeWrite(pipe, bytes) {
+      waylandPipeWrite?.(pipe, bytes);
+    },
+
+    /** End a guest pipe: the guest reads end of file after what was written. */
+    pipeClose(pipe) {
+      waylandPipeClose?.(pipe);
     },
 
     /**

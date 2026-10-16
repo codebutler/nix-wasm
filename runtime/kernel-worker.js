@@ -516,7 +516,11 @@ import { SharedQueues } from "./virtio/shared-queues.js";
         // owns OUT, host owns IN.
         common.waylandBridge = {
           sendOut: (clientId, data, fds) => {
-            const fdViews = fds.map((v) => ({ byteOffset: v.byteOffset, length: v.byteLength }));
+            // A shm fd crosses as its place in shared memory; a guest pipe as
+            // its vfd id ({ pipe }), for the host to write into.
+            const fdViews = fds.map((v) =>
+              v instanceof Uint8Array ? { byteOffset: v.byteOffset, length: v.byteLength } : v,
+            );
             port.postMessage({
               method: "wayland_out",
               dev: id,
@@ -532,6 +536,18 @@ import { SharedQueues } from "./virtio/shared-queues.js";
           // tear down the matching server-side client now.
           onClose: (clientId) =>
             port.postMessage({ method: "wayland_close", dev: id, clientId: clientId >>> 0 }),
+          // The guest wrote into, or closed, a pipe the host created (the
+          // compositor reading a guest clipboard selection).
+          onPipeData: (pipe, data) =>
+            port.postMessage(
+              { method: "wayland_pipe_data", dev: id, pipe: pipe >>> 0, buffer: data.buffer },
+              [data.buffer],
+            ),
+          onPipeClose: (pipe) =>
+            port.postMessage({ method: "wayland_pipe_close", dev: id, pipe: pipe >>> 0 }),
+          // A guest pipe opened or closed: the host writes only into open ones.
+          onGuestPipe: (pipe, open) =>
+            port.postMessage({ method: "wayland_guest_pipe", dev: id, pipe: pipe >>> 0, open }),
         };
         d = new WlDevice(common);
         // Wayland (idle wake): hand the main thread the address of raised_irqs[0]
