@@ -1498,24 +1498,26 @@ in
     else
       prev.xchat or null;
 
-  # The guest runs only a session bus. Nixpkgs enables Linux audit in D-Bus
-  # unconditionally, which pulls audit -> target gawk; that unrelated CLI
-  # cannot link against the wasm fork sysroot (capture_stack is host-only).
-  # Disable audit at Meson's own feature boundary and remove its build input.
+  # The guest runs only a session bus. Nixpkgs enables Linux audit and
+  # AppArmor in D-Bus unconditionally. Audit pulls target gawk, which cannot
+  # link against the wasm fork sysroot (capture_stack is host-only); AppArmor
+  # emits ELF .symver directives that wasm cannot assemble. Neither kernel
+  # integration applies to this session bus, so disable both Meson features
+  # and remove their build inputs.
   # X11 autolaunch and systemd are likewise unnecessary for the fixed session
   # socket in init.nix; native host D-Bus remains untouched by whenWasm.
   dbus = whenWasm
     (p: (p.override { x11Support = false; enableSystemd = false; }).overrideAttrs
       (old: let
-        withoutAudit = inputs: builtins.filter
-          (input: (input.pname or "") != "audit") inputs;
+        withoutKernelSecurity = inputs: builtins.filter
+          (input: !(builtins.elem (input.pname or "") [ "audit" "libapparmor" ])) inputs;
       in {
-        buildInputs = withoutAudit (old.buildInputs or []);
+        buildInputs = withoutKernelSecurity (old.buildInputs or []);
         # makeStatic promotes D-Bus's build inputs to propagatedBuildInputs.
-        propagatedBuildInputs = withoutAudit (old.propagatedBuildInputs or []);
+        propagatedBuildInputs = withoutKernelSecurity (old.propagatedBuildInputs or []);
         mesonFlags = builtins.filter
-          (flag: !(final.lib.hasPrefix "-Dlibaudit=" flag))
-          (old.mesonFlags or []) ++ [ "-Dlibaudit=disabled" ];
+          (flag: !(final.lib.hasPrefix "-Dlibaudit=" flag || final.lib.hasPrefix "-Dapparmor=" flag))
+          (old.mesonFlags or []) ++ [ "-Dlibaudit=disabled" "-Dapparmor=disabled" ];
         doCheck = false; # target binaries cannot execute on the cross host
       }))
     prev.dbus;
