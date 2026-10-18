@@ -1,0 +1,47 @@
+userspace/guest-desktop-fixture.nix
+  s_90082e9d863b41::t_a9f9a778b25fd4 1-26
+userspace/init.nix
+  s_90082e9d863b41::t_1eee17fce43464 84-87
+  s_90082e9d863b41::t_bfc8e70f15751b 88-91,110
+userspace/system.nix
+  s_90082e9d863b41::t_1eee17fce43464 172,250,288
+flake.nix
+  s_90082e9d863b41::t_a9f9a778b25fd4 528-530,813,979
+  s_90082e9d863b41::t_bfc8e70f15751b 525-527
+userspace/guest-status-notifier.nix
+  s_90082e9d863b41::t_bfc8e70f15751b 1-9,11-12,15-27
+  s_90082e9d863b41::t_a39bf3d4f6a6bd 10,13-14
+userspace/guest-status-notifier.c
+  s_90082e9d863b41::t_d0a58336aa441b 54,442,504
+  s_90082e9d863b41::t_19627c4f1a4601 290-291
+  s_90082e9d863b41::t_05c2602651e1b9 362-364,376
+  s_90082e9d863b41::t_3d675bde4bc827 737-738,741-742,751
+  s_90082e9d863b41::t_eca574840dcace 1-4,6-35,38-53,55-70,99,101,104-190,270-289,292-348,407-428,443-444,447-448,451-455,468-491,497-503,505-546,565-592,595-647,650-670,673-700,788-798,807-820,825,827-831,833-841,843-844
+  s_90082e9d863b41::t_a39bf3d4f6a6bd 5,349-361,365-375,379-406,445-446,449-450
+  s_90082e9d863b41::t_1abbab132c0deb 701-735,739-740,743-750,752-787,799-806,821-824,826,832,842
+  s_90082e9d863b41::t_9e82ab9ba37b9e 456-467,648-649,671-672
+  s_90082e9d863b41::t_d48e74b19a93c8 191-269
+  s_90082e9d863b41::t_be617ce89936e4 492-496,547-564,593-594
+  s_90082e9d863b41::t_c7797b55aa7d6f 377-378
+  s_90082e9d863b41::t_16c229cac9ab58 736
+  s_90082e9d863b41::t_f3fdc24e747d78 36-37,71-98,100,102-103
+  s_90082e9d863b41::t_ec6f368fa2c403 429-441
+userspace/guest-desktop-fixture.c
+  s_90082e9d863b41::t_12371a81211759 1-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8331b1ffca52b9ec27d74903841072fe0190efc8",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
