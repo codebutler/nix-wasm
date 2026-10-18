@@ -100,6 +100,7 @@ typedef struct {
   char *keys[8];
   char *labels[8];
   uint8_t action_count;
+  uint8_t urgency;
   int32_t timeout;
   guint timer;
 } Notice;
@@ -218,18 +219,20 @@ static void notice_free(gpointer pointer) {
 static void publish_notice(Notice *notice) {
   size_t title_len = strlen(notice->title);
   size_t body_len = strlen(notice->body);
-  size_t length = 16 + title_len + body_len;
+  size_t length = 17 + title_len + body_len;
   for (guint i = 0; i < notice->action_count; ++i)
     length += 2 + strlen(notice->keys[i]) + strlen(notice->labels[i]);
   if (length > 8192) return;
   uint8_t *frame = g_malloc(length);
-  frame[0] = HOST_MAGIC; frame[1] = HOST_VERSION; frame[2] = 4;
+  /* Notification v2 adds one urgency byte after the v1 fixed header. */
+  frame[0] = HOST_MAGIC; frame[1] = 2; frame[2] = 4;
   le32(frame + 3, notice->id);
   le16(frame + 7, (uint16_t)title_len);
   le16(frame + 9, (uint16_t)body_len);
   frame[11] = notice->action_count;
   le32(frame + 12, (uint32_t)notice->timeout);
-  size_t offset = 16;
+  frame[16] = notice->urgency;
+  size_t offset = 17;
   memcpy(frame + offset, notice->title, title_len); offset += title_len;
   memcpy(frame + offset, notice->body, body_len); offset += body_len;
   for (guint i = 0; i < notice->action_count; ++i) {
@@ -929,6 +932,9 @@ static void notice_method(GDBusConnection *connection, const char *sender,
   g_variant_get(parameters, "(&su&s&s&s@as@a{sv}i)",
     &app_name, &replaces, &icon, &title, &body, &actions, &hints, &timeout);
   (void)app_name; (void)icon;
+  uint8_t urgency = 1;
+  g_variant_lookup(hints, "urgency", "y", &urgency);
+  if (urgency > 2) urgency = 1;
   gsize action_strings = 0;
   const gchar **values = g_variant_get_strv(actions, &action_strings);
   Notice *replacement = replaces ? find_notice(replaces, NULL) : NULL;
@@ -982,6 +988,7 @@ static void notice_method(GDBusConnection *connection, const char *sender,
   notice->title = g_strdup(title);
   notice->body = g_strdup(body);
   notice->action_count = (uint8_t)(action_strings / 2);
+  notice->urgency = urgency;
   for (guint i = 0; i < notice->action_count; ++i) {
     notice->keys[i] = g_strdup(values[i * 2]);
     notice->labels[i] = g_strdup(values[i * 2 + 1]);
