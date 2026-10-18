@@ -834,6 +834,9 @@ void sl_internal_toplevel_configure_state(struct sl_window* window,
   LOG(VERBOSE) << window << " state change, fullscreen=" << window->fullscreen
                << " compositor_fullscreen=" << window->compositor_fullscreen;
   // Override previous state definitions
+  if (window->net_wm_demands_attention)
+    window->next_config.states[state_idx++] =
+        window->ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value;
   window->next_config.states_length = state_idx;
 }
 
@@ -905,6 +908,9 @@ void sl_internal_toplevel_configure_state_containerized(
   LOG(VERBOSE) << window << " state change, fullscreen=" << window->fullscreen
                << " compositor_fullscreen=" << window->compositor_fullscreen;
   // Override previous state definitions
+  if (window->net_wm_demands_attention)
+    window->next_config.states[state_idx++] =
+        window->ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value;
   window->next_config.states_length = state_idx;
 }
 
@@ -1147,6 +1153,7 @@ void sl_window_update(struct sl_window* window) {
   if (!window->unpaired) {
     window->paired_surface = host_surface;
     host_surface->window = window;
+    sl_window_publish_attention(window);
     sl_transform_try_window_scale(ctx, host_surface, window->width,
                                   window->height);
   }

@@ -30,7 +30,7 @@ struct sl_config {
   // Values and states here are consumed during sl_configure_window
   uint32_t values[5];
   uint32_t states_length = 0;
-  uint32_t states[3];
+  uint32_t states[5];
 };
 
 struct sl_host_surface;
@@ -75,6 +75,8 @@ struct sl_window {
   int managed = 0;
   int realized = 0;
   int activated = 0;
+  bool wm_hints_urgent = false;
+  bool net_wm_demands_attention = false;
   int fullscreen = 0;
   int compositor_fullscreen = 0;
   int maximized = 0;
@@ -173,6 +175,7 @@ enum {
   PROPERTY_WM_CLASS,
   PROPERTY_WM_TRANSIENT_FOR,
   PROPERTY_WM_NORMAL_HINTS,
+  PROPERTY_WM_HINTS,
   PROPERTY_WM_CLIENT_LEADER,
   PROPERTY_WM_PROTOCOLS,
   PROPERTY_MOTIF_WM_HINTS,

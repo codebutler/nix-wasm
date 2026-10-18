@@ -53,6 +53,7 @@ enum {
   ATOM_NET_WM_STATE_MAXIMIZED_VERT,
   ATOM_NET_WM_STATE_MAXIMIZED_HORZ,
   ATOM_NET_WM_STATE_FOCUSED,
+  ATOM_NET_WM_STATE_DEMANDS_ATTENTION,
   ATOM_CLIPBOARD,
   ATOM_CLIPBOARD_MANAGER,
   ATOM_TARGETS,
@@ -94,6 +95,7 @@ struct sl_context {
   struct sl_xdg_shell* xdg_shell;
   struct sl_aura_shell* aura_shell;
   struct sl_xdg_activation* xdg_activation;
+  struct sl_yore_attention* yore_attention;
   struct sl_viewporter* viewporter;
   struct sl_linux_dmabuf* linux_dmabuf;
   struct sl_linux_explicit_synchronization* linux_explicit_synchronization;

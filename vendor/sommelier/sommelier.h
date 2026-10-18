@@ -43,6 +43,7 @@ struct sl_xdg_shell;
 struct sl_subcompositor;
 struct sl_aura_shell;
 struct sl_xdg_activation;
+struct sl_yore_attention;
 struct sl_viewporter;
 struct sl_linux_dmabuf;
 struct sl_keyboard_extension;
@@ -428,6 +429,14 @@ struct sl_xdg_activation {
   uint32_t id;
   struct sl_global* host_global;
 };
+
+struct sl_yore_attention {
+  struct sl_context* ctx;
+  uint32_t id;
+  struct zyore_window_attention_v1* proxy;
+};
+
+void sl_window_publish_attention(struct sl_window* window);
 
 struct sl_global* sl_xdg_activation_global_create(struct sl_context* ctx);
 

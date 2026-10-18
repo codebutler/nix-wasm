@@ -57,6 +57,7 @@ wl_protocols = [
   'protocol/xdg-output-unstable-v1.xml',
   'protocol/xdg-shell.xml',
   'protocol/xdg-activation-v1.xml',
+  'protocol/yore-window-attention-v1.xml',
 ]
 
 wl_outs = []
