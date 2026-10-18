@@ -41,6 +41,8 @@ struct sockaddr_vm {
 #define MAX_LABEL 256
 #define MAX_ICON 64
 #define MAX_MENU_ROWS 64
+#define MAX_NOTICES_PER_OWNER_WINDOW 20
+#define NOTICE_RATE_WINDOW_US (10 * G_USEC_PER_SEC)
 #define HOST_MAGIC 'G'
 #define HOST_VERSION 1
 
@@ -101,8 +103,14 @@ typedef struct {
   guint timer;
 } Notice;
 
+typedef struct {
+  gint64 start_us;
+  guint count;
+} NoticeRate;
+
 static GPtrArray *items;
 static GPtrArray *notices;
+static GHashTable *notice_rates;
 static GDBusConnection *bus;
 static guint object_id, notice_object_id, notice_name_id, owner_signal_id;
 static uint32_t next_notice_id = 1;
@@ -622,6 +630,7 @@ static void name_owner_changed(GDBusConnection *connection, const char *sender,
   const char *name, *old_owner, *new_owner;
   g_variant_get(parameters, "(&s&s&s)", &name, &old_owner, &new_owner);
   if (*new_owner) return;
+  g_hash_table_remove(notice_rates, name);
   for (guint i = items->len; i > 0; --i) {
     Item *item = g_ptr_array_index(items, i - 1);
     if (g_strcmp0(item->owner, name) == 0 ||
@@ -919,6 +928,23 @@ static void notice_method(GDBusConnection *connection, const char *sender,
     g_free(values); g_variant_unref(actions); g_variant_unref(hints);
     return;
   }
+  NoticeRate *rate = g_hash_table_lookup(notice_rates, sender);
+  gint64 now_us = g_get_monotonic_time();
+  if (!rate) {
+    rate = g_new0(NoticeRate, 1);
+    rate->start_us = now_us;
+    g_hash_table_insert(notice_rates, g_strdup(sender), rate);
+  } else if (now_us - rate->start_us >= NOTICE_RATE_WINDOW_US) {
+    rate->start_us = now_us;
+    rate->count = 0;
+  }
+  if (rate->count >= MAX_NOTICES_PER_OWNER_WINDOW) {
+    g_dbus_method_invocation_return_dbus_error(invocation,
+      "org.freedesktop.DBus.Error.LimitsExceeded", "Notification rate exceeded");
+    g_free(values); g_variant_unref(actions); g_variant_unref(hints);
+    return;
+  }
+  ++rate->count;
   Notice *notice = replacement;
   if (notice) {
     if (notice->timer) g_source_remove(notice->timer);
@@ -995,12 +1021,14 @@ static void name_lost(GDBusConnection *connection, const char *name,
   owner_signal_id = object_id = notice_object_id = notice_name_id = 0;
   g_ptr_array_set_size(items, 0);
   g_ptr_array_set_size(notices, 0);
+  g_hash_table_remove_all(notice_rates);
   bus = NULL;
 }
 
 int main(void) {
   items = g_ptr_array_new_with_free_func(item_free);
   notices = g_ptr_array_new_with_free_func(notice_free);
+  notice_rates = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
   guint owner = g_bus_own_name(G_BUS_TYPE_SESSION, SNI_NAME,
     G_BUS_NAME_OWNER_FLAGS_NONE, bus_acquired, NULL, name_lost, NULL, NULL);
   g_timeout_add_seconds(1, connect_host, NULL);
@@ -1011,5 +1039,6 @@ int main(void) {
   close_host();
   g_ptr_array_unref(items);
   g_ptr_array_unref(notices);
+  g_hash_table_unref(notice_rates);
   return 0;
 }
