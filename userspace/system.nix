@@ -8,6 +8,7 @@
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
 { nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix
+, dbusPackage ? cross.dbus
 , extraSystemPackages ? [ ], useSQLiteWAL ? true }:
 let
   lib = cross.lib;
@@ -169,7 +170,7 @@ let
                             # ride the served closure (same pattern as l3afpad's
                             # baked-ICONDIR icon — XCHATSHAREDIR is this package's
                             # own store path, no pathsToLink entry needed).
-          cross.dbus        # One guest session bus for SNI and desktop notifications.
+          dbusPackage       # One guest session bus for SNI and desktop notifications.
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";

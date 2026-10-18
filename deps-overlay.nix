@@ -1503,18 +1503,21 @@ in
   # link against the wasm fork sysroot (capture_stack is host-only); AppArmor
   # emits ELF .symver directives that wasm cannot assemble. Neither kernel
   # integration applies to this session bus, so disable both Meson features
-  # and remove their build inputs.
+  # and remove their build inputs. libcap-ng is only used by audit here; its
+  # static-link flag must be removed with it so the fork adapter can supply
+  # the guest's own NIX_LDFLAGS without a duplicate env attribute.
   # X11 autolaunch and systemd are likewise unnecessary for the fixed session
   # socket in init.nix; native host D-Bus remains untouched by whenWasm.
   dbus = whenWasm
     (p: (p.override { x11Support = false; enableSystemd = false; }).overrideAttrs
       (old: let
         withoutKernelSecurity = inputs: builtins.filter
-          (input: !(builtins.elem (input.pname or "") [ "audit" "libapparmor" ])) inputs;
+          (input: !(builtins.elem (input.pname or "") [ "audit" "libapparmor" "libcap-ng" ])) inputs;
       in {
         buildInputs = withoutKernelSecurity (old.buildInputs or []);
         # makeStatic promotes D-Bus's build inputs to propagatedBuildInputs.
         propagatedBuildInputs = withoutKernelSecurity (old.propagatedBuildInputs or []);
+        env = builtins.removeAttrs (old.env or {}) [ "NIX_LDFLAGS" ];
         mesonFlags = builtins.filter
           (flag: !(final.lib.hasPrefix "-Dlibaudit=" flag || final.lib.hasPrefix "-Dapparmor=" flag))
           (old.mesonFlags or []) ++ [ "-Dlibaudit=disabled" "-Dapparmor=disabled" ];

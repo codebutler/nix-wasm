@@ -188,6 +188,10 @@
       # here; a real fork BOOT also needs the kernel dup_mmap+COW path + the
       # engine child-in-shared-arena wiring — see the Track B status doc.)
       forkStdenv = import ./toolchain/wasm-fork-stdenv.nix { inherit pkgs cross muslFork; };
+      # D-Bus links fork() even when launched --nofork: its service activation
+      # and daemonization paths are in the final executable. Use the existing
+      # fork/Asyncify adapter, which instruments and audits that import.
+      guestDbus = forkStdenv.enableForkFor cross.dbus;
       # #129: the per-source asyncify builder (the PR #20-proven seam shape) —
       # cross cc + muslFork's libc.a first + host wasm-opt --asyncify with
       # capture_stack as the sole unwind import. Used for the fork acceptance
@@ -805,6 +809,7 @@
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
+        dbusPackage = guestDbus;
         # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
         # c++, make) lives in .#wasm-binary-cache and is installed on demand via
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
@@ -957,6 +962,7 @@
       wasmSystemFork = import ./userspace/system.nix {
         inherit nixpkgs cross;
         busybox = wasmBusyboxFork;
+        dbusPackage = guestDbus;
         # #131 slice-1 (MMU-profile isolation, 2026-08-13): wasmAsh
         # dropped from this profile's toolchain. The fork guest's /bin/sh is
         # busybox-fork's own stock hush applet (userspace/busybox-fork.nix) —
