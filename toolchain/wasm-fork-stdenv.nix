@@ -83,19 +83,22 @@ in
 
   # For a package that already builds with cross.stdenv, opting in is:
   #   nativeBuildInputs += [ binaryen ];
-  #   NIX_LDFLAGS = "${forkLib} $NIX_LDFLAGS";   # muslFork wins the libc link
+  #   preBuild sets NIX_LDFLAGS to forkLib before actual links; configure probes
+  #   stay strict so --import-undefined cannot fake feature availability.
   #   postFixup: for f in $out/bin/*; do source ${forkShellFn}; fork_asyncify "$f"; done
   # A helper that packages `overrideAttrs` onto themselves:
   enableForkFor = drv:
     drv.overrideAttrs (o: {
       nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ binaryen pkgs.python3 ];
       # The shared cc-wrapper allow-list deliberately excludes capture_stack.
-      # --import-undefined is therefore required for this one fork-capable link;
-      # the final-module audit below restores the strict no-undef contract after
-      # asyncify (the same local-extension pattern as busybox-fork.nix).
-      # NIX_LDFLAGS is forwarded to wasm-ld itself by the cc-wrapper, so use
-      # the linker's flag spelling here (not clang's -Wl, spelling).
-      NIX_LDFLAGS = "--import-undefined ${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
+      # Apply --import-undefined only for the real build links, AFTER configure
+      # probes. Applying it during Meson's cc.has_function checks made absent
+      # libc functions look present (getpeerucred on wasm, for example).
+      # NIX_LDFLAGS reaches wasm-ld directly, so use its raw option spelling.
+      # The final-module audit below restores the strict no-undef contract.
+      preBuild = (o.preBuild or "") + ''
+        export NIX_LDFLAGS="--import-undefined ${muslFork}/lib/libc.a ''${NIX_LDFLAGS-}"
+      '';
       postFixup = (o.postFixup or "") + ''
         ${forkShellFn}
         if [ -d "$out/bin" ]; then
