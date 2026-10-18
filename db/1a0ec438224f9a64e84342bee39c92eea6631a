@@ -1,0 +1,30 @@
+flake.nix
+  s_90082e9d863b41::t_44638638db1fc6 1592-1598
+.github/workflows/nix-wasm.yml
+  s_90082e9d863b41::t_44638638db1fc6 87,154,168-186
+  s_da2d8e2b4a951c::t_2262f065d39675 187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "db1a0ec438224f9a64e84342bee39c92eea6631a",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_da2d8e2b4a951c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14f54-9756-77d2-adbb-998ab4f131d2",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
