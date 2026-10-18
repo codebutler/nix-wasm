@@ -1,0 +1,41 @@
+userspace/x11-attention-fixture.c
+  s_90082e9d863b41::t_3990153482edda 1-44,49-70
+  s_90082e9d863b41::t_48f62dde8a6ab2 45-48
+flake.nix
+  s_90082e9d863b41::t_025c03c80380dc 988,1605
+  s_90082e9d863b41::t_615c6b882089e4 529-531,821
+userspace/x11-attention-fixture.nix
+  s_90082e9d863b41::t_3990153482edda 1-24
+vendor/wl-eyes/Makefile
+  s_90082e9d863b41::t_6a1441767fdb5b 10,16-18,39-46
+vendor/wl-eyes/README.md
+  s_66753b2e0a4314::t_49d132392468d0 63-68
+vendor/wl-eyes/protocol/xdg-activation-v1.xml
+  s_90082e9d863b41::t_b3df2504fcc96e 1-200
+vendor/wl-eyes/src/eyes.c
+  s_90082e9d863b41::t_54be80629b2c4c 11,17,24,52,316-317,326,330-334,375-409,418-419
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "682bdb05e513cad8f65d896d9a750eb6d38b015f",
+  "prompts": {},
+  "sessions": {
+    "s_66753b2e0a4314": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c5f-06e8-7b13-b93c-e320cffbf21a",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
