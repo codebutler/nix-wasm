@@ -40,6 +40,7 @@ struct sockaddr_vm {
 #define MAX_ID 192
 #define MAX_LABEL 256
 #define MAX_ICON 64
+#define MAX_MENU_ROWS 64
 #define HOST_MAGIC 'G'
 #define HOST_VERSION 1
 
@@ -54,6 +55,10 @@ typedef struct {
   gboolean item_is_menu;
   uint8_t width, height;
   uint8_t pixels[MAX_ICON * MAX_ICON * 4];
+  char *menu_path;
+  guint menu_signal_id;
+  GHashTable *menu_ids;
+  uint32_t menu_revision;
 } Item;
 
 static const char watcher_xml[] =
@@ -295,10 +300,14 @@ static void item_free(gpointer pointer) {
   Item *item = pointer;
   if (bus && item->signal_id)
     g_dbus_connection_signal_unsubscribe(bus, item->signal_id);
+  if (bus && item->menu_signal_id)
+    g_dbus_connection_signal_unsubscribe(bus, item->menu_signal_id);
   g_free(item->service);
   g_free(item->owner);
   g_free(item->path);
   g_free(item->id);
+  g_free(item->menu_path);
+  if (item->menu_ids) g_hash_table_unref(item->menu_ids);
   g_free(item);
 }
 
@@ -404,6 +413,121 @@ static void read_named_icon(Item *item, GVariant *dict, const char *key) {
   }
 }
 
+/* A bounded, depth-first projection of com.canonical.dbusmenu's GetLayout.
+ * The source IDs remain in the guest so stale host clicks cannot target a new
+ * menu revision or another application's item. */
+static gboolean append_menu_node(GVariant *node, int parent, guint depth,
+  GByteArray *frame, GHashTable *ids, guint *count) {
+  if (!g_variant_is_of_type(node, G_VARIANT_TYPE("(ia{sv}av)"))) return FALSE;
+  if (depth > 3) return TRUE;
+  GVariant *id_value = g_variant_get_child_value(node, 0);
+  GVariant *props = g_variant_get_child_value(node, 1);
+  GVariant *children = g_variant_get_child_value(node, 2);
+  int id = g_variant_get_int32(id_value);
+  g_variant_unref(id_value);
+  gboolean valid = TRUE;
+  if (depth) {
+    const char *label = "", *type = NULL, *toggle = NULL;
+    gboolean enabled = TRUE, visible = TRUE;
+    gint state = 0;
+    g_variant_lookup(props, "label", "&s", &label);
+    g_variant_lookup(props, "type", "&s", &type);
+    g_variant_lookup(props, "toggle-type", "&s", &toggle);
+    g_variant_lookup(props, "toggle-state", "i", &state);
+    g_variant_lookup(props, "enabled", "b", &enabled);
+    g_variant_lookup(props, "visible", "b", &visible);
+    size_t label_len = strlen(label);
+    if (id <= 0 || label_len > 128 || *count >= MAX_MENU_ROWS ||
+        g_hash_table_contains(ids, GINT_TO_POINTER(id))) valid = FALSE;
+    else {
+      uint8_t flags = 0;
+      if (!enabled) flags |= 1;
+      if (!visible) flags |= 2;
+      if (state > 0) flags |= 4;
+      if (g_strcmp0(toggle, "radio") == 0) flags |= 8;
+      if (g_strcmp0(type, "separator") == 0) flags |= 16;
+      if (depth < 3 && g_variant_n_children(children)) flags |= 32;
+      if (g_strcmp0(toggle, "checkmark") == 0) flags |= 64;
+      uint8_t row[10];
+      le32(row, (uint32_t)id);
+      le32(row + 4, (uint32_t)parent);
+      row[8] = flags;
+      row[9] = (uint8_t)label_len;
+      g_byte_array_append(frame, row, sizeof row);
+      g_byte_array_append(frame, (const uint8_t *)label, (guint)label_len);
+      g_hash_table_add(ids, GINT_TO_POINTER(id));
+      ++*count;
+    }
+  }
+  for (gsize i = 0; valid && depth < 3 && i < g_variant_n_children(children); ++i) {
+    GVariant *wrapped = g_variant_get_child_value(children, i);
+    if (!g_variant_is_of_type(wrapped, G_VARIANT_TYPE_VARIANT)) valid = FALSE;
+    else {
+      GVariant *child = g_variant_get_variant(wrapped);
+      valid = append_menu_node(child, id, depth + 1, frame, ids, count);
+      g_variant_unref(child);
+    }
+    g_variant_unref(wrapped);
+  }
+  g_variant_unref(props);
+  g_variant_unref(children);
+  return valid;
+}
+
+static void publish_menu(Item *item) {
+  size_t id_len = strlen(item->id);
+  if (id_len > MAX_ID) return;
+  GByteArray *frame = g_byte_array_sized_new(11 + id_len + 1024);
+  uint8_t header[11] = {HOST_MAGIC, HOST_VERSION, 7, 0, 0, 0, 0, 0, 0, 0, 0};
+  le16(header + 3, (uint16_t)id_len);
+  header[6] = item->item_is_menu ? 1 : 0;
+  g_byte_array_append(frame, header, sizeof header);
+  g_byte_array_append(frame, (const uint8_t *)item->id, (guint)id_len);
+  GHashTable *ids = g_hash_table_new(g_direct_hash, g_direct_equal);
+  guint count = 0;
+  uint32_t revision = 0;
+  if (item->menu_path && bus) {
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_sync(bus, item->service,
+      item->menu_path, "com.canonical.dbusmenu", "GetLayout",
+      g_variant_new("(ii@as)", 0, 3, g_variant_new_strv(NULL, 0)),
+      G_VARIANT_TYPE("(u(ia{sv}av))"), G_DBUS_CALL_FLAGS_NONE, 2000,
+      NULL, &error);
+    if (reply) {
+      GVariant *revision_value = g_variant_get_child_value(reply, 0);
+      revision = g_variant_get_uint32(revision_value);
+      g_variant_unref(revision_value);
+      GVariant *root = g_variant_get_child_value(reply, 1);
+      if (g_variant_get_size(reply) > 16384 ||
+          !append_menu_node(root, 0, 0, frame, ids, &count)) {
+        g_byte_array_set_size(frame, 11 + id_len);
+        g_hash_table_remove_all(ids);
+        count = 0;
+        revision = 0;
+      }
+      g_variant_unref(root);
+      g_variant_unref(reply);
+    } else g_clear_error(&error);
+  }
+  frame->data[5] = (uint8_t)count;
+  le32(frame->data + 7, revision);
+  item->menu_revision = revision;
+  if (item->menu_ids) g_hash_table_unref(item->menu_ids);
+  item->menu_ids = ids;
+  send_frame(frame->data, frame->len);
+  g_byte_array_unref(frame);
+}
+
+static void menu_signal(GDBusConnection *connection, const char *sender,
+  const char *path, const char *interface, const char *signal,
+  GVariant *parameters, gpointer data) {
+  (void)connection; (void)sender; (void)path; (void)interface;
+  (void)parameters;
+  if (g_strcmp0(signal, "LayoutUpdated") == 0 ||
+      g_strcmp0(signal, "ItemsPropertiesUpdated") == 0)
+    publish_menu(data);
+}
+
 static void refresh_item(Item *item) {
   if (!bus) return;
   GError *error = NULL;
@@ -449,6 +573,21 @@ static void refresh_item(Item *item) {
   if (!item->width && item->status == 2)
     read_named_icon(item, dict, "IconName");
   publish(item);
+  const char *menu_path = NULL;
+  if (!g_variant_lookup(dict, "Menu", "&o", &menu_path) ||
+      g_strcmp0(menu_path, "/") == 0) menu_path = NULL;
+  if (g_strcmp0(item->menu_path, menu_path) != 0) {
+    if (item->menu_signal_id)
+      g_dbus_connection_signal_unsubscribe(bus, item->menu_signal_id);
+    item->menu_signal_id = 0;
+    g_free(item->menu_path);
+    item->menu_path = g_strdup(menu_path);
+    if (item->menu_path)
+      item->menu_signal_id = g_dbus_connection_signal_subscribe(bus,
+        item->owner, "com.canonical.dbusmenu", NULL, item->menu_path,
+        NULL, G_DBUS_SIGNAL_FLAGS_NONE, menu_signal, item, NULL);
+  }
+  publish_menu(item);
   g_variant_unref(dict);
   g_variant_unref(reply);
 }
@@ -510,6 +649,25 @@ static void call_item_action(const char *id, uint8_t action, int x, int y) {
   }
 }
 
+static void call_menu_action(const char *id, int row_id, uint32_t revision) {
+  if (!bus || row_id <= 0) return;
+  for (guint i = 0; i < items->len; ++i) {
+    Item *item = g_ptr_array_index(items, i);
+    if (g_strcmp0(item->id, id) != 0 || item->status == 0 ||
+        !item->menu_path || !item->menu_ids ||
+        item->menu_revision != revision ||
+        !g_hash_table_contains(item->menu_ids, GINT_TO_POINTER(row_id)))
+      continue;
+    g_dbus_connection_call(bus, item->service, item->menu_path,
+      "com.canonical.dbusmenu", "Event",
+      g_variant_new("(is@vu)", row_id, "clicked",
+        g_variant_new_variant(g_variant_new_int32(0)),
+        (guint32)(g_get_monotonic_time() / 1000)),
+      NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL, NULL);
+    break;
+  }
+}
+
 static gboolean host_input_ready(GIOChannel *channel, GIOCondition condition,
   gpointer data) {
   (void)channel; (void)data;
@@ -529,7 +687,7 @@ static gboolean host_input_ready(GIOChannel *channel, GIOCondition condition,
   size_t offset = 0;
   while (host_input_size - offset >= 4) {
     uint32_t length = read32(host_input + offset);
-    if (length > 5 + MAX_ID + 5) {
+    if (length > 13 + MAX_ID) {
       host_watch_id = 0;
       close_host();
       return G_SOURCE_REMOVE;
@@ -544,6 +702,15 @@ static gboolean host_input_ready(GIOChannel *channel, GIOCondition condition,
       memcpy(id, body + 10, id_len);
       id[id_len] = 0;
       call_item_action(id, body[5], read16(body + 6), read16(body + 8));
+    }
+    if (length >= 13 && body[0] == HOST_MAGIC && body[1] == HOST_VERSION &&
+        body[2] == 8 && read16(body + 3) == length - 13 &&
+        read16(body + 3) <= MAX_ID) {
+      char id[MAX_ID + 1];
+      size_t id_len = read16(body + 3);
+      memcpy(id, body + 13, id_len);
+      id[id_len] = 0;
+      call_menu_action(id, (int32_t)read32(body + 5), read32(body + 9));
     }
     if (length >= 10 && body[0] == HOST_MAGIC && body[1] == HOST_VERSION &&
         body[2] == 6 && read16(body + 8) == length - 10 &&
@@ -589,7 +756,11 @@ static gboolean connect_host(gpointer data) {
                                  host_input_ready, NULL);
   g_io_channel_unref(channel);
   for (guint i = 0; i < items->len && host_fd >= 0; ++i)
-    publish(g_ptr_array_index(items, i));
+    {
+      Item *item = g_ptr_array_index(items, i);
+      publish(item);
+      publish_menu(item);
+    }
   for (guint i = 0; i < notices->len && host_fd >= 0; ++i)
     publish_notice(g_ptr_array_index(notices, i));
   return G_SOURCE_CONTINUE;

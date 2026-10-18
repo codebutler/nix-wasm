@@ -9,10 +9,12 @@
 #define ITEM_IFACE "org.kde.StatusNotifierItem"
 #define WATCHER "org.kde.StatusNotifierWatcher"
 #define NOTICE "org.freedesktop.Notifications"
+#define MENU_PATH "/Menu"
 
 static GDBusConnection *bus;
 static guint phase;
 static uint8_t icon[16 * 16 * 4];
+static void publish_notice(void);
 
 static const char item_xml[] =
   "<node><interface name='org.kde.StatusNotifierItem'>"
@@ -26,9 +28,70 @@ static const char item_xml[] =
   "<property name='Status' type='s' access='read'/>"
   "<property name='IconPixmap' type='a(iiay)' access='read'/>"
   "<property name='AttentionIconPixmap' type='a(iiay)' access='read'/>"
+  "<property name='Menu' type='o' access='read'/>"
   "<property name='ItemIsMenu' type='b' access='read'/>"
   "<signal name='NewStatus'><arg type='s'/></signal>"
   "</interface></node>";
+
+static const char menu_xml[] =
+  "<node><interface name='com.canonical.dbusmenu'>"
+  "<method name='GetLayout'><arg type='i' direction='in'/>"
+  "<arg type='i' direction='in'/><arg type='as' direction='in'/>"
+  "<arg type='u' direction='out'/><arg type='(ia{sv}av)' direction='out'/></method>"
+  "<method name='Event'><arg type='i' direction='in'/>"
+  "<arg type='s' direction='in'/><arg type='v' direction='in'/>"
+  "<arg type='u' direction='in'/></method>"
+  "<method name='AboutToShow'><arg type='i' direction='in'/>"
+  "<arg type='b' direction='out'/></method>"
+  "</interface></node>";
+
+static GVariant *menu_leaf(int id, const char *label, gboolean checked) {
+  GVariantBuilder props, children;
+  g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+  g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+  g_variant_builder_add(&props, "{sv}", "label", g_variant_new_string(label));
+  if (checked) {
+    g_variant_builder_add(&props, "{sv}", "toggle-type",
+      g_variant_new_string("checkmark"));
+    g_variant_builder_add(&props, "{sv}", "toggle-state",
+      g_variant_new_int32(1));
+  }
+  return g_variant_new("(i@a{sv}@av)", id,
+    g_variant_builder_end(&props), g_variant_builder_end(&children));
+}
+
+static void menu_method(GDBusConnection *connection, const char *sender,
+  const char *path, const char *interface, const char *method,
+  GVariant *parameters, GDBusMethodInvocation *invocation, gpointer data) {
+  (void)connection; (void)sender; (void)path; (void)interface; (void)data;
+  if (g_strcmp0(method, "AboutToShow") == 0) {
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
+    return;
+  }
+  if (g_strcmp0(method, "Event") == 0) {
+    gint id; const char *event; GVariant *value; guint timestamp;
+    g_variant_get(parameters, "(i&s@vu)", &id, &event, &value, &timestamp);
+    (void)timestamp;
+    g_print("Menu item %d: %s\n", id, event);
+    if (id == 1 && g_strcmp0(event, "clicked") == 0) publish_notice();
+    g_variant_unref(value);
+    g_dbus_method_invocation_return_value(invocation, NULL);
+    return;
+  }
+  if (g_strcmp0(method, "GetLayout") == 0) {
+    GVariantBuilder props, children;
+    g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+    g_variant_builder_add_value(&children,
+      g_variant_new_variant(menu_leaf(1, "Send notification", FALSE)));
+    g_variant_builder_add_value(&children,
+      g_variant_new_variant(menu_leaf(2, "Alerts enabled", TRUE)));
+    GVariant *root = g_variant_new("(i@a{sv}@av)", 0,
+      g_variant_builder_end(&props), g_variant_builder_end(&children));
+    g_dbus_method_invocation_return_value(invocation,
+      g_variant_new("(u@(ia{sv}av))", 1u, root));
+  }
+}
 
 static const char *status(void) {
   if (phase == 1) return "NeedsAttention";
@@ -69,7 +132,8 @@ static GVariant *item_property(GDBusConnection *connection, const char *sender,
   if (g_strcmp0(name, "Id") == 0) return g_variant_new_string("yore-sni-fixture");
   if (g_strcmp0(name, "Title") == 0) return g_variant_new_string("Guest SNI fixture");
   if (g_strcmp0(name, "Status") == 0) return g_variant_new_string(status());
-  if (g_strcmp0(name, "ItemIsMenu") == 0) return g_variant_new_boolean(FALSE);
+  if (g_strcmp0(name, "ItemIsMenu") == 0) return g_variant_new_boolean(TRUE);
+  if (g_strcmp0(name, "Menu") == 0) return g_variant_new_object_path(MENU_PATH);
   if (g_strcmp0(name, "IconPixmap") == 0 ||
       g_strcmp0(name, "AttentionIconPixmap") == 0) {
     GVariantBuilder pixmaps;
@@ -117,6 +181,12 @@ int main(void) {
   guint object = g_dbus_connection_register_object(bus, ITEM_PATH,
     node->interfaces[0], &vtable, NULL, NULL, &error);
   if (!object) { g_printerr("SNI object: %s\n", error->message); return 1; }
+  GDBusNodeInfo *menu_node = g_dbus_node_info_new_for_xml(menu_xml, &error);
+  if (!menu_node) { g_printerr("Menu XML: %s\n", error->message); return 1; }
+  const GDBusInterfaceVTable menu_vtable = { menu_method, NULL, NULL, {0} };
+  guint menu_object = g_dbus_connection_register_object(bus, MENU_PATH,
+    menu_node->interfaces[0], &menu_vtable, NULL, NULL, &error);
+  if (!menu_object) { g_printerr("Menu object: %s\n", error->message); return 1; }
   GVariant *reply = g_dbus_connection_call_sync(bus, WATCHER,
     "/StatusNotifierWatcher", WATCHER, "RegisterStatusNotifierItem",
     g_variant_new("(s)", ITEM_PATH), NULL, G_DBUS_CALL_FLAGS_NONE,
@@ -132,7 +202,9 @@ int main(void) {
   g_main_loop_run(loop);
   g_main_loop_unref(loop);
   g_dbus_connection_unregister_object(bus, object);
+  g_dbus_connection_unregister_object(bus, menu_object);
   g_dbus_node_info_unref(node);
+  g_dbus_node_info_unref(menu_node);
   g_object_unref(bus);
   return 0;
 }
