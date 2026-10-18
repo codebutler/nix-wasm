@@ -6,6 +6,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
+#include <X11/extensions/XTest.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -182,11 +183,19 @@ static struct icon *find_icon(Window window) {
   return NULL;
 }
 
+static void resize_manager(void) {
+  int slots = 1;
+  for (int i = 0; i < MAX_ICONS; ++i)
+    if (icons[i].occupied) slots = i + 1;
+  XResizeWindow(display, manager, slots * ICON_SIZE, ICON_SIZE);
+}
+
 static void remove_icon(Window window) {
   struct icon *icon = find_icon(window);
   if (!icon) return;
   if (icon->announced) send_remove(window);
   memset(icon, 0, sizeof *icon);
+  resize_manager();
 }
 
 static void dock(Window window) {
@@ -199,7 +208,10 @@ static void dock(Window window) {
   icon->occupied = 1;
   XSelectInput(display, window, StructureNotifyMask | PropertyChangeMask);
   int slot = (int)(icon - icons);
-  XResizeWindow(display, manager, MAX_ICONS * ICON_SIZE, ICON_SIZE);
+  /* Keep the mapped embedder as small as the occupied slots allow. Xwayland
+   * still needs a viewable parent for XGetImage, but it need not expose an
+   * empty 768-pixel strip to the compositor for a single tray icon. */
+  resize_manager();
   XReparentWindow(display, window, manager, slot * ICON_SIZE, 0);
   XResizeWindow(display, window, ICON_SIZE, ICON_SIZE);
   XMapWindow(display, window);
@@ -224,25 +236,13 @@ static void button(Window window, int number, int x, int y) {
   XMoveWindow(display, manager,
               x - (int)(icon - icons) * ICON_SIZE - ICON_SIZE / 2,
               y - ICON_SIZE / 2);
-  XFlush(display);
-  for (int phase = 0; phase < 2; ++phase) {
-    XEvent event = {0};
-    event.xbutton.type = phase ? ButtonRelease : ButtonPress;
-    event.xbutton.display = display;
-    event.xbutton.window = window;
-    event.xbutton.root = DefaultRootWindow(display);
-    event.xbutton.subwindow = None;
-    event.xbutton.time = CurrentTime;
-    event.xbutton.x = ICON_SIZE / 2;
-    event.xbutton.y = ICON_SIZE / 2;
-    event.xbutton.x_root = x;
-    event.xbutton.y_root = y;
-    event.xbutton.state = phase ? (1u << (7 + number)) : 0;
-    event.xbutton.button = number;
-    event.xbutton.same_screen = True;
-    XSendEvent(display, window, False,
-               phase ? ButtonReleaseMask : ButtonPressMask, &event);
-  }
+  XSync(display, False);
+  /* XSendEvent marks its events synthetic; GTK tray widgets can ignore them,
+   * and the actual handler may live on a child of the docked XEmbed window.
+   * XTEST injects normal pointer events through Xwayland hit testing. */
+  XTestFakeMotionEvent(display, DefaultScreen(display), x, y, CurrentTime);
+  XTestFakeButtonEvent(display, number, True, CurrentTime);
+  XTestFakeButtonEvent(display, number, False, CurrentTime);
   XFlush(display);
 }
 
@@ -315,7 +315,7 @@ int main(void) {
    * each icon from the forwarded pixels in its own tray. */
   manager = XCreateWindow(display, root, 0,
                           DisplayHeight(display, DefaultScreen(display)) - ICON_SIZE,
-                          MAX_ICONS * ICON_SIZE, ICON_SIZE, 0, depth,
+                          ICON_SIZE, ICON_SIZE, 0, depth,
                           InputOutput, visual, CWOverrideRedirect | CWEventMask |
                           CWColormap | CWBackPixel | CWBorderPixel, &attrs);
   if (formats) XFree(formats);

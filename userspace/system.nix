@@ -249,6 +249,21 @@ let
         # publish-linux-channel republish, not a keystroke.
         environment.variables.DISPLAY = ":1";
         environment.variables.DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/yore-session-bus";
+        # dbus-daemon's built-in --session path is /etc/dbus-1/session.conf.
+        # This system has no full NixOS D-Bus module to populate that file.
+        environment.etc."dbus-1/session.conf".text = ''
+          <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+            "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+          <busconfig>
+            <type>session</type>
+            <listen>unix:path=/tmp/yore-session-bus</listen>
+            <policy context="default">
+              <allow send_destination="*"/>
+              <allow receive_sender="*"/>
+              <allow own="*"/>
+            </policy>
+          </busconfig>
+        '';
         environment.variables.GDK_USE_XSHM = "0";
         environment.variables.QT_X11_NO_MITSHM = "1";
 

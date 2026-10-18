@@ -9,11 +9,11 @@ cross.stdenv.mkDerivation {
   dontUnpack = true;
   dontConfigure = true;
   nativeBuildInputs = [ cross.buildPackages.pkg-config ];
-  buildInputs = [ cross.libx11 cross.libxrender ];
+  buildInputs = [ cross.libx11 cross.libxrender cross.libxtst ];
   buildPhase = ''
     runHook preBuild
-    $CC -O2 $($PKG_CONFIG --cflags x11 xrender) ${./x11-tray-bridge.c} \
-      $($PKG_CONFIG --libs x11 xrender) -o x11-tray-bridge
+    $CC -O2 $($PKG_CONFIG --cflags x11 xrender xtst) ${./x11-tray-bridge.c} \
+      $($PKG_CONFIG --libs x11 xrender xtst) -o x11-tray-bridge
     runHook postBuild
   '';
   installPhase = ''
