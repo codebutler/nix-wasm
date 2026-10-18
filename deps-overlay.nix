@@ -1524,9 +1524,10 @@ in
           ]))
           (old.mesonFlags or []) ++ [
             "-Dlibaudit=disabled" "-Dapparmor=disabled"
-            # The target libc lacks epoll_create1 and may lack inotify; Meson
-            # selects its supported poll/config-reload paths from these probes.
-            "-Depoll=auto" "-Dinotify=auto"
+            # nixpkgs' Meson hook sets auto_features=enabled, so auto still
+            # forces epoll and fails when target libc lacks epoll_create1.
+            # The session bus uses D-Bus's poll path and explicit reloads.
+            "-Depoll=disabled" "-Dinotify=disabled"
           ];
         doCheck = false; # target binaries cannot execute on the cross host
       }))
