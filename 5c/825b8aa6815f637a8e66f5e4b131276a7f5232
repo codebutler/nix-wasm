@@ -1,0 +1,23 @@
+userspace/system.nix
+  s_90082e9d863b41::t_c17d88d1f83dd8 11,173
+deps-overlay.nix
+  s_90082e9d863b41::t_d371b12b9c347b 1506-1508,1515,1520
+flake.nix
+  s_90082e9d863b41::t_c17d88d1f83dd8 191-194,812,965
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5c825b8aa6815f637a8e66f5e4b131276a7f5232",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
