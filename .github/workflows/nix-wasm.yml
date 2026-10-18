@@ -185,6 +185,45 @@ jobs:
       - name: Build desktop bridge programs
         run: nix build -L --no-link '.#x11-tray-bridge' '.#guest-status-notifier' '.#guest-desktop-fixture'
 
+  # Keep a bootable PR image available even when the large Namespace artifact
+  # and preview jobs are waiting for runners. This is the exact installed image
+  # pc consumes, uploaded privately as an Actions artifact for manual QA.
+  desktop-guest-image:
+    name: build desktop guest image for QA
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-26.05
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      - name: Build installed MMU image
+        run: |
+          nix build -L --out-link desktop-guest-image '.#linux-installed-image'
+          mkdir -p desktop-guest-artifact
+          cp "$(find -L desktop-guest-image -name linux.iso -type f -print -quit)" desktop-guest-artifact/linux.iso
+          sha256sum desktop-guest-artifact/linux.iso > desktop-guest-artifact/linux.iso.sha256
+          wc -c desktop-guest-artifact/linux.iso
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-guest-image
+          path: desktop-guest-artifact/
+          retention-days: 7
+          if-no-files-found: error
+
   # #173 M1-M3: boot the shipped MMU guest and force three cache misses through
   # the native package set. The cache contains only cross-built seed tools and
   # source-only inputs; the resulting outputs are therefore
