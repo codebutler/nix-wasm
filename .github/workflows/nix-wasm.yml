@@ -84,7 +84,7 @@ jobs:
   # `nix`) gates the boot smokes, which substitute the unchanged kernel/artifacts
   # from Cachix instead of waiting on a rebuild.
   changes:
-    runs-on: namespace-profile-xs
+    runs-on: ubuntu-24.04
     outputs:
       nix: ${{ steps.filter.outputs.nix }}
       runtime: ${{ steps.filter.outputs.runtime }}
@@ -151,7 +151,7 @@ jobs:
     name: native wasm32 nixpkgs eval (stdenv + hello + wget)
     needs: changes
     if: ${{ needs.changes.outputs.nix == 'true' }}
-    runs-on: namespace-profile-xs
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -164,6 +164,26 @@ jobs:
 
       - name: Evaluate native wasm derivation
         run: nix eval --raw '.#checks.x86_64-linux.wasm-native-eval.drvPath'
+
+  # Compile the new desktop programs independently of the image build. The
+  # stock runner can substitute the existing x86_64 cross toolchain from
+  # Cachix, so this gate remains useful when the larger Namespace jobs queue.
+  desktop-bridge-cross:
+    name: cross-build guest desktop bridge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v15
+        with:
+          name: nix-wasm
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      - name: Build desktop bridge programs
+        run: nix build -L -k --no-link '.#x11-tray-bridge' '.#guest-status-notifier' '.#guest-desktop-fixture'
 
   # #173 M1-M3: boot the shipped MMU guest and force three cache misses through
   # the native package set. The cache contains only cross-built seed tools and

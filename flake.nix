@@ -1589,6 +1589,13 @@
         linux-installed-image = linuxInstalledImage;
         linux-installed-image-nommu = linuxInstalledImageNommu;
 
+        # Build the desktop bridge programs on their own in CI. A guest image
+        # build also includes them, but exposing these derivations catches a
+        # cross-compile failure before the much larger image is available.
+        x11-tray-bridge = x11TrayBridge;
+        guest-status-notifier = guestStatusNotifier;
+        guest-desktop-fixture = guestDesktopFixture;
+
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).
         # Served by runtime/nix-cache.js; in-guest: `nix-env -iA guest-cc`.
