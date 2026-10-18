@@ -52,6 +52,7 @@ typedef struct {
   char *path;
   char *id;
   guint signal_id;
+  guint refresh_id;
   char label[MAX_LABEL + 1];
   uint8_t status;
   gboolean item_is_menu;
@@ -306,6 +307,7 @@ static void watcher_property_changed(void) {
 
 static void item_free(gpointer pointer) {
   Item *item = pointer;
+  if (item->refresh_id) g_source_remove(item->refresh_id);
   if (bus && item->signal_id)
     g_dbus_connection_signal_unsubscribe(bus, item->signal_id);
   if (bus && item->menu_signal_id)
@@ -526,6 +528,8 @@ static void publish_menu(Item *item) {
   g_byte_array_unref(frame);
 }
 
+static void schedule_refresh(Item *item);
+
 static void menu_signal(GDBusConnection *connection, const char *sender,
   const char *path, const char *interface, const char *signal,
   GVariant *parameters, gpointer data) {
@@ -533,7 +537,7 @@ static void menu_signal(GDBusConnection *connection, const char *sender,
   (void)parameters;
   if (g_strcmp0(signal, "LayoutUpdated") == 0 ||
       g_strcmp0(signal, "ItemsPropertiesUpdated") == 0)
-    publish_menu(data);
+    schedule_refresh(data);
 }
 
 static void refresh_item(Item *item) {
@@ -612,6 +616,20 @@ static gboolean refresh_registered_item(gpointer data) {
   return G_SOURCE_REMOVE;
 }
 
+static gboolean refresh_due(gpointer data) {
+  Item *item = data;
+  item->refresh_id = 0;
+  refresh_item(item);
+  return G_SOURCE_REMOVE;
+}
+
+/* Coalesce noisy SNI property and menu signals to at most one refresh per
+ * 50 ms per item. The source is cancelled before freeing an item. */
+static void schedule_refresh(Item *item) {
+  if (!item->refresh_id)
+    item->refresh_id = g_timeout_add(50, refresh_due, item);
+}
+
 static void item_signal(GDBusConnection *connection, const char *sender,
   const char *path, const char *interface, const char *signal,
   GVariant *parameters, gpointer data) {
@@ -619,7 +637,7 @@ static void item_signal(GDBusConnection *connection, const char *sender,
   if (g_strcmp0(interface, ITEM_INTERFACE) != 0 &&
       !(g_strcmp0(interface, "org.freedesktop.DBus.Properties") == 0 &&
         g_strcmp0(signal, "PropertiesChanged") == 0)) return;
-  refresh_item(data);
+  schedule_refresh(data);
 }
 
 static void name_owner_changed(GDBusConnection *connection, const char *sender,
