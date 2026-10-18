@@ -519,6 +519,9 @@
       ninepdDaemon = import ./userspace/ninepd.nix {
         inherit cross;
       };
+      x11TrayBridge = import ./userspace/x11-tray-bridge.nix {
+        inherit cross;
+      };
 
       # The first-boot seed installer copies roughly a GiB from squashfs to the
       # state disk. Bound that copy's page-cache footprint on the 2 GiB NOMMU
@@ -801,7 +804,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge ] ++ sharedAppPackages;
         useSQLiteWAL = false;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -967,7 +970,7 @@
         # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
         # sharedAppPackages' comment above for the full diagnosis). Fixed
         # 2026-08-13.
-        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge ] ++ sharedAppPackages;
       };
       wasmPasswdFork = import ./userspace/passwd.nix {
         lib = cross.lib;
