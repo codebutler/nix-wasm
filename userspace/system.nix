@@ -8,6 +8,7 @@
 # releases — e.g. nix.enable/nix.package live in the systemd-pulling
 # nix-daemon.nix here, so we re-declare them below). Revisit both on a bump.
 { nixpkgs, cross, busybox, toolchain ? [ ], nixPackage ? cross.nix
+, dbusPackage ? cross.dbus
 , extraSystemPackages ? [ ], useSQLiteWAL ? true }:
 let
   lib = cross.lib;
@@ -169,6 +170,7 @@ let
                             # ride the served closure (same pattern as l3afpad's
                             # baked-ICONDIR icon — XCHATSHAREDIR is this package's
                             # own store path, no pathsToLink entry needed).
+          dbusPackage       # One guest session bus for SNI and desktop notifications.
         ] ++ toolchain ++ extraSystemPackages);  # toolchain: nix, ash — on PATH from the closure; extraSystemPackages: guest acceptance programs whose store paths must ride the served closure (dltest's side modules)
         environment.defaultPackages = lib.mkForce [ ];
         environment.variables.TERM = "xterm-256color";
@@ -246,6 +248,22 @@ let
         # (pc `.claude/rules/linux.md`). A stale published ISO is a
         # publish-linux-channel republish, not a keystroke.
         environment.variables.DISPLAY = ":1";
+        environment.variables.DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/yore-session-bus";
+        # dbus-daemon's built-in --session path is /etc/dbus-1/session.conf.
+        # This system has no full NixOS D-Bus module to populate that file.
+        environment.etc."dbus-1/session.conf".text = ''
+          <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+            "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+          <busconfig>
+            <type>session</type>
+            <listen>unix:path=/tmp/yore-session-bus</listen>
+            <policy context="default">
+              <allow send_destination="*"/>
+              <allow receive_sender="*"/>
+              <allow own="*"/>
+            </policy>
+          </busconfig>
+        '';
         environment.variables.GDK_USE_XSHM = "0";
         environment.variables.QT_X11_NO_MITSHM = "1";
 
@@ -283,6 +301,7 @@ let
           export WAYLAND_DISPLAY=wayland-0
           export XDG_RUNTIME_DIR=/tmp
           export DISPLAY=:1
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/yore-session-bus
           export GDK_USE_XSHM=0
           export QT_X11_NO_MITSHM=1
           [ -r /etc/set-environment ] && . /etc/set-environment

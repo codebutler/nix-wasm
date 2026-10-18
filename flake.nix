@@ -188,6 +188,10 @@
       # here; a real fork BOOT also needs the kernel dup_mmap+COW path + the
       # engine child-in-shared-arena wiring — see the Track B status doc.)
       forkStdenv = import ./toolchain/wasm-fork-stdenv.nix { inherit pkgs cross muslFork; };
+      # D-Bus links fork() even when launched --nofork: its service activation
+      # and daemonization paths are in the final executable. Use the existing
+      # fork/Asyncify adapter, which instruments and audits that import.
+      guestDbus = forkStdenv.enableForkFor cross.dbus;
       # #129: the per-source asyncify builder (the PR #20-proven seam shape) —
       # cross cc + muslFork's libc.a first + host wasm-opt --asyncify with
       # capture_stack as the sole unwind import. Used for the fork acceptance
@@ -519,6 +523,18 @@
       ninepdDaemon = import ./userspace/ninepd.nix {
         inherit cross;
       };
+      x11TrayBridge = import ./userspace/x11-tray-bridge.nix {
+        inherit cross;
+      };
+      x11AttentionFixture = import ./userspace/x11-attention-fixture.nix {
+        inherit cross;
+      };
+      guestStatusNotifier = import ./userspace/guest-status-notifier.nix {
+        inherit cross;
+      };
+      guestDesktopFixture = import ./userspace/guest-desktop-fixture.nix {
+        inherit cross;
+      };
 
       # The first-boot seed installer copies roughly a GiB from squashfs to the
       # state disk. Bound that copy's page-cache footprint on the 2 GiB NOMMU
@@ -796,12 +812,13 @@
       # ---- curated NixOS-module eval -> guest /etc (Approach B) --------------
       wasmSystem = import ./userspace/system.nix {
         inherit nixpkgs cross; busybox = wasmBusybox;
+        dbusPackage = guestDbus;
         # Base system keeps only nix + ash; the compiler toolchain (clang, cc,
         # c++, make) lives in .#wasm-binary-cache and is installed on demand via
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge x11AttentionFixture guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
         useSQLiteWAL = false;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -948,6 +965,7 @@
       wasmSystemFork = import ./userspace/system.nix {
         inherit nixpkgs cross;
         busybox = wasmBusyboxFork;
+        dbusPackage = guestDbus;
         # #131 slice-1 (MMU-profile isolation, 2026-08-13): wasmAsh
         # dropped from this profile's toolchain. The fork guest's /bin/sh is
         # busybox-fork's own stock hush applet (userspace/busybox-fork.nix) —
@@ -967,7 +985,7 @@
         # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
         # sharedAppPackages' comment above for the full diagnosis). Fixed
         # 2026-08-13.
-        extraSystemPackages = [ wasmYoreSystem ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge x11AttentionFixture guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
       };
       wasmPasswdFork = import ./userspace/passwd.nix {
         lib = cross.lib;
@@ -1579,6 +1597,14 @@
         wasm-state-baseline-nommu = wasmStateBaselineNommu;
         linux-installed-image = linuxInstalledImage;
         linux-installed-image-nommu = linuxInstalledImageNommu;
+
+        # Build the desktop bridge programs on their own in CI. A guest image
+        # build also includes them, but exposing these derivations catches a
+        # cross-compile failure before the much larger image is available.
+        x11-tray-bridge = x11TrayBridge;
+        x11-attention-fixture = x11AttentionFixture;
+        guest-status-notifier = guestStatusNotifier;
+        guest-desktop-fixture = guestDesktopFixture;
 
         # On-demand compiler toolchain as a Nix binary cache (#43/#2/#1):
         # nix-cache-info + narinfo + nar/ + pkgs.nix (the defexpr index).

@@ -74,6 +74,8 @@ const char* sl_context_atom_name(int atom_enum) {
       return "_NET_WM_STATE_MAXIMIZED_HORZ";
     case ATOM_NET_WM_STATE_FOCUSED:
       return "_NET_WM_STATE_FOCUSED";
+    case ATOM_NET_WM_STATE_DEMANDS_ATTENTION:
+      return "_NET_WM_STATE_DEMANDS_ATTENTION";
     case ATOM_NET_WM_WINDOW_TYPE:
       return "_NET_WM_WINDOW_TYPE";
     case ATOM_NET_WM_WINDOW_TYPE_NORMAL:

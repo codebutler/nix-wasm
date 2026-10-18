@@ -81,6 +81,19 @@ let
   # disconnects, sommelier hangup-exits on the WM fd, and this line's
   # trailing `sleep 5` is the "open a new tab and it works again" delay.
   xwaylandLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; [ -e /dev/wl0 ] && XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /bin/sommelier -X --x-display=1 >>/var/log/sommelier-x.log 2>&1; sleep 5'";
+  # One session bus for native Wayland and X11 applications. Run in the
+  # foreground so busybox init reaps and restarts it. The socket address is
+  # fixed in /etc/profile for all login-launched GUI programs.
+  dbusLine = "::respawn:/bin/sh -c 'mkdir -p /tmp; rm -f /tmp/yore-session-bus; ${sw}/dbus-daemon --session --nofork --address=unix:path=/tmp/yore-session-bus >>/var/log/dbus-session.log 2>&1; sleep 5'";
+  # The watcher owns the guest SNI name and projects native Wayland items over
+  # vsock. It retries the host connection internally; busybox init restarts it
+  # if its process exits.
+  statusNotifierLine = "::respawn:/bin/sh -c 'while [ ! -S /tmp/yore-session-bus ]; do sleep 1; done; DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/yore-session-bus ${sw}/guest-status-notifier >>/var/log/guest-status-notifier.log 2>&1; sleep 5'";
+  # The XEmbed notification area is a guest-owned service. It waits for the
+  # standing :1 Xwayland server, owns _NET_SYSTEM_TRAY_S0, and connects to
+  # Yore's Linux tray listener over vsock 1026. The binary lives in the
+  # activated system profile, so early attempts simply retry after 5 seconds.
+  trayLine = "::respawn:/bin/sh -c 'DISPLAY=:1 ${sw}/x11-tray-bridge >>/var/log/x11-tray-bridge.log 2>&1; sleep 5'";
   # ninepd: the read-only 9P rootfs server behind pc's /Linux mount (pc#472).
   # Dials OUT to the host on vsock 1025 and serves the LIVE guest filesystem —
   # Filer browsing + the tray launcher's .desktop reads. INITRAMFS-absolute
@@ -94,4 +107,4 @@ let
   # space and busybox then reads the tty id as whitespace ("can't open /dev/  ").
 in
 pkgs.writeText "inittab"
-  (lib.concatStringsSep "\n" ([ syslogLine waylandLine xwaylandLine ninepdLine ] ++ consoleLines) + "\n")
+  (lib.concatStringsSep "\n" ([ syslogLine dbusLine statusNotifierLine waylandLine xwaylandLine trayLine ninepdLine ] ++ consoleLines) + "\n")

@@ -1498,6 +1498,41 @@ in
     else
       prev.xchat or null;
 
+  # The guest runs only a session bus. Nixpkgs enables Linux audit and
+  # AppArmor in D-Bus unconditionally. Audit pulls target gawk, which cannot
+  # link against the wasm fork sysroot (capture_stack is host-only); AppArmor
+  # emits ELF .symver directives that wasm cannot assemble. Neither kernel
+  # integration applies to this session bus, so disable both Meson features
+  # and remove their build inputs. libcap-ng is only used by audit here; its
+  # static-link flag must be removed with it so the fork adapter can supply
+  # the guest's own NIX_LDFLAGS without a duplicate env attribute.
+  # X11 autolaunch and systemd are likewise unnecessary for the fixed session
+  # socket in init.nix; native host D-Bus remains untouched by whenWasm.
+  dbus = whenWasm
+    (p: (p.override { x11Support = false; enableSystemd = false; }).overrideAttrs
+      (old: let
+        withoutKernelSecurity = inputs: builtins.filter
+          (input: !(builtins.elem (input.pname or "") [ "audit" "libapparmor" "libcap-ng" ])) inputs;
+      in {
+        buildInputs = withoutKernelSecurity (old.buildInputs or []);
+        # makeStatic promotes D-Bus's build inputs to propagatedBuildInputs.
+        propagatedBuildInputs = withoutKernelSecurity (old.propagatedBuildInputs or []);
+        env = builtins.removeAttrs (old.env or {}) [ "NIX_LDFLAGS" ];
+        mesonFlags = builtins.filter
+          (flag: !(builtins.any (prefix: final.lib.hasPrefix prefix flag) [
+            "-Dlibaudit=" "-Dapparmor=" "-Depoll=" "-Dinotify="
+          ]))
+          (old.mesonFlags or []) ++ [
+            "-Dlibaudit=disabled" "-Dapparmor=disabled"
+            # nixpkgs' Meson hook sets auto_features=enabled, so auto still
+            # forces epoll and fails when target libc lacks epoll_create1.
+            # The session bus uses D-Bus's poll path and explicit reloads.
+            "-Depoll=disabled" "-Dinotify=disabled"
+          ];
+        doCheck = false; # target binaries cannot execute on the cross host
+      }))
+    prev.dbus;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):

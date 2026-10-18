@@ -49,6 +49,7 @@
 #include <xcb/xproto.h>
 
 #include "aura-shell-client-protocol.h"  // NOLINT(build/include_directory)
+#include "yore-window-attention-v1-client-protocol.h"  // NOLINT(build/include_directory)
 #include "drm-server-protocol.h"         // NOLINT(build/include_directory)
 #include "fractional-scale-v1-client-protocol.h"  // NOLINT(build/include_directory)
 #ifdef GAMEPAD_SUPPORT
@@ -641,6 +642,25 @@ void sl_registry_handler(void* data,
       ctx->aura_shell = aura_shell;
       aura_shell->host_gtk_shell_global = sl_gtk_shell_global_create(ctx);
     }
+  } else if (strcmp(interface, "xdg_activation_v1") == 0) {
+    struct sl_xdg_activation* activation =
+        static_cast<sl_xdg_activation*>(calloc(1, sizeof(*activation)));
+    assert(activation);
+    activation->ctx = ctx;
+    activation->id = id;
+    assert(!ctx->xdg_activation);
+    ctx->xdg_activation = activation;
+    if (!ctx->xwayland)
+      activation->host_global = sl_xdg_activation_global_create(ctx);
+  } else if (strcmp(interface, "zyore_window_attention_v1") == 0) {
+    auto* attention = static_cast<sl_yore_attention*>(calloc(1, sizeof(sl_yore_attention)));
+    assert(attention);
+    attention->ctx = ctx;
+    attention->id = id;
+    attention->proxy = static_cast<zyore_window_attention_v1*>(wl_registry_bind(
+        registry, id, &zyore_window_attention_v1_interface, 1));
+    assert(!ctx->yore_attention);
+    ctx->yore_attention = attention;
   } else if (strcmp(interface, "wp_viewporter") == 0) {
     struct sl_viewporter* viewporter =
         static_cast<sl_viewporter*>(malloc(sizeof(struct sl_viewporter)));
@@ -865,6 +885,19 @@ void sl_registry_remover(void* data,
     zaura_shell_destroy(ctx->aura_shell->internal);
     free(ctx->aura_shell);
     ctx->aura_shell = nullptr;
+    return;
+  }
+  if (ctx->xdg_activation && ctx->xdg_activation->id == id) {
+    if (ctx->xdg_activation->host_global)
+      sl_global_destroy(ctx->xdg_activation->host_global);
+    free(ctx->xdg_activation);
+    ctx->xdg_activation = nullptr;
+    return;
+  }
+  if (ctx->yore_attention && ctx->yore_attention->id == id) {
+    zyore_window_attention_v1_destroy(ctx->yore_attention->proxy);
+    free(ctx->yore_attention);
+    ctx->yore_attention = nullptr;
     return;
   }
   if (ctx->viewporter && ctx->viewporter->id == id) {
@@ -1211,6 +1244,7 @@ void sl_handle_map_request(struct sl_context* ctx,
       {PROPERTY_WM_CLASS, XCB_ATOM_WM_CLASS},
       {PROPERTY_WM_TRANSIENT_FOR, XCB_ATOM_WM_TRANSIENT_FOR},
       {PROPERTY_WM_NORMAL_HINTS, XCB_ATOM_WM_NORMAL_HINTS},
+      {PROPERTY_WM_HINTS, XCB_ATOM_WM_HINTS},
       {PROPERTY_WM_CLIENT_LEADER, ctx->atoms[ATOM_WM_CLIENT_LEADER].value},
       {PROPERTY_WM_PROTOCOLS, ctx->atoms[ATOM_WM_PROTOCOLS].value},
       {PROPERTY_MOTIF_WM_HINTS, ctx->atoms[ATOM_MOTIF_WM_HINTS].value},
@@ -1336,6 +1370,14 @@ void sl_handle_map_request(struct sl_context* ctx,
                  sizeof(size_hints));
         }
         break;
+      case PROPERTY_WM_HINTS:
+        if (xcb()->get_property_value_length(reply) >=
+            static_cast<int>(sizeof(sl_wm_hints))) {
+          const auto* hints = static_cast<const sl_wm_hints*>(
+              xcb()->get_property_value(reply));
+          window->wm_hints_urgent = hints->flags & WM_HINTS_FLAG_URGENCY;
+        }
+        break;
       case PROPERTY_WM_CLIENT_LEADER:
         if (xcb()->get_property_value_length(reply) >= 4) {
           window->client_leader =
@@ -1383,6 +1425,9 @@ void sl_handle_map_request(struct sl_context* ctx,
           } else if (property_values[j] ==
                      ctx->atoms[ATOM_NET_WM_STATE_FULLSCREEN].value) {
             fullscreen = true;
+          } else if (property_values[j] ==
+                     ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value) {
+            window->net_wm_demands_attention = true;
           }
         }
         // Neither wayland not CrOS support 1D maximizing, so sommelier will
@@ -1865,6 +1910,40 @@ static void sl_request_attention(struct sl_context* ctx,
   }
 }
 
+void sl_window_publish_attention(struct sl_window* window) {
+  auto* ctx = window->ctx;
+  if (!ctx->yore_attention || !window->paired_surface) return;
+  zyore_window_attention_v1_set_attention(
+      ctx->yore_attention->proxy, window->paired_surface->proxy,
+      window->wm_hints_urgent || window->net_wm_demands_attention ? 1 : 0);
+}
+
+static void sl_window_update_attention_property(struct sl_window* window) {
+  auto* ctx = window->ctx;
+  auto* reply = xcb()->get_property_reply(
+      ctx->connection,
+      xcb()->get_property(ctx->connection, 0, window->id,
+                          ctx->atoms[ATOM_NET_WM_STATE].value, XCB_ATOM_ATOM,
+                          0, 64),
+      nullptr);
+  std::vector<xcb_atom_t> states;
+  if (reply) {
+    const auto* values = static_cast<const xcb_atom_t*>(
+        xcb()->get_property_value(reply));
+    const auto count = xcb()->get_property_value_length(reply) /
+                       sizeof(xcb_atom_t);
+    for (size_t i = 0; i < count; ++i)
+      if (values[i] != ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value)
+        states.push_back(values[i]);
+    free(reply);
+  }
+  if (window->net_wm_demands_attention)
+    states.push_back(ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value);
+  xcb()->change_property(ctx->connection, XCB_PROP_MODE_REPLACE, window->id,
+                         ctx->atoms[ATOM_NET_WM_STATE].value, XCB_ATOM_ATOM,
+                         32, states.size(), states.data());
+}
+
 void sl_handle_client_message(struct sl_context* ctx,
                               xcb_client_message_event_t* event) {
   TRACE_EVENT("x11wm", "XCB_CLIENT_MESSAGE", [&](perfetto::EventContext p) {
@@ -1986,6 +2065,18 @@ void sl_handle_client_message(struct sl_context* ctx,
             window->pending_maximized_change = true;
           }
         }
+      }
+      if (changed[ATOM_NET_WM_STATE_DEMANDS_ATTENTION]) {
+        if (action == NET_WM_STATE_ADD)
+          window->net_wm_demands_attention = true;
+        else if (action == NET_WM_STATE_REMOVE)
+          window->net_wm_demands_attention = false;
+        else if (action == NET_WM_STATE_TOGGLE)
+          window->net_wm_demands_attention = !window->net_wm_demands_attention;
+        sl_window_update_attention_property(window);
+        sl_window_publish_attention(window);
+        if (!ctx->yore_attention && window->net_wm_demands_attention)
+          sl_request_attention(ctx, window, /*is_strong_request=*/false);
       }
     }
   } else if (event->type == ctx->atoms[ATOM_WM_CHANGE_STATE].value &&
@@ -2469,6 +2560,8 @@ void sl_handle_property_notify(struct sl_context* ctx,
     }
 
     if (event->state == XCB_PROPERTY_DELETE) {
+      window->wm_hints_urgent = false;
+      sl_window_publish_attention(window);
       return;
     }
     struct sl_wm_hints wm_hints = {0};
@@ -2481,10 +2574,13 @@ void sl_handle_property_notify(struct sl_context* ctx,
     if (!reply) {
       return;
     }
-    memcpy(&wm_hints, xcb()->get_property_value(reply), sizeof(wm_hints));
+    if (xcb()->get_property_value_length(reply) >= (int)sizeof(wm_hints))
+      memcpy(&wm_hints, xcb()->get_property_value(reply), sizeof(wm_hints));
     free(reply);
 
-    if (wm_hints.flags & WM_HINTS_FLAG_URGENCY) {
+    window->wm_hints_urgent = wm_hints.flags & WM_HINTS_FLAG_URGENCY;
+    sl_window_publish_attention(window);
+    if (window->wm_hints_urgent && !ctx->yore_attention) {
       sl_request_attention(ctx, window, /*is_strong_request=*/false);
     }
   } else if (event->atom == ctx->atoms[ATOM_MOTIF_WM_HINTS].value) {
@@ -3164,6 +3260,7 @@ static void sl_set_supported(struct sl_context* ctx) {
       ctx->atoms[ATOM_NET_WM_STATE_MAXIMIZED_VERT].value,
       ctx->atoms[ATOM_NET_WM_STATE_MAXIMIZED_HORZ].value,
       ctx->atoms[ATOM_NET_WM_STATE_FOCUSED].value,
+      ctx->atoms[ATOM_NET_WM_STATE_DEMANDS_ATTENTION].value,
       // TODO(hollingum): STATE_MODAL and CLIENT_LIST, based on what wlroots
       // has.
   };
