@@ -1519,8 +1519,15 @@ in
         propagatedBuildInputs = withoutKernelSecurity (old.propagatedBuildInputs or []);
         env = builtins.removeAttrs (old.env or {}) [ "NIX_LDFLAGS" ];
         mesonFlags = builtins.filter
-          (flag: !(final.lib.hasPrefix "-Dlibaudit=" flag || final.lib.hasPrefix "-Dapparmor=" flag))
-          (old.mesonFlags or []) ++ [ "-Dlibaudit=disabled" "-Dapparmor=disabled" ];
+          (flag: !(builtins.any (prefix: final.lib.hasPrefix prefix flag) [
+            "-Dlibaudit=" "-Dapparmor=" "-Depoll=" "-Dinotify="
+          ]))
+          (old.mesonFlags or []) ++ [
+            "-Dlibaudit=disabled" "-Dapparmor=disabled"
+            # The target libc lacks epoll_create1 and may lack inotify; Meson
+            # selects its supported poll/config-reload paths from these probes.
+            "-Depoll=auto" "-Dinotify=auto"
+          ];
         doCheck = false; # target binaries cannot execute on the cross host
       }))
     prev.dbus;
