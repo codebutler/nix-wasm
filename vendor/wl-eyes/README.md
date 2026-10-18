@@ -60,3 +60,9 @@ From any Wayland session (`WAYLAND_DISPLAY` set):
 
 A 360×220 window appears. Move the pointer over it to make the eyes follow; click and
 drag to move the window; close it from the compositor to quit.
+
+For a compositor attention acceptance check, run `./wl-eyes --request-attention`
+and focus another window. After eight seconds the client submits an
+`xdg_activation_v1.activate` request without a user input token. A compositor
+that protects focus should leave the other window active and mark the eyes
+taskbar item for attention. The normal launch does not send this request.

@@ -526,6 +526,9 @@
       x11TrayBridge = import ./userspace/x11-tray-bridge.nix {
         inherit cross;
       };
+      x11AttentionFixture = import ./userspace/x11-attention-fixture.nix {
+        inherit cross;
+      };
       guestStatusNotifier = import ./userspace/guest-status-notifier.nix {
         inherit cross;
       };
@@ -815,7 +818,7 @@
         # `nix-env -iA guest-cc`. Removing it here shrinks the squashfs by ~89 MB.
         toolchain = [ nixWasmClean wasmAsh ];
         nixPackage = nixWasmClean;
-        extraSystemPackages = [ wasmYoreSystem x11TrayBridge guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge x11AttentionFixture guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
         useSQLiteWAL = false;
       };
       wasmPasswd = import ./userspace/passwd.nix {
@@ -982,7 +985,7 @@
         # xwaylandLine `sommelier -X` respawn to assert-abort forever (see
         # sharedAppPackages' comment above for the full diagnosis). Fixed
         # 2026-08-13.
-        extraSystemPackages = [ wasmYoreSystem x11TrayBridge guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
+        extraSystemPackages = [ wasmYoreSystem x11TrayBridge x11AttentionFixture guestStatusNotifier guestDesktopFixture ] ++ sharedAppPackages;
       };
       wasmPasswdFork = import ./userspace/passwd.nix {
         lib = cross.lib;
@@ -1599,6 +1602,7 @@
         # build also includes them, but exposing these derivations catches a
         # cross-compile failure before the much larger image is available.
         x11-tray-bridge = x11TrayBridge;
+        x11-attention-fixture = x11AttentionFixture;
         guest-status-notifier = guestStatusNotifier;
         guest-desktop-fixture = guestDesktopFixture;
 

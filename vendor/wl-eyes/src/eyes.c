@@ -8,17 +8,20 @@
  * is over the window and freeze at the last position when it leaves.
  */
 #include <math.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
+#include "xdg-activation-v1-client-protocol.h"
 
 #define WIDTH 360
 #define HEIGHT 220
@@ -46,6 +49,7 @@ struct app {
 	struct wl_seat *seat;
 	struct wl_pointer *pointer;
 	struct zxdg_decoration_manager_v1 *decoration_manager;
+	struct xdg_activation_v1 *activation;
 
 	struct wl_surface *surface;
 	struct xdg_surface *xdg_surface;
@@ -309,6 +313,8 @@ static void registry_global(void *data, struct wl_registry *r, uint32_t name, co
 		wl_seat_add_listener(app->seat, &seat_listener, app);
 	} else if (strcmp(iface, zxdg_decoration_manager_v1_interface.name) == 0) {
 		app->decoration_manager = wl_registry_bind(r, name, &zxdg_decoration_manager_v1_interface, 1);
+	} else if (strcmp(iface, xdg_activation_v1_interface.name) == 0) {
+		app->activation = wl_registry_bind(r, name, &xdg_activation_v1_interface, 1);
 	}
 }
 static void registry_global_remove(void *data, struct wl_registry *r, uint32_t name) {}
@@ -317,10 +323,15 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_global_remove,
 };
 
-int main(void)
+int main(int argc, char **argv)
 {
 	struct app app = { 0 };
 	app.running = true;
+	bool request_attention = argc == 2 && strcmp(argv[1], "--request-attention") == 0;
+	if (argc > 1 && !request_attention) {
+		fprintf(stderr, "usage: wl-eyes [--request-attention]\n");
+		return 2;
+	}
 
 	app.display = wl_display_connect(NULL);
 	if (!app.display) {
@@ -361,8 +372,41 @@ int main(void)
 	}
 	wl_surface_commit(app.surface);
 
-	printf("wl-eyes: running\n");
-	while (app.running && wl_display_dispatch(app.display) != -1) {
+	printf("wl-eyes: running%s\n",
+		request_attention ? "; requesting background activation in 8 seconds" : "");
+	fflush(stdout);
+	struct timespec started;
+	clock_gettime(CLOCK_MONOTONIC, &started);
+	bool requested = false;
+	while (app.running) {
+		if (!request_attention) {
+			if (wl_display_dispatch(app.display) == -1)
+				break;
+			continue;
+		}
+		if (wl_display_dispatch_pending(app.display) == -1)
+			break;
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (!requested && app.configured && now.tv_sec - started.tv_sec >= 8) {
+			requested = true;
+			if (app.activation) {
+				/* No user input token: the compositor must request attention,
+				 * leaving the focused Yore window in place. */
+				xdg_activation_v1_activate(app.activation, "qa-no-user-input-token", app.surface);
+				printf("wl-eyes: sent background activation request\n");
+			} else {
+				printf("wl-eyes: xdg-activation unavailable\n");
+			}
+			fflush(stdout);
+		}
+		if (wl_display_flush(app.display) == -1)
+			break;
+		struct pollfd pfd = { .fd = wl_display_get_fd(app.display), .events = POLLIN };
+		if (poll(&pfd, 1, 100) > 0 && (pfd.revents & POLLIN)) {
+			if (wl_display_dispatch(app.display) == -1)
+				break;
+		}
 	}
 
 	for (int i = 0; i < NBUF; i++)
@@ -371,6 +415,8 @@ int main(void)
 		zxdg_toplevel_decoration_v1_destroy(app.decoration);
 	if (app.decoration_manager)
 		zxdg_decoration_manager_v1_destroy(app.decoration_manager);
+	if (app.activation)
+		xdg_activation_v1_destroy(app.activation);
 	if (app.xdg_toplevel)
 		xdg_toplevel_destroy(app.xdg_toplevel);
 	if (app.xdg_surface)
