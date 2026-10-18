@@ -56,6 +56,7 @@ wl_protocols = [
   'protocol/viewporter.xml',
   'protocol/xdg-output-unstable-v1.xml',
   'protocol/xdg-shell.xml',
+  'protocol/xdg-activation-v1.xml',
 ]
 
 wl_outs = []
@@ -208,6 +209,7 @@ libsommelier = static_library(
     'sommelier-display.cc',
     'sommelier-fractional-scale.cc',
     'sommelier-gtk-shell.cc',
+    'sommelier-xdg-activation.cc',
     'sommelier-global.cc',
     'sommelier-idle-inhibit-manager.cc',
     'sommelier-inpututils.cc',

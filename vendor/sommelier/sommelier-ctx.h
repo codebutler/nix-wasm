@@ -93,6 +93,7 @@ struct sl_context {
   struct sl_data_device_manager* data_device_manager;
   struct sl_xdg_shell* xdg_shell;
   struct sl_aura_shell* aura_shell;
+  struct sl_xdg_activation* xdg_activation;
   struct sl_viewporter* viewporter;
   struct sl_linux_dmabuf* linux_dmabuf;
   struct sl_linux_explicit_synchronization* linux_explicit_synchronization;

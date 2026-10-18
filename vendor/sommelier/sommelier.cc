@@ -641,6 +641,16 @@ void sl_registry_handler(void* data,
       ctx->aura_shell = aura_shell;
       aura_shell->host_gtk_shell_global = sl_gtk_shell_global_create(ctx);
     }
+  } else if (strcmp(interface, "xdg_activation_v1") == 0) {
+    struct sl_xdg_activation* activation =
+        static_cast<sl_xdg_activation*>(calloc(1, sizeof(*activation)));
+    assert(activation);
+    activation->ctx = ctx;
+    activation->id = id;
+    assert(!ctx->xdg_activation);
+    ctx->xdg_activation = activation;
+    if (!ctx->xwayland)
+      activation->host_global = sl_xdg_activation_global_create(ctx);
   } else if (strcmp(interface, "wp_viewporter") == 0) {
     struct sl_viewporter* viewporter =
         static_cast<sl_viewporter*>(malloc(sizeof(struct sl_viewporter)));
@@ -865,6 +875,13 @@ void sl_registry_remover(void* data,
     zaura_shell_destroy(ctx->aura_shell->internal);
     free(ctx->aura_shell);
     ctx->aura_shell = nullptr;
+    return;
+  }
+  if (ctx->xdg_activation && ctx->xdg_activation->id == id) {
+    if (ctx->xdg_activation->host_global)
+      sl_global_destroy(ctx->xdg_activation->host_global);
+    free(ctx->xdg_activation);
+    ctx->xdg_activation = nullptr;
     return;
   }
   if (ctx->viewporter && ctx->viewporter->id == id) {
