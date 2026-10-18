@@ -93,7 +93,9 @@ in
       # --import-undefined is therefore required for this one fork-capable link;
       # the final-module audit below restores the strict no-undef contract after
       # asyncify (the same local-extension pattern as busybox-fork.nix).
-      NIX_LDFLAGS = "-Wl,--import-undefined ${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
+      # NIX_LDFLAGS is forwarded to wasm-ld itself by the cc-wrapper, so use
+      # the linker's flag spelling here (not clang's -Wl, spelling).
+      NIX_LDFLAGS = "--import-undefined ${muslFork}/lib/libc.a " + (o.NIX_LDFLAGS or "");
       postFixup = (o.postFixup or "") + ''
         ${forkShellFn}
         if [ -d "$out/bin" ]; then
