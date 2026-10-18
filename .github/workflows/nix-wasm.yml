@@ -183,7 +183,7 @@ jobs:
           name: nix-wasm
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
       - name: Build desktop bridge programs
-        run: nix build -L -k --no-link '.#x11-tray-bridge' '.#guest-status-notifier' '.#guest-desktop-fixture'
+        run: nix build -L --no-link '.#x11-tray-bridge' '.#guest-status-notifier' '.#guest-desktop-fixture'
 
   # #173 M1-M3: boot the shipped MMU guest and force three cache misses through
   # the native package set. The cache contains only cross-built seed tools and
