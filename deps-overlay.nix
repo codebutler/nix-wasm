@@ -1498,6 +1498,28 @@ in
     else
       prev.xchat or null;
 
+  # The guest runs only a session bus. Nixpkgs enables Linux audit in D-Bus
+  # unconditionally, which pulls audit -> target gawk; that unrelated CLI
+  # cannot link against the wasm fork sysroot (capture_stack is host-only).
+  # Disable audit at Meson's own feature boundary and remove its build input.
+  # X11 autolaunch and systemd are likewise unnecessary for the fixed session
+  # socket in init.nix; native host D-Bus remains untouched by whenWasm.
+  dbus = whenWasm
+    (p: (p.override { x11Support = false; enableSystemd = false; }).overrideAttrs
+      (old: let
+        withoutAudit = inputs: builtins.filter
+          (input: (input.pname or "") != "audit") inputs;
+      in {
+        buildInputs = withoutAudit (old.buildInputs or []);
+        # makeStatic promotes D-Bus's build inputs to propagatedBuildInputs.
+        propagatedBuildInputs = withoutAudit (old.propagatedBuildInputs or []);
+        mesonFlags = builtins.filter
+          (flag: !(final.lib.hasPrefix "-Dlibaudit=" flag))
+          (old.mesonFlags or []) ++ [ "-Dlibaudit=disabled" ];
+        doCheck = false; # target binaries cannot execute on the cross host
+      }))
+    prev.dbus;
+
   # --- busybox: redirect its internal stdenv override to our replaceCrossStdenv -
   # nixpkgs' all-packages.nix overrides busybox's stdenv when
   # `stdenv.targetPlatform.useLLVM` (= true for wasm):
