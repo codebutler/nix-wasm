@@ -243,6 +243,10 @@ static void button(Window window, int number, int x, int y) {
   XTestFakeMotionEvent(display, DefaultScreen(display), x, y, CurrentTime);
   XTestFakeButtonEvent(display, number, True, CurrentTime);
   XTestFakeButtonEvent(display, number, False, CurrentTime);
+  /* The guest pointer is otherwise left over the docked icon indefinitely:
+   * GTK opens a tooltip that can cover its own context menu. The host pointer
+   * remains where the user put it; release the synthetic guest hover. */
+  XTestFakeMotionEvent(display, DefaultScreen(display), 0, 0, CurrentTime);
   XFlush(display);
 }
 
