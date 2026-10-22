@@ -170,6 +170,9 @@ in
   perl = whenWasm
     (p: p.overrideAttrs (o: {
       configureFlags = (o.configureFlags or [ ]) ++ [
+        # wasm32 is little-endian; perl-cross cannot execute its byte-order
+        # probe in the build sandbox.
+        "-Dbyteorder=1234"
         "-Dcharsize=1" "-Dshortsize=2" "-Dintsize=4" "-Dlongsize=4"
         "-Ddoublesize=8" "-Dptrsize=4" "-Dlongdblsize=16"
         "-Dlonglongsize=8" "-Dsizesize=4" "-Dfpossize=16"
