@@ -89,9 +89,10 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     outputs:
-      # A workflow-only PR validates routing without rebuilding unchanged Nix
-      # sources. Its merge on master and a manual dispatch must run the full
-      # release build before the provenance-gated publisher can proceed.
+      # A workflow-only PR checks routing and builds its independent QA image.
+      # The image source hash can change even when the compiler derivation does
+      # not. Its merge on master and a manual dispatch must run the full Cachix
+      # provenance build before publication.
       nix: ${{ steps.filter.outputs.nix == 'true' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && steps.filter.outputs.workflow == 'true') }}
       runtime: ${{ steps.filter.outputs.runtime }}
     steps:

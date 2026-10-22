@@ -43,3 +43,8 @@ for the `artifacts` job to finish pushing its exact store paths to Cachix. Then
 run `publish-linux-channel.yml` with `dry_run: true` before the live run. Keep
 `allow_unpublished: false`: the publisher's provenance gate checks the CI-built
 paths before flipping the channel pointer.
+
+Workflow and documentation edits can change the Linux image's source hash even
+when `guest-clang` keeps the same derivation path. The workflow-only PR skips its
+heavy matrix while still building the independent QA image; the push to master
+forces the complete artifact build and Cachix upload.
