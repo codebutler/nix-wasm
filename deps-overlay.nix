@@ -161,6 +161,11 @@ in
         configureFlags = (o.configureFlags or [ ]) ++ [
           "--disable-all-programs" "--enable-libuuid" "--disable-uuidd"
         ];
+        # nixpkgs' shared postInstall unconditionally adds hd -> hexdump even
+        # when the latter is disabled; remove that now-dangling alias.
+        postInstall = (o.postInstall or "") + ''
+          rm -f "$bin/bin/hd" "$man/share/man/man1/hd.1"
+        '';
       })
     else prev.libuuid;
   # wasm musl's CRT calls a two-argument main. GNU Make normally selects its
