@@ -43,11 +43,11 @@ concurrency:
 
 jobs:
   publish:
-    # Dedicated x86_64 runner with 16 vCPU / 32 GiB: the publish normally
+    # Dedicated Lima/Rosetta runner configured for x86_64 Nix: the publish normally
     # substitutes CI-built paths, but the full image and binary-cache closure
     # still need substantial disk and RAM. Keep its architecture aligned with
     # nix-wasm.yml so the provenance gate checks the same store paths.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: [self-hosted, linux, ARM64, nix-wasm]
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +61,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       # Substitute the prebuilt wasm closure (kernel/guest-clang/squashfs) from the
       # Cachix cache the nix-wasm build CI populated — copy store paths, don't rebuild.

@@ -27,8 +27,8 @@ concurrency:
 jobs:
   gates:
     name: engine tests + typecheck + lint + format
-    # PRs stay on managed runners; pushes use the dedicated x86_64 runner.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-sm"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    # PRs stay on managed runners; pushes use the dedicated Lima runner.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-sm"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 15
     defaults:
       run:

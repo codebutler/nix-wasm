@@ -7,9 +7,9 @@ on:
 
 jobs:
   publish:
-    # Dedicated x86_64 runner — substitutes the closure from Cachix and
+    # Dedicated Lima/Rosetta runner — substitutes the closure from Cachix and
     # uploads to R2. cache.nixos.org still serves the native deps.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: [self-hosted, linux, ARM64, nix-wasm]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +25,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       # Substitute the wasm artifacts (incl. guest-clang/kernel) from the Cachix
       # cache the nix-wasm build CI populated — so this publish job copies prebuilt

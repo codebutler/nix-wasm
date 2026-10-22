@@ -103,7 +103,6 @@ jobs:
               - '**/*.nix'
               - 'patches/**'
               - '.rebuild-request'
-              - '.github/workflows/nix-wasm.yml'
               # nix-wasm#202 PR-1: several .nix derivations interpolate a
               # scripts/*.py path directly into their build (busybox-fork.nix's
               # wasm-check-imports.py post-link check; guest-clang.nix's
@@ -164,6 +163,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - name: Evaluate native wasm derivation
         run: nix eval --raw '.#checks.x86_64-linux.wasm-native-eval.drvPath'
@@ -181,6 +182,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
       - uses: cachix/cachix-action@v15
         with:
           name: nix-wasm
@@ -209,6 +212,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
       - uses: cachix/cachix-action@v15
         with:
           name: nix-wasm
@@ -235,7 +240,7 @@ jobs:
     name: native in-guest nixpkgs builds (stdenv + hello + wget)
     needs: [changes, toolchain, artifacts]
     if: ${{ !failure() && !cancelled() && needs.changes.outputs.nix == 'true' }}
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
@@ -245,6 +250,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -298,15 +305,15 @@ jobs:
     name: build .#${{ matrix.attr }}
     needs: changes
     if: ${{ needs.changes.outputs.nix == 'true' }}
-    # Dedicated x86_64 runner (at least 16 vCPU / 32 GiB). The from-source LLVM poles
+    # Dedicated ARM64 Lima runner with Rosetta executes x86_64 Nix builds. The LLVM poles
     # (guest-clang, the kernel's patched LLVM) are RAM/core-bound — they time out
     # on a stock 4-core/16 GB ubuntu-latest (kernel hit the 6h cap). The
-    # dedicated runner needs enough cores/RAM/disk to land each in ~1-2h.
+    # dedicated runner needs enough cores/RAM/disk for a cold build.
     # cache.nixos.org has the full nixos-26.05 x86_64 cache for native deps.
     # The `nix-wasm` label must identify a runner provisioned for the full
-    # build closure; pc's ARM64 Lima runner cannot produce the x86_64 store
+    # build closure; pc's ARM64 Lima runner lacks Rosetta and cannot produce x86_64 store
     # paths used by publication.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 350 # headroom for cold builds; warm reruns substitute from Cachix
     strategy:
       fail-fast: false
@@ -324,6 +331,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -342,7 +351,7 @@ jobs:
     # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
     # C++ + squashfs/initramfs/image). Keep this on the same x86_64 runner label
     # as the toolchain so the derivation paths match the publisher.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -355,6 +364,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -502,7 +513,7 @@ jobs:
     # paths-only + stream module bytes one file at a time, which lowers that
     # peak substantially, but md is kept regardless as headroom for the
     # closureInfo realize step itself and any future growth in the swept set.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -515,6 +526,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -582,7 +595,7 @@ jobs:
     # from Cachix). `!failure() && !cancelled()` lets it run even when `toolchain`
     # was SKIPPED (runtime-only change) instead of being blocked by the needs edge.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     # MERGED (CI perf pass): this job used to be a 3-way matrix (signals, mmu,
     # mmu-devices), each its own medium-runner job. Real CI history showed
     # jobs in this wave queueing 30-90+ min for a free `md` runner while the
@@ -614,6 +627,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -990,7 +1005,7 @@ jobs:
     # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
     # the unchanged nix:true artifacts from Cachix rather than blocking on a build.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     # MERGED (CI perf pass): `core` and `gtk` used to be two parallel matrix
     # shards, each independently re-substituting the SAME nix:true artifact set
     # (kernel + initramfs + squashfs + the ~22 GiB wasm-binary-cache) — a
@@ -1011,6 +1026,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:
@@ -1273,7 +1290,7 @@ jobs:
     # but it DOES softmmu-instrument-at-load the same ~14 MB GTK binaries the
     # NOMMU gtk group's own comment says fragment a much smaller heap — kept on
     # the same -lg profile rather than assuming a smaller one is safe untested.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     # MERGED (CI perf pass): `core` and `gtk` used to be two parallel matrix
     # shards on `lg` — the scarcest, most contended runner profile (real CI
     # history showed a `gtk`-shard queue wait as long as 127 min in this exact
@@ -1297,6 +1314,8 @@ jobs:
           nix_path: nixpkgs=channel:nixos-26.05
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system = x86_64-linux
+            extra-platforms = x86_64-linux
 
       - uses: cachix/cachix-action@v15
         with:

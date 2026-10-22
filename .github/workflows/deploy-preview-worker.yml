@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: [self-hosted, linux, ARM64, nix-wasm]
     steps:
       - uses: actions/checkout@v4
       # wrangler needs Node >= 22; a self-hosted runner may ship v20 by default.
