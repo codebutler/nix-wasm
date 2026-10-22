@@ -164,6 +164,18 @@ in
             '#if defined(_AMIGA) || defined(MK_OS_ZOS) || defined(__wasm__)'
       '';
     })) prev.gnumake;
+  # perl-cross measures target type sizes with GNU readelf --syms. GNU readelf
+  # cannot read wasm objects; these wasm32-musl sizes were measured from a
+  # target object with llvm-readobj --symbols instead of guessed from the host.
+  perl = whenWasm
+    (p: p.overrideAttrs (o: {
+      configureFlags = (o.configureFlags or [ ]) ++ [
+        "-Dcharsize=1" "-Dshortsize=2" "-Dintsize=4" "-Dlongsize=4"
+        "-Ddoublesize=8" "-Dptrsize=4" "-Dlongdblsize=16"
+        "-Dlonglongsize=8" "-Dsizesize=4" "-Dfpossize=16"
+        "-Dlseeksize=8" "-Duidsize=4" "-Dgidsize=4" "-Dtimesize=8"
+      ];
+    })) prev.perl;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
