@@ -53,13 +53,13 @@ let
 #endif'
     '';
   });
+  seedFork = p:
+    if forkStdenv == null
+    then throw "deps-overlay: exposed guest process tools require forkStdenv"
+    else forkStdenv.enableForkFor p;
   guestBash = p:
     let patched = wasmBash p;
-    in if isWasmCross && exposeGuestBuildTools
-       then if forkStdenv == null
-            then throw "deps-overlay: exposed guest Bash requires forkStdenv"
-            else forkStdenv.enableForkFor patched
-       else patched;
+    in if isWasmCross && exposeGuestBuildTools then seedFork patched else patched;
 
   # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
@@ -145,6 +145,12 @@ in
   bashNonInteractive =
     if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive
     else whenWasm guestBash prev.bashNonInteractive;
+  # Perl's Cwd.pm embeds the target `pwd` path, so the seed closure needs a
+  # real guest Coreutils. Its single binary includes fork callers (for example
+  # timeout), which must receive the same asyncified fork seam as guest Bash.
+  coreutils =
+    if isWasmCross && exposeGuestBuildTools then seedFork prev.coreutils
+    else prev.coreutils;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
