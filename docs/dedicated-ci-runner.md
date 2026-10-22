@@ -20,6 +20,8 @@ across trusted jobs. The workflows verify that its effective system is
 `x86_64-linux`; `cachix/cachix-action` configures the cache. Managed PR jobs
 continue to use `cachix/install-nix-action`. The publishing workflow also
 installs Node 22, Bun, and rclone.
+Install `unzip` in the VM before registering it: `oven-sh/setup-bun` needs it
+for the boot-smoke job (minimal Ubuntu Lima images omit it).
 
 The pc repository's `gha` Lima runner is **ARM64, 4 vCPU, 6 GiB RAM**. It lacks
 Rosetta and cannot build this repository's x86_64 Nix store paths. Do not register

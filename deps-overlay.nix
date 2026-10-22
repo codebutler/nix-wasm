@@ -25,6 +25,7 @@
   kernelHeaders,
   muslWasm,
   exposeGuestBuildTools ? false,
+  forkStdenv ? null,
   libffiTrampolines ? null,
 }:
 final: prev:
@@ -36,6 +37,29 @@ let
   # Apply build-host redirects only while cross compiling. In the native wasm
   # set these tools must be real guest packages and buildPackages == final.
   whenWasmCross = f: p: if isWasmCross then f p else p;
+
+  # musl's wasm CRT calls the two-argument main ABI. Bash's default three-arg
+  # entry point has a different wasm function type, even though C ABIs on other
+  # targets tolerate the extra argument. Keep Bash's own environment handling.
+  wasmBash = p: p.overrideAttrs (o: {
+    postPatch = (o.postPatch or "") + ''
+      substituteInPlace shell.c \
+        --replace-fail '#if defined (NO_MAIN_ENV_ARG)' \
+          '#if defined (NO_MAIN_ENV_ARG) || defined (__wasm__)' \
+        --replace-fail '  int code, old_errexit_flag;' \
+          '  int code, old_errexit_flag;
+#if defined (__wasm__)
+  char **env = environ;
+#endif'
+    '';
+  });
+  guestBash = p:
+    let patched = wasmBash p;
+    in if isWasmCross && exposeGuestBuildTools
+       then if forkStdenv == null
+            then throw "deps-overlay: exposed guest Bash requires forkStdenv"
+            else forkStdenv.enableForkFor patched
+       else patched;
 
   # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
@@ -116,9 +140,11 @@ in
   # or aren't used by nix.wasm at all). Point the shell machinery at the native
   # bash. A guest shell, when needed, is a separate user package.
   bash =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash else prev.bash;
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash
+    else whenWasm guestBash prev.bash;
   bashNonInteractive =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive else prev.bashNonInteractive;
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive
+    else whenWasm guestBash prev.bashNonInteractive;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
