@@ -1,0 +1,25 @@
+.github/workflows/publish-linux-channel.yml
+  s_e176bdd30b413e::t_85887ba981e7d4 44-51,65-69
+.github/workflows/publish-wasm-artifacts.yml
+  s_e176bdd30b413e::t_006c753dceff1e 8-15,27-31
+docs/dedicated-ci-runner.md
+  s_e176bdd30b413e::t_bd9718c09da422 18-22
+.github/workflows/nix-wasm.yml
+  s_e176bdd30b413e::t_0bc6ec654b166a 77-85,264,272-275,350,358-361,388,396-399,555,563-566,661,669-672,1065,1073-1076,1358,1366-1369
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3747a520b66f7463db9f1d842e5bdaccd9a3cf75",
+  "prompts": {},
+  "sessions": {
+    "s_e176bdd30b413e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c49-5608-7353-8d6e-6b03731a58a9",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
