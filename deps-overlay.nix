@@ -151,6 +151,19 @@ in
   coreutils =
     if isWasmCross && exposeGuestBuildTools then seedFork prev.coreutils
     else prev.coreutils;
+  # wasm musl's CRT calls a two-argument main. GNU Make normally selects its
+  # three-argument main (and Clang leaves an unresolved __main import); its
+  # existing z/OS path already reads the environment from environ instead.
+  gnumake = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace src/main.c \
+          --replace-fail '#ifdef MK_OS_ZOS' \
+            '#if defined(MK_OS_ZOS) || defined(__wasm__)' \
+          --replace-fail '#if defined(_AMIGA) || defined(MK_OS_ZOS)' \
+            '#if defined(_AMIGA) || defined(MK_OS_ZOS) || defined(__wasm__)'
+      '';
+    })) prev.gnumake;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
