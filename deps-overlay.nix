@@ -190,7 +190,8 @@ in
   # perl-cross measures target type sizes with GNU readelf --syms. GNU readelf
   # cannot read wasm objects; these wasm32-musl sizes were measured from a
   # target object with llvm-readobj --symbols instead of guessed from the host.
-  perl = whenWasm
+  perl =
+    let patched = whenWasm
     (p: p.overrideAttrs (o: {
       postPatch = (o.postPatch or "") + ''
         # Perl's static re extension builds its own regex engine. Keep the
@@ -223,8 +224,12 @@ in
         "-Ddoublesize=8" "-Dptrsize=4" "-Dlongdblsize=16"
         "-Dlonglongsize=8" "-Dsizesize=4" "-Dfpossize=16"
         "-Dlseeksize=8" "-Duidsize=4" "-Dgidsize=4" "-Dtimesize=8"
-      ];
+      # The seed interpreter is linked against the fork-capable guest CRT.
+      # Without this hint, pp_sys selects the no-fork do_spawn path, which
+      # Unix Perl does not implement. Keep the native/cross library unchanged.
+      ] ++ (if isWasmCross && exposeGuestBuildTools then [ "-Dd_fork=define" ] else [ ]);
     })) prev.perl;
+    in if isWasmCross && exposeGuestBuildTools then seedFork patched else patched;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
