@@ -21,10 +21,10 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: namespace-profile-sm
+    runs-on: [self-hosted, linux, X64, nix-wasm]
     steps:
       - uses: actions/checkout@v4
-      # wrangler needs Node >= 22; the Namespace runner ships v20 by default.
+      # wrangler needs Node >= 22; a self-hosted runner may ship v20 by default.
       - uses: actions/setup-node@v4
         with:
           node-version: 22

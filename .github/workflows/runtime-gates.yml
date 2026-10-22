@@ -27,8 +27,8 @@ concurrency:
 jobs:
   gates:
     name: engine tests + typecheck + lint + format
-    # Namespace small runner — keeps this off GitHub-hosted minutes (private repo).
-    runs-on: namespace-profile-sm
+    # Dedicated x86_64 runner — keeps this off GitHub-hosted minutes (private repo).
+    runs-on: [self-hosted, linux, X64, nix-wasm]
     timeout-minutes: 15
     defaults:
       run:

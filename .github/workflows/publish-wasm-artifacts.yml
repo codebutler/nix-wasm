@@ -7,10 +7,9 @@ on:
 
 jobs:
   publish:
-    # Namespace small runner (x86_64) — substitutes the closure from Cachix and
-    # uploads to R2, so the `sm` profile suffices; stays off GitHub-hosted
-    # minutes (private repo). cache.nixos.org still serves the native deps.
-    runs-on: namespace-profile-sm
+    # Dedicated x86_64 runner — substitutes the closure from Cachix and
+    # uploads to R2. cache.nixos.org still serves the native deps.
+    runs-on: [self-hosted, linux, X64, nix-wasm]
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +34,7 @@ jobs:
           name: nix-wasm
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      # Wrangler requires Node >= 22. Namespace currently exposes Node 20 to
+      # Wrangler requires Node >= 22. Self-hosted runners may expose Node 20 to
       # shell steps even though GitHub-hosted JavaScript actions themselves are
       # forced onto Node 24, so install a supported shell-visible runtime.
       - uses: actions/setup-node@v4
