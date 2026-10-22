@@ -151,6 +151,18 @@ in
   coreutils =
     if isWasmCross && exposeGuestBuildTools then seedFork prev.coreutils
     else prev.coreutils;
+  # The native bootstrap needs libuuid, not util-linux's unrelated command-line
+  # tools. Building the whole multi-output derivation also links switch_root,
+  # which calls fork and therefore needs the host-only capture_stack seam.
+  # Configure just the library; no guest executable from this package is seeded.
+  libuuid =
+    if isWasmCross && exposeGuestBuildTools then
+      prev.libuuid.overrideAttrs (o: {
+        configureFlags = (o.configureFlags or [ ]) ++ [
+          "--disable-all-programs" "--enable-libuuid" "--disable-uuidd"
+        ];
+      })
+    else prev.libuuid;
   # wasm musl's CRT calls a two-argument main. GNU Make normally selects its
   # three-argument main (and Clang leaves an unresolved __main import); its
   # existing z/OS path already reads the environment from environ instead.
