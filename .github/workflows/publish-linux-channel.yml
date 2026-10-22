@@ -41,6 +41,14 @@ concurrency:
   group: publish-linux-channel
   cancel-in-progress: false
 
+# The ARM64 Lima runner executes x86_64 Nix outputs through Rosetta.
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    system = x86_64-linux
+    extra-platforms = x86_64-linux
+  NIX_PATH: nixpkgs=channel:nixos-26.05
+
 jobs:
   publish:
     # Dedicated Lima/Rosetta runner configured for x86_64 Nix: the publish normally
@@ -54,18 +62,12 @@ jobs:
       - name: Disk free
         run: df -h /
 
-      # nixos-26.05 pin: complete x86_64 binary cache (incl. LLVM 21), so no
-      # heavy from-source rebuilds (matches the project's CI caching strategy).
-      - uses: cachix/install-nix-action@v27
-        with:
-          nix_path: nixpkgs=channel:nixos-26.05
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            system = x86_64-linux
-            extra-platforms = x86_64-linux
+      # Nix is preinstalled in this isolated VM so its validated x86 store
+      # persists across trusted release jobs. Reinstalling would conflict with
+      # its single-user /nix store.
+      - name: Verify preinstalled x86 Nix
+        run: test "$(nix eval --raw --impure --expr builtins.currentSystem)" = x86_64-linux
 
-      # Substitute the prebuilt wasm closure (kernel/guest-clang/squashfs) from the
-      # Cachix cache the nix-wasm build CI populated — copy store paths, don't rebuild.
       - uses: cachix/cachix-action@v15
         with:
           name: nix-wasm

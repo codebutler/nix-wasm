@@ -15,9 +15,11 @@ The active pc runner remains a separate VM. Give this VM as much RAM and disk as
 the host can spare; cold LLVM builds are resource intensive. One runner executes
 the `guest-clang` and `kernel` matrix jobs sequentially. Set it up as an ephemeral
 or otherwise isolated service following GitHub's self-hosted runner instructions.
-The `cachix/install-nix-action` and `cachix/cachix-action` steps configure Nix and
-the cache for each job; the publishing workflow also installs Node 22, Bun, and
-rclone.
+Install Nix once in the Lima guest in single-user mode and retain its store
+across trusted jobs. The workflows verify that its effective system is
+`x86_64-linux`; `cachix/cachix-action` configures the cache. Managed PR jobs
+continue to use `cachix/install-nix-action`. The publishing workflow also
+installs Node 22, Bun, and rclone.
 
 The pc repository's `gha` Lima runner is **ARM64, 4 vCPU, 6 GiB RAM**. It lacks
 Rosetta and cannot build this repository's x86_64 Nix store paths. Do not register
