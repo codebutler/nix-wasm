@@ -103,10 +103,11 @@
             inherit kernelHeaders;
             muslWasm = musl;
             exposeGuestBuildTools = true;
+            inherit forkStdenv;
           })
         ];
       };
-      wasmNativeSeedBash = forkStdenv.enableForkFor wasmNativeSeedCross.bashNonInteractive;
+      wasmNativeSeedBash = wasmNativeSeedCross.bashNonInteractive;
       wasmNativeSeedMake = forkStdenv.enableForkFor wasmNativeSeedCross.gnumake;
       wasmNativeSeedPackages = {
         inherit (wasmNativeSeedCross)

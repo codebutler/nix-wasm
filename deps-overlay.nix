@@ -25,6 +25,7 @@
   kernelHeaders,
   muslWasm,
   exposeGuestBuildTools ? false,
+  forkStdenv ? null,
   libffiTrampolines ? null,
 }:
 final: prev:
@@ -36,6 +37,29 @@ let
   # Apply build-host redirects only while cross compiling. In the native wasm
   # set these tools must be real guest packages and buildPackages == final.
   whenWasmCross = f: p: if isWasmCross then f p else p;
+
+  # musl's wasm CRT calls the two-argument main ABI. Bash's default three-arg
+  # entry point has a different wasm function type, even though C ABIs on other
+  # targets tolerate the extra argument. Keep Bash's own environment handling.
+  wasmBash = p: p.overrideAttrs (o: {
+    postPatch = (o.postPatch or "") + ''
+      substituteInPlace shell.c \
+        --replace-fail '#if defined (NO_MAIN_ENV_ARG)' \
+          '#if defined (NO_MAIN_ENV_ARG) || defined (__wasm__)' \
+        --replace-fail '  int code, old_errexit_flag;' \
+          '  int code, old_errexit_flag;
+#if defined (__wasm__)
+  char **env = environ;
+#endif'
+    '';
+  });
+  seedFork = p:
+    if forkStdenv == null
+    then throw "deps-overlay: exposed guest process tools require forkStdenv"
+    else forkStdenv.enableForkFor p;
+  guestBash = p:
+    let patched = wasmBash p;
+    in if isWasmCross && exposeGuestBuildTools then seedFork patched else patched;
 
   # gobject/GTK fpcast-emu seam; its `hook` rides gtk3's propagation (below).
   fpcast = import ./userspace/fpcast-emu.nix { cross = final; };
@@ -116,9 +140,96 @@ in
   # or aren't used by nix.wasm at all). Point the shell machinery at the native
   # bash. A guest shell, when needed, is a separate user package.
   bash =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash else prev.bash;
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bash
+    else whenWasm guestBash prev.bash;
   bashNonInteractive =
-    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive else prev.bashNonInteractive;
+    if isWasmCross && !exposeGuestBuildTools then final.buildPackages.bashNonInteractive
+    else whenWasm guestBash prev.bashNonInteractive;
+  # Perl's Cwd.pm embeds the target `pwd` path, so the seed closure needs a
+  # real guest Coreutils. Its single binary includes fork callers (for example
+  # timeout), which must receive the same asyncified fork seam as guest Bash.
+  coreutils =
+    if isWasmCross && exposeGuestBuildTools then seedFork prev.coreutils
+    else prev.coreutils;
+  # The native bootstrap needs libuuid, not util-linux's unrelated command-line
+  # tools. Building the whole multi-output derivation also links switch_root,
+  # which calls fork and therefore needs the host-only capture_stack seam.
+  # Configure just the library; no guest executable from this package is seeded.
+  libuuid =
+    if isWasmCross && exposeGuestBuildTools then
+      prev.libuuid.overrideAttrs (o: {
+        configureFlags = (o.configureFlags or [ ]) ++ [
+          "--disable-all-programs" "--enable-libuuid" "--disable-uuidd"
+          "--disable-write"
+        ];
+        # nixpkgs' shared postInstall unconditionally adds hd -> hexdump even
+        # when the latter is disabled; remove that now-dangling alias.
+        postInstall = (o.postInstall or "") + ''
+          rm -f "$bin/bin/hd" "$man/share/man/man1/hd.1"
+          # Disabling programs leaves some of util-linux's declared outputs
+          # empty. Nix still requires every declared output path to exist.
+          for outputName in $outputs; do
+            mkdir -p "''${!outputName}"
+          done
+        '';
+      })
+    else prev.libuuid;
+  # wasm musl's CRT calls a two-argument main. GNU Make normally selects its
+  # three-argument main (and Clang leaves an unresolved __main import); its
+  # existing z/OS path already reads the environment from environ instead.
+  gnumake = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        substituteInPlace src/main.c \
+          --replace-fail '#ifdef MK_OS_ZOS' \
+            '#if defined(MK_OS_ZOS) || defined(__wasm__)' \
+          --replace-fail '#if defined(_AMIGA) || defined(MK_OS_ZOS)' \
+            '#if defined(_AMIGA) || defined(MK_OS_ZOS) || defined(__wasm__)'
+      '';
+    })) prev.gnumake;
+  # perl-cross measures target type sizes with GNU readelf --syms. GNU readelf
+  # cannot read wasm objects; these wasm32-musl sizes were measured from a
+  # target object with llvm-readobj --symbols instead of guessed from the host.
+  perl =
+    let patched = whenWasm
+    (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        # Perl's static re extension builds its own regex engine. Keep the
+        # extension-private copies distinct from libperl's seven symbols.
+        substituteInPlace ext/re/re_top.h \
+          --replace-fail '#define Perl_reg_qr_package        my_reg_qr_package' \
+          '#define Perl_reg_qr_package        my_reg_qr_package
+#define Perl_reg_add_data          my_reg_add_data
+#define Perl_release_RExC_state    my_release_RExC_state
+#define Perl_populate_anyof_bitmap_from_invlist my_populate_anyof_bitmap_from_invlist
+#define Perl_set_ANYOF_arg         my_set_ANYOF_arg
+#define Perl_add_above_Latin1_folds my_add_above_Latin1_folds
+#define Perl_get_ANYOFM_contents   my_get_ANYOFM_contents
+#define Perl_get_ANYOFHbbm_contents my_get_ANYOFHbbm_contents'
+        # wasm musl's CRT calls the two-argument main ABI. Perl already has
+        # that path; select it for wasm in both the bootstrap and generated main.
+        for file in miniperlmain.c ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm; do
+          substituteInPlace "$file" \
+            --replace-fail '#ifdef NO_ENV_ARRAY_IN_MAIN' \
+              '#if defined(NO_ENV_ARRAY_IN_MAIN) || defined(__wasm__)' \
+            --replace-fail '#ifndef NO_ENV_ARRAY_IN_MAIN' \
+              '#if !defined(NO_ENV_ARRAY_IN_MAIN) && !defined(__wasm__)'
+        done
+      '';
+      configureFlags = (o.configureFlags or [ ]) ++ [
+        # wasm32 is little-endian; perl-cross cannot execute its byte-order
+        # probe in the build sandbox.
+        "-Dbyteorder=1234"
+        "-Dcharsize=1" "-Dshortsize=2" "-Dintsize=4" "-Dlongsize=4"
+        "-Ddoublesize=8" "-Dptrsize=4" "-Dlongdblsize=16"
+        "-Dlonglongsize=8" "-Dsizesize=4" "-Dfpossize=16"
+        "-Dlseeksize=8" "-Duidsize=4" "-Dgidsize=4" "-Dtimesize=8"
+      # The seed interpreter is linked against the fork-capable guest CRT.
+      # Without this hint, pp_sys selects the no-fork do_spawn path, which
+      # Unix Perl does not implement. Keep the native/cross library unchanged.
+      ] ++ (if isWasmCross && exposeGuestBuildTools then [ "-Dd_fork=define" ] else [ ]);
+    })) prev.perl;
+    in if isWasmCross && exposeGuestBuildTools then seedFork patched else patched;
   # gnugrep gets cross-built for wasm because zstd's zstdgrep wrapper script
   # substitutes a grep path; the wasm build fails (gnulib's sigsegv/stackvma has
   # no wasm support) and we don't need a guest grep for these build-time scripts.
