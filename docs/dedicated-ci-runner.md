@@ -22,6 +22,11 @@ resources for the from-source LLVM builds. Do not register that VM with the
 `nix-wasm` label. A label-only change to those jobs would leave the release
 blocked or build a different closure.
 
+This repository is public. PR jobs continue to use managed runners; the
+dedicated runner is selected only for push and maintainer-dispatched workflows.
+Run the dedicated machine only while needed and avoid reusing its workspace
+across unrelated repositories.
+
 Once the dedicated runner is online, rerun `nix-wasm.yml` on `master` and wait
 for the `artifacts` job to finish pushing its exact store paths to Cachix. Then
 run `publish-linux-channel.yml` with `dry_run: true` before the live run. Keep

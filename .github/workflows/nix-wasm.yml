@@ -75,6 +75,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # This repository is public. Keep PR code on managed runners; only push and
+  # maintainer-dispatched runs may use the persistent dedicated build machine.
+  # The two small GitHub-hosted jobs below retain their independent QA coverage.
   # --- decouple runtime-only changes from the world rebuild ---------------------
   # This workflow triggers on both *.nix/patches (the wasm world) AND runtime/**
   # (the JS engine, because the boot smokes run it). But the toolchain/artifacts
@@ -232,7 +235,7 @@ jobs:
     name: native in-guest nixpkgs builds (stdenv + hello + wget)
     needs: [changes, toolchain, artifacts]
     if: ${{ !failure() && !cancelled() && needs.changes.outputs.nix == 'true' }}
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
@@ -303,7 +306,7 @@ jobs:
     # The `nix-wasm` label must identify a runner provisioned for the full
     # build closure; pc's ARM64 Lima runner cannot produce the x86_64 store
     # paths used by publication.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     timeout-minutes: 350 # headroom for cold builds; warm reruns substitute from Cachix
     strategy:
       fail-fast: false
@@ -339,7 +342,7 @@ jobs:
     # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
     # C++ + squashfs/initramfs/image). Keep this on the same x86_64 runner label
     # as the toolchain so the derivation paths match the publisher.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -499,7 +502,7 @@ jobs:
     # paths-only + stream module bytes one file at a time, which lowers that
     # peak substantially, but md is kept regardless as headroom for the
     # closureInfo realize step itself and any future growth in the swept set.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -579,7 +582,7 @@ jobs:
     # from Cachix). `!failure() && !cancelled()` lets it run even when `toolchain`
     # was SKIPPED (runtime-only change) instead of being blocked by the needs edge.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     # MERGED (CI perf pass): this job used to be a 3-way matrix (signals, mmu,
     # mmu-devices), each its own medium-runner job. Real CI history showed
     # jobs in this wave queueing 30-90+ min for a free `md` runner while the
@@ -987,7 +990,7 @@ jobs:
     # when toolchain/artifacts were SKIPPED (runtime-only change) — it substitutes
     # the unchanged nix:true artifacts from Cachix rather than blocking on a build.
     if: ${{ !failure() && !cancelled() && (needs.changes.outputs.nix == 'true' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     # MERGED (CI perf pass): `core` and `gtk` used to be two parallel matrix
     # shards, each independently re-substituting the SAME nix:true artifact set
     # (kernel + initramfs + squashfs + the ~22 GiB wasm-binary-cache) — a
@@ -1270,7 +1273,7 @@ jobs:
     # but it DOES softmmu-instrument-at-load the same ~14 MB GTK binaries the
     # NOMMU gtk group's own comment says fragment a much smaller heap — kept on
     # the same -lg profile rather than assuming a smaller one is safe untested.
-    runs-on: [self-hosted, linux, X64, nix-wasm]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-lg"' || '["self-hosted","linux","X64","nix-wasm"]') }}
     # MERGED (CI perf pass): `core` and `gtk` used to be two parallel matrix
     # shards on `lg` — the scarcest, most contended runner profile (real CI
     # history showed a `gtk`-shard queue wait as long as 127 min in this exact
