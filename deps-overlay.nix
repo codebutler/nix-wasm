@@ -192,6 +192,29 @@ in
   # target object with llvm-readobj --symbols instead of guessed from the host.
   perl = whenWasm
     (p: p.overrideAttrs (o: {
+      postPatch = (o.postPatch or "") + ''
+        # Perl's static re extension builds its own regex engine. Keep the
+        # extension-private copies distinct from libperl's seven symbols.
+        substituteInPlace ext/re/re_top.h \
+          --replace-fail '#define Perl_reg_qr_package        my_reg_qr_package' \
+          '#define Perl_reg_qr_package        my_reg_qr_package
+#define Perl_reg_add_data          my_reg_add_data
+#define Perl_release_RExC_state    my_release_RExC_state
+#define Perl_populate_anyof_bitmap_from_invlist my_populate_anyof_bitmap_from_invlist
+#define Perl_set_ANYOF_arg         my_set_ANYOF_arg
+#define Perl_add_above_Latin1_folds my_add_above_Latin1_folds
+#define Perl_get_ANYOFM_contents   my_get_ANYOFM_contents
+#define Perl_get_ANYOFHbbm_contents my_get_ANYOFHbbm_contents'
+        # wasm musl's CRT calls the two-argument main ABI. Perl already has
+        # that path; select it for wasm in both the bootstrap and generated main.
+        for file in miniperlmain.c ext/ExtUtils-Miniperl/lib/ExtUtils/Miniperl.pm; do
+          substituteInPlace "$file" \
+            --replace-fail '#ifdef NO_ENV_ARRAY_IN_MAIN' \
+              '#if defined(NO_ENV_ARRAY_IN_MAIN) || defined(__wasm__)' \
+            --replace-fail '#ifndef NO_ENV_ARRAY_IN_MAIN' \
+              '#if !defined(NO_ENV_ARRAY_IN_MAIN) && !defined(__wasm__)'
+        done
+      '';
       configureFlags = (o.configureFlags or [ ]) ++ [
         # wasm32 is little-endian; perl-cross cannot execute its byte-order
         # probe in the build sandbox.
