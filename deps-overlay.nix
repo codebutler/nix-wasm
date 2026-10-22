@@ -160,11 +160,17 @@ in
       prev.libuuid.overrideAttrs (o: {
         configureFlags = (o.configureFlags or [ ]) ++ [
           "--disable-all-programs" "--enable-libuuid" "--disable-uuidd"
+          "--disable-write"
         ];
         # nixpkgs' shared postInstall unconditionally adds hd -> hexdump even
         # when the latter is disabled; remove that now-dangling alias.
         postInstall = (o.postInstall or "") + ''
           rm -f "$bin/bin/hd" "$man/share/man/man1/hd.1"
+          # Disabling programs leaves some of util-linux's declared outputs
+          # empty. Nix still requires every declared output path to exist.
+          for outputName in $outputs; do
+            mkdir -p "''${!outputName}"
+          done
         '';
       })
     else prev.libuuid;
