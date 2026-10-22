@@ -631,6 +631,9 @@ never the raw nar tree. CI runs on **x86_64-linux** (the flake is now parameteri
 `packagesFor system` + `genAttrs ["x86_64-linux" "aarch64-linux"]`, with
 `localSystem` threaded into `wasm-cross.nix`; `nix build .#X` picks the runner's
 system). Four workflows:
+The heavy jobs and publisher use a dedicated ARM64 Lima runner with Rosetta labeled
+`nix-wasm`; workflows force x86_64 Nix store paths. Provisioning requirements are
+in `docs/dedicated-ci-runner.md`. The separate pc Lima runner lacks Rosetta.
 - `.github/workflows/nix-wasm.yml` — builds the wasm world from source on a
   build-input/patch change and pushes to Cachix. The two from-source LLVM poles
   (`guest-clang`, `kernel`) build on their own runners in a matrix (each under the

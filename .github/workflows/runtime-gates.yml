@@ -27,8 +27,8 @@ concurrency:
 jobs:
   gates:
     name: engine tests + typecheck + lint + format
-    # Namespace small runner — keeps this off GitHub-hosted minutes (private repo).
-    runs-on: namespace-profile-sm
+    # PRs stay on managed runners; pushes use the dedicated Lima runner.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-sm"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
     timeout-minutes: 15
     defaults:
       run:
