@@ -444,6 +444,27 @@ jobs:
             '.#musl-fork-linkcheck' \
             --print-out-paths --no-link 2>&1 | tee build.log
 
+      # A persistent runner may already have a release image in its Nix store.
+      # In that case `nix build` reuses it and the Cachix post-build hook never
+      # sees a new output to push. Publish every valid image explicitly, even
+      # when an unrelated artifact (such as the optional compiler catalog)
+      # failed, so an image-only channel release can pass its provenance gate.
+      - name: Push built Linux images to Cachix
+        if: ${{ !cancelled() && github.ref == 'refs/heads/master' }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          for attr in linux-image linux-image-nommu linux-installed-image linux-installed-image-nommu; do
+            path=$(nix eval --raw ".#$attr.outPath")
+            if nix path-info "$path" >/dev/null 2>&1; then
+              echo "cachix push (image): $attr → $path"
+              cachix push nix-wasm "$path"
+            else
+              echo "Image not built in this job: $attr → $path"
+            fi
+          done
+
       # `nix-env -iA wasm-tools.<tool>` (the static pkgs.nix catalog) SUBSTITUTES
       # the .drv (then the output). cachix-action's post-build-hook pushes only
       # built OUTPUTS, so the toolchain .drv closures never reach Cachix on their
