@@ -1,0 +1,21 @@
+runtime/virtio/net-device.test.js
+  s_8dd181a5441a15::t_3658501c561297 1-90
+runtime/virtio/net-device.js
+  s_8dd181a5441a15::t_cede7fbd084912 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "df523475301721655c9b17cba16366c7bb6b52da",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

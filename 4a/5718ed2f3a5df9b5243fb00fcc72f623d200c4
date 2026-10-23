@@ -1,0 +1,23 @@
+docs/superpowers/specs/2026-06-23-squashfs-nix-serving-design.md
+  s_af9b2fcb0c03bf::t_ad82e0afc66bf3 32-37
+  s_af9b2fcb0c03bf::t_bd1061b4f21001 228-229
+  s_af9b2fcb0c03bf::t_9d4a3e37e14f68 1-31,38-69,73-122,127-227,230-248
+  s_af9b2fcb0c03bf::t_f5d15aa28dde47 70-72
+  s_af9b2fcb0c03bf::t_9b8823e930cac7 123-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "4a5718ed2f3a5df9b5243fb00fcc72f623d200c4",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

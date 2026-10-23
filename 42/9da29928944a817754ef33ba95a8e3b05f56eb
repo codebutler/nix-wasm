@@ -1,0 +1,91 @@
+userspace/wasm-native.nix
+  s_d4348d5b4c1e44::t_feb5117b1070c9 11,70-73,97
+  s_d4348d5b4c1e44::t_db0a09e5fb88fc 1
+  s_d4348d5b4c1e44::t_a6c9f6ee1c9125 87,89,91-92
+  s_d4348d5b4c1e44::t_6a5059d8e353a4 56-68
+  s_d4348d5b4c1e44::t_c386ce1468d5ee 74-86,88
+  s_d4348d5b4c1e44::t_7d8e53fff19088 2-3,7-10,24-28,30,34-36,44-53,55,69
+  s_d4348d5b4c1e44::t_ce99beff6f5cca 37-43
+  s_d4348d5b4c1e44::t_bf53940ea6f82a 4-6,12-23,29,31-33,54,94-96,130-134
+  s_d4348d5b4c1e44::t_041a359f0111fc 90,93
+  s_d4348d5b4c1e44::t_40c43b69e66beb 98-129
+flake.nix
+  s_d4348d5b4c1e44::t_2b7e1694e53b3e 995,1004
+  s_d4348d5b4c1e44::t_d05a5b726eb4ba 110
+  s_d4348d5b4c1e44::t_f0f15b6555ab58 160-163,167-171,997-999,1001-1002
+  s_d4348d5b4c1e44::t_feb5117b1070c9 111-124,126,140,1003
+  s_d4348d5b4c1e44::t_ce99beff6f5cca 996,1000
+  s_d4348d5b4c1e44::t_35fda38cd3b5d6 164-165,175-182
+  s_d4348d5b4c1e44::t_1348f643f7d0fe 40-44,141-146
+  s_d4348d5b4c1e44::t_b62ee551f67679 991,1012-1015,1201-1209
+  s_d4348d5b4c1e44::t_2c9d44238eaff5 155,992-994,1016
+  s_d4348d5b4c1e44::t_0806216791c42c 134-135,147-154,156-159,166,172,183,1151-1153,1658
+  s_d4348d5b4c1e44::t_b2a6511d8ce702 94-109,127-133,136-139,173-174
+  s_d4348d5b4c1e44::t_48eae0911e2598 125
+  s_d4348d5b4c1e44::t_809cd7b8a98065 1154
+  s_d4348d5b4c1e44::t_b3bde33e2d0e62 1210
+patches/wget/0001-wasm-disable-background-fork.patch
+  s_d4348d5b4c1e44::t_5b5b4f573615f3 1-3,5-8,10-13,15-16
+  s_d4348d5b4c1e44::t_ea34979b215f1b 4,9,14
+toolchain/wasm-fork-stdenv.nix
+  s_d4348d5b4c1e44::t_7d8e53fff19088 42,91-96,101-108
+userspace/wasm-nixpkgs-channel.nix
+  s_d4348d5b4c1e44::t_9326442cdb6fe9 42,60
+  s_d4348d5b4c1e44::t_48eae0911e2598 90-91
+  s_d4348d5b4c1e44::t_d05a5b726eb4ba 86
+  s_d4348d5b4c1e44::t_c9385422c0e4e2 25-28,38,44-45,54,61-85,93-108,116,118
+  s_d4348d5b4c1e44::t_1348f643f7d0fe 58-59,110-115
+  s_d4348d5b4c1e44::t_feb5117b1070c9 87-89,92,109
+.github/workflows/nix-wasm.yml
+  s_d4348d5b4c1e44::t_0806216791c42c 140,142-157
+  s_d4348d5b4c1e44::t_d9d01e08cf81b7 160
+  s_d4348d5b4c1e44::t_f0f15b6555ab58 137-139,141
+  s_d4348d5b4c1e44::t_49d3dfc74f0764 159
+  s_d4348d5b4c1e44::t_890b30bed4877d 158,161-223
+toolchain/native-bootstrap-cc.nix
+  s_d4348d5b4c1e44::t_10a970653a4c5f 23-25
+  s_d4348d5b4c1e44::t_1e016d2059aa4b 63
+  s_d4348d5b4c1e44::t_36118eda54ed0c 41,44,51-53
+  s_d4348d5b4c1e44::t_7d8e53fff19088 1-22,26-40,42-43,45-50,54-62,64-68,71-73
+  s_d4348d5b4c1e44::t_0568c4d4251742 69-70
+userspace/busybox-fork.nix
+  s_d4348d5b4c1e44::t_7d8e53fff19088 192-205
+deps-overlay.nix
+  s_d4348d5b4c1e44::t_1348f643f7d0fe 24-29,242-246,249-253
+  s_d4348d5b4c1e44::t_7ec1bad880f329 5-13,33,36-38,127-128,130
+  s_d4348d5b4c1e44::t_5b5b4f573615f3 263-268
+  s_d4348d5b4c1e44::t_feb5117b1070c9 258-262,269-270
+  s_d4348d5b4c1e44::t_7c5b53dd33a75d 118-121,125-126
+toolchain/guest-clang.nix
+  s_d4348d5b4c1e44::t_7d8e53fff19088 2-3,194-197,209-211,214-224
+  s_5c319dde45a577::t_d3a332c33ff588 225
+runtime/demo/node/native-nixpkgs-e2e.mjs
+  s_d4348d5b4c1e44::t_6531f305a66da0 1-3,6-24,46-57,62-67,74-82,89-98,105-119
+  s_d4348d5b4c1e44::t_d7f367d7fc51d2 4-5
+  s_d4348d5b4c1e44::t_d9d01e08cf81b7 25-45,68-73,83-88,99-104
+  s_d4348d5b4c1e44::t_34416fa77952ba 58-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "429da29928944a817754ef33ba95a8e3b05f56eb",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

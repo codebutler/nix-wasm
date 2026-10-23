@@ -1,0 +1,28 @@
+runtime/boot-nix-system.js
+  s_2759e1f8dbb051::t_4484dc7231a570 22
+runtime/kernel-host.js
+  s_2759e1f8dbb051::t_788add4423eb40 243-254
+runtime/kernel-worker.js
+  s_2759e1f8dbb051::t_bdb832e9375f52 272-275
+runtime/virtio/wl-device.js
+  s_2759e1f8dbb051::t_142a0a36934414 488-493
+runtime/boot.js
+  s_2759e1f8dbb051::t_8e8dc9511da476 66
+  s_2759e1f8dbb051::t_c06485af7d62e9 148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1b9849d2953945c76d3fdeb4be443319c1d015b9",
+  "prompts": {},
+  "sessions": {
+    "s_2759e1f8dbb051": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8228b50b-0db4-4cce-bcbf-adbba2856d3b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

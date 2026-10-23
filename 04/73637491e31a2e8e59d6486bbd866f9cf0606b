@@ -1,0 +1,22 @@
+patches/kernel/0021-wasm-user-as-free-marker.patch
+  s_d2c9c080387123::t_59b5c133da8cca 11-18
+  s_d2c9c080387123::t_688fecf3a2beb2 73
+runtime/node/smoke.mjs
+  s_d2c9c080387123::t_cc615989254224 21-43,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0473637491e31a2e8e59d6486bbd866f9cf0606b",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

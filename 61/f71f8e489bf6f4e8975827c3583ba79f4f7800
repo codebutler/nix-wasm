@@ -1,0 +1,32 @@
+userspace/busybox.nix
+  s_73dab31ed0204e::t_3b8ad03864335a 112-116
+  s_73dab31ed0204e::t_244135101a8e53 136
+  s_73dab31ed0204e::t_ad1b3ab8d05d38 120
+  s_73dab31ed0204e::t_4453200c77ac63 104-111
+patches/busybox/0004-libbb-spawn-clone.patch
+  s_73dab31ed0204e::t_733bb224de1d5d 10-21,24-31,33-34,36-43
+  s_73dab31ed0204e::t_5c08ce3fe4f189 23,32
+  s_73dab31ed0204e::t_dfe187acb792c8 22,35
+docs/superpowers/notes/2026-06-21-nofork-triage.md
+  s_73dab31ed0204e::t_7691eaa3e393f3 10,24-29,31-33,35-45,49,51,60-67,69-73,75,77-78,80-93,95-126,134-136,142-147,154-157
+deps-overlay.nix
+  s_73dab31ed0204e::t_88458a74f7e1cc 157-170
+  s_73dab31ed0204e::t_1a68e25243e489 120-128,138
+  s_73dab31ed0204e::t_dbf72e75b41521 129-135,142-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "61f71f8e489bf6f4e8975827c3583ba79f4f7800",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+patches/kernel/0013-wasm-virtio-wasm-transport.patch
+  s_8dd181a5441a15::t_8eae7acb8fe9a2 65
+  s_8dd181a5441a15::t_e8465e8973b629 417-422,428-429
+  s_8dd181a5441a15::t_ad454cf394eca5 430,447-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e02b2b4da926b34896faf411813b959924ccd36c",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

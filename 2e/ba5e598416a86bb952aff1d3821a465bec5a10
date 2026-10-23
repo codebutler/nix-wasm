@@ -1,0 +1,28 @@
+runtime/web/fork-smoke.mjs
+  s_d2c9c080387123::t_3f8c225c7df71f 25
+  s_d2c9c080387123::t_c5387075d73c0e 71-74,76,82,89-102,104
+  s_d2c9c080387123::t_7df798e026cdbd 62-64
+  s_d2c9c080387123::t_e745213656a88c 1-11,33,35-61,65-70,75,77-81,83-88,105-136
+  s_d2c9c080387123::t_d7945971483e8a 12-24,26-32
+runtime/web/main.js
+  s_d2c9c080387123::t_553c3e99196b83 29-33
+patches/kernel/0025-wasm-private-as-file-mmap-bounce.patch
+  s_d2c9c080387123::t_96d39bcb1d181d 237,239-240,243-244
+  s_d2c9c080387123::t_eeed64fe71a416 254,259-261,263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "2eba5e598416a86bb952aff1d3821a465bec5a10",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+flake.nix
+  s_5c319dde45a577::t_85f2824d7d3950 912-915,1059-1063,1092-1094,1318-1322,1330-1331,1334-1335,1341-1344,1347-1348,1354-1355
+  s_5c319dde45a577::t_b082dd0d12c31b 68-70,797-798
+  s_5c319dde45a577::t_c3fc20a9ca2ba6 1350,1357
+.github/workflows/pr-preview.yml
+  s_5c319dde45a577::t_b082dd0d12c31b 88,91
+  s_5c319dde45a577::t_251078e29755a9 129-132,137-140,150-151,158,163-168,174,177,182,190-191,196,205-206,208,212-213
+  s_5c319dde45a577::t_7fdb7b8c90f6be 221,229-231,233,236-240,242
+  s_5c319dde45a577::t_30549447c9ef3d 8-12,89-90
+docs/process-model.md
+  s_5c319dde45a577::t_40e57357b9f1e2 3-8,32-34,80-81,83-85,113-119,128,256-257
+  s_5c319dde45a577::t_f7d21073d4f067 98
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_82877547704c2d 199,202,205,208,807-808,854,856,858,1075-1076,1132,1134,1136,1296-1325
+  s_5c319dde45a577::t_f7d21073d4f067 687,732,745,1001
+  s_5c319dde45a577::t_34959c3f18defb 796-798,821-822,1002-1004,1006-1008,1010,1023-1024
+  s_5c319dde45a577::t_b082dd0d12c31b 1197
+  s_28e8ee7cf0b286::t_f86c17475658b3 1326
+runtime/demo/web/main.js
+  s_5c319dde45a577::t_52bfc686d91445 12-15,18-19
+CLAUDE.md
+  s_5c319dde45a577::t_d1809d7f152c7b 2171-2174
+  s_5c319dde45a577::t_99f717bafc5852 86-92,744,2139-2144
+toolchain/guest-clang.nix
+  s_5c319dde45a577::t_5a1dd1a4710f10 122-123
+runtime/abi.js
+  s_5c319dde45a577::t_5a1dd1a4710f10 105-112
+runtime/preview-variant.test.js
+  s_5c319dde45a577::t_ea5ff5a84b4245 4,13,50,52,60,69-70,77-78,93,98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "f1ab70db9aa630b318cc4950005d3c549b89ec36",
+  "prompts": {},
+  "sessions": {
+    "s_28e8ee7cf0b286": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0020e-2db2-7ef0-abe5-fc99f2e3150f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}

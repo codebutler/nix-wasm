@@ -1,0 +1,53 @@
+runtime/node/full-boot-interactive.test.mjs
+  s_d2c9c080387123::t_cc65b92c042b29 41-47,49
+  s_d2c9c080387123::t_cf6a333cef67a4 1-7,16-21,26-40,48,50-55
+  s_d2c9c080387123::t_43a8f3f9104573 8-15,22-25
+kernel.nix
+  s_d2c9c080387123::t_123af44090399b 84-90
+  s_d2c9c080387123::t_a7facce0152d9b 91-100
+  s_d2c9c080387123::t_e87aec0e7bbe9d 190-193
+  s_d2c9c080387123::t_8d4eb244b73d67 22
+runtime/kernel-host.js
+  s_d2c9c080387123::t_2759d103b0a970 158-161,163-165,167-200,203-204
+  s_d2c9c080387123::t_4956860134df93 64-65,74-77
+  s_d2c9c080387123::t_62d5822cdb11c8 66-73
+  s_d2c9c080387123::t_809b149c6edc9c 58-63
+  s_d2c9c080387123::t_27293812d5e7f0 147-157,162,201-202,205-209
+  s_d2c9c080387123::t_d57e7acd8eb948 145-146
+  s_d2c9c080387123::t_5f52ce07f0b1a8 517-521,523
+  s_d2c9c080387123::t_ec85e884cc7fc1 78-82,84-106
+  s_d2c9c080387123::t_1922069d0a63b2 522
+runtime/boot.js
+  s_d2c9c080387123::t_2714763fe5e607 266-271
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_fe89676dda9173 891-896,899-907
+  s_d2c9c080387123::t_fda5717f97e534 383-387
+runtime/node/boot-node.mjs
+  s_d2c9c080387123::t_fbc19172c60081 27-30,34-38
+  s_d2c9c080387123::t_45a9200f75ec3d 73-75
+flake.nix
+  s_d2c9c080387123::t_380ede3ad9876b 371-375,378
+  s_d2c9c080387123::t_47c7a26fe36faa 246
+  s_d2c9c080387123::t_7abad3efeccd1c 377
+  s_d2c9c080387123::t_dca71e009d2321 301-303
+  s_d2c9c080387123::t_2bff61979678e2 224-230,248
+  s_d2c9c080387123::t_a7e35aa1c55567 51-54
+  s_d2c9c080387123::t_ec43ca986688a3 231-245,247
+  s_d2c9c080387123::t_31cec781b5bd57 376,379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0746805269b4001972326130f3b5044961cd69cd",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

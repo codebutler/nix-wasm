@@ -1,0 +1,27 @@
+runtime/demo/web/smoke.mjs
+  s_5c319dde45a577::t_363cc0dad9d853 6-8,36-46,50,52-56,63,140-147,152-153,155,164
+  s_5c319dde45a577::t_3971a4cfd74f1a 47-49,51,57-62,64-68,138,148-151,154,156-163
+  s_5c319dde45a577::t_299ccd83f33380 137,139
+CLAUDE.md
+  s_5c319dde45a577::t_58d9400046f7f6 2063-2081
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_f17c33487550ab 854-864
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_363cc0dad9d853 1331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6b7eafbd8daafa2286ebb6ac2abf043c23746ae2",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

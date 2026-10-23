@@ -1,0 +1,23 @@
+runtime/demo/node/devtools-e2e.mjs
+  s_af9b2fcb0c03bf::t_883f4559511f27 77
+  s_af9b2fcb0c03bf::t_c370aa8737e0fc 56-59,63
+  s_af9b2fcb0c03bf::t_227ec7ad7955e9 3-4,9,15-17
+userspace/binary-cache.nix
+  s_af9b2fcb0c03bf::t_572314e78220ec 7-10,16-17,23,26,29-47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "eb4b698ebe23703b62a7b099565cc15eaa93b50d",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

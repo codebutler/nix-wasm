@@ -1,0 +1,51 @@
+vendor/sommelier/BUILD.gn
+  s_da2d8e2b4a951c::t_18ee3f9565c6fa 62
+vendor/sommelier/meson.build
+  s_da2d8e2b4a951c::t_ea33c1a7932ff4 60
+vendor/sommelier/protocol/yore-window-attention-v1.xml
+  s_90082e9d863b41::t_43746a3f41d0b3 1-32
+vendor/sommelier/sommelier-ctx.cc
+  s_da2d8e2b4a951c::t_828230f2ec48a0 77-78
+vendor/sommelier/sommelier-ctx.h
+  s_da2d8e2b4a951c::t_b7d549722e7a65 56,98
+vendor/sommelier/sommelier-window.cc
+  s_90082e9d863b41::t_1140e6dcc91eea 837-839,911-913,1156
+vendor/sommelier/sommelier-window.h
+  s_90082e9d863b41::t_3dc902be64340c 33,78-79,178
+vendor/sommelier/sommelier.cc
+  s_1f16ca1e44bcb2::t_db726e0a3952a3 52,655-663,897-902,1247,1373-1380,1428-1430,1913-1946,2069-2080,2563-2564,2577-2578,2581-2583,3263
+vendor/sommelier/sommelier.h
+  s_da2d8e2b4a951c::t_96bd7dd27fbe9a 46,433-440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab4ef3ee4c527a18d3116629d202560c1c4b0926",
+  "prompts": {},
+  "sessions": {
+    "s_1f16ca1e44bcb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c49-8f41-7531-937d-51c548a55f75",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_da2d8e2b4a951c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14f54-9756-77d2-adbb-998ab4f131d2",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

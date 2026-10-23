@@ -1,0 +1,19 @@
+patches/sommelier/0001-posix-spawn.patch
+  s_cd1a77be509bb9::t_d8d84d20bcc463 1-363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "7af30f75daa3073ed44cfbf0e8c814438181962c",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

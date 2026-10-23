@@ -1,0 +1,27 @@
+userspace/fork-helper.c
+  s_d2c9c080387123::t_40771b4901ede2 1-40
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_7d1f337718905c 80-94
+toolchain/guest-cc-fork.nix
+  s_d2c9c080387123::t_d7d1f4106ed473 79-81
+flake.nix
+  s_d2c9c080387123::t_9a0817adbadd77 167-172
+  s_d2c9c080387123::t_1cddc77ee55ae7 445
+  s_d2c9c080387123::t_2675f178d6f887 173-174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "708daf2a823820b0cc005fceb4dbe9191e71c79b",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

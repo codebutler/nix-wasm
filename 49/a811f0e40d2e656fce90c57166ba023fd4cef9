@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-06-26-sommelier-keyboard-design.md
+  s_cd1a77be509bb9::t_002adb52b39519 1-175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "49a811f0e40d2e656fce90c57166ba023fd4cef9",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

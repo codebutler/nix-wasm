@@ -1,0 +1,24 @@
+runtime/ninep/server.test.js
+  s_5c319dde45a577::t_22791362a000e9 56-67,69-108,256-258,260-278,280-281
+  s_5c319dde45a577::t_cbcf1b3b54f5bf 68,259,279
+runtime/ninep/server.js
+  s_5c319dde45a577::t_54a6c85637df0b 273-289,291-294,321,393-397,418-420,424-429,439,441-444,487-494,518,525,541
+  s_5c319dde45a577::t_03cd6cdefe5c98 261-263
+  s_5c319dde45a577::t_31978d6a3596a6 290,574-575
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6f20c608fb8cadf0f6c2241ccd0e1f59976650fd",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}

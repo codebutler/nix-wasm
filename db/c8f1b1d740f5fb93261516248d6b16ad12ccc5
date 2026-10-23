@@ -1,0 +1,21 @@
+flake.nix
+  s_64908446b11236::t_f5da6bbcd6a0d3 5-7
+  s_64908446b11236::t_c4606465af5af9 16
+  s_64908446b11236::t_d4aeecde1b040d 127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "dbc8f1b1d740f5fb93261516248d6b16ad12ccc5",
+  "prompts": {},
+  "sessions": {
+    "s_64908446b11236": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08df5dd5-7e9d-44f0-82d4-5225d838fb74",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

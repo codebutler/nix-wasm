@@ -1,0 +1,42 @@
+userspace/fork-loop.c
+  s_d2c9c080387123::t_fdb3e058d75034 1-41
+runtime/node/hostbridge.test.mjs
+  s_d2c9c080387123::t_c36c20f0a05bbd 64-67,89-90,93
+userspace/fork-nested.c
+  s_d2c9c080387123::t_89500417be08ce 1-38
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_4a8de95237e426 1292-1293,1297,1304-1305
+  s_d2c9c080387123::t_dfdbfcb00ab497 1294-1296,1298-1303
+  s_d2c9c080387123::t_670a58d8c7c9eb 550-552,554
+  s_d2c9c080387123::t_9a145181064891 111-118
+  s_d2c9c080387123::t_412ef31f7f4a6c 516-518,523-524
+runtime/hostbridge.js
+  s_d2c9c080387123::t_362098ef3b2ff6 125,127-137,139
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_f20c486cb322ee 3-9,11-12,22-72,82,86-88,114,122-126,128-135,142,144,147
+  s_d2c9c080387123::t_7faf9dd52450d3 127
+  s_d2c9c080387123::t_2f7c9f329fef5f 73-81,83-85,89-93
+runtime/kernel-host.js
+  s_d2c9c080387123::t_b0f31ea2a7599a 62-67
+  s_d2c9c080387123::t_4710469440b1a2 340-349,356,360-365
+flake.nix
+  s_d2c9c080387123::t_1e40927d9e067d 417-418
+  s_d2c9c080387123::t_2c78c82477f12f 152-164
+  s_d2c9c080387123::t_6767088fd372bf 281
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "149a1ac0917718f3449d409ef7f6ee82d1d14862",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

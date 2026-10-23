@@ -1,0 +1,56 @@
+userspace/seed-root.nix
+  s_5c319dde45a577::t_9e1b1ff3d63481 1-46
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_1da0668dbe2f54 237-238
+docs/superpowers/specs/2026-07-27-persistent-nix-store-design.md
+  s_5c319dde45a577::t_537e54bb92b59c 7,101-104,112,225
+  s_5c319dde45a577::t_17193506cec984 1,38-39,53,70,81,84,86-88,91-93,105,107-108,153,212-213,236-239
+  s_e6bf6abfb990be::t_b61f8374b21300 240
+userspace/base-squashfs.nix
+  s_5c319dde45a577::t_9e1b1ff3d63481 15,30,48
+scripts/pack-state-baseline.py
+  s_5c319dde45a577::t_9e1b1ff3d63481 1-49
+userspace/linux-image.nix
+  s_5c319dde45a577::t_fe3d0d7d3236d5 2-6,8-16,36-42,44,48,67-79,91-98,100-101,110
+flake.nix
+  s_5c319dde45a577::t_fe3d0d7d3236d5 969-999,1450-1455
+  s_4a6bb0f4c9aab5::t_a792ae0a75afe2 1456
+scripts/publish-linux-channel.sh
+  s_5c319dde45a577::t_1da0668dbe2f54 16-18,190-193,318-333,347-352,362-363,376-378,393-400,413-416,418,422,433-436,456-457,476-481,595-604,664-667,672-673,681-682,708-709
+CLAUDE.md
+  s_5c319dde45a577::t_17193506cec984 155-156,162-163
+userspace/state-baseline.nix
+  s_5c319dde45a577::t_9e1b1ff3d63481 1-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "de5b8f168f8ba79b78e697e2e8eca6cf716c79f7",
+  "prompts": {},
+  "sessions": {
+    "s_4a6bb0f4c9aab5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f40-28c5-7481-8639-70f57bdd10e1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_e6bf6abfb990be": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f9f-a4e0-7343-a7e7-a893e5cd2068",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

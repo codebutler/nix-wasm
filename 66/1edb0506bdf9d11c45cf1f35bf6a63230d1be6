@@ -1,0 +1,23 @@
+runtime/node/phase2-in-guest-fork.mjs
+  s_d2c9c080387123::t_919265b1ff519a 23-24
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_c0617913a56d11 293-317
+runtime/node/phase2-acceptance.mjs
+  s_d2c9c080387123::t_aef499ab1083ba 6-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "661edb0506bdf9d11c45cf1f35bf6a63230d1be6",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+runtime/softmmu-pass.js
+  s_d4348d5b4c1e44::t_9e22a691b55844 2329,2346-2348,2350-2352,2356,2360-2361
+  s_d4348d5b4c1e44::t_52ddc1d69ab751 241-246,254
+  s_d4348d5b4c1e44::t_f682b54c46bdb3 2328,2330-2337,2341-2344
+  s_d4348d5b4c1e44::t_93d4936b72eba2 249-253,2196,2301
+  s_d4348d5b4c1e44::t_8b8dc1aa27e24e 247-248,2338-2340
+runtime/softmmu-pass.test.js
+  s_d4348d5b4c1e44::t_f1ef12a2a1ae8b 16,28-64,373-382
+  s_d4348d5b4c1e44::t_4f578c91904aab 1095-1100,1103-1109
+  s_f0f604d83ae75c::t_f40f67b857bdfa 383-384
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "75fe6656f4ce41e7ba04e2b266a46c090c2d4db2",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_f0f604d83ae75c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38613d11-d3cb-4d7f-b6e7-037eb0f11cd6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_48ea56ac0bf1ec 169-183
+  s_d2c9c080387123::t_b21d3fe522a132 106-168,184-208
+kernel.nix
+  s_d2c9c080387123::t_4b62dcd303b966 128-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "31b2e57eecce5ebc1c50f72e35fccd2df24a13fb",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

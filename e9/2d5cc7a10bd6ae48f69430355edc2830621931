@@ -1,0 +1,21 @@
+userspace/bootstrap.nix
+  s_d4348d5b4c1e44::t_692775425ff134 335-336,338-347
+toolchain/wasm-fork-stdenv.nix
+  s_d4348d5b4c1e44::t_692775425ff134 61-63,115-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "e92d5cc7a10bd6ae48f69430355edc2830621931",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

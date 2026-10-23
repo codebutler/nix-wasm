@@ -1,0 +1,22 @@
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_2bcf984dc0fd53 41-52
+  s_d2c9c080387123::t_35b4c08c791a56 13
+docs/superpowers/plans/2026-06-19-mmu-fork-phase2.md
+  s_d2c9c080387123::t_f8469309e392b2 131-150,153-160,163-166,168,170-173
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "98d84c28604eabda55563fcf01b20b0094c0f11b",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

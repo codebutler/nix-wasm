@@ -1,0 +1,25 @@
+toolchain/wasm-native-seed-overlay.nix
+  s_d4348d5b4c1e44::t_f19fe262bb26b3 45-51
+  s_d4348d5b4c1e44::t_5c40c7c78dcdaa 52-57
+  s_d4348d5b4c1e44::t_c02aedc23223d7 37-42,58,71
+  s_d4348d5b4c1e44::t_5b7e3b703689ec 43-44
+patches/perl-cross-wasm-readelf.patch
+  s_d4348d5b4c1e44::t_c02aedc23223d7 1-4,7-15,17
+  s_d4348d5b4c1e44::t_d3c044b9883277 5-6,16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "631c958ba8cd37b630a87c3c5a8b4803340a8581",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

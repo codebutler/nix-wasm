@@ -1,0 +1,27 @@
+flake.nix
+  s_73dab31ed0204e::t_180c548ae6d657 431-434
+spikes/nofork/check.nix
+  s_73dab31ed0204e::t_86e6aebe83f2c2 1-23
+spikes/nofork/uses-fork.c
+  s_73dab31ed0204e::t_281fc5648784d3 1-2
+spikes/nofork/uses-spawn.c
+  s_73dab31ed0204e::t_5bc291fd6ea0f9 1-7
+toolchain/musl.nix
+  s_73dab31ed0204e::t_9a6ecc0a672c2d 60-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b696935adc4a711c69e5f7f533f58015920894fd",
+  "prompts": {},
+  "sessions": {
+    "s_73dab31ed0204e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3852e941-8731-4301-a37c-dd22f3e69a82",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

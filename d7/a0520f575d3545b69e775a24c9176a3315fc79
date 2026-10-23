@@ -1,0 +1,28 @@
+flake.nix
+  s_cd1a77be509bb9::t_97f4257a60b7d1 125-133
+  s_cd1a77be509bb9::t_cef376413325f6 348
+  s_cd1a77be509bb9::t_d99d7ed624d77c 535-538
+userspace/libgbm-shim/gbm.h
+  s_cd1a77be509bb9::t_8231ce0ce48450 27-28
+  s_cd1a77be509bb9::t_5ca46bc484c3cb 31-36
+  s_cd1a77be509bb9::t_f02d198aa17f21 46-55
+userspace/sommelier.nix
+  s_cd1a77be509bb9::t_d962d4837ff921 1-96,105-122
+  s_cd1a77be509bb9::t_204eec562f1cb1 97-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "d7a0520f575d3545b69e775a24c9176a3315fc79",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

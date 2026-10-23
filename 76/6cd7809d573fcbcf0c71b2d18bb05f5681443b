@@ -1,0 +1,26 @@
+kernel.nix
+  s_d2c9c080387123::t_5d9c3b5cc0668a 59-65
+docs/superpowers/specs/2026-06-19-task2-perprocess-memory-design.md
+  s_d2c9c080387123::t_133580d8ba4707 164-171
+  s_d2c9c080387123::t_5923b431df99ca 145-146
+runtime/node/task2-uaccess-residual.test.mjs
+  s_d2c9c080387123::t_7f3739f483e5ee 76,97,99,109-113,116-134
+patches/kernel/0015-wasm-uaccess-residual.patch
+  s_d2c9c080387123::t_0b7203635b43c0 4-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "766cd7809d573fcbcf0c71b2d18bb05f5681443b",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

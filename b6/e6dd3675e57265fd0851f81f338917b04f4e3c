@@ -1,0 +1,19 @@
+deps-overlay.nix
+  s_791cc0179de687::t_2961c2e41033b0 250-256,261-264,271,287-288,291-292,296
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b6e6dd3675e57265fd0851f81f338917b04f4e3c",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

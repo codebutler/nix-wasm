@@ -1,0 +1,22 @@
+CLAUDE.md
+  s_b3600ff8167073::t_2e3d83fb4e8e0a 389-406
+deps-overlay.nix
+  s_b3600ff8167073::t_1fe0f251f495b8 766-767,769-782
+  s_b3600ff8167073::t_1ba2c46ccabda4 732-733
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "cd7fa943dda7084e9285905e0c77c52e6bd0761a",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

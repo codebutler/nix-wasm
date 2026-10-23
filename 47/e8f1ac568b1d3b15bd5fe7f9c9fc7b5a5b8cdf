@@ -1,0 +1,26 @@
+userspace/linux-image.nix
+  s_21419a5db8af1c::t_2a54ef5d33f15b 26-35
+  s_21419a5db8af1c::t_c3386b96481daa 13-17,19
+  s_21419a5db8af1c::t_6f32270373847e 1-12,18,20-25,36
+  s_21419a5db8af1c::t_294f0083d15224 37-46
+  s_21419a5db8af1c::t_7b1402d71b6bbc 47
+flake.nix
+  s_21419a5db8af1c::t_76fd4e319167d1 523-525
+  s_21419a5db8af1c::t_fd07e1b0557a37 368-377
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "47e8f1ac568b1d3b15bd5fe7f9c9fc7b5a5b8cdf",
+  "prompts": {},
+  "sessions": {
+    "s_21419a5db8af1c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "959963a1-433c-4e2b-9aea-1b890ee5c25e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

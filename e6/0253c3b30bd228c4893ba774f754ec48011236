@@ -1,0 +1,31 @@
+deps-overlay.nix
+  s_791cc0179de687::t_4ed7ce8cdacf62 559-568
+  s_791cc0179de687::t_25efeffdb65023 608-614
+  s_791cc0179de687::t_d867e3af09d6c6 623-628
+  s_791cc0179de687::t_7f365b2bf2c5ce 440-444
+  s_791cc0179de687::t_f8cc7fa6dd474c 634
+  s_791cc0179de687::t_5a7c03373062a1 429-437,452-455
+  s_791cc0179de687::t_5bbcc9dacfdf34 522-558,569-587,596-607,629-633,635-650
+  s_791cc0179de687::t_caa5ef687ad7b1 588-595
+  s_791cc0179de687::t_86e7f79c251b66 359-364,370-372,376,379,392
+  s_791cc0179de687::t_54781841d0b20a 33-61
+  s_791cc0179de687::t_e1d7529bd50a41 615-622
+  s_791cc0179de687::t_affcefd8669941 409-410,412-424,445-449,456
+  s_791cc0179de687::t_e9fcdc4703d2ed 425-428,439,450-451
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e60253c3b30bd228c4893ba774f754ec48011236",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

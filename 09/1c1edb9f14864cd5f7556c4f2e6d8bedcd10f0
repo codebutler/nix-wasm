@@ -1,0 +1,38 @@
+runtime/.prettierignore
+  s_cd1a77be509bb9::t_b406ee82ef5292 3
+runtime/demo/node/virtio-wl-spike.mjs
+  s_cd1a77be509bb9::t_e566c7f456c24f 38
+  s_cd1a77be509bb9::t_19fc4933de241c 47-49
+runtime/virtio/wl-device.test.js
+  s_cd1a77be509bb9::t_19fc4933de241c 54-60,104-106
+runtime/virtio/echo-device.js
+  s_cd1a77be509bb9::t_19fc4933de241c 30,41-49,51-59
+runtime/virtio/wl-device.js
+  s_cd1a77be509bb9::t_19fc4933de241c 209-213,366,410-412
+runtime/demo/web/wayland-compositor.js
+  s_cd1a77be509bb9::t_19fc4933de241c 18,79-92,148-149,165-168,178-180,199-206,210-212,245-246,255-257,262-264,267-270,272-274,277-279,282-284,296-299,409-411,425-427,443-445,457-465
+runtime/jsconfig.json
+  s_cd1a77be509bb9::t_440d7257ff8364 14
+runtime/.eslintignore
+  s_cd1a77be509bb9::t_e4d716aef91ca1 3
+runtime/virtio/net-device.test.js
+  s_cd1a77be509bb9::t_19fc4933de241c 9-11,13-16,22-26,34-42,50-57,70,82,88,98,104-108,116
+runtime/virtio/net-device.js
+  s_cd1a77be509bb9::t_19fc4933de241c 12-13,33-34,51-52,55-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "091c1edb9f14864cd5f7556c4f2e6d8bedcd10f0",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

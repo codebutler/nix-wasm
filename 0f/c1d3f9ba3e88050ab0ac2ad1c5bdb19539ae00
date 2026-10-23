@@ -1,0 +1,20 @@
+CLAUDE.md
+  s_791cc0179de687::t_d09b8f9512bbd0 123
+  s_791cc0179de687::t_b9c3bb2ffa4b7f 122,124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "0fc1d3f9ba3e88050ab0ac2ad1c5bdb19539ae00",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

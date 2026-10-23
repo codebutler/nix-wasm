@@ -1,0 +1,27 @@
+docs/superpowers/notes/2026-06-28-nixpkgs-in-guest-eval.md
+  s_74bf89179e3ca0::t_acfa7ebeb423a6 1,3-33
+  s_74bf89179e3ca0::t_8219e4cdbc8de8 143-170
+CLAUDE.md
+  s_74bf89179e3ca0::t_5444c5001772b8 355-360
+  s_74bf89179e3ca0::t_a710ac9a9fd4f0 304-325
+runtime/demo/node/devtools-e2e.mjs
+  s_74bf89179e3ca0::t_010e0cef4de487 61,65-68
+  s_74bf89179e3ca0::t_02ce288bba719d 82
+  s_74bf89179e3ca0::t_57b5d95f888622 59-60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "fc40f1654505219238529079c954b423deb54dd3",
+  "prompts": {},
+  "sessions": {
+    "s_74bf89179e3ca0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cec49051-62ed-46ea-ba6e-7b161c67056e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

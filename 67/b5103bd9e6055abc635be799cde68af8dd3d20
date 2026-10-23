@@ -1,0 +1,34 @@
+toolchain/guest-clang.nix
+  s_b3600ff8167073::t_c377df8ce43752 95-102
+  s_b3600ff8167073::t_0eb3888a04aee8 35
+  s_b3600ff8167073::t_5cf96c01817903 29-34
+toolchain/wasm-host-imports.nix
+  s_b3600ff8167073::t_665b28c1954250 1-39
+wasm-cross.nix
+  s_b3600ff8167073::t_29361c5544c853 35-41
+toolchain/guest-cc.nix
+  s_b3600ff8167073::t_2f20545742b693 16-19,51-56,58
+CLAUDE.md
+  s_b3600ff8167073::t_a37082c71591ee 316-330
+toolchain/guest-cxx.nix
+  s_b3600ff8167073::t_2f20545742b693 21-24,55-64,66
+nix-wasm.nix
+  s_b3600ff8167073::t_ca79c33e0a305f 143
+  s_b3600ff8167073::t_48122b253a5541 21-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "67b5103bd9e6055abc635be799cde68af8dd3d20",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

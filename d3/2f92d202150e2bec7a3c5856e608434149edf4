@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-07-01-track-b-fork-seam-status.md
+  s_2fff1049ab5e4f::t_db3f50a39683ba 270-313
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d32f92d202150e2bec7a3c5856e608434149edf4",
+  "prompts": {},
+  "sessions": {
+    "s_2fff1049ab5e4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e7c8fba-1047-43cf-b025-6d4c2fd79d0c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

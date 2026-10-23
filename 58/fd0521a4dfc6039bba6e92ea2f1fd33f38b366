@@ -1,0 +1,42 @@
+docs/superpowers/specs/2026-06-18-mmu-fork-design.md
+  s_d2c9c080387123::t_dba1a3c06c5952 313-327,332-333
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_54b6df4bd16512 12-16,19-39
+spikes/asyncify-fork/FINDINGS.md
+  s_d2c9c080387123::t_2f1968d0fdb654 1-80
+spikes/asyncify-fork/run.mjs
+  s_d2c9c080387123::t_9a80eb2117c308 1-119
+spikes/asyncify-fork/probe.wat
+  s_d2c9c080387123::t_2576c1e9d2fd1d 1-39
+spikes/asyncify-fork/probe.c
+  s_d2c9c080387123::t_9b1a49046cc0e0 1-18,25-41
+  s_d2c9c080387123::t_7ba850cf0fb4ca 19-24
+spikes/asyncify-fork/build.sh
+  s_d2c9c080387123::t_5e14cdda81f9fc 8-10,12-14
+  s_d2c9c080387123::t_57f01ad4a1353f 1-7,11,15-28
+docs/superpowers/plans/2026-06-19-mmu-fork-phase2.md
+  s_d2c9c080387123::t_27d01a163cdb01 212
+  s_d2c9c080387123::t_25c0082e52eaaf 154-156
+spikes/asyncify-fork/.gitignore
+  s_d2c9c080387123::t_2b504196750c9b 1-2
+spikes/asyncify-fork/run-cc.mjs
+  s_d2c9c080387123::t_646c5a425094d0 80-83
+  s_d2c9c080387123::t_091705f9489c60 1-57,62-64,66-79,84-108
+  s_d2c9c080387123::t_80b792e4321964 58-61,65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "58fd0521a4dfc6039bba6e92ea2f1fd33f38b366",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

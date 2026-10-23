@@ -1,0 +1,21 @@
+runtime/kernel-host.js
+  s_8dd181a5441a15::t_ad9d6ad14815b6 167
+  s_8dd181a5441a15::t_33a93511d93adf 523-526
+  s_8dd181a5441a15::t_03a61e2d0f0dd0 290-299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f6fdf27701eb703dd02e54337b93d935a4b77e2f",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

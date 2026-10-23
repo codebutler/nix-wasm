@@ -1,0 +1,26 @@
+userspace/guest-status-notifier.c
+  s_90082e9d863b41::t_22211b75283da3 43,58-60,303-304,309-310
+  s_90082e9d863b41::t_cea2b0a37680ae 416-420,423-448,450-461,463-479,482-487,489-496,500,504-505,507-512,515-530,576-590
+  s_90082e9d863b41::t_7ff325c872f074 61,421-422,449,462,480-481,488,497-499,501-503,506,513-514,652,658,706-707,711,713
+  s_90082e9d863b41::t_0467526f63082f 653-657,659-670,708-710,712,714,759-763
+  s_90082e9d863b41::t_73f28d4d3e7b41 690
+userspace/guest-desktop-fixture.c
+  s_90082e9d863b41::t_16bacda15f6003 17
+  s_90082e9d863b41::t_efb1138c111b7a 12,31,36-95,135-136,184-189,205,207
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a7da7e692a79eb6933f0a925a42a9da6de91ed0f",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

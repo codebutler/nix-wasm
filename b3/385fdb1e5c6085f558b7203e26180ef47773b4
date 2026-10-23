@@ -1,0 +1,25 @@
+runtime/kernel-worker.js
+  s_d2c9c080387123::t_def678174b12c8 382-394
+runtime/node/phase1-acceptance.mjs
+  s_d2c9c080387123::t_bb634a3f3f0284 1-36
+runtime/node/smoke.mjs
+  s_d2c9c080387123::t_9405954dd0772e 21-32,34-35
+docs/superpowers/specs/2026-06-18-mmu-fork-design.md
+  s_d2c9c080387123::t_e46582ab7bc835 185-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "b3385fdb1e5c6085f558b7203e26180ef47773b4",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

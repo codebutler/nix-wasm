@@ -1,0 +1,19 @@
+patches/libffi/wasm32-raw-ffi.c
+  s_791cc0179de687::t_17a12340f86e6a 120,122-135,137-148,150,152-154,156,158,160-161,163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "8222f9e53c78d79369f67ac27513da549785c411",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+runtime/boot-nix-system.js
+  s_d1ade63152e0e3::t_54d2fc9e871991 30
+runtime/boot.js
+  s_d1ade63152e0e3::t_febc5a3e281690 72,81-83,169,172-173,212-216,269-272,278-292
+runtime/kernel-host.js
+  s_d1ade63152e0e3::t_c6b84b828bbff0 507-510,596-612,816-818,823-835
+runtime/kernel-worker.js
+  s_d1ade63152e0e3::t_933229d0fdbd89 519-523,539-547
+runtime/virtio/wl-device.js
+  s_d1ade63152e0e3::t_d3a8c1a478169a 40,55-67,102-104,228,230-232,278-297,466-472,474-476,492,498,500-501,573-580,583,619-621,629-636,643-648
+runtime/virtio/wl-device.test.js
+  s_d1ade63152e0e3::t_b03899a548d7a4 260-349
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "abf542b5bb5f5c03a373d3735516d39e3192620e",
+  "prompts": {},
+  "sessions": {
+    "s_d1ade63152e0e3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e9e8447-90fc-400e-b8d8-b8da5debcddb",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

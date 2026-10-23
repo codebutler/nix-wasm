@@ -1,0 +1,19 @@
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_ae04b5d2dc511d 135-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "7c7c2c652efd6bd0008dc837c32cfd596f6162bb",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

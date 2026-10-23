@@ -1,0 +1,19 @@
+runtime/demo/web/main.js
+  s_b3600ff8167073::t_a73ed05a1d3e7e 63,67-69,77,79-80,82-88,90-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "1a3392f467b1138054ca719f2bb568ec8010f28e",
+  "prompts": {},
+  "sessions": {
+    "s_b3600ff8167073": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "811b5c42-7639-4f9e-9859-f92a9e8ac62f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+runtime/demo/node/wl-server-ffi-smoke.mjs
+  s_cd1a77be509bb9::t_ffd9c1b26cf859 1-66
+flake.nix
+  s_cd1a77be509bb9::t_1ee90952c6b078 347
+  s_cd1a77be509bb9::t_b17c758b9df0c1 124-132
+  s_cd1a77be509bb9::t_62c9eb0dec83f5 466-470
+userspace/wl-server-ffi.c
+  s_cd1a77be509bb9::t_87dc401df73e56 1-12,16-17,21-30,32-100,136-158,160,162-195,199-203,210,214-216,218,221-222,225,227-252
+  s_cd1a77be509bb9::t_97f7ccc6a02a48 13-15,18-20,31,101-135,159,161,196-198,204-209,211-213,217,219-220,223-224,226
+userspace/test-ffi.xml
+  s_cd1a77be509bb9::t_ac267877977601 1-8
+userspace/wl-server-ffi.nix
+  s_cd1a77be509bb9::t_fa307be429cc64 1-73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "f3f7a86649df81fb88341b6fcfe78f9468da391f",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

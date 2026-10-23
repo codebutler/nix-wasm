@@ -1,0 +1,20 @@
+docs/superpowers/notes/sommelier-visual.md
+  s_cd1a77be509bb9::t_bc06581a9a8cba 69-76
+  s_cd1a77be509bb9::t_11aee1b4992781 9-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "58732d477e6ca6e6df0350e6c20b2d6b6af05a7b",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+docs/process-model.md
+  s_5c319dde45a577::t_83ea5734848911 7-9,114
+  s_5c319dde45a577::t_1fc12774a34379 259-260
+  s_5c319dde45a577::t_5be661f76b95cf 69-72,132-137,161-163,206-208,223
+.github/workflows/publish-linux-channel.yml
+  s_5c319dde45a577::t_78c7f99b388808 4-7,16
+userspace/linux-image.nix
+  s_5c319dde45a577::t_83ea5734848911 1-8
+userspace/busybox.nix
+  s_5c319dde45a577::t_83ea5734848911 1-5
+flake.nix
+  s_5c319dde45a577::t_aace542854f72a 798,817
+  s_5c319dde45a577::t_abbae8519dc773 68
+  s_5c319dde45a577::t_1fc12774a34379 1068,1327-1328
+  s_5c319dde45a577::t_83ea5734848911 907-912,919-924,1398-1400,1402
+.github/workflows/nix-wasm.yml
+  s_5c319dde45a577::t_83ea5734848911 226
+  s_5c319dde45a577::t_048f997adb0f65 815-817,827,841,1216,1323-1324
+scripts/publish-linux-channel.sh
+  s_5c319dde45a577::t_aace542854f72a 563-572
+  s_5c319dde45a577::t_78c7f99b388808 583-585,590,596-598,601-603,608-609
+  s_5c319dde45a577::t_1804c690962209 420-424,439,461,531-536,632-634
+  s_5c319dde45a577::t_6fa6111423fecf 293,295,299,301-312,319,321-326,334-335,342-383,386-393,401-403,405-408
+  s_5c319dde45a577::t_fc33e529ef30d2 6-9,16-17,26-29,46-47,189
+.github/workflows/pr-preview.yml
+  s_5c319dde45a577::t_048f997adb0f65 8,129-131,229,238
+  s_5c319dde45a577::t_aace542854f72a 137
+deps-overlay.nix
+  s_5c319dde45a577::t_c564aed2d241f3 138,140-144,173,176-179,186,190-194
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_aace542854f72a 118-125,135-136
+  s_5c319dde45a577::t_048f997adb0f65 9-10,12-15,21,23
+  s_5c319dde45a577::t_abbae8519dc773 168-169
+  s_5c319dde45a577::t_7e00103c1fc65a 170-179,184-191,206-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "7b572294221f792ded5c535ab57bba586fc8c155",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

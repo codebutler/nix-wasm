@@ -1,0 +1,19 @@
+runtime/demo/web/wayland-compositor.js
+  s_cd1a77be509bb9::t_8784e7916e5549 267-270,273-290
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "2c24d0c1b2f6ad61c6823035a319e458cca4d817",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

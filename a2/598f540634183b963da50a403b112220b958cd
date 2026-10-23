@@ -1,0 +1,22 @@
+runtime/ninep/server.js
+  s_5c319dde45a577::t_54a6c85637df0b 273-293,320,392-396,417-419,423-428,438,440-443,486-493,517,524,540
+  s_5c319dde45a577::t_03cd6cdefe5c98 261-263
+runtime/ninep/server.test.js
+  s_5c319dde45a577::t_22791362a000e9 56-107,255-280
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a2598f540634183b963da50a403b112220b958cd",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

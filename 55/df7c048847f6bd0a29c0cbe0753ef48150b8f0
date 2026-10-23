@@ -1,0 +1,29 @@
+flake.nix
+  s_d2c9c080387123::t_4c96f381305f33 273
+  s_d2c9c080387123::t_b8065f20f676f0 395
+  s_d2c9c080387123::t_84b00b2b0eaaa9 247-253,259
+  s_d2c9c080387123::t_6d03ad2bded758 254-258
+  s_d2c9c080387123::t_6b4c4f668f3df9 396
+toolchain/guest-binaryen.nix
+  s_d2c9c080387123::t_1a218b077ea243 90-95
+  s_d2c9c080387123::t_6f1885a5694cbc 1-82,87-89,96-108
+  s_d2c9c080387123::t_13c297a57fa8f4 83-86
+toolchain/guest-cc-fork.nix
+  s_d2c9c080387123::t_5663afd2469c0f 1-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "55df7c048847f6bd0a29c0cbe0753ef48150b8f0",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

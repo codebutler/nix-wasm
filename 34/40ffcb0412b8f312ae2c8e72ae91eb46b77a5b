@@ -1,0 +1,28 @@
+runtime/kernel-host.js
+  s_8dd181a5441a15::t_6cb2451c919000 506-514
+  s_8dd181a5441a15::t_7060fffc7293d0 285-291
+  s_8dd181a5441a15::t_3e3ca536c55d13 26
+  s_8dd181a5441a15::t_efe420da63f48a 139-179
+runtime/boot.js
+  s_8dd181a5441a15::t_23811a12af3d9b 223-231
+runtime/kernel-worker.js
+  s_8dd181a5441a15::t_d208a765b850d1 14
+  s_8dd181a5441a15::t_104585c87cde79 298-313
+  s_8dd181a5441a15::t_b1ef5fdd43afd8 228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "3440ffcb0412b8f312ae2c8e72ae91eb46b77a5b",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

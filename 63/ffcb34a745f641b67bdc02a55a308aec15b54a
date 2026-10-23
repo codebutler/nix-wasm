@@ -1,0 +1,21 @@
+runtime/.gitignore
+  s_791cc0179de687::t_cd0c531a591b2d 4
+userspace/init.nix
+  s_791cc0179de687::t_6c94e612c1ac87 17-18,21-24,26-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "63ffcb34a745f641b67bdc02a55a308aec15b54a",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": null
+    }
+  }
+}

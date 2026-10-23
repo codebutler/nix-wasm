@@ -1,0 +1,22 @@
+.superpowers/sdd/progress.md
+  s_d2c9c080387123::t_101923f6ab5b58 14,18,22-34
+  s_d2c9c080387123::t_f88931f518aea6 15
+docs/superpowers/specs/2026-06-20-fork-host-abi-v3.md
+  s_d2c9c080387123::t_9b0b15b41f93d4 1-215
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "c3ceb24e1a814457c0748540fd431fe61bb30d28",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

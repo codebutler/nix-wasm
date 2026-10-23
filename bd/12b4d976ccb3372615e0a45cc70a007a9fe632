@@ -1,0 +1,23 @@
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_b5385d4dc54731 230-236
+kernel.nix
+  s_5c319dde45a577::t_b5385d4dc54731 72,77-78,80,119,127,129,200-221
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_b5385d4dc54731 686-689,691-695
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "bd12b4d976ccb3372615e0a45cc70a007a9fe632",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

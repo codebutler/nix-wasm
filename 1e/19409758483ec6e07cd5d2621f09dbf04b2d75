@@ -1,0 +1,25 @@
+userspace/libgbm-shim/default.nix
+  s_cd1a77be509bb9::t_4d1c1d53c60557 1-53
+userspace/libgbm-shim/gbm.h
+  s_cd1a77be509bb9::t_0364c43ef97c74 1-75
+userspace/libgbm-shim/gbm-shim.c
+  s_cd1a77be509bb9::t_cd017cd039433b 1-43
+deps-overlay.nix
+  s_cd1a77be509bb9::t_6190b00dd5f349 483-500
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "1e19409758483ec6e07cd5d2621f09dbf04b2d75",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

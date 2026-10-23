@@ -1,0 +1,25 @@
+runtime/demo/web/wayland-compositor.js
+  s_d580a0e82f6259::t_2cec23b7ae687d 361,363-364
+  s_d580a0e82f6259::t_678822327853cb 278-279
+  s_d580a0e82f6259::t_c15bbedfe92293 392-404
+runtime/demo/web/vendor/greenfield/greenfield.mjs
+  s_d580a0e82f6259::t_925a0a464ea8cb 13124,13126-13133
+runtime/demo/web/vendor/greenfield/greenfield.d.mts
+  s_d580a0e82f6259::t_c0eeb4536de91e 54-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "7e02ede93c0e75ce27083f922372f82240222f35",
+  "prompts": {},
+  "sessions": {
+    "s_d580a0e82f6259": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7838adf-a5d7-4f15-84a0-3e0baf17456b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

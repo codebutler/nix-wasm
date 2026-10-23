@@ -1,0 +1,35 @@
+runtime/demo/node/build-from-source-e2e.mjs
+  s_16a51fa7de9b99::t_cf046a85feb8a3 41
+  s_16a51fa7de9b99::t_1823d67d5acb6f 1-40,42-101,103-105,107-119
+  s_16a51fa7de9b99::t_d88751f555ed24 102
+  s_d580a0e82f6259::t_aa74b2ec8218df 106
+.github/workflows/nix-wasm.yml
+  s_16a51fa7de9b99::t_19c01fd2068bfc 363-369
+CLAUDE.md
+  s_16a51fa7de9b99::t_a6f1f4103ccc8a 336-337
+  s_16a51fa7de9b99::t_bd98d941f291be 953-983
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c75b064fe99f29037ed8180fcb2228993c7bd163",
+  "prompts": {},
+  "sessions": {
+    "s_16a51fa7de9b99": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fc0d614c-fdad-451f-919e-3ba40aa27a5b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_d580a0e82f6259": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b7838adf-a5d7-4f15-84a0-3e0baf17456b",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+userspace/x11-tray-bridge.c
+  s_90082e9d863b41::t_dab89435ea2fa8 186-192,198,214,318
+  s_90082e9d863b41::t_7fb26857bd387a 9,211-213,239-245
+userspace/system.nix
+  s_90082e9d863b41::t_ff998e4357696d 252-266
+userspace/x11-tray-bridge.nix
+  s_90082e9d863b41::t_1b911ae101536f 12,15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1c9618742145f3d971a252d8a65584bc9351909",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

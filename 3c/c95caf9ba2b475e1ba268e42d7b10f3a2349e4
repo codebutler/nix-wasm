@@ -1,0 +1,19 @@
+.github/workflows/nix-wasm.yml
+  s_e176bdd30b413e::t_7bf1c97275ebcf 92-95,103-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3cc95caf9ba2b475e1ba268e42d7b10f3a2349e4",
+  "prompts": {},
+  "sessions": {
+    "s_e176bdd30b413e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c49-5608-7353-8d6e-6b03731a58a9",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

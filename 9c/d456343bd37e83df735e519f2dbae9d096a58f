@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-06-25-sommelier-virtwl-proxy.md
+  s_cd1a77be509bb9::t_8352e504a2e3a2 1-582
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "9cd456343bd37e83df735e519f2dbae9d096a58f",
+  "prompts": {},
+  "sessions": {
+    "s_cd1a77be509bb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c5a43f4-e9f7-42ad-a7e0-5192593fabfb",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

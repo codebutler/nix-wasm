@@ -1,0 +1,31 @@
+toolchain/musl.nix
+  s_d2c9c080387123::t_636b1ba8710f88 42-45
+  s_d2c9c080387123::t_f2c217deb6d447 12-19,25
+userspace/asyncify-cc.nix
+  s_d2c9c080387123::t_e5812f13eaec49 15-20,27-28,35-36
+  s_d2c9c080387123::t_656694e6debdcd 49
+flake.nix
+  s_d2c9c080387123::t_c39ee5198722ef 392-397
+  s_d2c9c080387123::t_619f49d1b4d79c 137-144
+  s_d2c9c080387123::t_ed3d7ce4a535bd 123-127,129
+userspace/fork-returns-twice.c
+  s_d2c9c080387123::t_b06535f420016b 1-33,39
+  s_d2c9c080387123::t_e5895c8bf005de 36-37
+  s_d2c9c080387123::t_de1cda1b0618d4 34-35,38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "ff421de3e4b847a4af3f9173eb9f67daf676f71b",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

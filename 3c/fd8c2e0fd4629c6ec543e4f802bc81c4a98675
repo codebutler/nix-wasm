@@ -1,0 +1,25 @@
+kernel.nix
+  s_af9b2fcb0c03bf::t_d46d0001f76122 71-74
+  s_af9b2fcb0c03bf::t_2f16ad7bd569a5 175-177,180
+  s_af9b2fcb0c03bf::t_f1c862ffdcf12a 170-174,178-179,181-183
+patches/kernel/0017-wasm-virtio-blk-device.patch
+  s_af9b2fcb0c03bf::t_46480b3c431393 13-14,23,27,30,33
+  s_af9b2fcb0c03bf::t_df99dd1b732eb8 1-12,15,18-19,21-22,24-26,28-29,31-32,34-45
+  s_af9b2fcb0c03bf::t_fff335c3c83ed7 16-17,20,46-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "3cfd8c2e0fd4629c6ec543e4f802bc81c4a98675",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

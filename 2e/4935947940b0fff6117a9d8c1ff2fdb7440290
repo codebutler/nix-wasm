@@ -1,0 +1,19 @@
+toolchain/native-bootstrap-cc.nix
+  s_d4348d5b4c1e44::t_e71a907ea8188d 39,42,46-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "2e4935947940b0fff6117a9d8c1ff2fdb7440290",
+  "prompts": {},
+  "sessions": {
+    "s_d4348d5b4c1e44": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a02f55-0ee7-7133-919a-4f395a4bdad1",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

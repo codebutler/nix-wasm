@@ -1,0 +1,20 @@
+userspace/guest-status-notifier.c
+  s_90082e9d863b41::t_414c3851b5b4ea 227
+  s_90082e9d863b41::t_a1c56c6e9a861f 103,222,228,234-235,935-937,991
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "dc44626d1298ce13c41da6eaeeed42c3a3ef50c4",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

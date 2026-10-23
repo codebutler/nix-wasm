@@ -1,0 +1,19 @@
+docs/superpowers/plans/2026-06-20-galculator-m4.md
+  s_791cc0179de687::t_684725a558a7b6 1,5,7,9,13-23,27,30-37,41,44-45,48-135,137,139,142-244,247-261,264-265,270,273-275,278-360,362-415,418-421,439-440,449-450,452,455-489,491,493,496-497,502,505-506,508-562,564,566-571,573,575-596,599-625,630-655
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "5528e8f2ec82bc98388f490395b27d0dfc16bd97",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

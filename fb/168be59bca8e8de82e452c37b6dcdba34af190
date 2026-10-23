@@ -1,0 +1,36 @@
+flake.nix
+  s_791cc0179de687::t_bd6d0c7c0afa3f 421-424
+  s_791cc0179de687::t_b1e8cf137aeaa9 291
+  s_791cc0179de687::t_a9f4e00409abe8 181-195
+userspace/gtk-hello.c
+  s_791cc0179de687::t_7774302f9fa4e9 1-10,19-21,26,29,37,39-40,43-59
+  s_791cc0179de687::t_480c50daf9ebdf 11-18,22-25,27-28,30-36,38,41-42
+runtime/node/gtk-smoke.mjs
+  s_791cc0179de687::t_daf4272e0a26e7 1-30
+docs/superpowers/notes/m3b-gtk-visual.md
+  s_791cc0179de687::t_d0fa8ea6bdea6f 1-53
+runtime/kernel-worker.js
+  s_791cc0179de687::t_4ada7abc76df00 879-891
+userspace/gtk-hello.nix
+  s_791cc0179de687::t_c2178017c35121 1-30
+CLAUDE.md
+  s_791cc0179de687::t_54db37bc004e44 335,341-344
+  s_791cc0179de687::t_a9d4c4dbf6a0a4 137-141
+  s_791cc0179de687::t_f855af9911a2fb 361-380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "fb168be59bca8e8de82e452c37b6dcdba34af190",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

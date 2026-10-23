@@ -1,0 +1,34 @@
+flake.nix
+  s_af9b2fcb0c03bf::t_a71706bdc56b21 341-344
+runtime/demo/web/main.js
+  s_af9b2fcb0c03bf::t_36f5970d3ecf0b 9
+runtime/README.md
+  s_af9b2fcb0c03bf::t_c34a3103deb8a3 83-91
+  s_af9b2fcb0c03bf::t_75da7b733a209c 54
+  s_af9b2fcb0c03bf::t_8369eaf50bfe3c 130
+  s_af9b2fcb0c03bf::t_9aa3f8b7c06828 27-29
+  s_af9b2fcb0c03bf::t_7924a3e2a31731 116
+  s_af9b2fcb0c03bf::t_d4effd8718e3e6 181
+runtime/nix-cache.js
+  s_af9b2fcb0c03bf::t_80a55c7ed59356 18
+runtime/sync-to-pc.sh
+  s_af9b2fcb0c03bf::t_71be11202fd768 23
+runtime/demo/node/web-shims.mjs
+  s_af9b2fcb0c03bf::t_4ca192b61ddd6b 101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "03ae1c6c24df94a3845e811769e801d5c48a032c",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

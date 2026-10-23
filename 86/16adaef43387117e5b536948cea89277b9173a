@@ -1,0 +1,74 @@
+runtime/demo/node/smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-74
+runtime/demo/node/web-shims.test.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-25
+runtime/demo/node/libffi-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-27
+runtime/README.md
+  s_791cc0179de687::t_67b95b1214df15 122,138,145,156,165-166,174-175,191
+runtime/demo/node/attach.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-32
+runtime/demo/node/boot.test.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-57
+runtime/demo/node/echo-fixture.worker.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-9
+runtime/demo/node/gtk-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-30
+runtime/demo/node/virtio-wl-spike.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-61
+runtime/demo/node/glib-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-27
+runtime/demo/node/web-shims.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-112
+runtime/demo/node/boot-mvp.test.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-36
+runtime/demo/node/virtio-spike.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-72
+runtime/demo/node/wl-text-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-37
+runtime/demo/node/worker-bootstrap.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-19
+runtime/demo/node/worker-bridge.test.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-21
+runtime/demo/node/wl-handshake.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-89
+runtime/.gitignore
+  s_791cc0179de687::t_a0e07eedbcd1a6 3
+runtime/jsconfig.json
+  s_791cc0179de687::t_a0e07eedbcd1a6 14
+runtime/package.json
+  s_791cc0179de687::t_a0e07eedbcd1a6 8,18,20-22
+runtime/demo/node/galculator-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-34
+runtime/demo/web/serve.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-45
+runtime/demo/web/smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-92
+runtime/demo/web/main.js
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-102
+runtime/demo/node/waylandproxyd-spike.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-101
+runtime/demo/node/boot-node.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-70
+runtime/demo/node/pango-smoke.mjs
+  s_791cc0179de687::t_ac2c4c3a90ab5d 1-28
+CLAUDE.md
+  s_791cc0179de687::t_200d02be424657 115
+  s_791cc0179de687::t_380352a0a47dec 105,119,123,126,129,132,135,140,146,148-149,151,166,173,417
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "8616adaef43387117e5b536948cea89277b9173a",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+userspace/toplevel.nix
+  s_af9b2fcb0c03bf::t_024a6fd1a30b26 2-3
+deps-overlay.nix
+  s_af9b2fcb0c03bf::t_cb4bf449157388 772-773
+runtime/scripts/build-artifacts.sh
+  s_af9b2fcb0c03bf::t_ddcb7c275f3686 37-41
+  s_af9b2fcb0c03bf::t_823e89fc8fd7ea 5-9
+CLAUDE.md
+  s_af9b2fcb0c03bf::t_a7fa54dc291274 329-330
+runtime/demo/node/boot.test.mjs
+  s_af9b2fcb0c03bf::t_708f69e3f029c6 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "4f6843a68b381c7dba570314e55891288d8f9401",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

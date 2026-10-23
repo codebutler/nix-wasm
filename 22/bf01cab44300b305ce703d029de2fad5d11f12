@@ -1,0 +1,21 @@
+patches/kernel/0016-wasm-nommu-ro-shared-mmap-copy.patch
+  s_791cc0179de687::t_ddc9698866b563 1-48
+kernel.nix
+  s_791cc0179de687::t_90e025e611de63 65-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "22bf01cab44300b305ce703d029de2fad5d11f12",
+  "prompts": {},
+  "sessions": {
+    "s_791cc0179de687": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b63102b-17a3-434b-9f23-656ee8aecf4f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

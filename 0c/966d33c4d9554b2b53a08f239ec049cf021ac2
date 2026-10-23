@@ -1,0 +1,20 @@
+deps-overlay.nix
+  s_90082e9d863b41::t_35a29cfb253942 1509-1515
+  s_90082e9d863b41::t_03c4104d1d8e18 1501-1508,1516-1522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0c966d33c4d9554b2b53a08f239ec049cf021ac2",
+  "prompts": {},
+  "sessions": {
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

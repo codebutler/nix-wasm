@@ -1,0 +1,46 @@
+flake.nix
+  s_5c319dde45a577::t_f3eb34806a7976 289-296,733,1153-1155
+  s_f1a5bd6f484102::t_487237ab73141a 1156
+runtime/demo/node/selftests-batch.mjs
+  s_5c319dde45a577::t_f3eb34806a7976 9,47-51
+  s_f1a5bd6f484102::t_b8d92ce1625f3f 52
+deps-overlay.nix
+  s_5c319dde45a577::t_f3eb34806a7976 447-451,454
+userspace/sqlite-wal-test.nix
+  s_5c319dde45a577::t_f3eb34806a7976 1-25
+docs/superpowers/notes/2026-08-05-mmu-phase1-parity-plan.md
+  s_5c319dde45a577::t_f3eb34806a7976 715-723
+runtime/demo/node/smoke.mjs
+  s_5c319dde45a577::t_f3eb34806a7976 3-4,111-122
+  s_f1a5bd6f484102::t_ce03a9b9188c90 123
+docs/superpowers/specs/2026-07-01-cleanup-131-audit.md
+  s_5c319dde45a577::t_f3eb34806a7976 248-255
+userspace/sqlite-wal-test.c
+  s_5c319dde45a577::t_3e19f0e9bf47e8 75-77
+  s_5c319dde45a577::t_774a37896f4706 71-72,81-86
+  s_5c319dde45a577::t_f3eb34806a7976 1-70,73-74,78-80,87-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "f2d936ce36ef6f2857bed5b278adc4b3b70142bd",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_f1a5bd6f484102": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00298-425a-7023-afc5-ec78144ac34f",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

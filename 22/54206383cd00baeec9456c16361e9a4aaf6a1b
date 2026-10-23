@@ -1,0 +1,21 @@
+docs/superpowers/plans/2026-06-23-squashfs-nix-serving.md
+  s_af9b2fcb0c03bf::t_870aa402ef6044 113,120,532,678,753,778
+docs/superpowers/specs/2026-06-23-squashfs-nix-serving-design.md
+  s_af9b2fcb0c03bf::t_870aa402ef6044 153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "2254206383cd00baeec9456c16361e9a4aaf6a1b",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+userspace/bootstrap.nix
+  s_5c319dde45a577::t_a6848c2584e763 51
+userspace/yore-bootloader.sh
+  s_5c319dde45a577::t_a6848c2584e763 49-50,52,66-70
+runtime/generation-profile.test.js
+  s_5c319dde45a577::t_a6848c2584e763 9,126,129,140
+runtime/boot.js
+  s_5c319dde45a577::t_a6848c2584e763 134-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "25fa0213ff6406068562cf13de761774f354acaf",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

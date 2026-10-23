@@ -1,0 +1,48 @@
+toolchain/musl.nix
+  s_2fff1049ab5e4f::t_4d45924b109a0c 99-119
+userspace/grandfork-child.c
+  s_2fff1049ab5e4f::t_13cc5adeb74d2d 1-55
+runtime/demo/node/busybox-fork-smoke.mjs
+  s_2fff1049ab5e4f::t_e086a673f87a53 144-146,154,156,158,165
+  s_2fff1049ab5e4f::t_24796c1ca67096 89-98
+  s_2fff1049ab5e4f::t_2f9a44f3d97ee3 1,3-7,18-28,30-88,99-114,116-120,122-143,147-153,155,157,159-164,166
+  s_2fff1049ab5e4f::t_afc256ada22f7a 2,8-17
+  s_2fff1049ab5e4f::t_8614f4095a1855 29
+  s_2fff1049ab5e4f::t_fbfbeb18438de8 115
+  s_2fff1049ab5e4f::t_42ea746f35cfd0 121
+userspace/busybox-fork.nix
+  s_2fff1049ab5e4f::t_86d5aaf5ca2ccc 105-108
+  s_2fff1049ab5e4f::t_48bdecf7bd19d7 1-32,59-104,109-168
+  s_2fff1049ab5e4f::t_39ccdcdc289498 33-58
+.github/workflows/nix-wasm.yml
+  s_2fff1049ab5e4f::t_9fe3ea90d5bffe 138-140
+  s_2fff1049ab5e4f::t_0e1780b79dad1e 327-342
+flake.nix
+  s_2fff1049ab5e4f::t_664bd63e642393 117-129
+  s_2fff1049ab5e4f::t_acd9d9ada46ed0 640-641
+  s_2fff1049ab5e4f::t_91e5da4da2a61f 600-602
+  s_2fff1049ab5e4f::t_ac0e725c2cd15f 143-149
+userspace/grandfork-init.c
+  s_2fff1049ab5e4f::t_95372c29cac202 1-58
+runtime/demo/node/grandfork-smoke.mjs
+  s_2fff1049ab5e4f::t_afffd83db5e728 1-74
+  s_2fff1049ab5e4f::t_fabdefbaead145 75-83
+patches/busybox/0001-wasm-arch.patch
+  s_2fff1049ab5e4f::t_011da9813c92e2 1-1456
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c20bd2b119bf492494dbd6cff3fefbafc7d6897c",
+  "prompts": {},
+  "sessions": {
+    "s_2fff1049ab5e4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e7c8fba-1047-43cf-b025-6d4c2fd79d0c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

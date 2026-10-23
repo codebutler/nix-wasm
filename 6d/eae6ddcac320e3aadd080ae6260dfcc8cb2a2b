@@ -1,0 +1,26 @@
+infra/preview-worker/src/index.test.js
+  s_2aa74a3a6bc0ab::t_f853322351d142 80-109
+scripts/preview-publish.sh
+  s_2aa74a3a6bc0ab::t_38e631c48de588 73,76-77
+infra/preview-worker/src/index.js
+  s_2aa74a3a6bc0ab::t_83a4031be30730 86-87,90-95
+  s_2aa74a3a6bc0ab::t_e1360ae309a1df 78
+infra/preview-worker/README.md
+  s_2aa74a3a6bc0ab::t_0b2a97315d37d1 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "6deae6ddcac320e3aadd080ae6260dfcc8cb2a2b",
+  "prompts": {},
+  "sessions": {
+    "s_2aa74a3a6bc0ab": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5b039c2b-8c6b-4a70-ab07-4b05782ad9d5",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

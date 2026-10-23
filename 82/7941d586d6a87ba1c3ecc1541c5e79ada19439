@@ -1,0 +1,29 @@
+userspace/bootstrap.nix
+  s_8dd181a5441a15::t_39d8bdde9aea02 62-76,78
+  s_8dd181a5441a15::t_112431162ccef1 56-60,77,79-80
+  s_8dd181a5441a15::t_1c1b11e23be8db 61
+userspace/initramfs.nix
+  s_8dd181a5441a15::t_c19b632ad58aea 92-98
+  s_8dd181a5441a15::t_a2e727dbb3d52b 17-65
+docs/2026-06-21-guest-dhcp-spike.md
+  s_8dd181a5441a15::t_520cece33cdaf8 1-110
+runtime/demo/node/dhcp-spike.mjs
+  s_8dd181a5441a15::t_014694961469d3 67-72,74-76,86-93
+  s_8dd181a5441a15::t_fe40b78501a362 1-66,73,77-85,94-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "827941d586d6a87ba1c3ecc1541c5e79ada19439",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

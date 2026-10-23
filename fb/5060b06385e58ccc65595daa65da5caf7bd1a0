@@ -1,0 +1,23 @@
+userspace/base-squashfs.nix
+  s_af9b2fcb0c03bf::t_ae3ff67baf14a7 26
+  s_af9b2fcb0c03bf::t_c14ed6ea93e383 1-25,27-28
+flake.nix
+  s_af9b2fcb0c03bf::t_937762a166b26c 327-331
+  s_af9b2fcb0c03bf::t_6dacaf004edb9a 496-497
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "fb5060b06385e58ccc65595daa65da5caf7bd1a0",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+runtime/kernel-host.js
+  s_af9b2fcb0c03bf::t_484e06c92c3060 64-74
+  s_af9b2fcb0c03bf::t_141433983ca142 43,49
+  s_af9b2fcb0c03bf::t_0ed67b2d68dbc9 533-536
+  s_af9b2fcb0c03bf::t_f5019de4972236 473,475
+  s_af9b2fcb0c03bf::t_cb8e7360a0d92f 44-48
+  s_af9b2fcb0c03bf::t_34915579a8d3dd 461,474
+runtime/boot.js
+  s_af9b2fcb0c03bf::t_a7e31a4a8ebe5a 165-166
+  s_af9b2fcb0c03bf::t_9defd490247cdf 63
+  s_af9b2fcb0c03bf::t_84c2e50b5e39ee 164,167-168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "054f7c9056c2dfae37e2beaf280aeffbae3a8b41",
+  "prompts": {},
+  "sessions": {
+    "s_af9b2fcb0c03bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9c8ba321-872f-49f5-bcd1-6ac8f53c0093",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

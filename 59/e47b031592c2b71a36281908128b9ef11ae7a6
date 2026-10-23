@@ -1,0 +1,39 @@
+vendor/sommelier/protocol/xdg-activation-v1.xml
+  s_90082e9d863b41::t_c3c0c03548741c 1-200
+vendor/sommelier/sommelier-xdg-activation.cc
+  s_1f16ca1e44bcb2::t_17d17edbcf7188 1-159
+vendor/sommelier/BUILD.gn
+  s_90082e9d863b41::t_14404e1fc790f0 61,123
+vendor/sommelier/meson.build
+  s_90082e9d863b41::t_a1e73a038204fa 59,212
+vendor/sommelier/sommelier-ctx.h
+  s_90082e9d863b41::t_a9d030ebdbfe3f 96
+vendor/sommelier/sommelier.cc
+  s_90082e9d863b41::t_2a85e8257df966 644-653,880-886
+vendor/sommelier/sommelier.h
+  s_90082e9d863b41::t_bddd05debaf41e 45,426-433
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "59e47b031592c2b71a36281908128b9ef11ae7a6",
+  "prompts": {},
+  "sessions": {
+    "s_1f16ca1e44bcb2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c49-8f41-7531-937d-51c548a55f75",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_90082e9d863b41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14eb1-82b9-7e72-9fc7-c742651a7a6e",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

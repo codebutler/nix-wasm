@@ -1,0 +1,40 @@
+userspace/yore-system.nix
+  s_5c319dde45a577::t_219dac76e870d2 1-7
+userspace/toplevel.nix
+  s_5c319dde45a577::t_efd53ddd6b1bbb 99-101,103
+userspace/bootstrap.nix
+  s_5c319dde45a577::t_bb4f7efc9216c6 126-131,210-216,241-255,258-268,271-279,309-316
+  s_5c319dde45a577::t_4dca252b2b43a8 256-257,269-270
+  s_5c319dde45a577::t_879f90a130e781 224-240
+userspace/base-squashfs.nix
+  s_5c319dde45a577::t_efd53ddd6b1bbb 4-6,54-57
+userspace/yore-bootloader.nix
+  s_5c319dde45a577::t_efd53ddd6b1bbb 11
+flake.nix
+  s_5c319dde45a577::t_219dac76e870d2 685,696,851
+userspace/yore-system.sh
+  s_5c319dde45a577::t_219dac76e870d2 1-5,9-25,39-57,59-72,74-106,108,110-118,120,122-134,136-142
+  s_5c319dde45a577::t_879f90a130e781 26-38,107,119
+  s_5c319dde45a577::t_52c18d17d5ef3e 6-8,58,73,109,121,135
+runtime/generation-profile.test.js
+  s_5c319dde45a577::t_52c18d17d5ef3e 1-137,154
+  s_5c319dde45a577::t_605fe1366b3f7e 138-153
+userspace/yore-bootloader.sh
+  s_5c319dde45a577::t_219dac76e870d2 1-61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8e81b49866c8370e1fb26390de5d1331444fbc21",
+  "prompts": {},
+  "sessions": {
+    "s_5c319dde45a577": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a00220-b034-74a0-aa1f-01865dc7dce2",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

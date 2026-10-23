@@ -1,0 +1,23 @@
+runtime/kernel-host.js
+  s_8dd181a5441a15::t_5e5b1ce659a49c 294
+runtime/demo/node/net-spike.mjs
+  s_8dd181a5441a15::t_21b0c6983d8172 32
+  s_8dd181a5441a15::t_1244d3eb84da60 118-119
+  s_8dd181a5441a15::t_440df8f322a2ee 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f13a2b1e15e4315ffd9a3546cbee33ffaa9c19f6",
+  "prompts": {},
+  "sessions": {
+    "s_8dd181a5441a15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e05b01a6-a947-47a6-9771-6c8f9aaf43e7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

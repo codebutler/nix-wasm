@@ -1,0 +1,31 @@
+runtime/node/asyncify.test.mjs
+  s_d2c9c080387123::t_4124c764f18901 1-140
+runtime/node/hostbridge.test.mjs
+  s_d2c9c080387123::t_de69cd7fbe2396 63-96
+spikes/asyncify-fork/run-cc.mjs
+  s_d2c9c080387123::t_1fc1924cf2346e 68
+  s_d2c9c080387123::t_6d9564ba3f1263 12-15,27-33,38
+runtime/node/task2.1-abi-v2-scaffold.test.mjs
+  s_d2c9c080387123::t_d81d3c6742ef7a 40-44
+runtime/hostbridge.js
+  s_d2c9c080387123::t_b0fec9ab274c0f 18-27
+  s_d2c9c080387123::t_e399fe9741bd86 124-146
+runtime/asyncify.js
+  s_d2c9c080387123::t_8e0a6316888d0f 1-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "e09f592135243d6d3a2f13ef4392b7b141d1178d",
+  "prompts": {},
+  "sessions": {
+    "s_d2c9c080387123": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6e56e973-11a6-46db-8f7e-8f769bef7649",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
