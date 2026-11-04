@@ -7,6 +7,8 @@
 //     Worker instances set forwardNotify so the main thread owns the journal.
 import { VirtioWasmDevice } from "./device.ts";
 import { BLK_SECTOR, markDirty } from "./blk-disk.ts";
+import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
+import type { Vring, VringChain } from "./vring.ts";
 
 const VIRTIO_BLK_T_IN = 0; // read
 const VIRTIO_BLK_T_OUT = 1; // write
@@ -18,11 +20,25 @@ const VIRTIO_BLK_S_UNSUPP = 2;
 const VIRTIO_BLK_F_RO = 5n; // device is read-only
 const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
+/** BlkDevice constructor options (the base opts plus these). */
+export interface BlkDeviceOptions extends VirtioWasmDeviceOptions {
+  image: Uint8Array;
+  readOnly?: boolean;
+  dirtyBitmap?: Uint8Array;
+  onDirty?: () => void;
+  forwardNotify?: ForwardNotify;
+}
+
 export class BlkDevice extends VirtioWasmDevice {
-  /**
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { image: Uint8Array, readOnly?: boolean, dirtyBitmap?: Uint8Array, onDirty?: () => void, forwardNotify?: (dev: number, q: number) => void }} opts
-   */
-  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ image: Uint8Array; readOnly?: boolean; dirtyBitmap?: Uint8Array; onDirty?: () => void; forwardNotify?: (dev: number,q: number) => void; }) {
+  image: Uint8Array;
+  readOnly: boolean;
+  dirtyBitmap: Uint8Array | null;
+  onDirty: (() => void) | null;
+  forwardNotify: ForwardNotify | null;
+  /** capacity in 512-byte sectors */
+  capacity: bigint;
+
+  constructor(opts: BlkDeviceOptions) {
     super(opts);
     this.image = opts.image;
     this.readOnly = opts.readOnly !== false;
@@ -35,7 +51,7 @@ export class BlkDevice extends VirtioWasmDevice {
     this.capacity = BigInt(Math.floor(this.image.length / BLK_SECTOR));
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     let f = 1n << VIRTIO_F_VERSION_1;
     if (this.readOnly) f |= 1n << VIRTIO_BLK_F_RO;
     return f;
@@ -43,7 +59,7 @@ export class BlkDevice extends VirtioWasmDevice {
 
   // virtio-blk config space: u64 capacity at offset 0 (little-endian, sectors).
   // The guest only reads offsets 0-7; fill the requested slice from that buffer.
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     const buf = new Uint8Array(8);
     new DataView(buf.buffer).setBigUint64(0, this.capacity, true);
     for (let i = 0; i < bytes.length; i++) {
@@ -52,7 +68,7 @@ export class BlkDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q) {
+  onNotify(q: number): void {
     if (this.forwardNotify) {
       this.forwardNotify(this.dev, q >>> 0);
       return;
@@ -60,7 +76,7 @@ export class BlkDevice extends VirtioWasmDevice {
     const ring = this.vring(q >>> 0);
     if (!ring) return;
     let serviced = 0;
-    let chain;
+    let chain: VringChain | null;
     while ((chain = ring.next())) {
       this._service(ring, chain);
       serviced++;
@@ -74,7 +90,7 @@ export class BlkDevice extends VirtioWasmDevice {
   //   out[0]: struct virtio_blk_outhdr { le32 type; le32 reserved; le64 sector; }
   //   data:   T_IN → in segs; T_OUT → out segs after the header
   //   status: last IN segment, 1 byte
-  _service(ring, chain) {
+  _service(ring: Vring, chain: VringChain): void {
     if (!chain.out.length || !chain.in.length) {
       this.log("[blk] malformed descriptor chain — skipping");
       ring.pushUsed(chain.head, 0);

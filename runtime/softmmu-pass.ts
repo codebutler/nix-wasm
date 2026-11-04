@@ -48,7 +48,7 @@
 
 // opcode -> { k:'load'|'store', n:name }. VALTYPE gives the value type on the
 // stack (loads push it, stores consume it) — used to pick the store's scratch.
-const MEM_OPS: Record<number,{ k: string; n: string; }> = {
+const MEM_OPS: Record<number, { k: string; n: string }> = {
   0x28: { k: "load", n: "i32_load" },
   0x29: { k: "load", n: "i64_load" },
   0x2a: { k: "load", n: "f32_load" },
@@ -73,7 +73,7 @@ const MEM_OPS: Record<number,{ k: string; n: string; }> = {
   0x3d: { k: "store", n: "i64_store16" },
   0x3e: { k: "store", n: "i64_store32" },
 };
-const VALTYPE: Record<string,string> = {
+const VALTYPE: Record<string, string> = {
   i32_store: "i32",
   i64_store: "i64",
   f32_store: "f32",
@@ -85,7 +85,7 @@ const VALTYPE: Record<string,string> = {
   i64_store32: "i64",
 };
 
-const VT: Record<string,number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+const VT: Record<string, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 // #128 PAGE-CROSSING scalar accesses: a multi-byte load/store whose
 // `(ea & 0xfff) + width > 0x1000` spans TWO virtual pages, which map to two
@@ -96,7 +96,7 @@ const VT: Record<string,number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c }
 // translation, memory is flat/contiguous.) These tables drive the split: for
 // width>=2 accesses the pass emits a fast within-page path + a byte-wise slow
 // path (`__mmu_{load,store}_bytes`) that translates EACH byte's page separately.
-const ACCESS_W: Record<number,number> = {
+const ACCESS_W: Record<number, number> = {
   0x28: 4,
   0x29: 8,
   0x2a: 4,
@@ -122,7 +122,7 @@ const ACCESS_W: Record<number,number> = {
   0x3e: 4,
 };
 // Result value-type of each load op (the `if`/`block` result type on the split).
-const LOAD_RESVT: Record<number,number> = {
+const LOAD_RESVT: Record<number, number> = {
   0x28: VT.i32,
   0x29: VT.i64,
   0x2a: VT.f32,
@@ -142,7 +142,7 @@ const LOAD_RESVT: Record<number,number> = {
 // op's result type: wrap/reinterpret/sign-extend. Opcodes: 0xa7 i32.wrap_i64,
 // 0xbe f32.reinterpret_i32, 0xbf f64.reinterpret_i64, 0xc1 i32.extend16_s,
 // 0xc3 i64.extend16_s, 0xc4 i64.extend32_s. (8/16u/32u already zero-extended.)
-const LOAD_POST: Record<number,number[]> = {
+const LOAD_POST: Record<number, number[]> = {
   0x28: [0xa7],
   0x29: [],
   0x2a: [0xa7, 0xbe],
@@ -157,7 +157,7 @@ const LOAD_POST: Record<number,number[]> = {
 // Convert a store's typed value (already on the stack) to the i64 the byte
 // helper stores from (it uses only the low `width` bytes). Opcodes: 0xad
 // i64.extend_i32_u, 0xbc i32.reinterpret_f32, 0xbd i64.reinterpret_f64.
-const STORE_TOI64: Record<number,number[]> = {
+const STORE_TOI64: Record<number, number[]> = {
   0x36: [0xad],
   0x37: [],
   0x38: [0xbc, 0xad],
@@ -314,7 +314,7 @@ function atomicFaultKind(sub: number): number {
  * @param {number} i
  * @returns {[string, number]}
  */
-function readName(b: Uint8Array, i: number): [string,number] {
+function readName(b: Uint8Array, i: number): [string, number] {
   let len = 0;
   [len, i] = readU(b, i);
   let str = "";
@@ -327,14 +327,18 @@ function readName(b: Uint8Array, i: number): [string,number] {
  * @param {Uint8Array} body
  * @returns {{funcs: {module: string, name: string, typeIdx: number}[], globals: {module: string, name: string, valtype: number, mutable: number}[]}}
  */
-function parseImportsDetailed(body: Uint8Array): { funcs: { module: string; name: string; typeIdx: number; }[]; globals: { module: string; name: string; valtype: number; mutable: number; }[]; } {
+function parseImportsDetailed(body: Uint8Array): {
+  funcs: { module: string; name: string; typeIdx: number }[];
+  globals: { module: string; name: string; valtype: number; mutable: number }[];
+} {
   let i = 0;
   let n = 0;
   [n, i] = readU(body, 0);
-  const funcs: { module: string; name: string; typeIdx: number; }[] = [];
-  const globals: { module: string; name: string; valtype: number; mutable: number; }[] = [];
+  const funcs: { module: string; name: string; typeIdx: number }[] = [];
+  const globals: { module: string; name: string; valtype: number; mutable: number }[] = [];
   for (let k = 0; k < n; k++) {
-    let mod = "", name = "";
+    let mod = "",
+      name = "";
     [mod, i] = readName(body, i);
     [name, i] = readName(body, i);
     const ek = body[i++];
@@ -376,12 +380,12 @@ function parseImportsDetailed(body: Uint8Array): { funcs: { module: string; name
  * @param {Uint8Array | null} typeBody
  * @returns {{params: number[], results: number[]}[]}
  */
-function parseTypeEntries(typeBody: Uint8Array|null): { params: number[]; results: number[]; }[] {
+function parseTypeEntries(typeBody: Uint8Array | null): { params: number[]; results: number[] }[] {
   if (!typeBody) return [];
   let i = 0;
   let n = 0;
   [n, i] = readU(typeBody, 0);
-  const out: { params: number[]; results: number[]; }[] = [];
+  const out: { params: number[]; results: number[] }[] = [];
   for (let k = 0; k < n; k++) {
     if (typeBody[i++] !== 0x60) throw new Error("softmmu: bad functype");
     let np = 0;
@@ -422,7 +426,11 @@ type CheckedContext = {
  *   index is known, so `rewriteFuncBody`'s inline checked path (#202 §6.2)
  *   can call it as the combined predicate's out-of-line "slow" arm.
  */
-function resolveCheckedImports(importSec: { id: number; body: Uint8Array; }|undefined, typeSec: { id: number; body: Uint8Array; }|undefined, exportSec: { id: number; body: Uint8Array; }|undefined): CheckedContext {
+function resolveCheckedImports(
+  importSec: { id: number; body: Uint8Array } | undefined,
+  typeSec: { id: number; body: Uint8Array } | undefined,
+  exportSec: { id: number; body: Uint8Array } | undefined,
+): CheckedContext {
   if (!importSec) {
     throw new Error(
       'softmmu: checked mode requires imports for "__wasm_syscall_2", ' +
@@ -497,7 +505,10 @@ function resolveCheckedImports(importSec: { id: number; body: Uint8Array; }|unde
  * @param {string} name
  * @returns {number}
  */
-function findExportFuncIdx(exportSec: { id: number; body: Uint8Array; }|undefined, name: string): number {
+function findExportFuncIdx(
+  exportSec: { id: number; body: Uint8Array } | undefined,
+  name: string,
+): number {
   if (!exportSec) return -1;
   const b = exportSec.body;
   let i = 0;
@@ -533,7 +544,7 @@ function findExportFuncIdx(exportSec: { id: number; body: Uint8Array; }|undefine
 // Built programmatically from the wasm threads opcode layout to avoid a ~50-row
 // hand transcription. atomic.fence (0x03) has no memarg and is copied verbatim.
 const ATOMIC_OPS = (() => {
-  const t: Record<number,{ opsAbove: string[]; result: boolean; }> = {};
+  const t: Record<number, { opsAbove: string[]; result: boolean }> = {};
   t[0x00] = { opsAbove: ["i32"], result: true }; // memory.atomic.notify(count)
   t[0x01] = { opsAbove: ["i32", "i64"], result: true }; // wait32(expected,timeout)
   t[0x02] = { opsAbove: ["i64", "i64"], result: true }; // wait64(expected,timeout)
@@ -561,7 +572,7 @@ const ATOMIC_OPS = (() => {
  * @param {number} i
  * @returns {[number, number]}
  */
-function readU(b: Uint8Array, i: number): [number,number] {
+function readU(b: Uint8Array, i: number): [number, number] {
   let r = 0,
     sh = 0,
     x = 0;
@@ -577,7 +588,7 @@ function readU(b: Uint8Array, i: number): [number,number] {
  * @param {number} i
  * @returns {[number, number]}
  */
-function readS(b: Uint8Array, i: number): [number,number] {
+function readS(b: Uint8Array, i: number): [number, number] {
   let r = 0,
     sh = 0,
     x = 0;
@@ -593,7 +604,7 @@ function readS(b: Uint8Array, i: number): [number,number] {
  * @param {number | null | undefined} n
  * @returns {number[]}
  */
-function u(n: number|null|undefined): number[] {
+function u(n: number | null | undefined): number[] {
   const out: number[] = [];
   let v = (n ?? 0) >>> 0;
   do {
@@ -608,7 +619,7 @@ function u(n: number|null|undefined): number[] {
  * @param {number | null | undefined} n
  * @returns {number[]}
  */
-function s(n: number|null|undefined): number[] {
+function s(n: number | null | undefined): number[] {
   const out: number[] = [];
   let more = true;
   let v = (n ?? 0) | 0;
@@ -642,7 +653,7 @@ const vec = (items: Array<number | number[]>): number[] => {
  * @param {Array<number[]|Uint8Array>} chunks
  * @returns {Uint8Array}
  */
-export function concatBytes(chunks: Array<number[]|Uint8Array>): Uint8Array {
+export function concatBytes(chunks: Array<number[] | Uint8Array>): Uint8Array {
   let total = 0;
   for (const c of chunks) total += c.length;
   const out = new Uint8Array(total);
@@ -706,7 +717,8 @@ export function concatBytes(chunks: Array<number[]|Uint8Array>): Uint8Array {
  * a reader can trust either encoding appearing anywhere in the output.
  */
 export class ByteSink {
-  buf: Uint8Array;
+  // Never a shared buffer: the bytes go straight to WebAssembly.compile.
+  buf: Uint8Array<ArrayBuffer>;
   len: number;
 
   constructor(initialCapacity: number = 1 << 16) {
@@ -773,7 +785,7 @@ export class ByteSink {
    * @param {number | null | undefined} n
    * @returns {ByteSink}
    */
-  u(n: number|null|undefined): ByteSink {
+  u(n: number | null | undefined): ByteSink {
     let v = (n ?? 0) >>> 0;
     do {
       let x = v & 0x7f;
@@ -790,7 +802,7 @@ export class ByteSink {
    * @param {number | null | undefined} n
    * @returns {ByteSink}
    */
-  s(n: number|null|undefined): ByteSink {
+  s(n: number | null | undefined): ByteSink {
     let more = true;
     let v = (n ?? 0) | 0;
     while (more) {
@@ -855,7 +867,7 @@ export class ByteSink {
   }
 
   /** The written portion as a Uint8Array VIEW (no copy) — call once, at the end. */
-  toUint8Array() {
+  toUint8Array(): Uint8Array<ArrayBuffer> {
     return this.buf.subarray(0, this.len);
   }
 }
@@ -865,9 +877,9 @@ export class ByteSink {
  * @param {Uint8Array} bytes
  * @returns {{id: number, body: Uint8Array}[]}
  */
-function splitSections(bytes: Uint8Array): { id: number; body: Uint8Array; }[] {
+function splitSections(bytes: Uint8Array): { id: number; body: Uint8Array }[] {
   if (bytes[0] !== 0 || bytes[1] !== 0x61) throw new Error("not wasm");
-  const out: { id: number; body: Uint8Array; }[] = [];
+  const out: { id: number; body: Uint8Array }[] = [];
   let i = 8;
   while (i < bytes.length) {
     const id = bytes[i++];
@@ -1143,11 +1155,11 @@ export function rewriteFuncBody(
   code: Uint8Array,
   numParams: number,
   ptBaseGlobal: number,
-  bulkFns: { memcpy: number; memfill: number; meminit: Map<number,number>; }|null,
-  checked: CheckedContext|null = null,
-  helper: { translateFunc: number; checkedTranslateFunc: number|null; }|null = null,
-  splitFns: { loadBytes: number; storeBytes: number; }|null = null,
-  sink: ByteSink|undefined = undefined,
+  bulkFns: { memcpy: number; memfill: number; meminit: Map<number, number> } | null,
+  checked: CheckedContext | null = null,
+  helper: { translateFunc: number; checkedTranslateFunc: number | null } | null = null,
+  splitFns: { loadBytes: number; storeBytes: number } | null = null,
+  sink: ByteSink | undefined = undefined,
 ): void {
   if (!sink) throw new Error("softmmu: rewriteFuncBody requires a ByteSink `sink` argument");
   // #202 P2-4: `checkedTranslateFunc` is JSDoc-optional on `checked` (it's
@@ -1188,8 +1200,13 @@ export function rewriteFuncBody(
   //       the final phys computation.
   const base = numParams + existingLocalCount;
   const EA = base;
-  const VAL: Record<string,number> = { i32: base + 1, i64: base + 2, f32: base + 3, f64: base + 4 };
-  const B: Record<string,number> = { i32: base + 5, i64: base + 6 };
+  const VAL: Record<string, number> = {
+    i32: base + 1,
+    i64: base + 2,
+    f32: base + 3,
+    f64: base + 4,
+  };
+  const B: Record<string, number> = { i32: base + 5, i64: base + 6 };
   const PGD_E = base + 7;
   const PTE = base + 8;
 
@@ -1199,7 +1216,7 @@ export function rewriteFuncBody(
   // — ByteSink.push is a drop-in, Array.push-compatible variadic append.
   // The guard at the top threw when `sink` was missing; say so to the type so
   // the closures below call ByteSink directly.
-  const out = (sink as ByteSink);
+  const out = sink as ByteSink;
   // new local-decl vec: existing 6 groups + 1 more (pgd_e+pte) when checked
   out.u(nLocals + 6 + (checked ? 1 : 0));
   out.pushBytes(code.subarray(localsStart, localsEnd));
@@ -1415,7 +1432,10 @@ export function rewriteFuncBody(
     emitCheckedPresentPredicate(0); // kind=0 read
     out.byte(0x20).u(EA); // local.get ea
     out.byte(0x41).s(0xfff).byte(0x71); // & 0xfff
-    out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W)  (i32.le_u)
+    out
+      .byte(0x41)
+      .s(0x1000 - W)
+      .byte(0x4d); // <= (0x1000-W)  (i32.le_u)
     out.byte(0x71); // AND into the combined predicate
     out.byte(0x04).byte(LOAD_RESVT[op]); // if (result <loadvt>)
     out.byte(0x20).u(PTE); // fast arm: phys from pte/ea
@@ -1433,7 +1453,10 @@ export function rewriteFuncBody(
     emitCheckedPresentPredicate(1); // kind=1 write
     out.byte(0x20).u(EA);
     out.byte(0x41).s(0xfff).byte(0x71);
-    out.byte(0x41).s(0x1000 - W).byte(0x4d);
+    out
+      .byte(0x41)
+      .s(0x1000 - W)
+      .byte(0x4d);
     out.byte(0x71); // AND into the combined predicate
     out.byte(0x04).byte(0x40); // if (void)
     out.byte(0x20).u(PTE); // fast arm: phys from pte/ea
@@ -1485,7 +1508,10 @@ export function rewriteFuncBody(
           // translates each byte's page separately. Both leave the op's
           // result value on the stack (the `if`'s result type).
           out.byte(0x20).u(EA).byte(0x41).s(0xfff).byte(0x71); // ea & 0xfff
-          out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W) (i32.le_u)
+          out
+            .byte(0x41)
+            .s(0x1000 - W)
+            .byte(0x4d); // <= (0x1000-W) (i32.le_u)
           out.byte(0x04).byte(LOAD_RESVT[op]); // if (result <loadvt>)
           emitTranslate(0); // -> phys (kind=0 load)
           out.byte(op).byte(0x00).u(0); // raw load, align 0 off 0
@@ -1520,7 +1546,10 @@ export function rewriteFuncBody(
           // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
           // fast within-page path else byte-wise slow path.
           out.byte(0x20).u(EA).byte(0x41).s(0xfff).byte(0x71); // ea & 0xfff
-          out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W) (i32.le_u)
+          out
+            .byte(0x41)
+            .s(0x1000 - W)
+            .byte(0x4d); // <= (0x1000-W) (i32.le_u)
           out.byte(0x04).byte(0x40); // if (void)
           emitTranslate(1); // -> phys (kind=1 store)
           out.byte(0x20).u(vl); // local.get val
@@ -1553,7 +1582,8 @@ export function rewriteFuncBody(
         i = next;
         continue;
       }
-      let align = 0, offset = 0;
+      let align = 0,
+        offset = 0;
       [align, j] = readU(code, j);
       [offset, j] = readU(code, j);
       // stack: addr, [op0], [op1]  (op1 on top). Pop operands top-first into
@@ -1656,7 +1686,7 @@ function countImports(importBody: Uint8Array, kind: number): number {
  * @param {Uint8Array | null} typeBody
  * @returns {number[]}
  */
-function typeParamCounts(typeBody: Uint8Array|null): number[] {
+function typeParamCounts(typeBody: Uint8Array | null): number[] {
   if (!typeBody) return [];
   let i = 0;
   let n = 0;
@@ -1680,7 +1710,7 @@ function typeParamCounts(typeBody: Uint8Array|null): number[] {
  * @param {Uint8Array | null} funcBody
  * @returns {number[]}
  */
-function definedFuncTypes(funcBody: Uint8Array|null): number[] {
+function definedFuncTypes(funcBody: Uint8Array | null): number[] {
   if (!funcBody) return [];
   let i = 0;
   let n = 0;
@@ -1702,7 +1732,12 @@ function definedFuncTypes(funcBody: Uint8Array|null): number[] {
  * @param {Uint8Array} bytes
  * @returns {{atomics: boolean, simd: boolean, bulk: boolean, initSegs: number[]}}
  */
-export function scanUnhandled(bytes: Uint8Array): { atomics: boolean; simd: boolean; bulk: boolean; initSegs: number[]; } {
+export function scanUnhandled(bytes: Uint8Array): {
+  atomics: boolean;
+  simd: boolean;
+  bulk: boolean;
+  initSegs: number[];
+} {
   const secs = splitSections(bytes);
   const code = secs.find((x) => x.id === 10);
   if (!code) return { atomics: false, simd: false, bulk: false, initSegs: [] };
@@ -1869,7 +1904,12 @@ function emitBwdBound(o: number[], x: number, n: number, dst: number) {
  * @param {number | null | undefined} ckFunc
  * @param {number} kind
  */
-function emitTranslateCall(o: number[], translateFunc: number, ckFunc: number|null|undefined, kind: number) {
+function emitTranslateCall(
+  o: number[],
+  translateFunc: number,
+  ckFunc: number | null | undefined,
+  kind: number,
+) {
   if (ckFunc != null) {
     o.push(I.i32c, ...s(kind), I.call, ...u(ckFunc));
   } else {
@@ -1885,7 +1925,7 @@ function emitTranslateCall(o: number[], translateFunc: number, ckFunc: number|nu
  *   helper — when given, dest chunks fault in with kind=1 (write) and src
  *   chunks with kind=0 (read); omit/null for the unchecked A1 fast path.
  */
-function memcpyHelperBody(translateFunc: number, ckFunc: number|null = null) {
+function memcpyHelperBody(translateFunc: number, ckFunc: number | null = null) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -1945,7 +1985,7 @@ function memcpyHelperBody(translateFunc: number, ckFunc: number|null = null) {
  *   helper — when given, dest chunks fault in with kind=1 (write); omit/null
  *   for the unchecked A1 fast path.
  */
-function memfillHelperBody(translateFunc: number, ckFunc: number|null = null) {
+function memfillHelperBody(translateFunc: number, ckFunc: number | null = null) {
   const d = 0,
     v = 1,
     n = 2,
@@ -1977,7 +2017,7 @@ function memfillHelperBody(translateFunc: number, ckFunc: number|null = null) {
  *   for the unchecked A1 fast path.
  * @param {number} seg the data-segment index
  */
-function meminitHelperBody(translateFunc: number, ckFunc: number|null, seg: number) {
+function meminitHelperBody(translateFunc: number, ckFunc: number | null, seg: number) {
   const d = 0,
     sp = 1,
     n = 2,
@@ -2012,7 +2052,7 @@ function meminitHelperBody(translateFunc: number, ckFunc: number|null, seg: numb
  * @param {number} translateFunc plain `__mmu_translate(va)` index
  * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
  */
-function loadBytesHelperBody(translateFunc: number, ckFunc: number|null = null) {
+function loadBytesHelperBody(translateFunc: number, ckFunc: number | null = null) {
   const EA = 0,
     W = 1,
     I = 2,
@@ -2049,7 +2089,7 @@ function loadBytesHelperBody(translateFunc: number, ckFunc: number|null = null) 
  * @param {number} translateFunc plain `__mmu_translate(va)` index
  * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
  */
-function storeBytesHelperBody(translateFunc: number, ckFunc: number|null = null) {
+function storeBytesHelperBody(translateFunc: number, ckFunc: number | null = null) {
   const EA = 0,
     VAL = 1,
     W = 2,
@@ -2219,11 +2259,12 @@ export function isInstrumented(bytes: Uint8Array): boolean {
  * @param {Uint8Array} bytes
  * @returns {string | null}
  */
-function moduleName(bytes: Uint8Array): string|null {
+function moduleName(bytes: Uint8Array): string | null {
   try {
     for (const s of splitSections(bytes)) {
       if (s.id !== 0) continue; // custom section
-      let i = 0, nm = "";
+      let i = 0,
+        nm = "";
       [nm, i] = readName(s.body, 0);
       if (nm !== "name") continue;
       while (i < s.body.length) {
@@ -2259,12 +2300,15 @@ function moduleName(bytes: Uint8Array): string|null {
  *   fallback on small functions.
  * @returns {Uint8Array}
  */
-export function instrument(bytes: Uint8Array, opts: {
-exportControls?: boolean;
-checked?: boolean;
-inlineLimit?: number;
-faultTableIndex?: number;
-} = {}): Uint8Array {
+export function instrument(
+  bytes: Uint8Array,
+  opts: {
+    exportControls?: boolean;
+    checked?: boolean;
+    inlineLimit?: number;
+    faultTableIndex?: number;
+  } = {},
+): Uint8Array<ArrayBuffer> {
   const unhandled = scanUnhandled(bytes);
   if (unhandled.simd) throw new Error("softmmu: module uses SIMD memory ops (unhandled)");
   // atomics ARE translated (ATOMIC_OPS / the 0xfe path in rewriteFuncBody).
@@ -2287,7 +2331,7 @@ faultTableIndex?: number;
   // module — a few hundred bytes) or a real program (KiB+). That discriminates
   // "a non-libc generated module reached the exec/instrument path" from "a real
   // program lost its keep-alive import".
-  let checkedCtx: CheckedContext|null = null;
+  let checkedCtx: CheckedContext | null = null;
   try {
     checkedCtx = opts.checked
       ? opts.faultTableIndex != null
@@ -2334,7 +2378,7 @@ faultTableIndex?: number;
     checkedCtx.faultTypeIdx = checkedTranslateType;
   }
   const translateFunc = nImpFuncs + nDefFuncs;
-  const meminit: Map<number,number> = new Map();
+  const meminit: Map<number, number> = new Map();
   unhandled.initSegs.forEach((seg, k) => meminit.set(seg, translateFunc + 3 + k));
   const bulkFns = { memcpy: translateFunc + 1, memfill: translateFunc + 2, meminit };
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
@@ -2556,7 +2600,9 @@ faultTableIndex?: number;
   ];
 
   // --- global section: append pt_base (i32 mutable, init 0) -------------------
-  const globalExistingTail = globalSec ? globalSec.body.subarray(u(nDefGlobals).length) : new Uint8Array(0);
+  const globalExistingTail = globalSec
+    ? globalSec.body.subarray(u(nDefGlobals).length)
+    : new Uint8Array(0);
   const newGlobalBody = [
     ...u(nDefGlobals + 1),
     ...globalExistingTail,
@@ -2593,7 +2639,7 @@ faultTableIndex?: number;
   // ByteSink doc comment for why: #202 streams it directly into the shared
   // output sink instead of building a separate whole-section copy first).
   const CODE_SECTION_STREAM = Symbol("softmmu:code-section-stream");
-  const replaced: Map<number,number[]|Uint8Array|typeof CODE_SECTION_STREAM> = new Map();
+  const replaced: Map<number, number[] | Uint8Array | typeof CODE_SECTION_STREAM> = new Map();
   replaced.set(1, newTypeBody);
   replaced.set(3, newFuncBody);
   replaced.set(6, newGlobalBody);
@@ -2636,7 +2682,7 @@ faultTableIndex?: number;
     if (sec.body === CODE_SECTION_STREAM) {
       emitCodeSectionBody(out);
     } else {
-      out.pushBytes((sec.body as number[] | Uint8Array));
+      out.pushBytes(sec.body as number[] | Uint8Array);
     }
     out.patch5(szOff, out.len - bodyStart);
   }

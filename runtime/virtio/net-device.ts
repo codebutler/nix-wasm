@@ -5,6 +5,8 @@
 //   pushRx(frame) -> prepend zeroed header -> guest RX -> raiseIrq()
 // The pc side (js/vnet/) connects frameSink/pushRx to a tcpip.js tap port.
 import { VirtioWasmDevice } from "./device.ts";
+import type { VirtioWasmDeviceOptions } from "./device.ts";
+import type { VringChain } from "./vring.ts";
 
 export const VIRTIO_NET_HDR_LEN = 12; // modern virtio_net header (no mrg_rxbuf)
 const VIRTIO_NET_F_MAC = 1n << 5n;
@@ -12,19 +14,29 @@ const VIRTIO_NET_F_STATUS = 1n << 16n;
 const RX = 0,
   TX = 1;
 
+/** NetDevice constructor options: the base opts plus an optional MAC. */
+export interface NetDeviceOptions extends VirtioWasmDeviceOptions {
+  /** 6-byte MAC address (default 52:54:00:cb:00:02) */
+  mac?: ArrayLike<number>;
+}
+
 export class NetDevice extends VirtioWasmDevice {
-  constructor(opts) {
+  mac: Uint8Array;
+  _linkUp: boolean;
+  _sink: ((frame: Uint8Array) => void) | null;
+
+  constructor(opts: NetDeviceOptions) {
     super(opts);
     this.mac = Uint8Array.from(opts.mac || [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02]);
     this._linkUp = true;
     this._sink = null;
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     return VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS;
   }
 
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     bytes.fill(0);
     // config space: [0..5] mac, [6..7] status (u16 LE)
     for (let i = 0; i < bytes.length; i++) {
@@ -36,20 +48,20 @@ export class NetDevice extends VirtioWasmDevice {
     }
   }
 
-  setLinkUp(up) {
+  setLinkUp(up: boolean): void {
     this._linkUp = !!up;
   }
 
-  setFrameSink(fn) {
+  setFrameSink(fn: ((frame: Uint8Array) => void) | null): void {
     this._sink = fn;
   }
 
-  onNotify(q) {
+  onNotify(q: number): void {
     if (q !== TX) return; // RX is host-driven via pushRx
     const vr = this.vring(TX);
     if (!vr) return;
     let serviced = 0,
-      chain;
+      chain: VringChain | null;
     while ((chain = vr.next())) {
       const buf = vr.readOut(chain);
       const frame =
@@ -62,7 +74,7 @@ export class NetDevice extends VirtioWasmDevice {
   }
 
   /** Deliver one inbound ethernet frame to the guest. Returns false if dropped. */
-  pushRx(frame) {
+  pushRx(frame: Uint8Array): boolean {
     const vr = this.vring(RX);
     if (!vr) return false;
     const chain = vr.next();

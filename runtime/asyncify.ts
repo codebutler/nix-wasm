@@ -15,6 +15,28 @@
 // asyncify_get_state() return values (Binaryen ABI).
 export const ASYNCIFY_STATE = Object.freeze({ NORMAL: 0, UNWINDING: 1, REWINDING: 2 });
 
+// The control exports `wasm-opt --asyncify` adds to an instrumented module.
+interface AsyncifyExports {
+  asyncify_get_state(): number;
+  asyncify_start_unwind(ctlPtr: number): void;
+  asyncify_stop_unwind(): void;
+  asyncify_start_rewind(ctlPtr: number): void;
+  asyncify_stop_rewind(): void;
+}
+
+// An instance's exports seen as an asyncify-instrumented module's. The export
+// object is the module's own (a dynamic boundary): the caller has established
+// the module was built with --asyncify.
+function asyncifyExports(instance: WebAssembly.Instance): AsyncifyExports {
+  return instance.exports as WebAssembly.Exports & AsyncifyExports;
+}
+
+// The capture_stack import, carrying the last control-buffer pointer it saw.
+export interface CaptureStack {
+  (ctlPtr: number): number;
+  ctlPtr: number;
+}
+
 // makeCaptureStack(getInstance, getForkResult) -> the `capture_stack` host
 // import function (env.capture_stack on the user instance).
 //
@@ -33,15 +55,18 @@ export const ASYNCIFY_STATE = Object.freeze({ NORMAL: 0, UNWINDING: 1, REWINDING
 //           return 0 (discarded by the unwind).
 //   REWINDING (re-entry during rewind): asyncify_stop_rewind(), return the
 //           fork result (the second of the double-return).
-export function makeCaptureStack(getInstance, getForkResult) {
-  const fn = (ctlPtr) => {
-    const inst = getInstance();
-    if (inst.exports.asyncify_get_state() === ASYNCIFY_STATE.REWINDING) {
-      inst.exports.asyncify_stop_rewind();
+export function makeCaptureStack(
+  getInstance: () => WebAssembly.Instance,
+  getForkResult: () => number,
+): CaptureStack {
+  const fn = (ctlPtr: number): number => {
+    const inst = asyncifyExports(getInstance());
+    if (inst.asyncify_get_state() === ASYNCIFY_STATE.REWINDING) {
+      inst.asyncify_stop_rewind();
       return getForkResult();
     }
     fn.ctlPtr = ctlPtr >>> 0;
-    inst.exports.asyncify_start_unwind(fn.ctlPtr);
+    inst.asyncify_start_unwind(fn.ctlPtr);
     return 0;
   };
   fn.ctlPtr = 0;
@@ -53,7 +78,7 @@ export function makeCaptureStack(getInstance, getForkResult) {
 // the program exited. The run-loop checks this after every entry call; an
 // asyncify-free (fast-path) instance has no asyncify_get_state export, so this
 // is false and the legacy "_start returned" guard applies unchanged.
-export function isPendingUnwind(instance) {
+export function isPendingUnwind(instance: WebAssembly.Instance): boolean {
   const st = instance.exports.asyncify_get_state;
   return typeof st === "function" && st() === ASYNCIFY_STATE.UNWINDING;
 }
@@ -61,8 +86,8 @@ export function isPendingUnwind(instance) {
 // Finish the unwind: state UNWINDING -> NORMAL, leaving the captured stack image
 // in linear memory (cur at the top of the written image — symmetric input for
 // the rewind, which reads it back down; do NOT reset cur between the two).
-export function stopUnwind(instance) {
-  instance.exports.asyncify_stop_unwind();
+export function stopUnwind(instance: WebAssembly.Instance): void {
+  asyncifyExports(instance).asyncify_stop_unwind();
 }
 
 // Arm a rewind from the control buffer at `ctlPtr`. The caller then RE-ENTERS the
@@ -70,8 +95,8 @@ export function stopUnwind(instance) {
 // the captured fork() call site, where capture_stack (REWINDING) returns the
 // fork result. The image at ctlPtr must already be the one to resume — in the
 // child that means the verbatim copy from the parent has already happened.
-export function startRewind(instance, ctlPtr) {
-  instance.exports.asyncify_start_rewind(ctlPtr >>> 0);
+export function startRewind(instance: WebAssembly.Instance, ctlPtr: number): void {
+  asyncifyExports(instance).asyncify_start_rewind(ctlPtr >>> 0);
 }
 
 // Verbatim-duplicate a parent address space into a child's. FINDING A
@@ -82,7 +107,10 @@ export function startRewind(instance, ctlPtr) {
 // stack image, which live in BSS) so the child rewinds the identical image.
 // Requires child capacity >= parent size (the dup mints the child at the
 // parent's current page count; equal is the normal case).
-export function dupAddressSpace(parentMemory, childMemory) {
+export function dupAddressSpace(
+  parentMemory: WebAssembly.Memory,
+  childMemory: WebAssembly.Memory,
+): void {
   const src = new Uint8Array(parentMemory.buffer);
   const dst = new Uint8Array(childMemory.buffer);
   if (dst.length < src.length) {

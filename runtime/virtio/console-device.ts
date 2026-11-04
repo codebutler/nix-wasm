@@ -52,6 +52,8 @@
 // notify, so there is no lost-wakeup race.
 
 import { VirtioWasmDevice } from "./device.ts";
+import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
+import type { VringChain } from "./vring.ts";
 
 // Number of single-port console devices the transport registers = number of hvc
 // lines the guest exposes (hvc0..hvc{N-1}). MUST match the kernel transport's
@@ -89,7 +91,19 @@ const CONFIG_BYTES = 12;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
+/** ConsoleVirtioDevice constructor options (the base opts plus these). */
+export interface ConsoleVirtioDeviceOptions extends VirtioWasmDeviceOptions {
+  sink?: (bytes: Uint8Array) => void;
+  forwardNotify?: ForwardNotify;
+  configIrq?: number;
+}
+
 export class ConsoleVirtioDevice extends VirtioWasmDevice {
+  sink: ((bytes: Uint8Array) => void) | null;
+  forwardNotify: ForwardNotify | null;
+  configIrq: number | null;
+  _pending: Uint8Array;
+
   /**
    * Extends the base VirtioWasmDevice opts with:
    * - `sink` ((bytes: Uint8Array) => void): MAIN-thread only — receives this
@@ -101,21 +115,18 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * - `configIrq` (number): MAIN-thread only — this console's config-change irq
    *   (CONSOLE_CONFIG_IRQ_BASE + idx), raised by setSize() on a resize. Omitted
    *   on the worker side (the worker never resizes; it only answers configRead).
-   *
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { sink?: (bytes: Uint8Array) => void, forwardNotify?: (dev: number, q: number) => void, configIrq?: number }} opts
    */
-  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ sink?: (bytes: Uint8Array) => void; forwardNotify?: (dev: number,q: number) => void; configIrq?: number; }) {
+  constructor(opts: ConsoleVirtioDeviceOptions) {
     super(opts);
     this.sink = opts.sink || null;
     this.forwardNotify = opts.forwardNotify || null;
     this.configIrq = opts.configIrq ?? null;
     // Host -> guest input bytes not yet delivered to a receiveq inbuf (the guest
     // may not have posted an inbuf yet). Flushed on the next pushRx/refill.
-    /** @type {Uint8Array} */
     this._pending = new Uint8Array(0);
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     // VIRTIO_CONSOLE_F_SIZE (bit 0): the guest reads cols/rows from config space
     // and honours config-change interrupts (terminal resize). We deliberately do
     // NOT offer VIRTIO_CONSOLE_F_MULTIPORT (bit 1) — F_SIZE is independent of it,
@@ -130,7 +141,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * Read at probe (initial winsize) and on every config-change interrupt. Falls
    * back to 80x24 until the first resize so the tty never boots at 0x0.
    */
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     const { cols, rows } = this.shared.getConfigSize(this.dev);
     const cfg = new Uint8Array(CONFIG_BYTES);
     const dv = new DataView(cfg.buffer);
@@ -149,15 +160,13 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * so the guest re-reads config and hvc_resize()s the tty (SIGWINCH). Ordering
    * matters: the SAB write must land before the irq, so the guest sees the new
    * size when it reads. No-op if this device has no configIrq (worker side).
-   * @param {number} cols
-   * @param {number} rows
    */
-  setSize(cols: number, rows: number) {
+  setSize(cols: number, rows: number): void {
     this.shared.setConfigSize(this.dev, cols >>> 0, rows >>> 0);
     if (this.configIrq != null) this._raise(this.irqCpu, this.configIrq);
   }
 
-  onNotify(q) {
+  onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the sink + input buffer are on the main thread — forward.
@@ -178,14 +187,14 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * len 0). Raises the device IRQ once if any chain was consumed so the guest's
    * blocked write completes.
    */
-  drainTx() {
+  drainTx(): void {
     const vr = this.vring(TRANSMITQ);
     if (!vr) {
       this.log("[virtio-console] transmitq notify before queue setup");
       return;
     }
     let serviced = 0;
-    let chain;
+    let chain: VringChain | null;
     while ((chain = vr.next())) {
       const bytes = vr.readOut(chain);
       if (bytes.length && this.sink) this.sink(Uint8Array.from(bytes));
@@ -201,9 +210,8 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * inbuf) stay pending and are delivered on the next flushRx (a receiveq refill
    * kick or a later pushRx). A console is a byte stream (no framing), so partial
    * inbufs are fine and leftovers are kept.
-   * @param {Uint8Array} bytes
    */
-  pushRx(bytes: Uint8Array) {
+  pushRx(bytes: Uint8Array): void {
     if (bytes && bytes.length) {
       if (this._pending.length === 0) {
         this._pending = Uint8Array.from(bytes);
@@ -222,7 +230,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * chain at a time, until either the pending buffer is empty or the guest has
    * no more inbufs. Raises the device IRQ once if anything was delivered.
    */
-  flushRx() {
+  flushRx(): void {
     if (this._pending.length === 0) return;
     const vr = this.vring(RECEIVEQ);
     if (!vr) return; // receiveq not set up yet — keep pending

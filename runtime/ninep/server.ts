@@ -39,9 +39,111 @@ import {
   makeQid,
   packDirent,
 } from "./protocol.ts";
+import type { Dirent, P9Message, P9Reply, Qid } from "./protocol.ts";
+
+// ── The VFS contract this server consumes ─────────────────────────────────
+// The production backend is pc's async typed-record VFS (js/vfs); MemVfs
+// (mem-vfs.ts) is the in-memory one the tests use. These describe the subset
+// of that API the server actually calls.
+
+/** A record as the VFS reports it from stat/list. */
+export interface VfsRecord {
+  /** Stable inode id, interned into qid.path (falls back to `path`). */
+  id?: string;
+  /** "folder" | "alias" (a symlink) | anything else = a byte file. */
+  type: string;
+  name: string;
+  path: string;
+  modifiedAt?: number;
+  size?: number;
+  /** Symlink target, for `alias` records. */
+  target?: string;
+  mime?: string;
+}
+
+/** What the server hands to `vfs.write`. */
+export interface VfsWriteRecord {
+  type: string;
+  blob?: Blob;
+  bytes?: Uint8Array<ArrayBuffer>;
+  body?: string;
+  mime?: string;
+  size?: number;
+  target?: string;
+}
+
+/** Options the server passes to `vfs.openWrite`. */
+export interface VfsOpenWriteOptions {
+  append: boolean;
+  mime: string;
+  versioning: boolean;
+  deferPersistence: boolean;
+}
+
+/** A streaming writer from `vfs.openWrite` (one logical file that grows). */
+export interface VfsWriter {
+  /** Bytes written so far — the offset the next sequential write lands at. */
+  readonly size: number;
+  write(bytes: Uint8Array): Promise<void>;
+  truncate(size: number): Promise<void>;
+  flush(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** A backend the server can export. Results of the mutators are unused. */
+export interface NinePVfs {
+  stat(path: string): Promise<VfsRecord | null>;
+  list(path: string): Promise<VfsRecord[]>;
+  readBlob(path: string): Promise<Blob>;
+  write(path: string, record: VfsWriteRecord): Promise<unknown>;
+  mkdir(path: string): Promise<unknown>;
+  remove(path: string): Promise<unknown>;
+  move(srcPath: string, dstPath: string): Promise<unknown>;
+  openWrite?(path: string, opts: VfsOpenWriteOptions): Promise<VfsWriter>;
+}
+
+/** An export: a bare VFS, or a VFS rooted at a subpath. */
+export type NinePExport = NinePVfs | { vfs: NinePVfs; root?: string };
+
+/** Options for createNinePServer. */
+export interface NinePServerOptions {
+  vfs?: NinePVfs;
+  root?: string;
+  exports?: Record<string, NinePExport>;
+  msize?: number;
+  uid?: number;
+  gid?: number;
+  trace?: (line: string) => void;
+}
+
+/** The server returned by createNinePServer. */
+export interface NinePServer {
+  handle(reqBytes: Uint8Array, cid?: number): Promise<Uint8Array>;
+  /** The msize most recently negotiated by any connection's Tversion. */
+  readonly msize: number;
+  stats(): { fids: number; qids: number; conns: number };
+}
+
+// A fid's state: its path and backend (set at Tattach, inherited through
+// Twalk), plus what Tlopen/Tlcreate attach to it.
+interface Fid {
+  path: string;
+  vfs: NinePVfs;
+  opened?: boolean;
+  dirents?: Dirent[] | null;
+  writer?: VfsWriter | null;
+}
+
+// Per-connection (cid) state: negotiated msize + the fid namespace.
+interface Conn {
+  msize: number;
+  fids: Map<number, Fid>;
+}
 
 /** Reverse opcode → name map, for the opt-in RPC tracer (createNinePServer). */
-const P9_NAMES = Object.fromEntries(Object.entries(P9).map(([k, v]) => [v, k]));
+const P9_NAMES: Record<number, string> = Object.fromEntries(
+  Object.entries(P9).map(([k, v]) => [v, k]),
+);
 
 // Linux V9FS_MAGIC, reported by Tstatfs.
 const V9FS_MAGIC = 0x01021997;
@@ -53,7 +155,7 @@ const O_TRUNC = 0x200;
 // Map a thrown VFS error to a Linux errno for Rlerror. Server-originated
 // errors carry `.p9errno` directly; VFS errors carry `.code` (or a
 // "CODE: msg" string), matching js/vfs/index.js.
-const CODE_TO_ERRNO = {
+const CODE_TO_ERRNO: Record<string, number> = {
   EPERM: E.PERM,
   ENOENT: E.NOENT,
   EIO: E.IO,
@@ -71,37 +173,35 @@ const CODE_TO_ERRNO = {
   ENAMETOOLONG: E.NAMETOOLONG,
 };
 
-function p9err(errno) {
-  const e = new Error("9p errno " + errno);
-  // @ts-ignore
-  e.p9errno = errno;
-  return e;
+function p9err(errno: number): Error & { p9errno: number } {
+  return Object.assign(new Error("9p errno " + errno), { p9errno: errno });
 }
 
-function errnoFromError(e) {
-  if (e && typeof e.p9errno === "number") return e.p9errno;
-  let code = e && e.code;
-  if (!code && e && typeof e.message === "string") {
+function errnoFromError(e: unknown): number {
+  if (typeof e !== "object" || e === null) return E.IO;
+  if ("p9errno" in e && typeof e.p9errno === "number") return e.p9errno;
+  let code: unknown = "code" in e ? e.code : undefined;
+  if (!code && "message" in e && typeof e.message === "string") {
     const m = e.message.match(/^([A-Z]+):/);
     if (m) code = m[1];
   }
-  if (code && CODE_TO_ERRNO[code] != null) return CODE_TO_ERRNO[code];
+  if (code && CODE_TO_ERRNO[String(code)] != null) return CODE_TO_ERRNO[String(code)];
   return E.IO;
 }
 
 // ── path helpers (single-component walk, like the kernel's per-name walk) ──
-function parentOf(p) {
+function parentOf(p: string): string {
   if (p === "/" || p === "") return "/";
   const i = p.lastIndexOf("/");
   return i <= 0 ? "/" : p.slice(0, i);
 }
-function joinName(base, seg) {
+function joinName(base: string, seg: string): string {
   if (seg === "" || seg === ".") return base;
   if (seg === "..") return parentOf(base);
   if (seg.includes("/")) throw p9err(E.INVAL);
   return base === "/" ? "/" + seg : base + "/" + seg;
 }
-function joinPath(base, rel) {
+function joinPath(base: string, rel: string): string {
   let cur = base;
   for (const s of String(rel || "").split("/")) {
     if (s) cur = joinName(cur, s);
@@ -111,12 +211,12 @@ function joinPath(base, rel) {
 // Normalize an attach name to an export key: leading slashes stripped, so the
 // guest's `aname=/` and `aname=nix` (or `aname=/nix`) match the keys the host
 // registers. "/" stays "/" (the default/root export).
-function normAname(a) {
+function normAname(a: string | null | undefined): string {
   const s = String(a == null ? "/" : a).replace(/^\/+/, "");
   return s === "" ? "/" : s;
 }
 
-function concatBytes(arrs) {
+function concatBytes(arrs: Uint8Array[]): Uint8Array {
   let n = 0;
   for (const a of arrs) n += a.length;
   const out = new Uint8Array(n);
@@ -130,6 +230,11 @@ function concatBytes(arrs) {
 
 const enc = new TextEncoder();
 
+// The backend test addExport uses: a callable `stat` (see the note there).
+function isVfsBackend(val: NinePExport): val is NinePVfs {
+  return !!val && typeof (val as NinePVfs).stat === "function";
+}
+
 /**
  * Create a 9P2000.L server bound to one or more VFS backends.
  *
@@ -137,20 +242,8 @@ const enc = new TextEncoder();
  * Multi-export: `{ exports: { "/": userVfs, "nix": storeVfs, … } }` registers
  * several; the guest picks one per mount via the 9P `aname` mount option. A
  * value may be a bare VFS or `{ vfs, root }`.
- *
- * @param {{
- *   vfs?: any, root?: string,
- *   exports?: Record<string, any>,
- *   msize?: number, uid?: number, gid?: number,
- *   trace?: (line: string) => void,
- * }} opts
  */
-export function createNinePServer(opts: {
-vfs?: any; root?: string;
-exports?: Record<string,any>;
-msize?: number; uid?: number; gid?: number;
-trace?: (line: string) => void;
-}) {
+export function createNinePServer(opts: NinePServerOptions): NinePServer {
   const maxMsize = opts.msize || 65536;
   const uid = opts.uid ?? 0;
   const gid = opts.gid ?? 0;
@@ -158,16 +251,15 @@ trace?: (line: string) => void;
   const trace = opts.trace;
 
   // aname (normalized) → { vfs, root }. Tattach selects by aname.
-  const exportsByName = new Map();
-  const addExport = (name, val) => {
+  const exportsByName: Map<string, { vfs: NinePVfs; root: string }> = new Map();
+  const addExport = (name: string, val: NinePExport) => {
     // Detect a backend by its VFS surface (callable stat), NOT by a `.vfs`
     // property: the real js/vfs module namespace itself exports a `vfs` symbol
     // (and withCtlDevice mirrors it), so `.vfs`-presence duck-typing grabbed
     // that inner export as the backend — readBlob broke and 9P writes silently
     // zero-filled (caught by writes.mjs against realvfs.html; MemVfs has no
     // `.vfs`, so unit tests never saw it).
-    const isVfs = val && typeof val.stat === "function";
-    const e = isVfs ? { vfs: val, root: "/" } : { vfs: val.vfs, root: val.root || "/" };
+    const e = isVfsBackend(val) ? { vfs: val, root: "/" } : { vfs: val.vfs, root: val.root || "/" };
     exportsByName.set(normAname(name), e);
   };
   if (opts.exports) {
@@ -181,7 +273,7 @@ trace?: (line: string) => void;
   // wins; otherwise fall back to treating `aname` as a subpath of the default
   // export (the pre-multi-export behavior), so a single-backend server keeps
   // honoring `aname=/sub` mounts.
-  function resolveAttach(aname) {
+  function resolveAttach(aname: string): { vfs: NinePVfs; path: string } {
     const exp = exportsByName.get(normAname(aname));
     if (exp) return { vfs: exp.vfs, path: exp.root };
     const base = defaultExport.root || "/";
@@ -194,9 +286,9 @@ trace?: (line: string) => void;
   // inode-id (string) → interned qid.path (small int), stable per session.
   // Shared across connections — identity is content/inode-based, so the same
   // file seen through two mounts gets the same qid.path (correct).
-  const qidPaths = new Map();
+  const qidPaths: Map<string, number> = new Map();
   let qidSeq = 1;
-  function qidPathFor(inode) {
+  function qidPathFor(inode: string): number {
     const k = String(inode);
     let v = qidPaths.get(k);
     if (v == null) {
@@ -210,9 +302,8 @@ trace?: (line: string) => void;
   // mounts share one ring but get isolated fid tables here, keyed by cid.
   // fid → { path, vfs, opened?, dirents? } — the fid carries its backend, set
   // at Tattach and inherited through Twalk.
-  /** @type {Map<number, { msize: number, fids: Map<number, any> }>} */
-  const conns: Map<number,{ msize: number; fids: Map<number,any>; }> = new Map();
-  function conn(cid) {
+  const conns: Map<number, Conn> = new Map();
+  function conn(cid: number): Conn {
     let c = conns.get(cid);
     if (!c) {
       c = { msize: maxMsize, fids: new Map() };
@@ -220,21 +311,21 @@ trace?: (line: string) => void;
     }
     return c;
   }
-  function getFid(cid, fid) {
+  function getFid(cid: number, fid: number): Fid {
     const f = conn(cid).fids.get(fid);
     if (!f) throw p9err(E.BADF);
     return f;
   }
 
-  function qidOf(rec) {
+  function qidOf(rec: VfsRecord): Qid {
     const t = rec.type === "folder" ? QT.DIR : rec.type === "alias" ? QT.SYMLINK : QT.FILE;
     const version = Math.floor((rec.modifiedAt ?? 0) / 1000) >>> 0;
     return makeQid(t, version, qidPathFor(rec.id ?? rec.path));
   }
-  function dtypeOf(rec) {
+  function dtypeOf(rec: VfsRecord): number {
     return rec.type === "folder" ? DT.DIR : rec.type === "alias" ? DT.LNK : DT.REG;
   }
-  function modeOf(rec) {
+  function modeOf(rec: VfsRecord): number {
     if (rec.type === "folder") return 0o040000 | 0o755;
     if (rec.type === "alias") return 0o120000 | 0o777;
     // Regular files are reported executable (0755). pc's VFS has no per-file
@@ -244,7 +335,7 @@ trace?: (line: string) => void;
     // the Nix store living under /mnt/yore. Cosmetic only for data files.
     return 0o100000 | 0o755;
   }
-  async function sizeOf(vfs, rec) {
+  async function sizeOf(vfs: NinePVfs, rec: VfsRecord): Promise<number> {
     if (rec.type === "folder") return 0;
     if (rec.type === "alias") return rec.target ? enc.encode(rec.target).length : 0;
     if (typeof rec.size === "number") return rec.size;
@@ -255,7 +346,7 @@ trace?: (line: string) => void;
     }
   }
 
-  async function readBytes(vfs, path) {
+  async function readBytes(vfs: NinePVfs, path: string): Promise<Uint8Array> {
     try {
       const blob = await vfs.readBlob(path);
       return new Uint8Array(await blob.arrayBuffer());
@@ -266,7 +357,11 @@ trace?: (line: string) => void;
   // Backends without openWrite() use read-modify-write of the whole record.
   // Byte writes from Linux land as a `file` record regardless of the prior
   // type — Linux is byte-oriented; typed editors own their own save paths.
-  async function writeBytes(vfs, path, bytes) {
+  async function writeBytes(
+    vfs: NinePVfs,
+    path: string,
+    bytes: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
     await vfs.write(path, {
       type: "file",
       blob: new Blob([bytes]),
@@ -279,13 +374,13 @@ trace?: (line: string) => void;
   // append Blob parts without reading and rewriting the complete file for
   // every 9P packet. Keep the writer on the fid: Linux normally sends cp(1)
   // output as monotonically increasing Twrites and Tclunk is the close seam.
-  async function closeWriter(f) {
+  async function closeWriter(f: Fid): Promise<void> {
     const writer = f?.writer;
     f.writer = null;
     if (writer) await writer.close();
   }
 
-  async function openWriter(f, append) {
+  async function openWriter(f: Fid, append: boolean): Promise<VfsWriter | null> {
     if (typeof f.vfs.openWrite !== "function") return null;
     await closeWriter(f);
     f.writer = await f.vfs.openWrite(f.path, {
@@ -299,7 +394,7 @@ trace?: (line: string) => void;
 
   // Build the dirent list for an open directory, including synthetic "." and
   // "..". Offsets are 1-based cookies the client passes back to resume.
-  async function loadDirents(vfs, dirPath) {
+  async function loadDirents(vfs: NinePVfs, dirPath: string): Promise<Dirent[]> {
     const self = await vfs.stat(dirPath);
     if (!self) throw p9err(E.NOENT);
     const parent = (await vfs.stat(parentOf(dirPath))) || self;
@@ -318,7 +413,7 @@ trace?: (line: string) => void;
   }
 
   // ── per-message handlers → { type: R*, …fields } (tag added by handle) ──
-  async function dispatch(cid, m) {
+  async function dispatch(cid: number, m: P9Message): Promise<P9Reply> {
     switch (m.type) {
       case P9.Tversion: {
         const c = conn(cid);
@@ -342,7 +437,7 @@ trace?: (line: string) => void;
         const f = getFid(cid, m.fid);
         const vfs = f.vfs;
         let cur = f.path;
-        const qids = [];
+        const qids: Qid[] = [];
         for (let i = 0; i < m.wnames.length; i++) {
           const next = joinName(cur, m.wnames[i]);
           const rec = await vfs.stat(next);
@@ -507,7 +602,7 @@ trace?: (line: string) => void;
       case P9.Treaddir: {
         const f = getFid(cid, m.fid);
         if (!f.dirents || m.offset === 0) f.dirents = await loadDirents(f.vfs, f.path);
-        const out = [];
+        const out: Uint8Array[] = [];
         let total = 0;
         for (const d of f.dirents) {
           if (d.offset <= m.offset) continue; // already delivered
@@ -628,12 +723,12 @@ trace?: (line: string) => void;
   // (only Twalk/Tlcreate, or an Rlerror) means the guest faulted before issuing
   // it (user-page pinning under the softmmu). Formatting only — never affects
   // behavior; the whole path is skipped unless opts.trace is set.
-  function peekFidPath(cid, fid) {
+  function peekFidPath(cid: number, fid: number): string {
     const c = conns.get(cid);
     const f = c && c.fids.get(fid);
     return f ? f.path : "?";
   }
-  function traceRpc(cid, m, reply) {
+  function traceRpc(cid: number, m: P9Message, reply: P9Reply): void {
     const req = P9_NAMES[m.type] || `T#${m.type}`;
     const rep = P9_NAMES[reply.type] || `R#${reply.type}`;
     let d = "";
@@ -654,7 +749,7 @@ trace?: (line: string) => void;
         d = `fid=${m.fid} path=${peekFidPath(cid, m.fid)} off=${m.offset} count=${m.count}`;
         break;
       default:
-        if (m.fid !== undefined) d = `fid=${m.fid}`;
+        if ("fid" in m && m.fid !== undefined) d = `fid=${m.fid}`;
     }
     let r = "";
     if (reply.type === P9.Rlerror) r = ` errno=${reply.ecode}`;
@@ -668,12 +763,9 @@ trace?: (line: string) => void;
    * errors become Rlerror(errno). `cid` is the connection id (one per guest
    * mount, supplied by the transport); it defaults to 0 so a single-mount
    * caller behaves exactly as before.
-   * @param {Uint8Array} reqBytes
-   * @param {number} [cid]
-   * @returns {Promise<Uint8Array>}
    */
   async function handle(reqBytes: Uint8Array, cid: number = 0): Promise<Uint8Array> {
-    let m;
+    let m: P9Message;
     try {
       m = decode(reqBytes);
     } catch {

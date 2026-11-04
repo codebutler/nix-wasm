@@ -18,33 +18,36 @@ export const DISK_OVERLAY_VERSION = 1;
 // copying one beside the guest's ~2 GiB WebAssembly.Memory can OOM the host.
 export const STATE_DISK_COPY_MAX_BYTES = 64 * 1024 * 1024;
 
-function isShared(bitmap) {
+function isShared(bitmap: Uint8Array): boolean {
   return typeof SharedArrayBuffer !== "undefined" && bitmap.buffer instanceof SharedArrayBuffer;
 }
 
-function loadByte(bitmap, i) {
+function loadByte(bitmap: Uint8Array, i: number): number {
   return isShared(bitmap) ? Atomics.load(bitmap, i) : bitmap[i];
 }
 
-function orByte(bitmap, i, mask) {
+function orByte(bitmap: Uint8Array, i: number, mask: number): void {
   if (isShared(bitmap)) Atomics.or(bitmap, i, mask);
   else bitmap[i] |= mask;
 }
 
-function andByte(bitmap, i, mask) {
+function andByte(bitmap: Uint8Array, i: number, mask: number): void {
   if (isShared(bitmap)) Atomics.and(bitmap, i, mask);
   else bitmap[i] &= mask;
 }
 
 /**
- * @param {Uint8Array} image
- * @param {Uint8Array} dirtyBitmap  bit i set ⇒ sector i dirty
- * @param {{ clear?: boolean }} [opts]
- * @returns {Uint8Array} CBHD bytes (empty overlay when no dirties)
+ * @param image
+ * @param dirtyBitmap  bit i set ⇒ sector i dirty
+ * @param opts
+ * @returns CBHD bytes (empty overlay when no dirties)
  */
-export function packDirtySectors(image: Uint8Array, dirtyBitmap: Uint8Array, opts: { clear?: boolean; } = {}): Uint8Array {
+export function packDirtySectors(
+  image: Uint8Array,
+  dirtyBitmap: Uint8Array,
+  opts: { clear?: boolean } = {},
+): Uint8Array {
   const sectors = Math.floor(image.length / BLK_SECTOR);
-  /** @type {number[]} */
   const dirty: number[] = [];
   for (let s = 0; s < sectors; s++) {
     const bi = s >> 3;
@@ -75,12 +78,8 @@ export function packDirtySectors(image: Uint8Array, dirtyBitmap: Uint8Array, opt
   return out;
 }
 
-/**
- * Apply a CBHD overlay onto a (usually zeroed) image. Mutates `image`.
- * @param {Uint8Array} image
- * @param {Uint8Array} overlay
- */
-export function applyDirtyOverlay(image: Uint8Array, overlay: Uint8Array) {
+/** Apply a CBHD overlay onto a (usually zeroed) image. Mutates `image`. */
+export function applyDirtyOverlay(image: Uint8Array, overlay: Uint8Array): void {
   if (overlay.byteLength < 16) throw new Error("blk overlay: truncated header");
   if (overlay[0] !== 0x43 || overlay[1] !== 0x42 || overlay[2] !== 0x48 || overlay[3] !== 0x44) {
     throw new Error("blk overlay: bad magic");
@@ -110,9 +109,22 @@ export function applyDirtyOverlay(image: Uint8Array, overlay: Uint8Array) {
 }
 
 /** Bytes needed for a dirty bitmap covering `capacityBytes`. */
-export function dirtyBitmapBytes(capacityBytes) {
+export function dirtyBitmapBytes(capacityBytes: number): number {
   const sectors = Math.floor(capacityBytes / BLK_SECTOR);
   return (sectors + 7) >> 3;
+}
+
+/** createStateDiskBacking options. */
+export interface StateDiskBackingOptions {
+  stubBytes?: number;
+  maxCopyBytes?: number;
+}
+
+/** The shared buffers backing a RW virtio-blk state disk. */
+export interface StateDiskBacking {
+  imageBuffer: SharedArrayBuffer;
+  dirtyBuffer: SharedArrayBuffer;
+  persistable: boolean;
 }
 
 /**
@@ -122,11 +134,11 @@ export function dirtyBitmapBytes(capacityBytes) {
  * and saveDisk() journals only guest T_OUT writes made after attachment.  This
  * is what keeps autosaves incremental even when the baseline is populated.
  *
- * @param {ArrayBuffer|SharedArrayBuffer|Uint8Array|null|undefined} image
- * @param {{ stubBytes?: number, maxCopyBytes?: number }} [opts]
- * @returns {{ imageBuffer: SharedArrayBuffer, dirtyBuffer: SharedArrayBuffer, persistable: boolean }}
  */
-export function createStateDiskBacking(image: ArrayBuffer|SharedArrayBuffer|Uint8Array|null|undefined, opts: { stubBytes?: number; maxCopyBytes?: number; } = {}): { imageBuffer: SharedArrayBuffer; dirtyBuffer: SharedArrayBuffer; persistable: boolean; } {
+export function createStateDiskBacking(
+  image: ArrayBuffer | SharedArrayBuffer | Uint8Array | null | undefined,
+  opts: StateDiskBackingOptions = {},
+): StateDiskBacking {
   const stubBytes = opts.stubBytes ?? 1024 * 1024;
   const maxCopyBytes = opts.maxCopyBytes ?? STATE_DISK_COPY_MAX_BYTES;
 
@@ -142,8 +154,8 @@ export function createStateDiskBacking(image: ArrayBuffer|SharedArrayBuffer|Uint
     };
   }
 
-  let source;
-  let reusable = null;
+  let source: Uint8Array;
+  let reusable: SharedArrayBuffer | null = null;
   if (image instanceof SharedArrayBuffer) {
     source = new Uint8Array(image);
     reusable = image;
@@ -184,21 +196,15 @@ export function createStateDiskBacking(image: ArrayBuffer|SharedArrayBuffer|Uint
   };
 }
 
-/**
- * Mark sectors [sector, sector+count) dirty in a bitmap.
- * @param {Uint8Array} dirtyBitmap
- * @param {number} sector
- * @param {number} count
- */
-export function markDirty(dirtyBitmap: Uint8Array, sector: number, count: number) {
+/** Mark sectors [sector, sector+count) dirty in a bitmap. */
+export function markDirty(dirtyBitmap: Uint8Array, sector: number, count: number): void {
   for (let i = 0; i < count; i++) {
     const s = sector + i;
     orByte(dirtyBitmap, s >> 3, 1 << (s & 7));
   }
 }
 
-/** @param {Uint8Array} dirtyBitmap */
-export function dirtySectorCount(dirtyBitmap: Uint8Array) {
+export function dirtySectorCount(dirtyBitmap: Uint8Array): number {
   let n = 0;
   for (let i = 0; i < dirtyBitmap.length; i++) {
     let b = loadByte(dirtyBitmap, i);

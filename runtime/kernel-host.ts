@@ -32,6 +32,156 @@ import {
 import { VsockVirtioDevice } from "./virtio/vsock-device.ts";
 import { SndVirtioDevice } from "./virtio/snd-device.ts";
 import { createStateDiskBacking, packDirtySectors } from "./virtio/blk-disk.ts";
+import type { NinePServer } from "./virtio/ninep-device.ts";
+import type { DynamicLoader } from "./dylink.ts";
+import type { WlFd } from "./virtio/wl-device.ts";
+
+// ---------------------------------------------------------------------------
+// The host <-> kernel-worker protocol. kernel-worker.ts posts WorkerMessage
+// values (discriminated by `method`) and receives one InitMessage.
+// ---------------------------------------------------------------------------
+
+/** Lock words a task's worker waits on, plus the SAB view they live in. */
+export interface TaskLocks {
+  serialize: number;
+  /** Set right after the literal is built, so Object.keys() counts only the lock words. */
+  _memory?: Int32Array;
+}
+export type LockName = "serialize";
+
+/** A user binary's byte range in SHARED kernel memory (pc's new exec ABI). */
+export interface UserExecutable {
+  bin_start: number;
+  bin_end: number;
+  data_start: number;
+  table_start: number;
+  /** pc (#128): the new task's page-table root (its mm's pgd). */
+  pt_base: number;
+  /** pc (#129 MMU fork): the asyncify fork control-buffer pointer (nonzero only for a fork child). */
+  fork_ctl: number;
+  /** pc (#130): the parent's dynamic-linking state, replayed by the child worker. */
+  dyn: ReturnType<DynamicLoader["snapshot"]> | null;
+}
+
+/** One compiled user executable in the cross-worker Module cache (#128). */
+export interface ExecModuleEntry {
+  module: WebAssembly.Module;
+  table_initial: number;
+}
+
+export interface CpuRunnerOptions {
+  runner_type: "primary_cpu" | "secondary_cpu";
+  idle_task: number | undefined;
+  boot_cmdline?: string;
+  initrd?: ArrayBuffer;
+}
+export interface TaskRunnerOptions {
+  runner_type: "task";
+  prev_task: number;
+  new_task: number;
+  user_executable: UserExecutable | null;
+}
+export type RunnerOptions = CpuRunnerOptions | TaskRunnerOptions;
+
+/** The one message the host posts to each worker. */
+export type InitMessage = RunnerOptions & {
+  method: "init";
+  variant: string;
+  vmlinux: WebAssembly.Module;
+  memory: WebAssembly.Memory;
+  locks: TaskLocks;
+  last_task: Uint32Array;
+  runner_name: string;
+  virtio_queues: SharedArrayBuffer;
+  squashfs: SharedArrayBuffer | null;
+  stateDisk: SharedArrayBuffer;
+  stateDiskDirty: SharedArrayBuffer;
+  exec_modules: Map<string, ExecModuleEntry>;
+};
+
+/** A shm fd (its place in shared memory) or a guest pipe, as a worker posts it. */
+export interface WaylandFdView {
+  pipe?: number;
+  byteOffset?: number;
+  length?: number;
+}
+
+/** Messages a worker posts to the host, keyed by `method`. */
+export interface WorkerMessageMap {
+  blk_dirty: { dev: number };
+  wayland_irq_addr: { addr: number };
+  /** init_task is an i64 global's value on wasm64, so it may be a BigInt. */
+  start_primary: { init_task: number | bigint };
+  start_secondary: { cpu: number; idle_task: number };
+  stop_secondary: { cpu: number };
+  create_and_run_task: {
+    prev_task: number;
+    new_task: number;
+    name: string;
+    user_executable: UserExecutable | null;
+  };
+  exec_module_add: { hash: string; module: WebAssembly.Module; table_initial: number };
+  release_task: { dead_task: number };
+  serialize_tasks: { prev_task: number; next_task: number };
+  wayland_out: { dev: number; clientId: number; buffer: ArrayBuffer; fds?: WaylandFdView[] };
+  wayland_in_refill: { dev: number };
+  virtio9p_notify: { dev: number; q: number };
+  virtioconsole_notify: { dev: number; q: number };
+  virtiovsock_notify: { dev: number; q: number };
+  virtiosnd_notify: { dev: number; q: number };
+  net_out: { dev: number; frame: ArrayBuffer };
+  wayland_close: { dev: number; clientId: number };
+  wayland_pipe_data: { dev: number; pipe: number; buffer: ArrayBuffer };
+  wayland_guest_pipe: { dev: number; pipe: number; open: boolean };
+  wayland_pipe_close: { dev: number; pipe: number };
+  log: { message: string };
+  fatal: { detail: string };
+}
+export type WorkerMessageMethod = keyof WorkerMessageMap;
+export type WorkerMessageOf<M extends WorkerMessageMethod> = { method: M } & WorkerMessageMap[M];
+export type WorkerMessage = { [M in WorkerMessageMethod]: WorkerMessageOf<M> }[WorkerMessageMethod];
+type WorkerMessageHandlers = {
+  [M in WorkerMessageMethod]: (message: WorkerMessageOf<M>, worker: Worker) => void;
+};
+
+/** The worker→main Greenfield bridge (Wayland Phase 4f); every hook is optional here. */
+export interface WaylandHostBridge {
+  sendOut?: (clientId: number, buffer: Uint8Array, fds: WlFd[]) => void | Promise<void>;
+  onClose?: (clientId: number) => void | Promise<void>;
+  onPipeData?: (pipe: number, bytes: Uint8Array) => void | Promise<void>;
+  onPipeClose?: (pipe: number) => void | Promise<void>;
+}
+
+export interface LinuxOptions {
+  worker_url: string | URL;
+  variant: string;
+  vmlinux: WebAssembly.Module;
+  boot_cmdline: string;
+  initrd: ArrayBuffer;
+  log: (text: string) => void;
+  ninep_server?: NinePServer;
+  console_sink?: (idx: number, bytes: Uint8Array) => void;
+  vsock?: { onReady?: (device: VsockVirtioDevice) => void };
+  snd?: { onReady?: (device: SndVirtioDevice) => void };
+  virtio_queues: SharedArrayBuffer;
+  squashfs?: ArrayBuffer;
+  stateDisk?: { image: ArrayBuffer | SharedArrayBuffer | Uint8Array; onDirty?: () => void };
+  wayland?: WaylandHostBridge;
+  on_module_cached?: () => void;
+}
+
+/** Whether a pushed-in fd is a `{ pipe }` (else it is bytes). */
+const isPipeFd = (f: Uint8Array | { pipe: number } | ArrayBuffer): f is { pipe: number } =>
+  !!f && "pipe" in f && f.pipe !== undefined;
+
+/** One running worker: a CPU's boot+idle task or a task. */
+interface Runner {
+  worker: Worker;
+  locks: TaskLocks;
+  last_task: Uint32Array;
+  running: boolean;
+  kill: boolean;
+}
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -94,7 +244,7 @@ export const linux = async ({
   // compiles user binaries from shared memory per-exec, so there is no
   // host-side streamed-Module cache whose completion this would signal.
   on_module_cached,
-}) => {
+}: LinuxOptions) => {
   const arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
   const Ulong = arch_bits == 32 ? Number : BigInt;
 
@@ -102,7 +252,7 @@ export const linux = async ({
   // task worker (any of which may end up servicing the virtio-blk vring) sees
   // the same read-only image — the per-worker JS heaps are otherwise isolated.
   // Undefined on a --no-nix boot → no blk image (the device mounts empty).
-  let squashfs_sab = null;
+  let squashfs_sab: SharedArrayBuffer | null = null;
   if (squashfs && squashfs.byteLength) {
     squashfs_sab = new SharedArrayBuffer(squashfs.byteLength);
     new Uint8Array(squashfs_sab).set(new Uint8Array(squashfs));
@@ -119,11 +269,10 @@ export const linux = async ({
   // multi-worker virtio kicks cannot diverge. Bootstrap treats stub-sized
   // disks as "no install" (legacy overlay). hasStateDisk/saveDisk stay false
   // for stubs — only a caller-provided image is persistable.
-  let state_sab = null;
-  let state_dirty_sab = null;
+  let state_sab: SharedArrayBuffer | null = null;
+  let state_dirty_sab: SharedArrayBuffer | null = null;
   let state_persistable = false;
-  /** @type {(() => void) | null} */
-  let state_on_dirty: (() => void)|null = null;
+  let state_on_dirty: (() => void) | null = null;
   {
     const backing = createStateDiskBacking(stateDisk?.image);
     state_sab = backing.imageBuffer;
@@ -134,7 +283,7 @@ export const linux = async ({
   }
 
   /// Dict of online CPUs.
-  const cpus = {};
+  const cpus: Map<number, Runner> = new Map();
 
   /// pc (#128 MMU boot speed): canonical content-keyed cache of compiled
   /// user-executable Modules (hash -> {module, table_initial}). Under the
@@ -145,11 +294,11 @@ export const linux = async ({
   /// snapshot of this Map in its init message (kernel-worker.js exec_modules)
   /// and posts back modules it compiles (exec_module_add). Capped FIFO so a
   /// long session's many distinct binaries can't grow it unboundedly.
-  const exec_module_cache = new Map();
+  const exec_module_cache: Map<string, ExecModuleEntry> = new Map();
   const EXEC_MODULE_CACHE_MAX = 48;
 
   /// Dict of tasks.
-  const tasks = {};
+  const tasks: Map<number, Runner> = new Map();
 
   /// pc (new exec ABI): the host-side compiled-Module cache (keyed by an opaque
   /// per-inode token) is GONE. binfmt_wasm now places the user binary as a byte
@@ -161,12 +310,12 @@ export const linux = async ({
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
 
-  const lock_notify = (locks, lock, count) => {
+  const lock_notify = (locks: TaskLocks, lock: LockName, count?: number) => {
     Atomics.store(locks._memory, locks[lock], 1);
     Atomics.notify(locks._memory, locks[lock], count || 1);
   };
 
-  const lock_wait = (locks, lock) => {
+  const lock_wait = (locks: TaskLocks, lock: LockName) => {
     Atomics.wait(locks._memory, locks[lock], 0);
     Atomics.store(locks._memory, locks[lock], 0);
   };
@@ -191,9 +340,9 @@ export const linux = async ({
   const VW_DEV_WL = 0;
   const VIRTIO_WASM_IRQ_BASE = 8; // matches drivers/virtio/virtio_wasm.c + kernel-worker
   const hostWlQueues = new SharedQueues(virtio_queues);
-  let wlRaisedIrqsAddr = null; // byte offset of raised_irqs[0].counter (8-byte aligned)
-  let hostWlDevice = null;
-  const raiseHostWlIrq = (_cpu, irq) => {
+  let wlRaisedIrqsAddr: number | null = null; // byte offset of raised_irqs[0].counter (8-byte aligned)
+  let hostWlDevice: WlDevice | null = null;
+  const raiseHostWlIrq = (_cpu: number, irq: number) => {
     if (wlRaisedIrqsAddr == null) return;
     // Re-view each time: memory.grow() detaches the prior ArrayBuffer.
     const i32 = new Int32Array(memory.buffer);
@@ -224,7 +373,7 @@ export const linux = async ({
   // It shares hostWlQueues (the cross-worker queue-layout SAB) so the RX vring +
   // its avail cursor stay consistent with the worker's instance. dev=2, irq=10.
   const VW_DEV_NET = 2;
-  let hostNetDevice = null;
+  let hostNetDevice: NetDevice | null = null;
   const hostNet = () => {
     if (!hostNetDevice && wlRaisedIrqsAddr != null) {
       hostNetDevice = new NetDevice({
@@ -250,12 +399,12 @@ export const linux = async ({
   // task parked in p9_client_rpc. dev/cid MUST match kernel-worker's VW_DEV_9P +
   // kernel patch 0018: 9P_ROOT=dev4/cid1, 9P_NIXCACHE=dev5/cid2.
   const VW_DEV_9P = [
-    { dev: 4, cid: 1 },
-    { dev: 5, cid: 2 },
+    { dev: 4, tag: "yoreroot", cid: 1 },
+    { dev: 5, tag: "nixcache", cid: 2 },
   ];
   const hostNinePByDev = new Map(VW_DEV_9P.map((d) => [d.dev, d]));
-  const hostNinePDevices = new Map();
-  const hostNineP = (dev) => {
+  const hostNinePDevices: Map<number, NinePVirtioDevice> = new Map();
+  const hostNineP = (dev: number) => {
     const id = dev >>> 0;
     const spec = hostNinePByDev.get(id);
     if (!spec || !ninep_server || wlRaisedIrqsAddr == null) return null;
@@ -269,6 +418,7 @@ export const linux = async ({
         onlineCpus: [0], // maxcpus=1
         sharedQueues: hostWlQueues, // shared queue-layout SAB (consistent vring state)
         log,
+        tag: spec.tag,
         cid: spec.cid,
         server: ninep_server,
       });
@@ -287,9 +437,8 @@ export const linux = async ({
   // is CONSOLE_BASE + idx (matching kernel-worker + kernel patch 0019); the
   // console (hvc/vtermno) index is idx. Built lazily per console once the self-wake
   // addr is published (and only if a console_sink was provided).
-  /** @type {Map<number, ConsoleVirtioDevice>} */
-  const hostConsoleDevices: Map<number,ConsoleVirtioDevice> = new Map();
-  const hostConsole = (idx) => {
+  const hostConsoleDevices: Map<number, ConsoleVirtioDevice> = new Map();
+  const hostConsole = (idx: number) => {
     if (!console_sink || wlRaisedIrqsAddr == null) return null;
     let d = hostConsoleDevices.get(idx);
     if (!d) {
@@ -320,7 +469,7 @@ export const linux = async ({
   // self-wake virtio-wl/net/9p use (raiseHostWlIrq). dev MUST match
   // kernel-worker's VW_DEV_VSOCK + kernel patch 0020: index 7.
   const VW_DEV_VSOCK = 7;
-  let hostVsockDevice = null;
+  let hostVsockDevice: VsockVirtioDevice | null = null;
   let vsockReadyFired = false;
   const hostVsock = () => {
     if (wlRaisedIrqsAddr == null) return null;
@@ -354,7 +503,7 @@ export const linux = async ({
   // IRQ uses the SAME raised_irqs self-wake wl/net/9p/vsock use. dev MUST match
   // kernel-worker's VW_DEV_SND + kernel patch 0027: index 6.
   const VW_DEV_SND = 6;
-  let hostSndDevice = null;
+  let hostSndDevice: SndVirtioDevice | null = null;
   let sndReadyFired = false;
   const hostSnd = () => {
     if (wlRaisedIrqsAddr == null) return null;
@@ -383,23 +532,23 @@ export const linux = async ({
 
   // handle.net.readable: guest-egress ethernet frames. The worker posts each TX
   // frame as { method: "net_out", frame } and we enqueue it here.
-  let netController = null;
+  let netController: ReadableStreamDefaultController<Uint8Array> | null = null;
   let netLinkUp = false;
-  const netReadable = new ReadableStream({
+  const netReadable = new ReadableStream<Uint8Array>({
     start: (c) => {
       netController = c;
     },
   });
   // handle.net.writable: inbound ethernet frames. Each write is delivered to the
   // guest via the main-thread NetDevice's RX vring (pushRx).
-  const netWritable = new WritableStream({
+  const netWritable = new WritableStream<Uint8Array | ArrayBuffer>({
     write: (frame) => {
       hostNet()?.pushRx(frame instanceof Uint8Array ? frame : new Uint8Array(frame));
     },
   });
 
   /// Callbacks from Web Workers (each one representing one task).
-  const message_callbacks = {
+  const message_callbacks: WorkerMessageHandlers = {
     // #177: a state-disk T_OUT dirtied sectors — notify the host (autosave debounce).
     blk_dirty: () => {
       state_on_dirty?.();
@@ -414,7 +563,8 @@ export const linux = async ({
       // CPU 0 has init_task which sits in static storage. After booting it becomes CPU 0's idle task. The runner will
       // in this special case tell us where it is so that we can register it.
       log("Starting cpu 0 with init_task " + message.init_task);
-      tasks[message.init_task] = cpus[0];
+      // Number(): on wasm64 init_task is a BigInt; every other task id is a Number.
+      tasks.set(Number(message.init_task), cpus.get(0));
     },
 
     start_secondary: (message) => {
@@ -440,10 +590,10 @@ export const linux = async ({
         }
       }
 
-      if (cpus[message.cpu]) {
+      if (cpus.get(message.cpu)) {
         log("[Main]: Stopping CPU " + message.cpu);
-        cpus[message.cpu].worker.terminate();
-        delete cpus[message.cpu];
+        cpus.get(message.cpu).worker.terminate();
+        cpus.delete(message.cpu);
       } else {
         log(
           "[Main]: Tried to stop CPU " +
@@ -480,16 +630,16 @@ export const linux = async ({
       // next_task was previously suspended, wake it up.
 
       // Tell the next task where we switched from, so that it can finish the task switch.
-      tasks[message.next_task].last_task[0] = message.prev_task;
+      tasks.get(message.next_task).last_task[0] = message.prev_task;
 
-      tasks[message.prev_task].running = false;
-      tasks[message.next_task].running = true;
+      tasks.get(message.prev_task).running = false;
+      tasks.get(message.next_task).running = true;
 
       // Release the above write of last_task and wake up the task.
-      lock_notify(tasks[message.next_task].locks, "serialize");
+      lock_notify(tasks.get(message.next_task).locks, "serialize");
 
       // In case the task was dying, we're now done. prev_task will wait in serialize_me() but never be scheduled again.
-      if (tasks[message.prev_task].kill) {
+      if (tasks.get(message.prev_task).kill) {
         kill_task(message.prev_task);
       }
     },
@@ -629,13 +779,24 @@ export const linux = async ({
     },
   };
 
+  // Generic over the method so the handler and its message stay correlated.
+  const dispatch_message = <M extends WorkerMessageMethod>(
+    data: WorkerMessageOf<M>,
+    worker: Worker,
+  ) => {
+    message_callbacks[data.method](data, worker);
+  };
+
   /// Memory shared between all CPUs.
-  const memory = new WebAssembly.Memory({
+  // lib.dom types a memory's initial/maximum as number only; a memory64
+  // (address "i64") takes BigInts, hence Ulong and the one cast below.
+  const memory_descriptor = {
     initial: Ulong(30), // TODO: extract this automatically from vmlinux.
     maximum: Ulong(0x10000), // Allow the full 32-bit address space to be allocated.
     shared: true,
     address: "i" + arch_bits,
-  });
+  };
+  const memory = new WebAssembly.Memory(memory_descriptor as WebAssembly.MemoryDescriptor);
 
   /**
    * Create and run one CPU in a background thread (a Web Worker).
@@ -644,8 +805,8 @@ export const linux = async ({
    * system, including bringing up secondary CPUs at the end, while for secondary CPUs, this just means some
    * book-keeping before dropping into their own idle tasks.
    */
-  const make_cpu = (cpu, idle_task) => {
-    const options = {
+  const make_cpu = (cpu: number, idle_task?: number) => {
+    const options: CpuRunnerOptions = {
       runner_type: cpu == 0 ? "primary_cpu" : "secondary_cpu",
       idle_task: idle_task,
     };
@@ -660,9 +821,9 @@ export const linux = async ({
     const name = "CPU " + cpu + " [boot+idle]" + (cpu != 0 ? " (" + idle_task + ")" : "");
 
     const runner = make_vmlinux_runner(name, options);
-    cpus[cpu] = runner;
+    cpus.set(cpu, runner);
     if (cpu != 0) {
-      tasks[idle_task] = runner; // For CPU 0, start_primary does this registration for us.
+      tasks.set(idle_task, runner); // For CPU 0, start_primary does this registration for us.
     }
   };
 
@@ -673,21 +834,26 @@ export const linux = async ({
    * are brought up, they can run concurrently (and will effectively be managed by the Wasm host OS). While we are not
    * able to suspend them from JS, the host OS will do that.
    */
-  const make_task = (prev_task, new_task, name, user_executable) => {
+  const make_task = (
+    prev_task: number,
+    new_task: number,
+    name: string,
+    user_executable: UserExecutable | null,
+  ) => {
     // pc (new exec ABI): user_executable is the binary's byte range
     // ({bin_start,bin_end,data_start,table_start}) in the SHARED kernel memory.
     // Pass it straight to the new worker, which compiles it from shared memory.
-    const options = {
+    const options: TaskRunnerOptions = {
       runner_type: "task",
       prev_task: prev_task,
       new_task: new_task,
       user_executable: user_executable,
     };
-    tasks[new_task] = make_vmlinux_runner(name + " (" + new_task + ")", options);
+    tasks.set(new_task, make_vmlinux_runner(name + " (" + new_task + ")", options));
   };
 
-  const kill_task = (dead_task) => {
-    const task = tasks[dead_task];
+  const kill_task = (dead_task: number) => {
+    const task = tasks.get(dead_task);
     if (task.running) {
       // Case 1: current task is killing itself => we know that the reaped task is currently running (probably kthread).
       //
@@ -699,16 +865,16 @@ export const linux = async ({
       // Case 2: current task reaped another task => we know that the reaped task is not running. (kill == false).
       // Case 3: we get here from Case 1 as it eventually scheduled out, calling serialize_me(). (kill == true).
       task.worker.terminate();
-      delete tasks[dead_task];
+      tasks.delete(dead_task);
     }
   };
 
   /// Create a runner for vmlinux. It will run in a Web Worker and execute some specified code.
-  const make_vmlinux_runner = (name, options) => {
+  const make_vmlinux_runner = (name: string, options: RunnerOptions): Runner => {
     // Note: SharedWorker does not seem to allow WebAssembly Module or Memory instances posted.
     const worker = createModuleWorker(worker_url); // name dropped (Blob-shim path can't set it)
 
-    let locks = {
+    let locks: TaskLocks = {
       serialize: 0,
     };
     locks._memory = new Int32Array(new SharedArrayBuffer(Object.keys(locks).length * 4));
@@ -724,9 +890,10 @@ export const linux = async ({
       log("[worker error] " + detail);
     };
 
-    worker.onmessage = (message_event) => {
+    // The protocol is trusted, not validated: an unknown method throws here.
+    worker.onmessage = (message_event: MessageEvent<WorkerMessage>) => {
       const data = message_event.data;
-      message_callbacks[data.method](data, worker);
+      dispatch_message(data, worker);
     };
 
     worker.onmessageerror = (e) => {
@@ -734,7 +901,7 @@ export const linux = async ({
       log("[worker messageerror]");
     };
 
-    const init_msg = {
+    const init_msg: InitMessage = {
       ...options,
       method: "init",
       variant: variant,
@@ -778,7 +945,7 @@ export const linux = async ({
     // window/shell); queued + flushed via that console's main-thread
     // ConsoleVirtioDevice (raised_irqs self-wake), so bytes posted before the
     // guest sets up the receiveq stay pending and are delivered on the next refill.
-    console_input: (idx, data) => {
+    console_input: (idx: number, data: Uint8Array | string) => {
       const bytes = data instanceof Uint8Array ? data : text_encoder.encode(data);
       hostConsole(idx | 0)?.pushRx(bytes);
     },
@@ -787,7 +954,7 @@ export const linux = async ({
     // writes cols/rows into the shared config and raises its config-change irq;
     // the stock virtio-console driver re-reads config and hvc_resize()s the tty
     // (SIGWINCH). No-op before the console device exists (pre-attach).
-    console_resize: (idx, cols, rows) => {
+    console_resize: (idx: number, cols: number, rows: number) => {
       hostConsole(idx | 0)?.setSize(cols | 0, rows | 0);
     },
 
@@ -803,10 +970,12 @@ export const linux = async ({
     // this is also why no synchronous SAB reply is needed for SENDs (4f). injectIn
     // no-ops cleanly (logs "deferred") if the IN queue isn't set up yet
     // (pre-handshake) or the wake addr hasn't been published yet.
-    // @param {number} clientId  ctx vfd_id
-    // @param {Uint8Array} bytes  wire bytes
-    // @param {Uint8Array[]} [fds]  server→client fd payloads (keymap)
-    wayland_push_in: (clientId, bytes, fds) => {
+    // clientId: ctx vfd_id; bytes: wire bytes; fds: server→client fd payloads (keymap)
+    wayland_push_in: (
+      clientId: number,
+      bytes: Uint8Array | ArrayBuffer,
+      fds?: (Uint8Array | { pipe: number } | ArrayBuffer)[],
+    ) => {
       const dev = hostWl();
       if (!dev) {
         log("[wayland] push_in dropped: host idle-wake not armed yet");
@@ -815,21 +984,19 @@ export const linux = async ({
       const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       const fdBufs =
         fds && fds.length
-          ? fds.map((f) =>
-              f instanceof Uint8Array ? f : f && f.pipe !== undefined ? f : new Uint8Array(f),
-            )
+          ? fds.map((f) => (f instanceof Uint8Array ? f : isPipeFd(f) ? f : new Uint8Array(f)))
           : null;
       dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
 
     // Wayland: write into, or hang up, a GUEST pipe (a fd the guest passed in a
     // request, e.g. wl_data_offer.receive) — a clipboard transfer into the guest.
-    wayland_pipe_write: (pipe, bytes) => {
+    wayland_pipe_write: (pipe: number, bytes: Uint8Array | ArrayBuffer) => {
       const dev = hostWl();
       if (!dev) return log("[wayland] pipe write dropped: host idle-wake not armed yet");
       dev.pipeWrite(pipe >>> 0, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
     },
-    wayland_pipe_close: (pipe) => {
+    wayland_pipe_close: (pipe: number) => {
       const dev = hostWl();
       if (!dev) return log("[wayland] pipe close dropped: host idle-wake not armed yet");
       dev.pipeClose(pipe >>> 0);
@@ -841,7 +1008,7 @@ export const linux = async ({
     net: {
       readable: netReadable,
       writable: netWritable,
-      setLinkUp: (up) => {
+      setLinkUp: (up: boolean) => {
         netLinkUp = !!up;
         hostNet()?.setLinkUp(up);
       },

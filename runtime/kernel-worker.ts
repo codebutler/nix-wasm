@@ -7,11 +7,14 @@
 // virtio-9p transport (issue #10), serviced by the main-thread host devices —
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
 import { DynamicLoader } from "./dylink.ts";
+import type { EnvImports } from "./dylink.ts";
 import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.ts";
 import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.ts";
 import { UserFault, readUser, readUserCString, writeUser } from "./mmu-uaccess.ts";
 import { FfiTrampolines } from "./ffi-codegen.ts";
+import type { WasmValType } from "./ffi-codegen.ts";
 import { WlDevice } from "./virtio/wl-device.ts";
+import type { WaylandBridge } from "./virtio/wl-device.ts";
 import { NetDevice } from "./virtio/net-device.ts";
 import { BlkDevice } from "./virtio/blk-device.ts";
 import { NinePVirtioDevice } from "./virtio/ninep-device.ts";
@@ -19,14 +22,187 @@ import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/con
 import { VsockVirtioDevice } from "./virtio/vsock-device.ts";
 import { SndVirtioDevice } from "./virtio/snd-device.ts";
 import { SharedQueues } from "./virtio/shared-queues.ts";
+import type {
+  ExecModuleEntry,
+  InitMessage,
+  LockName,
+  TaskLocks,
+  UserExecutable,
+  WorkerMessage,
+} from "./kernel-host.ts";
+import { VirtioWasmDevice } from "./virtio/device.ts";
+import type { VirtioWasmDeviceOptions } from "./virtio/device.ts";
+
+// This module runs as a dedicated Web Worker (the Node harness shims `self` as a
+// plain object with the same postMessage/onmessage shape).
+declare const self: DedicatedWorkerGlobalScope;
+
+/// Node's process global, read only to detect the Node harness (absent in a
+/// browser worker).
+declare const process: { env?: Record<string, string | undefined> } | undefined;
+
+/// V8's ErrorConstructor extension (not in the standard lib; absent elsewhere).
+interface V8ErrorConstructor extends ErrorConstructor {
+  captureStackTrace?(target: object, constructorOpt?: Function): void;
+}
+
+/// A wasm integer of the kernel's word size: number on wasm32, bigint on wasm64.
+type UlongValue = number | bigint;
+
+/// A mutable/immutable wasm global holding a kernel word (i32 or i64).
+type UlongGlobal = WebAssembly.Global<"i32" | "i64">;
+
+/// The shared kernel memory. On a wasm64 variant it is a memory64 (address
+/// "i64"), whose grow() takes and returns a bigint — lib.dom's
+/// WebAssembly.AddressValue is still number-only, so the bigint form is added.
+type KernelMemory = WebAssembly.Memory & { grow(delta: bigint): bigint };
+
+/// The parent's dynamic-linking state carried into a cloned child worker.
+type DynSnapshot = ReturnType<DynamicLoader["snapshot"]>;
+
+/// The params wasm_load_executable records for user_executable_setup().
+interface UserExecutableParams {
+  data_start: number;
+  table_start: number;
+  pt_base: number;
+  table_initial: number;
+}
+
+/// A user syscall entry: (sp, tp, nr, arg0..argN), wasm integers in and out.
+type SyscallFn = (...args: UlongValue[]) => UlongValue;
+
+/// The vmlinux exports this worker calls. Wasm exports are untyped at the
+/// instantiate boundary; this is the kernel's side of the ABI.
+type VmlinuxExports = {
+  init_task: UlongGlobal;
+  boot_command_line: UlongGlobal;
+  initrd_start: UlongGlobal;
+  initrd_end: UlongGlobal;
+  _start: () => void;
+  _start_secondary: (idle_task: UlongValue) => void;
+  /// 1 for a task created without a kernel-thread fn (a clone child), else 0.
+  ret_from_fork: (prev_task: UlongValue, new_task: UlongValue) => number;
+  raise_interrupt: (cpu: number, irq: number) => void;
+  raise_exception: () => void;
+  get_user_stack_pointer: () => UlongValue;
+  get_user_tls_base: () => UlongValue;
+  wasm_raised_irqs_ptr?: (cpu: number) => UlongValue;
+  wasm_collapse?: () => void;
+  wasm_fork_current: (sp: UlongValue, tls: UlongValue, ctl: UlongValue) => UlongValue;
+  wasm_syscall_0: SyscallFn;
+  wasm_syscall_1: SyscallFn;
+  wasm_syscall_2: SyscallFn;
+  wasm_syscall_3: SyscallFn;
+  wasm_syscall_4: SyscallFn;
+  wasm_syscall_5: SyscallFn;
+  wasm_syscall_6: SyscallFn;
+};
+interface VmlinuxInstance extends WebAssembly.Instance {
+  readonly exports: VmlinuxExports;
+}
+
+/// The user-executable exports this worker calls (all optional: which ones a
+/// binary has depends on how it was linked and instrumented).
+type UserExports = {
+  _start?: () => void;
+  __libc_clone_callback?: () => void;
+  __libc_handle_signal?: () => void;
+  __set_tls_base?: (tls: UlongValue) => void;
+  __get_tls_base?: () => UlongValue;
+  __mmu_pt_base?: UlongGlobal;
+  __mmu_start?: () => void;
+  __wasm_apply_data_relocs?: () => void;
+  __wasm_early_tp_init?: () => void;
+  __wasm_call_ctors?: () => void;
+  asyncify_get_state?: () => number;
+  asyncify_start_unwind?: (ctlPtr: number) => void;
+  asyncify_stop_unwind?: () => void;
+  asyncify_start_rewind?: (ctlPtr: number) => void;
+  asyncify_stop_rewind?: () => void;
+};
+interface UserInstance extends WebAssembly.Instance {
+  readonly exports: UserExports;
+}
+
+/// A host import vmlinux calls. Arguments are wasm integers: i32 arrives as a
+/// number, and on wasm64 init() wraps every callback to convert its i64
+/// (bigint) arguments to number first and its result back to bigint.
+type HostCallback = (...args: number[]) => UlongValue | void;
+
+/// The user executable's `env` imports (see user_executable_setup()).
+/// lib.dom's WebAssembly.ImportValue predates the exception-handling proposal
+/// and omits WebAssembly.Tag (__cpp_exception), which engines accept as an
+/// import; every other member is a standard ImportValue. It is an EnvImports
+/// (dylink.ts) as written; the WebAssembly.instantiate call asserts it to the
+/// lib's Imports, which has no room for the Tag.
+type UserEnv = {
+  memory: KernelMemory;
+  __memory_base: UlongGlobal;
+  __stack_pointer: UlongGlobal;
+  __indirect_function_table: WebAssembly.Table;
+  __table_base: UlongGlobal;
+  __table_base32: WebAssembly.Global<"i32">;
+  __wasm_syscall_0: SyscallFn;
+  __wasm_syscall_1: SyscallFn;
+  __wasm_syscall_2: SyscallFn;
+  __wasm_syscall_3: SyscallFn;
+  __wasm_syscall_4: SyscallFn;
+  __wasm_syscall_5: SyscallFn;
+  __wasm_syscall_6: SyscallFn;
+  __wasm_abort: () => never;
+  capture_stack: ReturnType<typeof makeCaptureStack>;
+  __cpp_exception: WebAssembly.Tag;
+  logAPIs: () => void;
+  __dlsym_time64: () => number;
+  __cxa_thread_atexit_impl: () => number;
+  __wasm_dl_probe: (bufPtr: UlongValue, bufLen: UlongValue, outPtr: UlongValue) => number;
+  __wasm_dlopen: (
+    bufPtr: UlongValue,
+    bufLen: UlongValue,
+    memoryBase: UlongValue,
+    flags: UlongValue,
+  ) => number;
+  __wasm_dlsym: (handle: UlongValue, namePtr: UlongValue) => number;
+  __wasm_ffi_call: (
+    funcIndex: UlongValue,
+    argPtr: UlongValue,
+    retPtr: UlongValue,
+    sigPtr: UlongValue,
+    sigLen: UlongValue,
+  ) => number;
+  __lsan_disable: () => void;
+  __lsan_enable: () => void;
+  __lsan_ignore_object: () => void;
+};
+type UserImports = {
+  env: UserEnv;
+  "GOT.func": Record<string, UlongGlobal>;
+  "GOT.mem": Record<string, UlongGlobal>;
+};
+
+/// The worker's end of the channel to kernel-host.ts.
+interface HostPort {
+  postMessage(message: WorkerMessage, transfer?: Transferable[]): void;
+}
+
+/// What init() reads: kernel-host.ts's InitMessage, with the memory64 grow()
+/// (see KernelMemory) and the opt-in trace_syscalls debug flag, which the host
+/// does not send by default (set it in the runner options for a debug session).
+/// init() also reads user_executable before checking runner_type; a CPU
+/// runner's message simply has none.
+type WorkerInitMessage = InitMessage & {
+  memory: KernelMemory;
+  trace_syscalls?: boolean;
+  user_executable?: UserExecutable | null;
+};
 
 (function (console) {
-  let port = self;
-  let variant;
-  let arch_bits;
-  let Ulong;
-  let memory = null; // Note: memory.buffer has to be re-accessed after growing the memory!
-  let locks = null;
+  let port: HostPort = self;
+  let variant: string;
+  let arch_bits: 32 | 64;
+  let Ulong: (value: UlongValue) => UlongValue;
+  let memory: KernelMemory = null; // Note: memory.buffer has to be re-accessed after growing the memory!
+  let locks: TaskLocks = null;
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
 
@@ -38,7 +214,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   // event so the opaque one is suppressed lets the host surface a real cause.
   // Errors thrown BEFORE this handler registers still reach worker.onerror as a
   // backstop (kernel-host.js), so a failure is never silent.
-  const reportFatal = (detail) => {
+  const reportFatal = (detail: unknown) => {
     try {
       self.postMessage({ method: "fatal", detail: String(detail) });
     } catch {}
@@ -69,7 +245,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   let trace_enabled = false;
   let syscall_trace_budget = 120;
   const syscall_logged =
-    (fn) =>
+    (fn: SyscallFn): SyscallFn =>
     (...args) => {
       if (!trace_enabled) return fn(...args); // fast path: upstream behaviour
       let r;
@@ -122,7 +298,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   // after, before the child produced any output — see userspace/spawn-canary-
   // test.c's file comment for the full case history).
   const SPAWN_DEBUG = typeof process !== "undefined" && !!(process.env && process.env.SPAWN_DEBUG);
-  const sdbg = (...args) => {
+  const sdbg = (...args: unknown[]) => {
     if (SPAWN_DEBUG) console.error(`[spawn-dbg ${runner_name}]`, ...args);
   };
 
@@ -138,8 +314,8 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   /// the module back (exec_module_add) for all future workers. Keyed on a
   /// 2xFNV-1a content hash + length of the PRE-instrument bytes (instrumentation
   /// is deterministic, so equal inputs => equal instrumented module).
-  let exec_modules = new Map();
-  const exec_hash = (bytes) => {
+  let exec_modules: Map<string, ExecModuleEntry> = new Map();
+  const exec_hash = (bytes: Uint8Array) => {
     let h1 = 0x811c9dc5 | 0;
     let h2 = 0x01000193 | 0;
     for (let i = 0; i < bytes.length; i++) {
@@ -150,18 +326,18 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   };
 
   /// SAB-backed storage for last process in switch_to (when it returns back from another task).
-  let switch_to_last_task = null;
+  let switch_to_last_task: Uint32Array = null;
 
   /// The vmlinux instance, to handle boot, idle, kthreads and syscalls etc.
-  let vmlinux_instance = null;
+  let vmlinux_instance: VmlinuxInstance = null;
 
   /// The user executable (if any) to run when we're not in vmlinux.
-  let user_executable = null;
-  let user_executable_params = null;
+  let user_executable: Promise<WebAssembly.Module> = null;
+  let user_executable_params: UserExecutableParams = null;
 
   /// The user executabe instance, or null. Try using the instance variable in the promise over this one if possible.
-  let user_executable_instance = null;
-  let user_executable_imports = null;
+  let user_executable_instance: UserInstance = null;
+  let user_executable_imports: UserImports = null;
 
   /// pc (#126 Track C / #130): per-process dynamic linking (dlopen/dlsym).
   /// dyn_loader is built LAZILY on the first dl host-import call (parsing the
@@ -173,17 +349,18 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   /// tables. dyn_replay carries a cloning parent's side-module snapshot into
   /// this (child) worker; it is replayed right after the user instance exists,
   /// before any user code runs (Track 0 §4 step 3).
-  let dyn_loader = null;
-  let dyn_replay = null;
-  let user_executable_range = null;
+  let dyn_loader: DynamicLoader = null;
+  let dyn_replay: DynSnapshot = null;
+  let user_executable_range: { bin_start: number; bin_end: number } = null;
 
   /// pc (#130): the per-process runtime-FFI trampoline cache (runtime/
   /// ffi-codegen.js) — built lazily on the first __wasm_ffi_call, sharing this
   /// process's Memory + function table.
-  let ffi_trampolines = null;
+  let ffi_trampolines: FfiTrampolines = null;
 
   /// Flag that a clone callback should be called instead of _start().
-  let should_call_clone_callback = false;
+  /// (ret_from_fork's i32 result once the task has run, hence the number.)
+  let should_call_clone_callback: boolean | number = false;
 
   /// pc (#129 MMU fork): nonzero when THIS worker's task is a fork child — the
   /// asyncify ctl pointer to REWIND at first run (fork() returns 0 there)
@@ -197,7 +374,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   /// _Fork seam calls it; asyncify unwinds the caller's stack and the run loop
   /// (run_user_entry) drives the kernel clone + the dual rewind. One fn per
   /// worker; late-binds the instance (exec replaces it).
-  let capture_stack_fn = null;
+  let capture_stack_fn: ReturnType<typeof makeCaptureStack> = null;
 
   /// pc (#128/#129): THIS worker's own page-table root — the pt_base baked into
   /// its user instance's __mmu_pt_base at instantiation (its task's mm->pgd).
@@ -223,17 +400,23 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   /// Only MMU-fork kernels export wasm_collapse; NOMMU keeps the JS-throw path.
   let reload_pending = false;
 
+  const V8Error: V8ErrorConstructor = Error;
+
+  /// Why a Trap was thrown (see the throw sites and user_executable_error).
+  type TrapKind = "panic" | "reload_program" | "signal_return";
+
   /// An exception type used to abort part of execution (useful for collapsing the call stack of user code).
   class Trap extends Error {
-    constructor(kind) {
+    declare kind: TrapKind;
+    constructor(kind: TrapKind) {
       super("This exception should be ignored. It is part of Linux/Wasm host glue.");
-      Error.captureStackTrace && Error.captureStackTrace(this, Trap);
+      V8Error.captureStackTrace && V8Error.captureStackTrace(this, Trap);
       this.name = "Trap";
       this.kind = kind;
     }
   }
 
-  const log = (message) => {
+  const log = (message: string) => {
     port.postMessage({
       method: "log",
       message: "[Runner " + runner_name + "]: " + message,
@@ -246,8 +429,8 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   // smaller than the binary declares, and big programs blow past any fixed
   // guess — clang.wasm needs ~27k entries vs the 4096 previously hardcoded.
   // Returns 0 when no table import exists (caller keeps a sane floor).
-  const table_import_initial = (bytes) => {
-    const uleb = (i) => {
+  const table_import_initial = (bytes: Uint8Array) => {
+    const uleb = (i: number): [number, number] => {
       let r = 0,
         s = 0,
         b;
@@ -361,19 +544,19 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   };
 
   /// Get a JS string object from a (nul-terminated) C-string in a Uint8Array.
-  const get_cstring = (memory, index) => {
+  const get_cstring = (memory: WebAssembly.Memory, index: number) => {
     const memory_u8 = new Uint8Array(memory.buffer);
     let end;
     for (end = index; memory_u8[end]; ++end); // Find terminating nul-character.
     return text_decoder.decode(memory_u8.slice(index, end));
   };
 
-  const lock_notify = (lock, count) => {
+  const lock_notify = (lock: LockName, count?: number) => {
     Atomics.store(locks._memory, locks[lock], 1);
     Atomics.notify(locks._memory, locks[lock], count || 1);
   };
 
-  const lock_wait = (lock) => {
+  const lock_wait = (lock: LockName) => {
     Atomics.wait(locks._memory, locks[lock], 0);
     Atomics.store(locks._memory, locks[lock], 0);
   };
@@ -396,16 +579,16 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   /// Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB),
   /// attached in init(). Shared so a queue set up on the boot worker is
   /// serviceable from a userspace task worker.
-  let virtio_queues = null;
+  let virtio_queues: SharedQueues = null;
 
   /// squashfs image bytes for the seed BlkDevice (VW_DEV_BLK=3); set from the
   /// boot message in init(). Zero-length when no squashfs was provided (--no-nix).
-  let squashfsImage = new Uint8Array(0);
+  let squashfsImage: Uint8Array = new Uint8Array(0);
   /// #177: RW state-disk image + dirty bitmap (VW_DEV_BLK_STATE=1 → /dev/vdb).
   /// SharedArrayBuffer views handed in via the boot message; absent → no state
   /// disk (installer-only / busybox boots).
-  let stateDiskImage = null;
-  let stateDiskDirty = null;
+  let stateDiskImage: Uint8Array = null;
+  let stateDiskDirty: Uint8Array = null;
 
   /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
   /// transport, keyed by the host device index `dev` the guest passes in every
@@ -461,7 +644,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   // index); the main-thread instance owns the sink (guest output) + input buffer
   // (host input) per console and raises the completion IRQ via the raised_irqs
   // self-wake.
-  const isConsoleDev = (id) => id >= CONSOLE_BASE && id < CONSOLE_BASE + CONSOLE_DEVICES;
+  const isConsoleDev = (id: number) => id >= CONSOLE_BASE && id < CONSOLE_BASE + CONSOLE_DEVICES;
 
   // raised_irqs[0] address is per-cpu-fixed post-boot; publish it once for the
   // main-thread self-wake (shared by virtio-wl/net AND virtio-9p — so 9P works
@@ -482,13 +665,12 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
     }
   };
 
-  /** @type {Map<number, import("./virtio/device.ts").VirtioWasmDevice>} */
-  const virtio_devices: Map<number,import("./virtio/device.ts").VirtioWasmDevice> = new Map();
-  const get_virtio_device = (dev) => {
+  const virtio_devices: Map<number, VirtioWasmDevice> = new Map();
+  const get_virtio_device = (dev: number): VirtioWasmDevice | null => {
     const id = dev >>> 0;
     let d = virtio_devices.get(id);
     if (!d && vmlinux_instance && virtio_queues) {
-      const common = {
+      const common: VirtioWasmDeviceOptions & { waylandBridge?: WaylandBridge } = {
         dev: id,
         irq: VIRTIO_WASM_IRQ_BASE + id,
         memory,
@@ -513,7 +695,9 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         // to this SEND" was the wrong model. Single producer per direction: worker
         // owns OUT, host owns IN.
         common.waylandBridge = {
-          sendOut: (clientId, data, fds) => {
+          // `data` here and in onPipeData is a .slice() copy, so it owns a plain
+          // (non-shared, transferable) ArrayBuffer.
+          sendOut: (clientId, data: Uint8Array<ArrayBuffer>, fds) => {
             // A shm fd crosses as its place in shared memory; a guest pipe as
             // its vfd id ({ pipe }), for the host to write into.
             const fdViews = fds.map((v) =>
@@ -536,7 +720,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             port.postMessage({ method: "wayland_close", dev: id, clientId: clientId >>> 0 }),
           // The guest wrote into, or closed, a pipe the host created (the
           // compositor reading a guest clipboard selection).
-          onPipeData: (pipe, data) =>
+          onPipeData: (pipe, data: Uint8Array<ArrayBuffer>) =>
             port.postMessage(
               { method: "wayland_pipe_data", dev: id, pipe: pipe >>> 0, buffer: data.buffer },
               [data.buffer],
@@ -610,7 +794,8 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         // shared queue-layout SAB + raised_irqs self-wake, so a parked idle CPU
         // is woken without this worker servicing a postMessage (the wl pattern).
         const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
-        net.setFrameSink((frame) => {
+        // Each frame is a Uint8Array.from() copy: a plain, transferable ArrayBuffer.
+        net.setFrameSink((frame: Uint8Array<ArrayBuffer>) => {
           port.postMessage({ method: "net_out", dev: id, frame: frame.buffer }, [frame.buffer]);
         });
         d = net;
@@ -655,7 +840,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   };
 
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
-  const host_callbacks = {
+  const host_callbacks: Record<string, HostCallback> = {
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {
       // New web workers cannot be spawned from within a Worker in most browsers. It can currently not be spawned from
@@ -809,7 +994,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
       dyn_replay = null;
       ffi_trampolines = null;
       user_executable_range = { bin_start, bin_end };
-      let bytes = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      let bytes: Uint8Array<ArrayBuffer> = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
       // pc (#128 software MMU): a nonzero pt_base means the MMU kernel — the
       // user code must go through the per-access translate. Instrument the image
       // AT LOAD, right here, so EVERY execed binary (busybox, nix, any tool) runs
@@ -832,7 +1017,10 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             table_initial = hit.table_initial;
           } else {
             if (!isInstrumented(bytes)) {
-              bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
+              bytes = softmmuInstrument(bytes, {
+                checked: true,
+                exportControls: true,
+              });
             }
             table_initial = table_import_initial(bytes);
             user_executable = WebAssembly.compile(bytes);
@@ -1032,7 +1220,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   };
 
   /// Callbacks from the main thread.
-  const message_callbacks = {
+  const message_callbacks: { init: (message: WorkerInitMessage) => void } = {
     init: (message) => {
       variant = message.variant;
       arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
@@ -1042,7 +1230,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         // Quick hack that truncates parameters to 32-bit Number, then upsamples them to BigInt. Ugly but works in practice for memories <4G.
         for (const method in host_callbacks) {
           const original = host_callbacks[method];
-          host_callbacks[method] = function (...args) {
+          host_callbacks[method] = function (...args: UlongValue[]) {
             const result = original(...args.map(Number));
             if (typeof result !== "undefined") {
               return BigInt(result);
@@ -1126,14 +1314,14 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
       // worth hardcoding — scan the words just before the thrown object for
       // a pointer that dereferences like a type_info with a plausible
       // mangled-name string, and report what we find. Best-effort.
-      const describe_cpp_exception = (error) => {
+      const describe_cpp_exception = (error: unknown) => {
         try {
           const tag = user_executable_imports && user_executable_imports.env.__cpp_exception;
           if (!tag || !(error instanceof WebAssembly.Exception) || !error.is(tag)) return null;
           const ptr = Number(error.getArg(tag, 0));
           const dv = new DataView(memory.buffer);
           const u8 = new Uint8Array(memory.buffer);
-          const cstr = (p, max = 256) => {
+          const cstr = (p: number, max = 256) => {
             if (p < 8 || p + max > u8.length) return null;
             let s = "";
             for (let i = 0; i < max && u8[p + i]; i++) s += String.fromCharCode(u8[p + i]);
@@ -1157,7 +1345,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
       };
 
       // This is a global error handler that is used when calling Wasm code.
-      const wasm_error = (error) => {
+      const wasm_error = (error: unknown) => {
         // pc (#196): worker.terminate() can land a V8 "termination exception"
         // on whichever promise chain happens to be in flight in THIS worker
         // right now: user_executable_chain's .catch(user_executable_error),
@@ -1254,7 +1442,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         // * Drop all passive data segments.
         // An in-memory atomic flag ensures this only happens the first time vmlinux is instantiated on the main memory.
         return WebAssembly.instantiate(message.vmlinux, import_object).then((instance) => {
-          vmlinux_instance = instance;
+          vmlinux_instance = instance as VmlinuxInstance; // wasm exports are untyped at this boundary
         });
       };
 
@@ -1297,12 +1485,12 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             const initrd_end = initrd_start + message.initrd.byteLength;
             new Uint8Array(memory.buffer).set(new Uint8Array(message.initrd), initrd_start);
             new DataView(memory.buffer).setUint32(
-              vmlinux_instance.exports.initrd_start.value,
+              Number(vmlinux_instance.exports.initrd_start.value),
               initrd_start,
               true,
             );
             new DataView(memory.buffer).setUint32(
-              vmlinux_instance.exports.initrd_end.value,
+              Number(vmlinux_instance.exports.initrd_end.value),
               initrd_end,
               true,
             );
@@ -1350,11 +1538,11 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
           env: {
             memory: memory,
             __memory_base: new WebAssembly.Global(
-              { value: "i" + arch_bits, mutable: false },
+              { value: `i${arch_bits}`, mutable: false },
               Ulong(user_executable_params.data_start),
             ),
             __stack_pointer: new WebAssembly.Global(
-              { value: "i" + arch_bits, mutable: true },
+              { value: `i${arch_bits}`, mutable: true },
               stack_pointer,
             ),
             // Sized per-binary from the import section (pc, #139 Gate 0.2) —
@@ -1365,7 +1553,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
               element: "anyfunc",
             }),
             __table_base: new WebAssembly.Global(
-              { value: "i" + arch_bits, mutable: false },
+              { value: `i${arch_bits}`, mutable: false },
               Ulong(user_executable_params.table_start),
             ),
             __table_base32: new WebAssembly.Global(
@@ -1433,7 +1621,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             //   never cross instances, so per-worker identity is enough.)
             // * logAPIs — debug-logging hook referenced by some objects from
             //   the linux-wasm musl hacks; harmless no-op.
-            __cpp_exception: new WebAssembly.Tag({ parameters: ["i" + arch_bits] }),
+            __cpp_exception: new WebAssembly.Tag({ parameters: [`i${arch_bits}`] }),
             logAPIs: () => {},
             // pc additions (#139 Gate 0.2 — clang/lld-sized programs):
             // * __dlsym_time64 — musl's dlsym(3) time64 redirector; only
@@ -1542,11 +1730,11 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
                 // Reject nonsense before readUser can allocate from it.
                 if (len < 2 || len > 257) return 1;
                 const sig = readUser(memory.buffer, own_pt_base, Number(sigPtr), len);
-                const CODES = [null, "i32", "i64", "f32", "f64"];
+                const CODES: (WasmValType | null)[] = [null, "i32", "i64", "f32", "f64"];
                 const np = sig[0];
                 if (sig.length !== 2 + np || sig[1] >= CODES.length) return 1;
                 const ret = CODES[sig[1]];
-                const params = [];
+                const params: WasmValType[] = [];
                 for (let i = 0; i < np; i++) {
                   const p = CODES[sig[2 + i]];
                   if (!p) return 1;
@@ -1607,7 +1795,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             {
               get: (_target, prop) =>
                 typeof prop === "string"
-                  ? new WebAssembly.Global({ value: "i" + arch_bits, mutable: true }, Ulong(0))
+                  ? new WebAssembly.Global({ value: `i${arch_bits}`, mutable: true }, Ulong(0))
                   : undefined,
             },
           ),
@@ -1616,7 +1804,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
             {
               get: (_target, prop) =>
                 typeof prop === "string"
-                  ? new WebAssembly.Global({ value: "i" + arch_bits, mutable: true }, Ulong(0))
+                  ? new WebAssembly.Global({ value: `i${arch_bits}`, mutable: true }, Ulong(0))
                   : undefined,
             },
           ),
@@ -1640,11 +1828,16 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         // * clone: clone explicitly passes its tls pointer to the kernel as part of the syscall. Unless the tls pointer
         //   has been overridden with CLONE_SETTLS, it will be copied from the old task to the new one. This is mostly
         //   useful when CLONE_VFORK is used, in which case the new task can borrow the TLS until it calls exec or exit.
+        // The import object carries a WebAssembly.Tag the lib's Imports type omits (see UserEnv).
         let woken = user_executable.then((user_module) =>
-          WebAssembly.instantiate(user_module, user_executable_imports),
+          WebAssembly.instantiate(
+            user_module,
+            user_executable_imports as Record<string, EnvImports> as WebAssembly.Imports,
+          ),
         );
 
-        woken = woken.then((instance) => {
+        woken = woken.then((untyped_instance) => {
+          const instance = untyped_instance as UserInstance; // wasm exports are untyped at this boundary
           // pc (#128 software MMU): a softmmu-instrumented image exports the
           // mutable __mmu_pt_base global its inlined translate reads — point
           // it at this task's page-table root BEFORE any of the module's own
@@ -1748,7 +1941,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
       // lazily with fork_ctl and rewinds in ITS worker), then REWIND this
       // (parent) instance so capture_stack returns the child pid, re-entering
       // through the SAME export. Loops so nested forks just work.
-      const run_user_entry = (instance, enter, label) => {
+      const run_user_entry = (instance: UserInstance, enter: () => void, label: string) => {
         for (;;) {
           enter();
           if (!isPendingUnwind(instance)) {
@@ -1770,7 +1963,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         }
       };
 
-      const user_executable_run = (instance) => {
+      const user_executable_run = (instance: UserInstance) => {
         if (fork_rewind_ctl) {
           // pc (#129 MMU fork): this task IS a fork child. Its memory image is
           // the parent's via the kernel's COW page tables (same shared arena,
@@ -1850,7 +2043,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         }
       };
 
-      const user_executable_error = (error) => {
+      const user_executable_error = (error: unknown): Promise<void> | void => {
         if (reload_pending) {
           // #175: the deliberate exec stack-collapse arrived as an UNCATCHABLE wasm trap
           // (RuntimeError from the kernel's wasm_collapse()). Consume the flag and run the new
@@ -1875,7 +2068,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
         }
       };
 
-      const user_executable_chain = () => {
+      const user_executable_chain = (): Promise<void> => {
         // user_executable_error() may deal with an exec() trap and recursively call run_chain() again.
         return user_executable_setup().then(user_executable_run).catch(user_executable_error);
       };
@@ -1898,7 +2091,7 @@ import { SharedQueues } from "./virtio/shared-queues.ts";
   };
 
   self.onmessage = (message_event) => {
-    const data = message_event.data;
+    const data: WorkerInitMessage = message_event.data;
     message_callbacks[data.method](data);
   };
 

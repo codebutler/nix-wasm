@@ -16,11 +16,8 @@
 // the SW path (the dev-server sends real headers; `bun test` has no SW) nothing
 // changes — the worker is created directly.
 
-/**
- * @param {string | URL} url absolute URL of the real `{ type: "module" }` worker
- * @returns {Worker}
- */
-export function createModuleWorker(url: string|URL): Worker {
+/** @param url absolute URL of the real `{ type: "module" }` worker */
+export function createModuleWorker(url: string | URL): Worker {
   const swControlled = typeof navigator !== "undefined" && navigator.serviceWorker?.controller;
   if (!swControlled) return new Worker(url, { type: "module" });
 

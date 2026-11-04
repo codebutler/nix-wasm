@@ -44,12 +44,14 @@ const PAGE = 0x1000;
 const PAGE_MASK = 0xfff;
 
 export class UserFault extends Error {
+  va: number;
+  kind: "load" | "store";
+
   /**
-   * @param {number} va      faulting user virtual address
-   * @param {"load"|"store"} kind
-   * @param {string} detail  which level / which test failed
+   * @param va      faulting user virtual address
+   * @param detail  which level / which test failed
    */
-  constructor(va: number, kind: "load"|"store", detail: string) {
+  constructor(va: number, kind: "load" | "store", detail: string) {
     super(`mmu-uaccess: ${kind} fault at user VA 0x${(va >>> 0).toString(16)} (${detail})`);
     this.name = "UserFault";
     this.va = va >>> 0;
@@ -59,13 +61,18 @@ export class UserFault extends Error {
 
 /**
  * Translate one user VA to a physical (= linear-memory) offset.
- * @param {DataView} dv     over the guest Memory's buffer
- * @param {number} ptBase   the task's page-table root (mm->pgd); 0 = identity
- * @param {number} va       user virtual address
- * @param {boolean} write   require _PAGE_WRITE as well as _PAGE_PRESENT
- * @returns {number} physical offset
+ * @param dv       over the guest Memory's buffer
+ * @param ptBase   the task's page-table root (mm->pgd); 0 = identity
+ * @param va       user virtual address
+ * @param write    require _PAGE_WRITE as well as _PAGE_PRESENT
+ * @returns physical offset
  */
-export function translateUser(dv: DataView, ptBase: number, va: number, write: boolean = false): number {
+export function translateUser(
+  dv: DataView,
+  ptBase: number,
+  va: number,
+  write: boolean = false,
+): number {
   va = va >>> 0;
   // EVERY address-valued quantity is normalized `>>> 0`: JS bitwise ops
   // return SIGNED 32-bit values, and both `ptBase` (an i32 crossing a host
@@ -98,9 +105,13 @@ export function translateUser(dv: DataView, ptBase: number, va: number, write: b
  * the raw reads this module replaces, so NOMMU is unaffected.
  * Translated: a page-wise gathered COPY (user pages are not physically
  * contiguous).
- * @returns {Uint8Array}
  */
-export function readUser(buffer, ptBase, va, len): Uint8Array {
+export function readUser(
+  buffer: ArrayBufferLike,
+  ptBase: number,
+  va: number,
+  len: number,
+): Uint8Array {
   va = va >>> 0;
   len = len >>> 0;
   const u8 = new Uint8Array(buffer);
@@ -122,9 +133,13 @@ export function readUser(buffer, ptBase, va, len): Uint8Array {
  * Read a NUL-terminated C string from user memory (page-wise under
  * translation; a page boundary mid-string is followed through the walk).
  * `max` bounds the scan so a missing terminator cannot run away.
- * @returns {string}
  */
-export function readUserCString(buffer, ptBase, va, max = 4096): string {
+export function readUserCString(
+  buffer: ArrayBufferLike,
+  ptBase: number,
+  va: number,
+  max: number = 4096,
+): string {
   va = va >>> 0;
   const u8 = new Uint8Array(buffer);
   const dec = new TextDecoder();
@@ -135,7 +150,7 @@ export function readUserCString(buffer, ptBase, va, max = 4096): string {
     return dec.decode(u8.slice(va, end));
   }
   const dv = new DataView(buffer);
-  const parts = [];
+  const parts: Uint8Array[] = [];
   let scanned = 0;
   while (scanned < max) {
     const cur = va + scanned;
@@ -166,7 +181,12 @@ export function readUserCString(buffer, ptBase, va, max = 4096): string {
  * the header). Identity path writes directly, matching the raw stores this
  * replaces.
  */
-export function writeUser(buffer, ptBase, va, bytes) {
+export function writeUser(
+  buffer: ArrayBufferLike,
+  ptBase: number,
+  va: number,
+  bytes: Uint8Array,
+): void {
   va = va >>> 0;
   const u8 = new Uint8Array(buffer);
   if (!ptBase) {

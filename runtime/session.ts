@@ -2,17 +2,25 @@
 // convenience session behaviors (line buffering, hangup, hooks). Generic: no
 // VFS dependency. The pc Terminal app and the node CLI both layer on this.
 
-/**
- * Wrap one boot.js console seam as a TerminalSession.
- * @param {{ write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void }} con
- * @param {{ onKill?: () => void }} [hooks]
- * @returns {{ write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, kill(): void, hangup(text?: string): void }}
- */
-export function makeConsoleSession(con: { write(b: Uint8Array|string): void; onData(cb: (b: Uint8Array) => void): () => void; resize(c: number,r: number): void; }, hooks: { onKill?: () => void; } = {}): { write(b: Uint8Array|string): void; onData(cb: (b: Uint8Array) => void): () => void; resize(c: number,r: number): void; kill(): void; hangup(text?: string): void; } {
+/** Wrap one boot.js console seam as a TerminalSession. */
+export function makeConsoleSession(
+  con: {
+    write(b: Uint8Array | string): void;
+    onData(cb: (b: Uint8Array) => void): () => void;
+    resize(c: number, r: number): void;
+  },
+  hooks: { onKill?: () => void } = {},
+): {
+  write(b: Uint8Array | string): void;
+  onData(cb: (b: Uint8Array) => void): () => void;
+  resize(c: number, r: number): void;
+  kill(): void;
+  hangup(text?: string): void;
+} {
   let killed = false;
-  /** @type {Set<(b: Uint8Array) => void>} renderer callbacks (for hangup) */
+  // renderer callbacks (for hangup)
   const listeners: Set<(b: Uint8Array) => void> = new Set();
-  /** @type {Set<() => void>} console-side unsubscribers for every onData() */
+  // console-side unsubscribers for every onData()
   const unsubs: Set<() => void> = new Set();
   return {
     write(data) {

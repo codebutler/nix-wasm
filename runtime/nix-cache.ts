@@ -26,14 +26,14 @@
 // Surface: the same async VFS the 9P server consumes — stat/list/readBlob, every
 // mutation rejected EROFS (a binary cache is immutable, content-addressed data).
 
-function vfsError(code, path) {
-  const e = new Error(code + ": " + path);
-  // @ts-ignore — augmenting Error with a code, like js/vfs/index.js does
-  e.code = code;
-  return e;
+import type { NinePVfs, VfsRecord } from "./ninep/server.ts";
+
+// Augmenting Error with a code, like js/vfs/index.js does.
+function vfsError(code: string, path: string) {
+  return Object.assign(new Error(code + ": " + path), { code });
 }
 
-const norm = (path) => (path || "/").replace(/^\/+/, "").replace(/\/+$/, "");
+const norm = (path: string) => (path || "/").replace(/^\/+/, "").replace(/\/+$/, "");
 
 // A fixed mtime: the committed cache is immutable per session, so a constant
 // keeps the derived 9P qid version stable (server.js derives it from modifiedAt).
@@ -48,24 +48,24 @@ const MTIME = 1_700_000_000_000;
 const SEEDED_DIRS = new Set(["", "nar", "realisations", "log"]);
 
 /**
- * @param {string} baseUrl  URL of the published standard Nix cache dir (serves
+ * @param baseUrl  URL of the published standard Nix cache dir (serves
  *   nix-cache-info + *.narinfo + nar/* at their relative paths).
  */
-export function createNixCacheExport(baseUrl: string) {
+export function createNixCacheExport(baseUrl: string): NinePVfs {
   const base = String(baseUrl).replace(/\/+$/, "");
-  /** @type {Map<string, Promise<Blob>>} relPath → in-flight/cached blob fetch */
-  const blobCache: Map<string,Promise<Blob>> = new Map();
-  /** @type {Map<string, Promise<object|null>>} relPath → in-flight/cached HEAD probe */
-  const statCache: Map<string,Promise<object|null>> = new Map();
+  // relPath → in-flight/cached blob fetch
+  const blobCache: Map<string, Promise<Blob>> = new Map();
+  // relPath → in-flight/cached HEAD probe
+  const statCache: Map<string, Promise<VfsRecord | null>> = new Map();
 
-  const folderRec = (p) => ({
+  const folderRec = (p: string): VfsRecord => ({
     id: "nix-cache:" + (p || "/"),
     type: "folder",
     name: p.includes("/") ? p.slice(p.lastIndexOf("/") + 1) : p,
     path: "/" + p,
     modifiedAt: MTIME,
   });
-  const fileRec = (p) => ({
+  const fileRec = (p: string): VfsRecord => ({
     id: "nix-cache:" + p,
     type: "file",
     name: p.slice(p.lastIndexOf("/") + 1),
@@ -77,7 +77,7 @@ export function createNixCacheExport(baseUrl: string) {
   // Probe a path's existence with a HEAD. 200 → fileRec, 404 → null (ENOENT),
   // any other status / network error → throw EIO (and evict so a retry re-probes).
   // The result (file or not-found) is cached because the cache is immutable.
-  const probe = (p) => {
+  const probe = (p: string): Promise<VfsRecord | null> => {
     let entry = statCache.get(p);
     if (!entry) {
       entry = fetch(base + "/" + p, { method: "HEAD" }).then((r) => {
@@ -91,17 +91,19 @@ export function createNixCacheExport(baseUrl: string) {
     return entry;
   };
 
-  const rofs = (op) => async (path) => {
-    throw vfsError("EROFS", "cannot " + op + " " + path + " (read-only nix cache)");
-  };
+  const rofs =
+    (op: string) =>
+    async (path: string): Promise<never> => {
+      throw vfsError("EROFS", "cannot " + op + " " + path + " (read-only nix cache)");
+    };
 
   return {
-    async stat(path) {
+    async stat(path: string) {
       const p = norm(path);
       if (SEEDED_DIRS.has(p)) return folderRec(p);
       return probe(p);
     },
-    async list(path) {
+    async list(path: string) {
       const p = norm(path);
       // A remote standard cache isn't enumerable; only the fixed layout dirs are
       // known. Nix never readdirs a binary cache, so this is functionally complete.
@@ -109,7 +111,7 @@ export function createNixCacheExport(baseUrl: string) {
       if (p === "") return ["nar", "realisations", "log"].map(folderRec);
       return [];
     },
-    async readBlob(path) {
+    async readBlob(path: string) {
       const p = norm(path);
       let blob = blobCache.get(p);
       if (!blob) {

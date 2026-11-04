@@ -33,12 +33,35 @@
 // sees the pending bit and returns immediately).
 
 import { VirtioWasmDevice } from "./device.ts";
+import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
+import type { VringChain } from "./vring.ts";
 
 // virtio-9p feature bits (uapi/linux/virtio_9p.h + virtio_config.h).
 const VIRTIO_9P_MOUNT_TAG = 0n; // device carries a mount tag in config space
 const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
+/** The 9P server a main-thread NinePVirtioDevice services its vq with. */
+export interface NinePServer {
+  handle(bytes: Uint8Array, cid?: number): Promise<Uint8Array> | Uint8Array;
+}
+
+/** NinePVirtioDevice constructor options (the base opts plus these). */
+export interface NinePVirtioDeviceOptions extends VirtioWasmDeviceOptions {
+  tag: string;
+  cid?: number;
+  server?: NinePServer;
+  forwardNotify?: ForwardNotify;
+}
+
 export class NinePVirtioDevice extends VirtioWasmDevice {
+  tag: string;
+  cid: number;
+  server: NinePServer | null;
+  forwardNotify: ForwardNotify | null;
+  _tagBytes: Uint8Array;
+  _servicing: boolean;
+  _rearm: boolean;
+
   /**
    * Extends the base VirtioWasmDevice opts with:
    * - `tag` (string): mount tag advertised in config space.
@@ -48,10 +71,8 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
    *   only — the 9P server that services the vq.
    * - `forwardNotify` ((dev, q) => void): WORKER only — forwards the kick to the
    *   main thread (where the async server lives) instead of servicing it here.
-   *
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { tag: string, cid?: number, server?: { handle(bytes: Uint8Array, cid?: number): Promise<Uint8Array>|Uint8Array }, forwardNotify?: (dev: number, q: number) => void }} opts
    */
-  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ tag: string; cid?: number; server?: { handle(bytes: Uint8Array,cid?: number): Promise<Uint8Array>|Uint8Array; }; forwardNotify?: (dev: number,q: number) => void; }) {
+  constructor(opts: NinePVirtioDeviceOptions) {
     super(opts);
     this.tag = opts.tag;
     this.cid = (opts.cid ?? 0) >>> 0;
@@ -64,14 +85,14 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
     this._rearm = false;
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     return (1n << VIRTIO_9P_MOUNT_TAG) | (1n << VIRTIO_F_VERSION_1);
   }
 
   // struct virtio_9p_config { __virtio16 tag_len; __u8 tag[]; } — little-endian.
   // The guest driver reads tag_len (offset 0) then tag (offset 2). Serve the
   // requested slice from that buffer, zero-padding past the end.
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(2 + this._tagBytes.length);
     new DataView(cfg.buffer).setUint16(0, this._tagBytes.length, true);
     cfg.set(this._tagBytes, 2);
@@ -81,7 +102,7 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q) {
+  onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the 9P server is on the main thread — forward the kick.
@@ -99,9 +120,8 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
    * VFS is async) and re-entrancy-safe: a kick arriving while a drain is in
    * flight re-scans instead of overlapping. Never throws — server.handle turns
    * 9P errors into Rlerror frames itself; the catch is a last-resort guard.
-   * @param {number} q
    */
-  async service(q: number) {
+  async service(q: number): Promise<void> {
     if (!this.server) {
       this.log(`[virtio-9p ${this.tag}] service() with no server`);
       return;
@@ -123,13 +143,13 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
         // bytes out of the vring), then service them concurrently — matching the
         // concurrently so independent in-flight 9P requests (distinct tags)
         // aren't serialized behind one slow VFS call.
-        const work = [];
-        let chain;
+        const work: { chain: VringChain; req: Uint8Array }[] = [];
+        let chain: VringChain | null;
         while ((chain = vr.next())) work.push({ chain, req: vr.readOut(chain) });
         if (work.length === 0) continue;
         await Promise.all(
           work.map(async ({ chain, req }) => {
-            let reply;
+            let reply: Uint8Array;
             try {
               reply = await this.server.handle(req, this.cid);
             } catch (e) {

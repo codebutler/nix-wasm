@@ -54,18 +54,24 @@ const GLOBALS = [
 
 const enc = new TextEncoder();
 
+/** One message argument: a 32-bit word or a NUL-terminated string. */
+interface WlArg {
+  u32?: number;
+  str?: string;
+}
+
 /** Round n up to the next multiple of 4. */
-function align4(n) {
+function align4(n: number): number {
   return (n + 3) & ~3;
 }
 
 /**
  * Build one Wayland message into a Uint8Array.
- * @param {number} objectId   target object id
- * @param {number} opcode     event opcode
- * @param {Array<{u32?:number, str?:string}>} args  ordered argument list
+ * @param objectId   target object id
+ * @param opcode     event opcode
+ * @param args  ordered argument list
  */
-function buildMessage(objectId: number, opcode: number, args: Array<{ u32?: number; str?: string; }>) {
+function buildMessage(objectId: number, opcode: number, args: WlArg[]): Uint8Array {
   // First pass: compute body size.
   let body = 0;
   for (const a of args) {
@@ -99,7 +105,7 @@ function buildMessage(objectId: number, opcode: number, args: Array<{ u32?: numb
 }
 
 /** Concatenate Uint8Arrays. */
-function concat(parts) {
+function concat(parts: Uint8Array[]): Uint8Array {
   let total = 0;
   for (const p of parts) total += p.length;
   const out = new Uint8Array(total);
@@ -118,22 +124,25 @@ function concat(parts) {
  * the handshake needs.
  */
 export class WlServer {
-  /** @param {(s:string)=>void} [log] */
-  constructor(log: (s: string) => void) {
+  log: (s: string) => void;
+  registries: Set<number>;
+  boundIds: Set<number>;
+  callbacks: Set<number>;
+  globalsSeen: number;
+
+  constructor(log?: (s: string) => void) {
     this.log = log || (() => {});
-    this.registries = new Set(); // registry object ids the client created
-    this.boundIds = new Set(); // ids bound via wl_registry.bind
-    this.callbacks = new Set(); // wl_callback ids created via wl_display.sync
+    this.registries = new Set<number>(); // registry object ids the client created
+    this.boundIds = new Set<number>(); // ids bound via wl_registry.bind
+    this.callbacks = new Set<number>(); // wl_callback ids created via wl_display.sync
     this.globalsSeen = 0; // diagnostic: how many global events we emitted
   }
 
   /**
    * Process all messages in `bytes` and return the concatenated reply bytes.
-   * @param {Uint8Array} bytes
-   * @returns {Uint8Array}
    */
   handle(bytes: Uint8Array): Uint8Array {
-    const replies = [];
+    const replies: Uint8Array[] = [];
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let off = 0;
     while (off + 8 <= bytes.length) {
@@ -153,7 +162,7 @@ export class WlServer {
     return replies.length ? concat(replies) : new Uint8Array(0);
   }
 
-  _dispatch(objectId, opcode, body) {
+  _dispatch(objectId: number, opcode: number, body: Uint8Array): Uint8Array | null {
     if (objectId === WL_DISPLAY_ID) {
       if (opcode === WL_DISPLAY_GET_REGISTRY) return this._getRegistry(body);
       if (opcode === WL_DISPLAY_SYNC) return this._sync(body);
@@ -171,14 +180,14 @@ export class WlServer {
 
   /** wl_display.get_registry(new_id registry): record the registry id, emit a
    *  wl_registry.global for each advertised global. */
-  _getRegistry(body) {
+  _getRegistry(body: Uint8Array): Uint8Array {
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
     const registryId = dv.getUint32(0, true);
     this.registries.add(registryId);
     this.log(
       `[wl-server] get_registry -> registry id=${registryId}, advertising ${GLOBALS.length} globals`,
     );
-    const parts = [];
+    const parts: Uint8Array[] = [];
     for (const g of GLOBALS) {
       parts.push(
         buildMessage(registryId, WL_REGISTRY_EVT_GLOBAL, [
@@ -194,7 +203,7 @@ export class WlServer {
 
   /** wl_registry.bind(name, interface, version, new_id): record the new id. The
    *  handshake needs nothing further from the bound object. */
-  _bind(body) {
+  _bind(body: Uint8Array): null {
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
     // args: u32 name, string interface, u32 version, new_id (u32)
     const name = dv.getUint32(0, true);
@@ -212,7 +221,7 @@ export class WlServer {
   /** wl_display.sync(new_id callback): emit wl_callback.done(serial) then
    *  wl_display.delete_id(callback) so the client frees it. This is what
    *  wl_display_roundtrip() waits on. */
-  _sync(body) {
+  _sync(body: Uint8Array): Uint8Array {
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
     const callbackId = dv.getUint32(0, true);
     this.callbacks.add(callbackId);

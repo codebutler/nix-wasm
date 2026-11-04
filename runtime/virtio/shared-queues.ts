@@ -15,6 +15,8 @@
 //   [0] desc_lo  [1] desc_hi  [2] avail_lo  [3] avail_hi
 //   [4] used_lo  [5] used_hi  [6] num       [7] lastAvail (Atomics)  [8] valid
 
+import type { VringLayout } from "./vring.ts";
+
 const SLOT_WORDS = 9;
 // Device-index capacity of the cross-worker table. Must cover every VW_DEV_*
 // the transport registers: WL=0, ECHO=1, NET=2, BLK=3, the virtio-9p channels
@@ -45,11 +47,11 @@ const TOTAL_WORDS = QUEUE_WORDS + CONFIG_WORDS;
 export const VIRTIO_QUEUES_BYTES = TOTAL_WORDS * 4;
 
 /** Allocate the shared queue-layout buffer (runtime/boot.js owns one). */
-export function makeSharedQueues() {
+export function makeSharedQueues(): SharedArrayBuffer {
   return new SharedArrayBuffer(VIRTIO_QUEUES_BYTES);
 }
 
-function slotBase(dev, q) {
+function slotBase(dev: number, q: number): number {
   if (dev >= MAX_DEVS || q >= MAX_QS) {
     throw new Error(`[virtio] (dev=${dev},q=${q}) exceeds shared-queue table`);
   }
@@ -58,13 +60,21 @@ function slotBase(dev, q) {
 
 /** Cross-worker view over a virtio queues SAB. */
 export class SharedQueues {
-  /** @param {SharedArrayBuffer} sab */
+  i32: Int32Array;
+
   constructor(sab: SharedArrayBuffer) {
     this.i32 = new Int32Array(sab);
   }
 
   /** Record a queue's vring layout (called from setupQueue, any worker). */
-  set(dev, q, desc, avail, used, num) {
+  set(
+    dev: number,
+    q: number,
+    desc: number | bigint,
+    avail: number | bigint,
+    used: number | bigint,
+    num: number | bigint,
+  ): void {
     const b = slotBase(dev, q);
     const i = this.i32;
     i[b + 0] = Number(desc) & 0xffffffff;
@@ -79,16 +89,16 @@ export class SharedQueues {
   }
 
   /** Whether a queue has been set up (in any worker). */
-  has(dev, q) {
+  has(dev: number, q: number): boolean {
     return Atomics.load(this.i32, slotBase(dev, q) + 8) === 1;
   }
 
   /** Read a queue's layout, or null if not set up. */
-  get(dev, q) {
+  get(dev: number, q: number): VringLayout | null {
     const b = slotBase(dev, q);
     if (Atomics.load(this.i32, b + 8) !== 1) return null;
     const i = this.i32;
-    const u32 = (lo, hi) => (i[lo] >>> 0) + (i[hi] >>> 0) * 0x100000000;
+    const u32 = (lo: number, hi: number): number => (i[lo] >>> 0) + (i[hi] >>> 0) * 0x100000000;
     return {
       desc: u32(b + 0, b + 1),
       avail: u32(b + 2, b + 3),
@@ -98,17 +108,17 @@ export class SharedQueues {
   }
 
   /** Read the shared host-side avail cursor. */
-  loadLastAvail(dev, q) {
+  loadLastAvail(dev: number, q: number): number {
     return Atomics.load(this.i32, slotBase(dev, q) + 7) & 0xffff;
   }
 
   /** Store the shared host-side avail cursor. */
-  storeLastAvail(dev, q, v) {
+  storeLastAvail(dev: number, q: number, v: number): void {
     Atomics.store(this.i32, slotBase(dev, q) + 7, v & 0xffff);
   }
 
   /** Forget a queue (reset). */
-  clear(dev, q) {
+  clear(dev: number, q: number): void {
     const b = slotBase(dev, q);
     Atomics.store(this.i32, b + 8, 0);
     Atomics.store(this.i32, b + 7, 0);
@@ -119,14 +129,14 @@ export class SharedQueues {
    * word so both fields update atomically. Read back by getConfigSize from any
    * worker. cols/rows are clamped to u16.
    */
-  setConfigSize(dev, cols, rows) {
+  setConfigSize(dev: number, cols: number, rows: number): void {
     if (dev >= MAX_DEVS) throw new Error(`[virtio] dev=${dev} exceeds config table`);
     const packed = ((rows & 0xffff) << 16) | (cols & 0xffff);
     Atomics.store(this.i32, CONFIG_BASE + dev, packed);
   }
 
   /** Read a device's window size. Returns {cols, rows} (0/0 if never set). */
-  getConfigSize(dev) {
+  getConfigSize(dev: number): { cols: number; rows: number } {
     if (dev >= MAX_DEVS) throw new Error(`[virtio] dev=${dev} exceeds config table`);
     const packed = Atomics.load(this.i32, CONFIG_BASE + dev) >>> 0;
     return { cols: packed & 0xffff, rows: (packed >>> 16) & 0xffff };

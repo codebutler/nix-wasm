@@ -27,10 +27,38 @@
 // funcref, and writes the result back — all in the process's own address space.
 import { instrument as softmmuInstrument } from "./softmmu-pass.ts";
 
+// The four numeric wasm value types the trampolines marshal.
+export type WasmValType = "i32" | "i64" | "f32" | "f64";
+
+// A signature in wasm value types (see genTrampoline).
+export interface FfiSignature {
+  params: WasmValType[];
+  result: WasmValType | null;
+}
+
+// The host pieces a soft-MMU (checked) generated module is wired to: the
+// task's page-table root, musl's syscall2 trap, the stack pointer global and
+// the TLS accessor.
+export interface MmuImports {
+  ptBase: number;
+  syscall2: Function;
+  stackPointer: WebAssembly.Global;
+  getTlsBase: Function;
+}
+
+// The control exports instrument() adds to a checked module.
+export interface MmuControlExports {
+  __mmu_pt_base: WebAssembly.Global;
+  __mmu_start?: () => void;
+}
+
+// A generated trampoline: (argPtr, retPtr, funcIndex) -> ().
+type Trampoline = (argPtr: number, retPtr: number, funcIndex: number) => void;
+
 // wasm value-type byte encodings.
-const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
-const LOAD = { i32: 0x28, i64: 0x29, f32: 0x2a, f64: 0x2b };
-const STORE = { i32: 0x36, i64: 0x37, f32: 0x38, f64: 0x39 };
+const VT: Record<WasmValType, number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+const LOAD: Record<WasmValType, number> = { i32: 0x28, i64: 0x29, f32: 0x2a, f64: 0x2b };
+const STORE: Record<WasmValType, number> = { i32: 0x36, i64: 0x37, f32: 0x38, f64: 0x39 };
 // opcodes used in canonical marshalling.
 const OP = {
   i64_extend_i32_u: 0xad,
@@ -50,8 +78,8 @@ const OP = {
 // is (i64 × NUM_FUNC_PARAMS) → i64. Must match userspace/fpcast-emu.nix.
 export const CANONICAL_PARAMS = 128;
 
-const uleb = (n) => {
-  const out = [];
+const uleb = (n: number): number[] => {
+  const out: number[] = [];
   let v = n >>> 0;
   do {
     let b = v & 0x7f;
@@ -61,8 +89,8 @@ const uleb = (n) => {
   } while (v);
   return out;
 };
-const sleb = (n) => {
-  const out = [];
+const sleb = (n: number): number[] => {
+  const out: number[] = [];
   let more = true;
   let v = n | 0;
   while (more) {
@@ -74,9 +102,13 @@ const sleb = (n) => {
   }
   return out;
 };
-const vec = (items) => [...uleb(items.length), ...items.flat()];
-const str = (s) => vec([...s].map((c) => c.charCodeAt(0)));
-const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
+const vec = (items: Array<number | number[]>): number[] => [...uleb(items.length), ...items.flat()];
+const str = (s: string): number[] => vec([...s].map((c) => c.charCodeAt(0)));
+const section = (id: number, payload: number[]): number[] => [
+  id,
+  ...uleb(payload.length),
+  ...payload,
+];
 
 /**
  * A signature: { params: ('i32'|'i64'|'f32'|'f64')[], result: same | null }.
@@ -84,25 +116,19 @@ const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
  * by-value → i32 pointer, struct return → leading i32 pointer + void, varargs →
  * trailing i32 pointer; see wasm32-raw-ffi.c) before calling here.
  *
- * @param {{ params: string[], result: string | null }} sig
  * `checked` adds the three imports/exports required by the checked soft-MMU
  * pass. They are otherwise unused by this raw generated module; instrument()
  * consumes them when it adds the faulting page-table walk.
- *
- * @param {{
- *   canonical?: boolean,
- *   checked?: boolean,
- *   sharedMemory?: boolean,
- *   memoryMaximum?: number,
- * }} [opts]
- * @returns {Uint8Array}
  */
-export function genTrampoline(sig: { params: string[]; result: string|null; }, opts: {
-canonical?: boolean;
-checked?: boolean;
-sharedMemory?: boolean;
-memoryMaximum?: number;
-} = {}): Uint8Array {
+export function genTrampoline(
+  sig: FfiSignature,
+  opts: {
+    canonical?: boolean;
+    checked?: boolean;
+    sharedMemory?: boolean;
+    memoryMaximum?: number;
+  } = {},
+): Uint8Array<ArrayBuffer> {
   const canonical = !!opts.canonical;
   const checked = !!opts.checked;
   const memoryImport = opts.sharedMemory
@@ -188,10 +214,9 @@ memoryMaximum?: number;
  * hb_* dlsym regression). Instantiate with { e: { f: rawFn } }; the adapted
  * function is exported as "thunk".
  *
- * @param {{ params: string[], result: string | null }} sig the RAW signature
- * @returns {Uint8Array}
+ * @param sig the RAW signature
  */
-export function genCanonicalThunk(sig: { params: string[]; result: string|null; }): Uint8Array {
+export function genCanonicalThunk(sig: FfiSignature): Uint8Array<ArrayBuffer> {
   // type 0 = the canonical thunk type; type 1 = the raw target signature.
   const canonType = [
     0x60,
@@ -209,7 +234,7 @@ export function genCanonicalThunk(sig: { params: string[]; result: string|null; 
   const funcSec = section(3, vec([[...uleb(0)]])); // local func (index 1): canonical type
   const exportSec = section(7, vec([[...str("thunk"), 0x00, ...uleb(1)]]));
 
-  const body = [];
+  const body: number[] = [];
   sig.params.forEach((p, i) => {
     body.push(OP.local_get, ...uleb(i)); // canonical i64 param i
     fromABI(body, p); // i64 -> raw param type
@@ -242,8 +267,8 @@ export function genCanonicalThunk(sig: { params: string[]; result: string|null; 
 }
 
 /** Raw ABI: load each arg at its natural type, call the exact signature. */
-function genRawBody(sig) {
-  const body = [];
+function genRawBody(sig: FfiSignature): number[] {
+  const body: number[] = [];
   if (sig.result) body.push(OP.local_get, ...uleb(1)); // retPtr for the later store
   sig.params.forEach((p, i) => {
     body.push(OP.local_get, ...uleb(0)); // argPtr
@@ -261,8 +286,8 @@ function genRawBody(sig) {
  * CANONICAL_PARAMS with i64 0, call (i64×N)->i64, convert the i64 result to the
  * real result type (fromABI). Mirrors binaryen FuncCastEmulation exactly.
  */
-function genCanonicalBody(sig) {
-  const body = [];
+function genCanonicalBody(sig: FfiSignature): number[] {
+  const body: number[] = [];
   if (sig.result) body.push(OP.local_get, ...uleb(1)); // retPtr for the store
   // real args, each extended to i64
   sig.params.forEach((p, i) => {
@@ -288,7 +313,7 @@ function genCanonicalBody(sig) {
 }
 
 /** Extend a value of wasm type `t` (on the stack) up to i64 (binaryen toABI). */
-function toABI(body, t) {
+function toABI(body: number[], t: WasmValType): void {
   switch (t) {
     case "i32":
       body.push(OP.i64_extend_i32_u);
@@ -307,7 +332,7 @@ function toABI(body, t) {
 }
 
 /** Convert an i64 (on the stack) down to wasm type `t` (binaryen fromABI). */
-function fromABI(body, t) {
+function fromABI(body: number[], t: WasmValType): void {
   switch (t) {
     case "i32":
       body.push(OP.i32_wrap_i64);
@@ -330,42 +355,36 @@ function fromABI(body, t) {
  * One per process (the trampolines close over the process's Memory + table).
  */
 export class FfiTrampolines {
-  /**
-   * @param {{
-   *   memory: WebAssembly.Memory,
-   *   table: WebAssembly.Table,
-   *   mmu?: {
-   *     ptBase: number,
-   *     syscall2: Function,
-   *     stackPointer: WebAssembly.Global,
-   *     getTlsBase: Function,
-   *   },
-   * }} opts
-   */
-  constructor({ memory, table, mmu }: {
-memory: WebAssembly.Memory;
-table: WebAssembly.Table;
-mmu?: {
-ptBase: number;
-syscall2: Function;
-stackPointer: WebAssembly.Global;
-getTlsBase: Function;
-};
-}) {
+  memory: WebAssembly.Memory;
+  table: WebAssembly.Table;
+  mmu: MmuImports | null;
+  sharedMemory: boolean;
+  memoryMaximum: number;
+  cache: Map<string, Trampoline>;
+
+  constructor({
+    memory,
+    table,
+    mmu,
+  }: {
+    memory: WebAssembly.Memory;
+    table: WebAssembly.Table;
+    mmu?: MmuImports;
+  }) {
     this.memory = memory;
     this.table = table;
     this.mmu = mmu || null;
     this.sharedMemory =
       typeof SharedArrayBuffer !== "undefined" && this.memory.buffer instanceof SharedArrayBuffer;
-    const memoryAny = /** @type {any} */ (this.memory);
-    const memoryType = typeof memoryAny.type === "function" ? memoryAny.type() : null;
+    // Memory.type() is the JS-API type-reflection proposal: absent on engines
+    // without it (and from lib.dom).
+    const memoryReflect: WebAssembly.Memory & { type?: () => { maximum?: number } } = this.memory;
+    const memoryType = typeof memoryReflect.type === "function" ? memoryReflect.type() : null;
     this.memoryMaximum = Number(memoryType?.maximum || 0x10000);
-    /** @type {Map<string, (a: number, r: number, f: number) => void>} */
     this.cache = new Map();
   }
 
-  /** @param {{ params: string[], result: string | null }} sig @param {boolean} canonical */
-  key(sig: { params: string[]; result: string|null; }, canonical: boolean) {
+  key(sig: FfiSignature, canonical: boolean): string {
     return (
       (this.mmu ? "M:" : "N:") +
       (canonical ? "C:" : "R:") +
@@ -378,18 +397,18 @@ getTlsBase: Function;
   /**
    * Get (or build + cache) the trampoline for a signature, then invoke it:
    * calls table[funcIndex] with args read from argPtr, result written to retPtr.
-   *
-   * @param {{ params: string[], result: string | null }} sig
-   * @param {boolean} canonical
-   * @param {number} funcIndex
-   * @param {number} argPtr
-   * @param {number} retPtr
    */
-  call(sig: { params: string[]; result: string|null; }, canonical: boolean, funcIndex: number, argPtr: number, retPtr: number) {
+  call(
+    sig: FfiSignature,
+    canonical: boolean,
+    funcIndex: number,
+    argPtr: number,
+    retPtr: number,
+  ): void {
     const k = this.key(sig, canonical);
     let tramp = this.cache.get(k);
     if (!tramp) {
-      let bytes = genTrampoline(sig, {
+      let bytes: Uint8Array = genTrampoline(sig, {
         canonical,
         checked: !!this.mmu,
         sharedMemory: this.sharedMemory,
@@ -402,7 +421,7 @@ getTlsBase: Function;
         // silently falling back to unchecked translation.
         bytes = softmmuInstrument(bytes, { checked: true, exportControls: true });
       }
-      const env = {
+      const env: WebAssembly.ModuleImports = {
         memory: this.memory,
         __indirect_function_table: this.table,
       };
@@ -414,17 +433,18 @@ getTlsBase: Function;
         });
       }
       const instance = new WebAssembly.Instance(
-        new WebAssembly.Module(/** @type {BufferSource} */ (bytes)),
+        // instrument() and genTrampoline() both build fresh, non-shared buffers.
+        new WebAssembly.Module(bytes as Uint8Array<ArrayBuffer>),
         {
           env,
         },
       );
       if (this.mmu) {
-        const mmuExports = /** @type {any} */ (instance.exports);
+        const mmuExports = instance.exports as WebAssembly.Exports & MmuControlExports;
         mmuExports.__mmu_pt_base.value = this.mmu.ptBase;
         if (mmuExports.__mmu_start) mmuExports.__mmu_start();
       }
-      tramp = /** @type {any} */ (instance.exports.trampoline);
+      tramp = instance.exports.trampoline as Trampoline;
       this.cache.set(k, tramp);
     }
     tramp(argPtr, retPtr, funcIndex);

@@ -47,6 +47,7 @@
 // compilation is unrestricted.
 
 import { genCanonicalThunk } from "./ffi-codegen.ts";
+import type { FfiSignature, MmuControlExports, MmuImports, WasmValType } from "./ffi-codegen.ts";
 import { genFaultBridge, instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.ts";
 
 const textDecoder = new TextDecoder("utf-8");
@@ -62,7 +63,12 @@ const SEC_ELEM = 9;
 // Value-type byte → ffi-codegen signature name (the four numeric types the
 // canonical fpcast ABI marshals). An export whose signature uses anything else
 // (ref types, v128) gets NO runtime thunk — see functionAddress.
-const VT_NAME = { 0x7f: "i32", 0x7e: "i64", 0x7d: "f32", 0x7c: "f64" };
+const VT_NAME: Partial<Record<number, WasmValType>> = {
+  0x7f: "i32",
+  0x7e: "i64",
+  0x7d: "f32",
+  0x7c: "f64",
+};
 
 // The fpcast-emu canonical param count (must match runtime/ffi-codegen.js
 // CANONICAL_PARAMS + userspace/fpcast-emu.nix `-pa max-func-params@128`). A
@@ -86,8 +92,10 @@ const WASM_DYLINK_MEM_INFO = 1;
 const WASM_DYLINK_NEEDED = 2;
 
 class Cursor {
-  /** @param {Uint8Array} bytes */
-  constructor(bytes: Uint8Array, at = 0) {
+  b: Uint8Array;
+  i: number;
+
+  constructor(bytes: Uint8Array, at: number = 0) {
     this.b = bytes;
     this.i = at;
   }
@@ -117,7 +125,7 @@ class Cursor {
     if (s < 32 && x & 0x40) r |= -1 << s;
     return r;
   }
-  bytes(n) {
+  bytes(n: number): Uint8Array {
     const v = this.b.subarray(this.i, this.i + n);
     this.i += n;
     return v;
@@ -135,51 +143,45 @@ class Cursor {
     const v = this.bytes(this.uleb());
     return textDecoder.decode(v.buffer instanceof ArrayBuffer ? v : v.slice());
   }
-  skip(n) {
+  skip(n: number): void {
     this.i += n;
   }
 }
 
 /** Skip one limits encoding (flags + min [+ max]). */
-function skipLimits(c) {
+function skipLimits(c: Cursor): number {
   const flags = c.uleb();
   c.uleb();
   if (flags & 1) c.uleb();
   return flags;
 }
 
+/** A module's dylink.0 memory/table requirements and DT_NEEDED list. */
+export interface DylinkSection {
+  memSize: number;
+  memAlign: number;
+  tableSize: number;
+  tableAlign: number;
+  needed: string[];
+}
+
 /**
  * Parse the sections of a wasm module this loader needs: the dylink.0 memory/
  * table requirements, the import list, the export list, and the (single,
  * __table_base-anchored) elem segment's function indices.
- *
- * @param {Uint8Array} bytes
- * @returns {{
- *   dylink: { memSize: number, memAlign: number, tableSize: number, tableAlign: number, needed: string[] } | null,
- *   imports: { module: string, name: string, kind: number }[],
- *   funcImportCount: number,
- *   tableImportInitial: number,
- *   exports: { name: string, kind: number, index: number }[],
- *   elem: { offsetKind: "global" | "const", offsetConst: number, funcIndices: number[] } | null,
- *   dynsym: Map<string, number>,
- *   fpcast: boolean,
- *   types: { params: number[], results: number[] }[],
- *   funcImportTypes: number[],
- *   funcTypes: number[],
- * }}
  */
 export function parseDylinkModule(bytes: Uint8Array): {
-dylink: { memSize: number; memAlign: number; tableSize: number; tableAlign: number; needed: string[]; }|null;
-imports: { module: string; name: string; kind: number; }[];
-funcImportCount: number;
-tableImportInitial: number;
-exports: { name: string; kind: number; index: number; }[];
-elem: { offsetKind: "global"|"const"; offsetConst: number; funcIndices: number[]; }|null;
-dynsym: Map<string,number>;
-fpcast: boolean;
-types: { params: number[]; results: number[]; }[];
-funcImportTypes: number[];
-funcTypes: number[];
+  dylink: DylinkSection | null;
+  imports: { module: string; name: string; kind: number }[];
+  funcImportCount: number;
+  tableImportInitial: number;
+  exports: { name: string; kind: number; index: number }[];
+  elem: { offsetKind: "global" | "const"; offsetConst: number; funcIndices: number[] } | null;
+  dynsym: Map<string, number>;
+  fpcast: boolean;
+  types: { params: number[]; results: number[] }[];
+  funcImportTypes: number[];
+  funcTypes: number[];
 } {
   if (
     bytes.length < 8 ||
@@ -191,7 +193,6 @@ funcTypes: number[];
     throw new Error("not a wasm module (bad magic)");
   }
   const c = new Cursor(bytes, 8);
-  /** @type {ReturnType<typeof parseDylinkModule>} */
   const info: ReturnType<typeof parseDylinkModule> = {
     dylink: null,
     imports: [],
@@ -220,7 +221,7 @@ funcTypes: number[];
       for (let k = 0; k < n; k++) {
         if (c.u8() !== 0x60) break; // functype tag; anything else = malformed
         const np = c.uleb();
-        const params = [];
+        const params: number[] = [];
         let allI64 = np === CANONICAL_PARAMS;
         for (let j = 0; j < np; j++) {
           const t = c.u8();
@@ -228,7 +229,7 @@ funcTypes: number[];
           if (t !== VT_I64) allI64 = false;
         }
         const nr = c.uleb();
-        const results = [];
+        const results: number[] = [];
         let i64Ret = nr === 1;
         for (let j = 0; j < nr; j++) {
           const t = c.u8();
@@ -252,7 +253,13 @@ funcTypes: number[];
           info.dynsym.set(sym, c.uleb());
         }
       } else if (name === "dylink.0") {
-        const d = { memSize: 0, memAlign: 0, tableSize: 0, tableAlign: 0, needed: [] };
+        const d: DylinkSection = {
+          memSize: 0,
+          memAlign: 0,
+          tableSize: 0,
+          tableAlign: 0,
+          needed: [],
+        };
         while (c.i < end) {
           const sub = c.u8();
           const subSize = c.uleb();
@@ -320,8 +327,7 @@ funcTypes: number[];
         }
         // offset expr: (i32.const N | global.get G) end
         const op = c.u8();
-        /** @type {"const" | "global"} */
-        let offsetKind: "const"|"global" = "const";
+        let offsetKind: "const" | "global" = "const";
         let offsetConst = 0;
         if (op === 0x41) {
           offsetKind = "const";
@@ -334,7 +340,7 @@ funcTypes: number[];
         }
         if (c.u8() !== 0x0b) throw new Error("elem offset expr not terminated");
         const count = c.uleb();
-        const funcIndices = [];
+        const funcIndices: number[] = [];
         for (let j = 0; j < count; j++) funcIndices.push(c.uleb());
         if (info.elem) throw new Error("multiple elem segments unsupported");
         info.elem = { offsetKind, offsetConst, funcIndices };
@@ -352,11 +358,11 @@ funcTypes: number[];
  * canonical ABI marshals exactly i32/i64/f32/f64). Used by functionAddress to
  * build canonical thunks for dlsym'd raw exports in an fpcast world.
  *
- * @param {ReturnType<typeof parseDylinkModule>} info
- * @returns {(name: string) => ({ params: string[], result: string | null } | null)}
  */
-function buildSigLookup(info: ReturnType<typeof parseDylinkModule>): (name: string) => ({ params: string[]; result: string|null; }|null) {
-  const byName = new Map();
+function buildSigLookup(
+  info: ReturnType<typeof parseDylinkModule>,
+): (name: string) => FfiSignature | null {
+  const byName = new Map<string, number>();
   for (const e of info.exports) if (e.kind === KIND_FUNC) byName.set(e.name, e.index);
   const { types, funcImportTypes, funcTypes, funcImportCount } = info;
   return (name) => {
@@ -365,13 +371,13 @@ function buildSigLookup(info: ReturnType<typeof parseDylinkModule>): (name: stri
     const ti = fi < funcImportCount ? funcImportTypes[fi] : funcTypes[fi - funcImportCount];
     const t = types[ti];
     if (!t || t.results.length > 1) return null;
-    const params = [];
+    const params: WasmValType[] = [];
     for (const b of t.params) {
       const n = VT_NAME[b];
       if (!n) return null;
       params.push(n);
     }
-    let result = null;
+    let result: WasmValType | null = null;
     if (t.results.length === 1) {
       result = VT_NAME[t.results[0]];
       if (!result) return null;
@@ -384,18 +390,15 @@ function buildSigLookup(info: ReturnType<typeof parseDylinkModule>): (name: stri
  * Map exported function names to their slot OFFSET within the module's elem
  * segment (i.e. the table index relative to the module's tableBase). Only
  * functions that are address-taken at build time appear (the fpcast rule).
- *
- * @param {ReturnType<typeof parseDylinkModule>} info
- * @returns {Map<string, number>}
  */
-export function exportedElemSlots(info: ReturnType<typeof parseDylinkModule>): Map<string,number> {
+export function exportedElemSlots(info: ReturnType<typeof parseDylinkModule>): Map<string, number> {
   // The cb.dynsym custom section (dynsym-inject seam) is authoritative when
   // present — it survives fpcast, which renumbers elem entries to thunks and
   // breaks the export-index matching below.
   if (info.dynsym.size > 0) return new Map(info.dynsym);
-  const slots = new Map();
+  const slots = new Map<string, number>();
   if (!info.elem) return slots;
-  const slotByFuncIndex = new Map();
+  const slotByFuncIndex = new Map<number, number>();
   info.elem.funcIndices.forEach((funcIndex, slot) => {
     // First slot wins if a function appears twice (it can't under wasm-ld,
     // which dedupes table entries, but be deterministic anyway).
@@ -412,23 +415,43 @@ export function exportedElemSlots(info: ReturnType<typeof parseDylinkModule>): M
 /** dl error codes (negated Linux errno), the guest musl maps them to dlerror text. */
 export const DL_ERRNO = { ENOENT: 2, ENOMEM: 12, EINVAL: 22, ENOEXEC: 8 };
 
+/** One loaded module's record (Track 0 §2 `modules[]` entry). */
+interface DlModule {
+  handle: number;
+  name: string;
+  bytes: Uint8Array | null;
+  memoryBase: number;
+  tableBase: number;
+  tableCount: number;
+  global: boolean;
+  instance: WebAssembly.Instance;
+  elemSlots: Map<string, number>;
+  dynSlots: Map<string, number>;
+  fpcast: boolean;
+  sigOf: (name: string) => FfiSignature | null;
+}
+
 /**
- * One loaded module's record (Track 0 §2 `modules[]` entry).
- * @typedef {{
- *   handle: number,
- *   name: string,
- *   bytes: Uint8Array | null,
- *   memoryBase: number,
- *   tableBase: number,
- *   tableCount: number,
- *   global: boolean,
- *   instance: WebAssembly.Instance,
- *   elemSlots: Map<string, number>,
- *   dynSlots: Map<string, number>,
- *   fpcast: boolean,
- *   sigOf: (name: string) => ({ params: string[], result: string | null } | null),
- * }} DlModule
+ * One table-layout-affecting operation, for fork/clone replay (Track 0 §4).
+ * {op:"load"} entries reference DynamicLoader.modules by index; {op:"install"}
+ * entries record a dynamic raw-export table install; {op:"grow"} is the
+ * tombstone of a load that failed at instantiate.
  */
+type DlOp =
+  | { op: "load"; module: number }
+  | { op: "install"; module: number; name: string }
+  | { op: "grow"; count: number };
+
+// A host env import object. lib.dom's WebAssembly.ImportValue leaves out
+// WebAssembly.Tag, which the worker's env carries (__cpp_exception) and side
+// modules may import (the KIND_TAG case in load()).
+export type EnvImports = Record<string, WebAssembly.ImportValue | WebAssembly.Tag>;
+
+// Exports a side module may carry beyond its symbols.
+interface SideModuleExports {
+  __wasm_apply_data_relocs?: () => void;
+  __wasm_call_ctors?: () => void;
+}
 
 /**
  * The per-process dynamic loader. One instance per user program image (reset on
@@ -437,36 +460,40 @@ export const DL_ERRNO = { ENOENT: 2, ENOMEM: 12, EINVAL: 22, ENOEXEC: 8 };
  * dlopen, and dlsym() serves both.
  */
 export class DynamicLoader {
+  memory: WebAssembly.Memory;
+  table: WebAssembly.Table;
+  baseEnv: EnvImports;
+  archBits: number;
+  log: (msg: string) => void;
+  mmu: MmuImports | null;
+  faultTableIndex: number | null;
+  faultBridgeInstance: WebAssembly.Instance | null;
+  modules: DlModule[];
+  opLog: DlOp[];
+  lastError: number;
+  thunkedSlots: Set<number>;
+  thunkModules: Map<string, WebAssembly.Module>;
+
   /**
-   * @param {{
-   *   memory: WebAssembly.Memory,
-   *   table: WebAssembly.Table,
-   *   baseEnv: Record<string, unknown>,
-   *   archBits?: number,
-   *   log?: (msg: string) => void,
-   *   mmu?: {
-   *     ptBase: number,
-   *     syscall2: Function,
-   *     stackPointer: WebAssembly.Global,
-   *     getTlsBase: Function,
-   *   },
-   * }} opts baseEnv = the worker's host-provided env import object (syscalls,
+   * @param opts baseEnv = the worker's host-provided env import object (syscalls,
    *   abort, lsan stubs, …) — the FINAL fallback for a side module's unresolved
    *   env imports, exactly the set the main module gets.
    */
-  constructor({ memory, table, baseEnv, archBits = 32, log = () => {}, mmu }: {
-memory: WebAssembly.Memory;
-table: WebAssembly.Table;
-baseEnv: Record<string,unknown>;
-archBits?: number;
-log?: (msg: string) => void;
-mmu?: {
-ptBase: number;
-syscall2: Function;
-stackPointer: WebAssembly.Global;
-getTlsBase: Function;
-};
-}) {
+  constructor({
+    memory,
+    table,
+    baseEnv,
+    archBits = 32,
+    log = () => {},
+    mmu,
+  }: {
+    memory: WebAssembly.Memory;
+    table: WebAssembly.Table;
+    baseEnv: EnvImports;
+    archBits?: number;
+    log?: (msg: string) => void;
+    mmu?: MmuImports;
+  }) {
     this.memory = memory;
     this.table = table;
     this.baseEnv = baseEnv;
@@ -481,7 +508,8 @@ getTlsBase: Function;
       // call_indirect without adding imports and renumbering every defined
       // function in an arbitrary module.
       this.faultBridgeInstance = new WebAssembly.Instance(
-        new WebAssembly.Module(/** @type {BufferSource} */ (genFaultBridge())),
+        // genFaultBridge() builds a fresh, non-shared buffer.
+        new WebAssembly.Module(genFaultBridge() as Uint8Array<ArrayBuffer>),
         {
           env: {
             __wasm_syscall_2: this.mmu.syscall2,
@@ -493,36 +521,40 @@ getTlsBase: Function;
       this.faultTableIndex = this.table.grow(1);
       this.table.set(this.faultTableIndex, this.faultBridgeInstance.exports.fault);
     }
-    /** @type {DlModule[]} */
     this.modules = [];
     /**
      * Ordered log of table-layout-affecting operations, for fork/clone replay
      * (Track 0 §4). {op:"load"} entries reference this.modules by index;
      * {op:"install"} entries record a dynamic raw-export table install.
-     * @type {({ op: "load", module: number } | { op: "install", module: number, name: string } | { op: "grow", count: number })[]}
      */
     this.opLog = [];
     this.lastError = 0;
     /** Table slots holding runtime-generated canonical thunks (dynSlots that
-     *  adapt a raw dlsym'd export to the fpcast ABI — see functionAddress).
-     *  @type {Set<number>} */
+     *  adapt a raw dlsym'd export to the fpcast ABI — see functionAddress). */
     this.thunkedSlots = new Set();
-    /** Compiled thunk modules, keyed by raw signature. @type {Map<string, WebAssembly.Module>} */
+    /** Compiled thunk modules, keyed by raw signature. */
     this.thunkModules = new Map();
   }
 
-  /** @param {number} v */
-  ulong(v: number) {
+  ulong(v: number): number | bigint {
     return this.archBits === 64 ? BigInt(v) : Number(v);
   }
 
   /**
    * Register the already-instantiated MAIN module (handle 1). `bytes` may be a
    * view over shared kernel memory — only parsed here, never retained.
-   *
-   * @param {{ instance: WebAssembly.Instance, bytes: Uint8Array, memoryBase: number, tableBase: number }} m
    */
-  registerMain({ instance, bytes, memoryBase, tableBase }: { instance: WebAssembly.Instance; bytes: Uint8Array; memoryBase: number; tableBase: number; }) {
+  registerMain({
+    instance,
+    bytes,
+    memoryBase,
+    tableBase,
+  }: {
+    instance: WebAssembly.Instance;
+    bytes: Uint8Array;
+    memoryBase: number;
+    tableBase: number;
+  }) {
     const info = parseDylinkModule(bytes);
     this.modules.push({
       handle: 1,
@@ -544,10 +576,9 @@ getTlsBase: Function;
    * dlopen phase 1 — parse the module's dylink requirements so the GUEST can
    * allocate memoryBase in its own address space (its malloc owns the arena).
    *
-   * @param {Uint8Array} bytes
-   * @returns {{ memSize: number, memAlign: number, tableSize: number } | number} negative errno on failure
+   * @returns negative errno on failure
    */
-  probe(bytes: Uint8Array): { memSize: number; memAlign: number; tableSize: number; }|number {
+  probe(bytes: Uint8Array): { memSize: number; memAlign: number; tableSize: number } | number {
     let info;
     try {
       info = parseDylinkModule(bytes);
@@ -567,10 +598,8 @@ getTlsBase: Function;
    * Resolve a symbol to an exported value across the loaded chain: main first,
    * then global side modules in load order. (A module's OWN symbols never reach
    * here — -Bsymbolic binds them at link time.) Returns { module, value } or null.
-   *
-   * @param {string} name
    */
-  resolveExport(name: string) {
+  resolveExport(name: string): { module: DlModule; value: WebAssembly.ExportValue } | null {
     for (const m of this.modules) {
       if (!m.global) continue;
       const v = m.instance.exports[name];
@@ -584,14 +613,13 @@ getTlsBase: Function;
    * rule: prefer the defining module's own elem slot; fall back to a dynamic
    * raw-export install (logged for replay).
    *
-   * @param {DlModule} m the defining module
-   * @param {string} name
-   * @param {Function} fn the module's export
-   * @param {boolean} [logged] false while building a load's GOT imports: those
+   * @param m the defining module
+   * @param name
+   * @param fn the module's export
+   * @param logged false while building a load's GOT imports: those
    *   installs are deterministic consequences of the load and are reproduced
    *   by replaying the load itself — logging them too would double-install on
    *   replay and shift every later index.
-   * @returns {number}
    */
   functionAddress(m: DlModule, name: string, fn: Function, logged: boolean = true): number {
     const slot = m.elemSlots.get(name);
@@ -608,7 +636,7 @@ getTlsBase: Function;
     // of the build-time FuncCastEmulation elem rewrite). Signature unknown
     // (exotic types / no export record) → install raw and warn: a direct
     // canonical call would trap anyway, but the libffi path can still use it.
-    let install = /** @type {any} */ (fn);
+    let install: WebAssembly.ExportValue = fn;
     let thunked = false;
     if (this.modules[0]?.fpcast) {
       const sig = m.sigOf(name);
@@ -631,14 +659,12 @@ getTlsBase: Function;
    * A canonical-ABI adapter around a raw export (see functionAddress). Thunk
    * MODULES are cached per raw signature; each target gets its own (cheap)
    * instance binding the import.
-   * @param {{ params: string[], result: string | null }} sig
-   * @param {Function} fn
    */
-  #canonicalThunk(sig: { params: string[]; result: string|null; }, fn: Function) {
+  #canonicalThunk(sig: FfiSignature, fn: Function): WebAssembly.ExportValue {
     const key = `${sig.params.join(",")}->${sig.result ?? ""}`;
     let mod = this.thunkModules.get(key);
     if (!mod) {
-      mod = new WebAssembly.Module(/** @type {BufferSource} */ (genCanonicalThunk(sig)));
+      mod = new WebAssembly.Module(genCanonicalThunk(sig));
       this.thunkModules.set(key, mod);
     }
     return new WebAssembly.Instance(mod, { e: { f: fn } }).exports.thunk;
@@ -652,9 +678,6 @@ getTlsBase: Function;
    * thunk (fpcast world); un-thunked dynSlots are raw. Falls back to the main module's
    * fpcast status for slots outside any recorded range (e.g. a program that
    * never dlopen'd — its own function pointers follow its own build).
-   *
-   * @param {number} index
-   * @returns {boolean}
    */
   isCanonicalSlot(index: number): boolean {
     for (const m of this.modules) {
@@ -672,20 +695,21 @@ getTlsBase: Function;
   }
 
   /** A data symbol's absolute address: defining module's memoryBase + relative export. */
-  dataAddress(m, value) {
-    return m.memoryBase + Number(/** @type {WebAssembly.Global} */ (value).value);
+  dataAddress(m: DlModule, value: WebAssembly.Global): number {
+    return m.memoryBase + Number(value.value);
   }
 
   /**
    * dlopen phase 2 — instantiate the side module at the guest-allocated
    * memoryBase. Synchronous. Returns the module handle (>1) or negative errno.
    *
-   * @param {Uint8Array} bytes the module image (copied; retained for replay)
-   * @param {number} memoryBase
-   * @param {{ name?: string, global?: boolean, replay?: boolean }} [opts]
-   * @returns {number}
+   * @param bytes the module image (copied; retained for replay)
    */
-  load(bytes: Uint8Array, memoryBase: number, opts: { name?: string; global?: boolean; replay?: boolean; } = {}): number {
+  load(
+    bytes: Uint8Array,
+    memoryBase: number,
+    opts: { name?: string; global?: boolean; replay?: boolean } = {},
+  ): number {
     const { name = "<side>", global = true, replay = false } = opts;
     let info;
     try {
@@ -703,7 +727,6 @@ getTlsBase: Function;
       info.elem ? info.elem.funcIndices.length : 0,
     );
 
-    /** @type {DlModule} */
     const record: DlModule = {
       handle: this.modules.length + 1,
       name,
@@ -712,7 +735,7 @@ getTlsBase: Function;
       tableBase: 0, // assigned below, after fallible resolution
       tableCount,
       global,
-      instance: /** @type {any} */ (null),
+      instance: null, // set once instantiated (phase 2)
       elemSlots: exportedElemSlots(info),
       dynSlots: new Map(),
       fpcast: info.fpcast,
@@ -731,20 +754,21 @@ getTlsBase: Function;
       // Always compile from an owned, non-shared copy: `bytes` may be a view
       // over the guest's SharedArrayBuffer-backed memory, which the
       // WebAssembly.Module constructor rejects.
-      let moduleBytes = /** @type {Uint8Array} */ (record.bytes);
+      let moduleBytes: Uint8Array = record.bytes;
       if (this.mmu && !isInstrumented(moduleBytes)) {
         moduleBytes = softmmuInstrument(moduleBytes, {
           checked: true,
-          faultTableIndex: /** @type {number} */ (this.faultTableIndex),
+          faultTableIndex: this.faultTableIndex,
         });
       }
-      module = new WebAssembly.Module(/** @type {BufferSource} */ (moduleBytes));
+      // record.bytes is an owned slice (or replay's own ArrayBuffer), and
+      // instrument() builds a fresh buffer: never shared.
+      module = new WebAssembly.Module(moduleBytes as Uint8Array<ArrayBuffer>);
     } catch (e) {
       this.log(`[dylink] load(${name}): compile failed: ${e}`);
       return -DL_ERRNO.ENOEXEC;
     }
-    /** @type {Record<string, unknown>} */
-    const envImports: Record<string,unknown> = {};
+    const envImports: EnvImports = {};
     for (const imp of info.imports) {
       if (imp.module !== "env") continue;
       if (
@@ -761,8 +785,8 @@ getTlsBase: Function;
         const r = this.resolveExport(imp.name);
         if (r && typeof r.value === "function") {
           envImports[imp.name] = r.value;
-        } else if (typeof (/** @type {any} */ (this.baseEnv)[imp.name]) !== "undefined") {
-          envImports[imp.name] = /** @type {any} */ (this.baseEnv)[imp.name];
+        } else if (typeof this.baseEnv[imp.name] !== "undefined") {
+          envImports[imp.name] = this.baseEnv[imp.name];
         } else {
           this.log(`[dylink] load(${name}): unresolved function import env.${imp.name}`);
           return -DL_ERRNO.ENOEXEC;
@@ -770,14 +794,14 @@ getTlsBase: Function;
       } else if (imp.kind === KIND_GLOBAL) {
         const r = this.resolveExport(imp.name);
         if (r && r.value instanceof WebAssembly.Global) envImports[imp.name] = r.value;
-        else if (/** @type {any} */ (this.baseEnv)[imp.name] instanceof WebAssembly.Global)
-          envImports[imp.name] = /** @type {any} */ (this.baseEnv)[imp.name];
+        else if (this.baseEnv[imp.name] instanceof WebAssembly.Global)
+          envImports[imp.name] = this.baseEnv[imp.name];
         else {
           this.log(`[dylink] load(${name}): unresolved global import env.${imp.name}`);
           return -DL_ERRNO.ENOEXEC;
         }
       } else if (imp.kind === KIND_TAG) {
-        envImports[imp.name] = /** @type {any} */ (this.baseEnv)[imp.name];
+        envImports[imp.name] = this.baseEnv[imp.name];
         if (!envImports[imp.name]) {
           this.log(`[dylink] load(${name}): unresolved tag import env.${imp.name}`);
           return -DL_ERRNO.ENOEXEC;
@@ -798,13 +822,12 @@ getTlsBase: Function;
     record.tableBase = tableBase;
     this.modules.push(record);
 
-    const g = (v, mutable = true) =>
+    const g = (v: number, mutable: boolean = true): WebAssembly.Global =>
       new WebAssembly.Global(
         { value: this.archBits === 64 ? "i64" : "i32", mutable },
         this.ulong(v),
       );
-    /** @type {Record<string, Record<string, unknown>>} */
-    const imports: Record<string,Record<string,unknown>> = {
+    const imports: Record<string, EnvImports> = {
       env: {
         ...envImports,
         memory: this.memory,
@@ -812,7 +835,7 @@ getTlsBase: Function;
         __memory_base: g(memoryBase, false),
         __table_base: g(tableBase, false),
         __table_base32: new WebAssembly.Global({ value: "i32", mutable: false }, tableBase),
-        __stack_pointer: /** @type {any} */ (this.baseEnv).__stack_pointer,
+        __stack_pointer: this.baseEnv.__stack_pointer,
       },
       "GOT.mem": {},
       "GOT.func": {},
@@ -835,7 +858,9 @@ getTlsBase: Function;
 
     let instance;
     try {
-      instance = new WebAssembly.Instance(module, /** @type {any} */ (imports));
+      // EnvImports differs from WebAssembly.Imports only by WebAssembly.Tag
+      // (missing from lib.dom's ImportValue; the engine accepts it).
+      instance = new WebAssembly.Instance(module, imports as WebAssembly.Imports);
     } catch (e) {
       this.log(`[dylink] load(${name}): instantiate failed: ${e}`);
       this.modules.pop();
@@ -845,7 +870,7 @@ getTlsBase: Function;
     record.instance = instance;
 
     if (this.mmu) {
-      const ex = /** @type {any} */ (instance.exports);
+      const ex = instance.exports as WebAssembly.Exports & MmuControlExports;
       ex.__mmu_pt_base.value = this.mmu.ptBase;
       if (ex.__mmu_start) ex.__mmu_start();
     }
@@ -854,7 +879,7 @@ getTlsBase: Function;
     // fork/clone replay, where the (shared or copied) memory already holds the
     // parent's initialized/mutated data (Track 0 §4 step 3).
     if (!replay) {
-      const ex = /** @type {any} */ (instance.exports);
+      const ex = instance.exports as WebAssembly.Exports & SideModuleExports;
       if (ex.__wasm_apply_data_relocs) ex.__wasm_apply_data_relocs();
       if (ex.__wasm_call_ctors) ex.__wasm_call_ctors();
     }
@@ -865,13 +890,8 @@ getTlsBase: Function;
    * dlsym — resolve `name` against `handle` (0 = RTLD_DEFAULT: global scope in
    * load order). Returns the wasm "address" (data address or fn table index),
    * 0 when not found.
-   *
-   * @param {number} handle
-   * @param {string} name
-   * @returns {number}
    */
   dlsym(handle: number, name: string): number {
-    /** @type {DlModule[]} */
     let search: DlModule[];
     if (handle === 0) {
       search = this.modules.filter((m) => m.global);
@@ -899,7 +919,7 @@ getTlsBase: Function;
         .filter((m) => m.handle !== 1)
         .map((m) => ({
           name: m.name,
-          bytes: /** @type {Uint8Array} */ (m.bytes).slice().buffer,
+          bytes: m.bytes.slice().buffer,
           memoryBase: m.memoryBase,
           global: m.global,
         })),
@@ -911,10 +931,8 @@ getTlsBase: Function;
    * Reproduce a parent's table layout after the child's main module is
    * instantiated: walk the op log, re-loading side modules (relocs/ctors
    * skipped) and re-doing dynamic installs, in the exact original order.
-   *
-   * @param {ReturnType<DynamicLoader["snapshot"]>} snap
    */
-  replay(snap: ReturnType<DynamicLoader["snapshot"]>) {
+  replay(snap: ReturnType<DynamicLoader["snapshot"]>): void {
     let next = 0; // index into snap.modules, consumed by "load" entries in order
     for (const entry of snap.opLog) {
       if (entry.op === "load") {

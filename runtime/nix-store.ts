@@ -23,6 +23,18 @@
 // readOnlyPrefixes=["/"] so the whole store rejects writes.
 
 import { MemVfs } from "./ninep/mem-vfs.ts";
+import type { MemSeedTree } from "./ninep/mem-vfs.ts";
+import type { NinePVfs } from "./ninep/server.ts";
+
+/** One package's files: path-within-the-package (e.g. "bin/cbhello") → bytes. */
+export type NixPackageFiles = Record<string, Uint8Array<ArrayBuffer>>;
+
+/** The read-only store VFS, plus the absolute guest paths it created. */
+export interface NixStoreVfs extends NinePVfs {
+  rename(): Promise<never>;
+  isWritablePath(): boolean;
+  storePaths: string[];
+}
 
 // Nix's base32 alphabet (RFC 4648 minus e, o, t, u). We use it MSB-first over
 // the leading SHA-256 bytes — deterministic + content-addressed; not the exact
@@ -30,7 +42,7 @@ import { MemVfs } from "./ninep/mem-vfs.ts";
 const NIX_B32 = "0123456789abcdfghijklmnpqrsvwxyz";
 const HASH_LEN = 32; // store-path hash length, like Nix (32 base32 chars = 160 bits)
 
-function base32(bytes, len) {
+function base32(bytes: Uint8Array, len: number): string {
   let bits = 0;
   let value = 0;
   let out = "";
@@ -51,7 +63,7 @@ const enc = new TextEncoder();
 
 // Deterministic serialization of a package's files → SHA-256 → base32. Sorting
 // the paths makes the hash independent of insertion order.
-async function contentHash(files) {
+async function contentHash(files: NixPackageFiles): Promise<string> {
   const names = Object.keys(files).sort();
   const parts = [];
   for (const name of names) {
@@ -73,40 +85,39 @@ async function contentHash(files) {
 
 // Expand a flat { "bin/cbhello": bytes } map into a nested folder tree the
 // MemVfs seed format understands ({ bin: { cbhello: bytes } }).
-function buildTree(files) {
-  const root = {};
+function buildTree(files: NixPackageFiles): MemSeedTree {
+  const root: MemSeedTree = {};
   for (const [path, bytes] of Object.entries(files)) {
     const segs = path.split("/").filter(Boolean);
     let cur = root;
     for (let i = 0; i < segs.length - 1; i++) {
       cur[segs[i]] = cur[segs[i]] || {};
-      cur = cur[segs[i]];
+      cur = cur[segs[i]] as MemSeedTree; // a segment before the last is a folder
     }
     cur[segs[segs.length - 1]] = bytes;
   }
   return root;
 }
 
-function erofs(op) {
-  const e = new Error("EROFS: " + op + " on a read-only store");
-  // @ts-ignore — server.js maps .code → Linux errno (E.ROFS)
-  e.code = "EROFS";
-  return e;
+function erofs(op: string) {
+  // server.js maps .code → Linux errno (E.ROFS)
+  return Object.assign(new Error("EROFS: " + op + " on a read-only store"), { code: "EROFS" });
 }
 
 /**
  * Build a read-only content-addressed store VFS for `/nix`.
  *
- * @param {Array<{ name: string, version?: string, files: Record<string, Uint8Array> }>} [packages]
- *   each package's `files` maps a path-within-the-package (e.g. "bin/cbhello")
+ * @param packages each package's `files` maps a path-within-the-package (e.g. "bin/cbhello")
  *   to its bytes.
- * @returns {Promise<any>} a VFS (stat/list/readBlob + EROFS mutations) whose tree
+ * @returns a VFS (stat/list/readBlob + EROFS mutations) whose tree
  *   is rooted at `/nix` (so `/store/<path>` here is `/nix/store/<path>` in the
  *   guest), plus a `storePaths` array of the absolute guest paths created.
  */
-export async function createNixStore(packages: Array<{ name: string; version?: string; files: Record<string,Uint8Array>; }> = []): Promise<any> {
-  const store = {};
-  const storePaths = [];
+export async function createNixStore(
+  packages: Array<{ name: string; version?: string; files: NixPackageFiles }> = [],
+): Promise<NixStoreVfs> {
+  const store: MemSeedTree = {};
+  const storePaths: string[] = [];
   for (const pkg of packages) {
     const hash = await contentHash(pkg.files);
     const dir = `${hash}-${pkg.name}${pkg.version ? "-" + pkg.version : ""}`;
@@ -120,9 +131,9 @@ export async function createNixStore(packages: Array<{ name: string; version?: s
   // rather than leaning on MemVfs's prefix mechanism (which doesn't special-case
   // a "/" root). Reads forward to the in-memory tree.
   return {
-    stat: (p) => tree.stat(p),
-    list: (p) => tree.list(p),
-    readBlob: (p) => tree.readBlob(p),
+    stat: (p: string) => tree.stat(p),
+    list: (p: string) => tree.list(p),
+    readBlob: (p: string) => tree.readBlob(p),
     async write() {
       throw erofs("write");
     },

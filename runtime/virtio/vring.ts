@@ -14,19 +14,56 @@
 export const VRING_DESC_F_NEXT = 1;
 export const VRING_DESC_F_WRITE = 2;
 
+/** A queue's split-vring byte offsets in linear memory, and its ring size. */
+export interface VringLayout {
+  desc: number;
+  avail: number;
+  used: number;
+  num: number;
+}
+
+/** External host-side avail cursor (shared across workers). */
+export interface VringCursor {
+  load: () => number;
+  store: (v: number) => void;
+}
+
+/** One descriptor's buffer: a linear-memory byte offset and length. */
+export interface VringSegment {
+  addr: number;
+  len: number;
+}
+
+/** A popped descriptor chain: its head index and readable/writable segments. */
+export interface VringChain {
+  head: number;
+  /** readable (device-read) segments */
+  out: VringSegment[];
+  /** writable (device-write) segments */
+  in: VringSegment[];
+}
+
 /**
  * One split virtqueue the host services. Wraps the desc/avail/used offsets the
  * guest passed via wasm_virtio_setup_queue and tracks the host-side avail index.
  */
 export class Vring {
+  memory: WebAssembly.Memory;
+  desc: number;
+  avail: number;
+  used: number;
+  num: number;
+  /** Host-side index into the avail ring (backed by `cursor` when given). */
+  lastAvail: number;
+
   /**
-   * @param {WebAssembly.Memory} memory  shared kernel memory (buffer may detach on grow)
-   * @param {{desc:number, avail:number, used:number, num:number}} layout
-   * @param {{load:()=>number, store:(v:number)=>void}} [cursor]
+   * @param memory  shared kernel memory (buffer may detach on grow)
+   * @param layout
+   * @param cursor
    *   external host-side avail cursor (shared across workers); defaults to a
    *   per-instance counter.
    */
-  constructor(memory: WebAssembly.Memory, layout: { desc: number; avail: number; used: number; num: number; }, cursor: { load: () => number; store: (v: number) => void; }) {
+  constructor(memory: WebAssembly.Memory, layout: VringLayout, cursor?: VringCursor) {
     this.memory = memory;
     this.desc = layout.desc;
     this.avail = layout.avail;
@@ -35,7 +72,7 @@ export class Vring {
     if (cursor) {
       Object.defineProperty(this, "lastAvail", {
         get: () => cursor.load(),
-        set: (v) => cursor.store(v),
+        set: (v: number) => cursor.store(v),
       });
     } else {
       this.lastAvail = 0; // host-side index into the avail ring
@@ -43,17 +80,17 @@ export class Vring {
   }
 
   // Re-fetch the DataView: memory.buffer detaches when the wasm memory grows.
-  _dv() {
+  _dv(): DataView {
     return new DataView(this.memory.buffer);
   }
 
   /** Read avail.idx (the guest's producer index). */
-  availIdx() {
+  availIdx(): number {
     return this._dv().getUint16(this.avail + 2, true);
   }
 
   /** Whether the guest has exposed buffers the host hasn't taken yet. */
-  hasAvail() {
+  hasAvail(): boolean {
     return this.lastAvail !== this.availIdx();
   }
 
@@ -61,7 +98,7 @@ export class Vring {
    * Pop the next available descriptor chain. Returns { head, out, in } where
    * out/in are arrays of {addr,len} readable/writable segments, or null if none.
    */
-  next() {
+  next(): VringChain | null {
     const v = this._dv();
     if (this.lastAvail === v.getUint16(this.avail + 2, true)) return null;
 
@@ -72,10 +109,10 @@ export class Vring {
     return { head, out, in: in_ };
   }
 
-  _readChain(head) {
+  _readChain(head: number): { out: VringSegment[]; in: VringSegment[] } {
     const v = this._dv();
-    const out = [];
-    const in_ = [];
+    const out: VringSegment[] = [];
+    const in_: VringSegment[] = [];
     let i = head;
     for (let guard = 0; guard <= this.num; guard++) {
       const d = this.desc + i * 16;
@@ -91,7 +128,7 @@ export class Vring {
   }
 
   /** Read a chain's readable (out) segments as one flat Uint8Array. */
-  readOut(chain) {
+  readOut(chain: VringChain): Uint8Array {
     const v = this._dv();
     let total = 0;
     for (const s of chain.out) total += s.len;
@@ -107,7 +144,7 @@ export class Vring {
    * Write `bytes` into a chain's writable (in) segments, truncating to the
    * available writable space. Returns the number of bytes written.
    */
-  writeIn(chain, bytes) {
+  writeIn(chain: VringChain, bytes: ArrayLike<number>): number {
     const v = this._dv();
     let si = 0;
     for (const s of chain.in) {
@@ -120,14 +157,14 @@ export class Vring {
   }
 
   /** Total writable byte capacity of a chain. */
-  inCapacity(chain) {
+  inCapacity(chain: VringChain): number {
     let n = 0;
     for (const s of chain.in) n += s.len;
     return n;
   }
 
   /** Publish a used-buffer: used.ring[idx % num] = {id: head, len}; used.idx++. */
-  pushUsed(head, len) {
+  pushUsed(head: number, len: number): void {
     const u = this._dv();
     const usedIdx = u.getUint16(this.used + 2, true);
     const slot = usedIdx % this.num;

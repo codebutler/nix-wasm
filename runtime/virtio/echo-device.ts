@@ -9,9 +9,11 @@
 
 import { VirtioWasmDevice } from "./device.ts";
 import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
+import type { RaiseInterrupt } from "./device.ts";
+import type { VringChain } from "./vring.ts";
 
 export class EchoDevice extends VirtioWasmDevice {
-  onNotify(q) {
+  onNotify(q: number): void {
     const vr = this.vring(q);
     if (!vr) {
       this.log(`[virtio-echo] notify for unknown queue ${q}`);
@@ -19,7 +21,7 @@ export class EchoDevice extends VirtioWasmDevice {
     }
 
     let serviced = 0;
-    let chain;
+    let chain: VringChain | null;
     while ((chain = vr.next())) {
       const src = vr.readOut(chain);
       const inv = new Uint8Array(src.length);
@@ -34,6 +36,30 @@ export class EchoDevice extends VirtioWasmDevice {
   }
 }
 
+/** makeEchoDevice options: the base device opts with defaults filled in. */
+export interface EchoDeviceFactoryOptions {
+  memory: WebAssembly.Memory;
+  raiseInterrupt: RaiseInterrupt;
+  dev?: number;
+  irq?: number;
+  onlineCpus?: Set<number> | number[];
+  sharedQueues?: SharedQueues;
+  log?: (s: string) => void;
+}
+
+/** The 1a { setupQueue, notify } shape makeEchoDevice returns. */
+export interface EchoDeviceHandle {
+  device: EchoDevice;
+  setupQueue: (
+    q: number,
+    desc: number | bigint,
+    avail: number | bigint,
+    used: number | bigint,
+    num: number,
+  ) => void;
+  notify: (q: number) => void;
+}
+
 /**
  * Back-compat factory used by 1a tests. Builds an EchoDevice and exposes the
  * old { setupQueue, notify } shape.
@@ -46,7 +72,7 @@ export function makeEchoDevice({
   onlineCpus,
   sharedQueues,
   log,
-}) {
+}: EchoDeviceFactoryOptions): EchoDeviceHandle {
   const shared = sharedQueues || new SharedQueues(makeSharedQueues());
   const d = new EchoDevice({
     dev,

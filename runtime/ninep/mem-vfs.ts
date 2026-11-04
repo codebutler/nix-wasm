@@ -13,18 +13,42 @@
 // Errors are thrown as `Error` with a `.code` (ENOENT/EEXIST/EROFS/…), matching
 // how the real dispatcher surfaces write-policy violations.
 
-function vfsError(code, path) {
-  const e = new Error(code + ": " + path);
-  // @ts-ignore — augmenting Error with a code, like js/vfs/index.js does
-  e.code = code;
-  return e;
+import type { NinePVfs, VfsRecord, VfsWriteRecord } from "./server.ts";
+
+/** Options for a MemVfs. */
+export interface MemVfsOptions {
+  readOnlyPrefixes?: string[];
+}
+
+/** A `MemVfs.from` seed: string or bytes → a byte file, nested object → a folder. */
+export interface MemSeedTree {
+  [name: string]: string | Uint8Array<ArrayBuffer> | MemSeedTree;
+}
+
+// One stored node. Folders carry a children Map(name→id); byte files `bytes`
+// (+ `mime`); aliases (symlinks) a `target`. `type` and `modifiedAt` are set
+// by every writer, right after a fresh node is made.
+interface MemNode {
+  id: string;
+  type?: string;
+  name: string;
+  modifiedAt?: number;
+  children?: Map<string, string>;
+  bytes?: Uint8Array<ArrayBuffer>;
+  target?: string;
+  mime?: string;
+}
+
+function vfsError(code: string, path: string): Error & { code: string } {
+  // Augments Error with a code, like js/vfs/index.js does.
+  return Object.assign(new Error(code + ": " + path), { code });
 }
 
 const ROOT_ID = "__root__";
 const enc = new TextEncoder();
 
-function normalize(path) {
-  const segs = [];
+function normalize(path: string): string {
+  const segs: string[] = [];
   for (const s of String(path || "/").split("/")) {
     if (s === "" || s === ".") continue;
     if (s === "..") segs.pop();
@@ -32,24 +56,28 @@ function normalize(path) {
   }
   return "/" + segs.join("/");
 }
-function basename(path) {
+function basename(path: string): string {
   const p = normalize(path);
   return p === "/" ? "" : p.slice(p.lastIndexOf("/") + 1);
 }
-function dirname(path) {
+function dirname(path: string): string {
   const p = normalize(path);
   if (p === "/") return "/";
   const i = p.lastIndexOf("/");
   return i <= 0 ? "/" : p.slice(0, i);
 }
 
-export class MemVfs {
-  /** @param {{ readOnlyPrefixes?: string[] }} [opts] */
-  constructor(opts: { readOnlyPrefixes?: string[]; } = {}) {
+export class MemVfs implements NinePVfs {
+  _seq: number;
+  _clock: number;
+  _readOnly: string[];
+  /** node-by-id; folders carry a children Map(name→id) */
+  nodes: Map<string, MemNode>;
+
+  constructor(opts: MemVfsOptions = {}) {
     this._seq = 0;
     this._clock = 1_700_000_000_000; // deterministic mtimes
     this._readOnly = (opts.readOnlyPrefixes || []).map(normalize);
-    /** @type {Map<string, any>} node-by-id; folders carry a children Map(name→id) */
     this.nodes = new Map();
     this.nodes.set(ROOT_ID, {
       id: ROOT_ID,
@@ -60,17 +88,17 @@ export class MemVfs {
     });
   }
 
-  _tick() {
+  _tick(): number {
     return (this._clock += 1000);
   }
-  _id() {
+  _id(): string {
     return "n" + ++this._seq;
   }
 
   /** Seed from a nested literal: string → byte file, object → folder. */
-  static from(tree, opts) {
+  static from(tree: MemSeedTree, opts?: MemVfsOptions): MemVfs {
     const fs = new MemVfs(opts);
-    const build = (parentPath, obj) => {
+    const build = (parentPath: string, obj: MemSeedTree) => {
       for (const [name, val] of Object.entries(obj)) {
         const path = parentPath === "/" ? "/" + name : parentPath + "/" + name;
         if (val && typeof val === "object" && !(val instanceof Uint8Array)) {
@@ -86,7 +114,7 @@ export class MemVfs {
     return fs;
   }
 
-  _resolve(path) {
+  _resolve(path: string): MemNode | null {
     const p = normalize(path);
     if (p === "/") return this.nodes.get(ROOT_ID);
     let cur = this.nodes.get(ROOT_ID);
@@ -99,8 +127,8 @@ export class MemVfs {
     return cur || null;
   }
 
-  _record(node, path) {
-    const rec = {
+  _record(node: MemNode, path: string): VfsRecord {
+    const rec: VfsRecord = {
       id: node.id,
       type: node.type,
       name: basename(path) || node.name,
@@ -114,28 +142,28 @@ export class MemVfs {
     return rec;
   }
 
-  _assertWritable(op, path) {
+  _assertWritable(op: string, path: string): void {
     const p = normalize(path);
     if (this._readOnly.some((ro) => p === ro || p.startsWith(ro + "/"))) {
       throw vfsError("EROFS", "cannot " + op + " " + p + " (read-only)");
     }
   }
 
-  _parentFolder(path) {
+  _parentFolder(path: string): MemNode {
     const parent = this._resolve(dirname(path));
     if (!parent) throw vfsError("ENOENT", dirname(path));
     if (parent.type !== "folder") throw vfsError("ENOTDIR", dirname(path));
     return parent;
   }
 
-  _mkdirSync(path) {
+  _mkdirSync(path: string): VfsRecord {
     const existing = this._resolve(path);
     if (existing) {
       if (existing.type === "folder") return this._record(existing, path);
       throw vfsError("EEXIST", path);
     }
     const parent = this._parentFolder(path);
-    const node = {
+    const node: MemNode = {
       id: this._id(),
       type: "folder",
       name: basename(path),
@@ -147,11 +175,11 @@ export class MemVfs {
     return this._record(node, path);
   }
 
-  _writeSync(path, record) {
+  _writeSync(path: string, record: VfsWriteRecord): VfsRecord {
     const parent = this._parentFolder(path);
     const name = basename(path);
     const existingId = parent.children.get(name);
-    const node = existingId ? this.nodes.get(existingId) : { id: this._id(), name };
+    const node: MemNode = existingId ? this.nodes.get(existingId) : { id: this._id(), name };
     node.type = record.type || "file";
     node.modifiedAt = this._tick();
     if (node.type === "folder") {
@@ -171,17 +199,17 @@ export class MemVfs {
 
   // ── async API (the surface server.js calls) ─────────────────────────────
 
-  async stat(path) {
+  async stat(path: string): Promise<VfsRecord | null> {
     const node = this._resolve(path);
     return node ? this._record(node, path) : null;
   }
 
-  async list(path) {
+  async list(path: string): Promise<VfsRecord[]> {
     const node = this._resolve(path);
     if (!node) throw vfsError("ENOENT", path);
     if (node.type !== "folder") throw vfsError("ENOTDIR", path);
     const base = normalize(path);
-    const out = [];
+    const out: VfsRecord[] = [];
     for (const [name, id] of node.children) {
       const child = this.nodes.get(id);
       out.push(this._record(child, base === "/" ? "/" + name : base + "/" + name));
@@ -190,29 +218,29 @@ export class MemVfs {
     return out;
   }
 
-  async readBlob(path) {
+  async readBlob(path: string): Promise<Blob> {
     const node = this._resolve(path);
     if (!node) throw vfsError("ENOENT", path);
     if (node.type === "folder") throw vfsError("EISDIR", path);
     return new Blob([node.bytes || new Uint8Array(0)]);
   }
 
-  async write(path, record) {
+  async write(path: string, record: VfsWriteRecord): Promise<VfsRecord> {
     this._assertWritable("write", path);
     // Convert a Blob payload into raw bytes (what we store internally).
-    let bytes = record.bytes;
+    let bytes: Uint8Array<ArrayBuffer> = record.bytes;
     if (!bytes && record.blob instanceof Blob)
       bytes = new Uint8Array(await record.blob.arrayBuffer());
     if (!bytes && typeof record.body === "string") bytes = enc.encode(record.body);
     return this._writeSync(path, { ...record, bytes });
   }
 
-  async mkdir(path) {
+  async mkdir(path: string): Promise<VfsRecord> {
     this._assertWritable("mkdir", path);
     return this._mkdirSync(path);
   }
 
-  async remove(path) {
+  async remove(path: string): Promise<void> {
     this._assertWritable("remove", path);
     const node = this._resolve(path);
     if (!node) throw vfsError("ENOENT", path);
@@ -222,7 +250,7 @@ export class MemVfs {
     this.nodes.delete(node.id);
   }
 
-  async move(srcPath, dstPath) {
+  async move(srcPath: string, dstPath: string): Promise<VfsRecord> {
     this._assertWritable("move", srcPath);
     this._assertWritable("move", dstPath);
     const node = this._resolve(srcPath);
@@ -240,11 +268,11 @@ export class MemVfs {
     return this._record(node, dstPath);
   }
 
-  async rename(srcPath, dstPath) {
+  async rename(srcPath: string, dstPath: string): Promise<VfsRecord> {
     return this.move(srcPath, dstPath);
   }
 
-  isWritablePath(path) {
+  isWritablePath(path: string): boolean {
     const p = normalize(path);
     return !this._readOnly.some((ro) => p === ro || p.startsWith(ro + "/"));
   }

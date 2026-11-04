@@ -15,22 +15,59 @@
 // a CPU itself.
 
 import { Vring } from "./vring.ts";
+import type { SharedQueues } from "./shared-queues.ts";
+
+/** Guest export that raises `irq` on `cpu` (the kernel's raise_interrupt). */
+export type RaiseInterrupt = (cpu: number, irq: number) => void;
+
+/**
+ * Worker-side hook a device uses to hand a queue kick to the main-thread
+ * instance of the same device (where its sink/server lives).
+ */
+export type ForwardNotify = (dev: number, q: number) => void;
+
+/** Constructor options shared by every VirtioWasmDevice. */
+export interface VirtioWasmDeviceOptions {
+  /** host device index (matches the guest's `dev`) */
+  dev: number;
+  /**
+   * the irq this device's request_irq() grabbed
+   * (VIRTIO_WASM_IRQ_BASE + dev in virtio_wasm.c)
+   */
+  irq: number;
+  /** shared kernel memory */
+  memory: WebAssembly.Memory;
+  /** guest export */
+  raiseInterrupt: RaiseInterrupt;
+  /** online CPU mask (default {0}) */
+  onlineCpus?: Set<number> | number[];
+  /**
+   * cross-worker queue-layout store (a queue set up on one worker must be
+   * serviceable from another; see shared-queues.js).
+   */
+  sharedQueues: SharedQueues;
+  log?: (s: string) => void;
+}
 
 export class VirtioWasmDevice {
-  /**
-   * @param {object} opts
-   * @param {number} opts.dev   host device index (matches the guest's `dev`)
-   * @param {number} opts.irq   the irq this device's request_irq() grabbed
-   *                            (VIRTIO_WASM_IRQ_BASE + dev in virtio_wasm.c)
-   * @param {WebAssembly.Memory} opts.memory  shared kernel memory
-   * @param {(cpu:number, irq:number)=>void} opts.raiseInterrupt  guest export
-   * @param {Set<number>|number[]} [opts.onlineCpus]  online CPU mask (default {0})
-   * @param {import("./shared-queues.ts").SharedQueues} opts.sharedQueues
-   *   cross-worker queue-layout store (a queue set up on one worker must be
-   *   serviceable from another; see shared-queues.js).
-   * @param {(s:string)=>void} [opts.log]
-   */
-  constructor({ dev, irq, memory, raiseInterrupt, onlineCpus, sharedQueues, log }: { dev: number; irq: number; memory: WebAssembly.Memory; raiseInterrupt: (cpu: number,irq: number) => void; onlineCpus?: Set<number>|number[]; sharedQueues: import("./shared-queues.ts").SharedQueues; log?: (s: string) => void; }) {
+  dev: number;
+  irq: number;
+  memory: WebAssembly.Memory;
+  _raise: RaiseInterrupt;
+  shared: SharedQueues;
+  /** Lowest online CPU: the one every interrupt is raised on. */
+  irqCpu: number;
+  log: (s: string) => void;
+
+  constructor({
+    dev,
+    irq,
+    memory,
+    raiseInterrupt,
+    onlineCpus,
+    sharedQueues,
+    log,
+  }: VirtioWasmDeviceOptions) {
     this.dev = dev >>> 0;
     this.irq = irq;
     this.memory = memory;
@@ -44,7 +81,13 @@ export class VirtioWasmDevice {
   }
 
   /** Called from wasm_virtio_setup_queue: record a queue's vring layout. */
-  setupQueue(q, desc, avail, used, num) {
+  setupQueue(
+    q: number,
+    desc: number | bigint,
+    avail: number | bigint,
+    used: number | bigint,
+    num: number,
+  ): void {
     this.shared.set(this.dev, q >>> 0, desc, avail, used, num);
     this.log(`[virtio dev${this.dev}] setup q=${q} desc=${desc} num=${num}`);
   }
@@ -53,7 +96,7 @@ export class VirtioWasmDevice {
    * Build a Vring for queue q from the shared layout, with its host-side avail
    * cursor backed by the cross-worker store. Returns null if q isn't set up.
    */
-  vring(q) {
+  vring(q: number): Vring | null {
     const qi = q >>> 0;
     const layout = this.shared.get(this.dev, qi);
     if (!layout) return null;
@@ -64,30 +107,30 @@ export class VirtioWasmDevice {
   }
 
   /** Deliver this device's used-buffer interrupt to the (sole) online CPU. */
-  raiseIrq() {
+  raiseIrq(): void {
     this._raise(this.irqCpu, this.irq);
   }
 
   /** Called from wasm_virtio_notify: guest kicked queue q. Override. */
-  onNotify(_q) {
+  onNotify(_q: number): void {
     throw new Error("VirtioWasmDevice.onNotify not implemented");
   }
 
   /** Device feature bits offered to the guest (host side). Override if any. */
-  getFeatures() {
+  getFeatures(): bigint {
     return 0n;
   }
 
   /** Read device config space into `bytes` (a Uint8Array view) at `offset`. */
-  configRead(_offset, bytes) {
+  configRead(_offset: number, bytes: Uint8Array): void {
     bytes.fill(0); // no device-specific config by default
   }
 
   /** Write device config space. Override if writable config exists. */
-  configWrite(_offset, _bytes) {}
+  configWrite(_offset: number, _bytes: Uint8Array): void {}
 
   /** Quiesce: forget all queue state. Called from wasm_virtio_reset. */
-  reset() {
+  reset(): void {
     for (let q = 0; q < 4; q++) this.shared.clear(this.dev, q);
     this.log(`[virtio dev${this.dev}] reset`);
   }
@@ -95,7 +138,7 @@ export class VirtioWasmDevice {
   // ---- helpers for config space backed by the shared memory ----
 
   /** A Uint8Array view of `len` bytes at linear-memory offset `buf`. */
-  memView(buf, len) {
+  memView(buf: number | bigint, len: number | bigint): Uint8Array {
     return new Uint8Array(this.memory.buffer, Number(buf), Number(len));
   }
 }

@@ -25,18 +25,21 @@
 // root to be gated at all; main.js imports it back via a relative path.
 
 /**
- * @param {{ artifactsBase?: string, variants?: Record<string, { artifactsBase: string }> } | null} preview
- *   Parsed preview.json, or null when the page has none (local dev).
- * @param {string | null} variant  The `?variant=` query param value, or null
+ * @param preview  Parsed preview.json, or null when the page has none (local dev).
+ * @param variant  The `?variant=` query param value, or null
  *   for the default (unqualified) artifact set.
- * @param {string} baseHref  Resolution base for the relative URLs below
+ * @param baseHref  Resolution base for the relative URLs below
  *   (document.baseURI in the browser).
- * @returns {string}  The resolved artifacts/ base URL (trailing slash).
- * @throws {Error}  If an explicit variant doesn't resolve to a real artifact
+ * @returns  The resolved artifacts/ base URL (trailing slash).
+ * @throws  If an explicit variant doesn't resolve to a real artifact
  *   set under a preview.json that IS present — deliberately never falls back
  *   to booting the default guest under a URL that claims a variant it isn't.
  */
-export function resolveArtifactsBase(preview: { artifactsBase?: string; variants?: Record<string,{ artifactsBase: string; }>; }|null, variant: string|null, baseHref: string): string {
+export function resolveArtifactsBase(
+  preview: { artifactsBase?: string; variants?: Record<string, { artifactsBase: string }> } | null,
+  variant: string | null,
+  baseHref: string,
+): string {
   if (variant) {
     const variantBase = preview?.variants?.[variant]?.artifactsBase;
     if (variantBase) return new URL(variantBase, baseHref).href;

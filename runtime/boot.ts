@@ -24,6 +24,7 @@ import { linux } from "./kernel-host.ts";
 import { makeSharedQueues } from "./virtio/shared-queues.ts";
 import { CONSOLE_DEVICES } from "./virtio/console-device.ts";
 import { createNinePServer } from "./ninep/server.ts";
+import type { NinePVfs } from "./ninep/server.ts";
 
 // Number of guest consoles (hvc0..hvc{N-1}) — one per Linux terminal window;
 // hvc0 also carries the kernel boot log. One stock single-port virtio-console
@@ -55,64 +56,50 @@ const DEFAULT_CMDLINE =
 
 const enc = new TextEncoder();
 
-/**
- * Boot a linux-wasm kernel with a VFS mounted at /mnt/yore over 9P.
- *
- * @param {{
- *   vfs: any,                         // the async typed-record VFS (MemVfs in tests, pc vfs in prod)
- *   variant?: string,                 // 'wasm32_nommu' (default) | 'wasm64_nommu'
- *   vmlinuxUrl: string,               // URL of the kernel wasm (required)
- *   initrdUrl: string,                // URL of the initramfs.cpio.gz (required)
- *   cmdline?: string,                 // kernel command line
- *   onLog?: (text: string) => void,   // host/diagnostic log sink
- *   squashfs?: ArrayBuffer,           // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
- *   stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array, onDirty?: () => void },  // #177: RW state disk (/dev/vdb); >64 MiB must be a full SharedArrayBuffer; saveDisk() packs incremental CBHD dirties
- *   nixCache?: any,                   // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
- *   onModuleCached?: () => void,      // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
- *   wayland?: { sendOut: (clientId: number, buffer: Uint8Array, fds: (Uint8Array | { pipe: number })[]) => void, onClose?: (clientId: number) => void, onPipeData?: (pipe: number, bytes: Uint8Array) => void, onPipeClose?: (pipe: number) => void },  // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx; a `{ pipe }` fd is a guest pipe (write it with pipeWrite); onPipeData/onPipeClose = the guest wrote into / closed a host pipe passed to it as a `{ pipe }` pushIn fd
- *   vsock?: { onReady: (device: import("./virtio/vsock-device.ts").VsockVirtioDevice) => void },  // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
- *   ninepTrace?: (line: string) => void,  // #151 diagnostic: opt-in host-side 9P RPC tracer (localizes 9P I/O under the software MMU); also enabled via the NINEP_TRACE env in node/CI
- *   snd?: { onReady: (device: import("./virtio/snd-device.ts").SndVirtioDevice) => void },  // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
- * }} opts
- * @returns {Promise<{
- *   consoleCount: number,
- *   memory: WebAssembly.Memory,
- *   console(vtermno: number): { write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, reset(): void },
- *   pushIn(clientId: number, bytes: Uint8Array, fds?: (Uint8Array | { pipe: number })[]): void,
- *   pipeWrite(pipe: number, bytes: Uint8Array): void,
- *   pipeClose(pipe: number): void,
- *   net: { readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, setLinkUp(up: boolean): void },
- *   saveDisk(): Uint8Array|null,
- *   hasStateDisk(): boolean,
- *   kill(): void,
- * }>}
- */
+/** The handle kernel-host's linux() resolves to. */
+type KernelHost = Awaited<ReturnType<typeof linux>>;
+
+/** Boot a linux-wasm kernel with a VFS mounted at /mnt/yore over 9P. */
 export async function bootLinux(opts: {
-vfs: any; // the async typed-record VFS (MemVfs in tests, pc vfs in prod)
-variant?: string; // 'wasm32_nommu' (default) | 'wasm64_nommu'
-vmlinuxUrl: string; // URL of the kernel wasm (required)
-initrdUrl: string; // URL of the initramfs.cpio.gz (required)
-cmdline?: string; // kernel command line
-onLog?: (text: string) => void; // host/diagnostic log sink
-squashfs?: ArrayBuffer; // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
-stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array; onDirty?: () => void; }; // #177: RW state disk (/dev/vdb); >64 MiB must be a full SharedArrayBuffer; saveDisk() packs incremental CBHD dirties
-nixCache?: any; // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
-onModuleCached?: () => void; // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
-wayland?: { sendOut: (clientId: number,buffer: Uint8Array,fds: (Uint8Array|{ pipe: number; })[]) => void; onClose?: (clientId: number) => void; onPipeData?: (pipe: number,bytes: Uint8Array) => void; onPipeClose?: (pipe: number) => void; }; // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx; a `{ pipe }` fd is a guest pipe (write it with pipeWrite); onPipeData/onPipeClose = the guest wrote into / closed a host pipe passed to it as a `{ pipe }` pushIn fd
-vsock?: { onReady: (device: import("./virtio/vsock-device.ts").VsockVirtioDevice) => void; }; // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
-ninepTrace?: (line: string) => void; // #151 diagnostic: opt-in host-side 9P RPC tracer (localizes 9P I/O under the software MMU); also enabled via the NINEP_TRACE env in node/CI
-snd?: { onReady: (device: import("./virtio/snd-device.ts").SndVirtioDevice) => void; }; // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
+  vfs: NinePVfs; // the async typed-record VFS (MemVfs in tests, pc vfs in prod)
+  variant?: string; // 'wasm32_nommu' (default) | 'wasm64_nommu'
+  vmlinuxUrl: string; // URL of the kernel wasm (required)
+  initrdUrl: string; // URL of the initramfs.cpio.gz (required)
+  cmdline?: string; // kernel command line
+  onLog?: (text: string) => void; // host/diagnostic log sink
+  squashfs?: ArrayBuffer; // #43: read-only base-system squashfs image, served to the guest as /dev/vdX over virtio-blk (copied into a SAB shared with every worker). Absent → blk device mounts empty.
+  stateDisk?: { image: ArrayBuffer | SharedArrayBuffer | Uint8Array; onDirty?: () => void }; // #177: RW state disk (/dev/vdb); >64 MiB must be a full SharedArrayBuffer; saveDisk() packs incremental CBHD dirties
+  nixCache?: NinePVfs; // a read-only Nix binary cache VFS (createNixCacheExport); registered as the `nixcache` 9P export, mounted at /nix-cache so in-guest nix substitutes from it (#141)
+  onModuleCached?: () => void; // fires when a streamed user binary finishes compiling + caching host-side — lets the UI close a "loading <tool>…" indicator (#141)
+  wayland?: {
+    sendOut: (clientId: number, buffer: Uint8Array, fds: (Uint8Array | { pipe: number })[]) => void;
+    onClose?: (clientId: number) => void;
+    onPipeData?: (pipe: number, bytes: Uint8Array) => void;
+    onPipeClose?: (pipe: number) => void;
+  }; // Phase 4f: worker→main Greenfield bridge (fire-and-forget); onClose = guest closed a ctx; a `{ pipe }` fd is a guest pipe (write it with pipeWrite); onPipeData/onPipeClose = the guest wrote into / closed a host pipe passed to it as a `{ pipe }` pushIn fd
+  vsock?: { onReady: (device: import("./virtio/vsock-device.ts").VsockVirtioDevice) => void }; // issue #10 option 3: called once with the main-thread virtio-vsock device so a caller (the future pc /Ctl consumer) can device.listen(port, conn => …) over a standard AF_VSOCK channel
+  ninepTrace?: (line: string) => void; // #151 diagnostic: opt-in host-side 9P RPC tracer (localizes 9P I/O under the software MMU); also enabled via the NINEP_TRACE env in node/CI
+  snd?: { onReady: (device: import("./virtio/snd-device.ts").SndVirtioDevice) => void }; // issue #145: called once with the main-thread virtio-snd device so a caller (pc's AudioWorklet sink / a smoke's recorder) can device.setSink({ onPcm, … })
 }): Promise<{
-consoleCount: number;
-memory: WebAssembly.Memory;
-console(vtermno: number): { write(b: Uint8Array|string): void; onData(cb: (b: Uint8Array) => void): () => void; resize(c: number,r: number): void; reset(): void; };
-pushIn(clientId: number,bytes: Uint8Array,fds?: (Uint8Array|{ pipe: number; })[]): void;
-pipeWrite(pipe: number,bytes: Uint8Array): void;
-pipeClose(pipe: number): void;
-net: { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>; setLinkUp(up: boolean): void; };
-saveDisk(): Uint8Array|null;
-hasStateDisk(): boolean;
-kill(): void;
+  consoleCount: number;
+  memory: WebAssembly.Memory;
+  console(vtermno: number): {
+    write(b: Uint8Array | string): void;
+    onData(cb: (b: Uint8Array) => void): () => void;
+    resize(c: number, r: number): void;
+    reset(): void;
+  };
+  pushIn(clientId: number, bytes: Uint8Array, fds?: (Uint8Array | { pipe: number })[]): void;
+  pipeWrite(pipe: number, bytes: Uint8Array): void;
+  pipeClose(pipe: number): void;
+  net: {
+    readable: ReadableStream<Uint8Array>;
+    writable: WritableStream<Uint8Array>;
+    setLinkUp(up: boolean): void;
+  };
+  saveDisk(): Uint8Array | null;
+  hasStateDisk(): boolean;
+  kill(): void;
 }> {
   const vfs = opts.vfs;
   const variant = opts.variant || "wasm32_nommu";
@@ -134,14 +121,12 @@ kill(): void;
 
   // Per-console output fan-out. Bytes for a console with no attached renderer
   // are buffered so its boot/prompt output survives the gap before onData().
-  /** @type {Map<number, Set<(b: Uint8Array) => void>>} */
-  const sinks: Map<number,Set<(b: Uint8Array) => void>> = new Map();
-  /** @type {Map<number, Uint8Array[]>} */
-  const backlog: Map<number,Uint8Array[]> = new Map();
+  const sinks: Map<number, Set<(b: Uint8Array) => void>> = new Map();
+  const backlog: Map<number, Uint8Array[]> = new Map();
 
   // The main-thread virtio-console device calls this as (port, bytes) for every
   // chunk of guest console output (port = hvc/vtermno index; bytes = Uint8Array).
-  function emit(port, bytes) {
+  function emit(port: number, bytes: Uint8Array) {
     const vt = port | 0;
     const set = sinks.get(vt);
     if (!set || set.size === 0) {
@@ -164,17 +149,19 @@ kill(): void;
   const NINEP_MSIZE = 500 * 1024;
   // Register the user VFS at the root aname; the /nix-cache binary cache is
   // a second export when provided (#141).
-  const exports = { "/": vfs };
+  const exports: Record<string, NinePVfs> = { "/": vfs };
   if (opts.nixCache) exports.nixcache = opts.nixCache; // read-only Nix binary cache, pc-init mounts at /nix-cache + substituters=file:///nix-cache (#141)
   // #151 diagnostic: opt-in host-side 9P RPC trace to localize file I/O failing
   // under the software MMU (guest-copy-fault vs transport). Off by default;
   // enabled via opts.ninepTrace or the NINEP_TRACE env (node/CI only — the
   // browser has no `process`, so this stays undefined there).
-  const proc = /** @type {any} */ (globalThis).process;
+  const g: typeof globalThis & { process?: { env?: Record<string, string | undefined> } } =
+    globalThis;
+  const proc = g.process;
   const ninepTrace =
     opts.ninepTrace ||
     (proc && proc.env && proc.env.NINEP_TRACE
-      ? (/** @type {string} */ line: string) => console.error(`[9p] ${line}`)
+      ? (line: string) => console.error(`[9p] ${line}`)
       : undefined);
   const ninepServer = createNinePServer({ exports, msize: NINEP_MSIZE, trace: ninepTrace });
 
@@ -192,11 +179,21 @@ kill(): void;
   // (the client never blocks on its own request), and the self-wake IN path can
   // wake a parked guest, so the old synchronous round-trip is gone (it dropped
   // steady-state frame callbacks — see wl-device.js / kernel-worker.js).
-  /** @type {{ sendOut?: (clientId:number, buffer:Uint8Array, fds:(Uint8Array|{pipe:number})[])=>void, onClose?: (clientId:number)=>void, onPipeData?: (pipe:number, bytes:Uint8Array)=>void, onPipeClose?: (pipe:number)=>void } | undefined} */
-  const wayland: { sendOut?: (clientId: number,buffer: Uint8Array,fds: (Uint8Array|{ pipe: number; })[]) => void; onClose?: (clientId: number) => void; onPipeData?: (pipe: number,bytes: Uint8Array) => void; onPipeClose?: (pipe: number) => void; }|undefined = opts.wayland;
-  let waylandPushIn = null; // os.wayland_push_in: the single async host→guest path
-  let waylandPipeWrite = null; // os.wayland_pipe_write / _close: guest pipes
-  let waylandPipeClose = null;
+  const wayland:
+    | {
+        sendOut?: (
+          clientId: number,
+          buffer: Uint8Array,
+          fds: (Uint8Array | { pipe: number })[],
+        ) => void;
+        onClose?: (clientId: number) => void;
+        onPipeData?: (pipe: number, bytes: Uint8Array) => void;
+        onPipeClose?: (pipe: number) => void;
+      }
+    | undefined = opts.wayland;
+  let waylandPushIn: KernelHost["wayland_push_in"] | null = null; // os.wayland_push_in: the single async host→guest path
+  let waylandPipeWrite: KernelHost["wayland_pipe_write"] | null = null; // os.wayland_pipe_write / _close: guest pipes
+  let waylandPipeClose: KernelHost["wayland_pipe_close"] | null = null;
 
   const workerUrl = new URL("./kernel-worker.ts", import.meta.url);
   const os = await linux({
@@ -290,22 +287,22 @@ kill(): void;
      * callbacks, wl_buffer.release, and server→client fds (the keymap). The bytes
      * (+ any fds) go onto the IN vring and raise the IRQ, waking the guest if it
      * is parked in poll()/dispatch. No-op if the wayland bridge is not wired.
-     * @param {number} clientId guest ctx vfd_id
-     * @param {Uint8Array} bytes wire bytes
-     * @param {(Uint8Array | { pipe: number })[]} [fds] server→client fd payloads:
+     * @param clientId guest ctx vfd_id
+     * @param bytes wire bytes
+     * @param fds server→client fd payloads:
      *   bytes (the keymap), or `{ pipe: n }`, host pipe n (n < 2^29) the guest
      *   writes into (wl_data_source.send) — reported through the bridge's
      *   onPipeData(n) and onPipeClose(n)
      */
-    pushIn(clientId: number, bytes: Uint8Array, fds: (Uint8Array|{ pipe: number; })[]) {
+    pushIn(clientId: number, bytes: Uint8Array, fds: (Uint8Array | { pipe: number })[]) {
       waylandPushIn?.(clientId, bytes, fds);
     },
 
     /**
      * Write into a guest pipe: a `{ pipe }` fd the guest passed in a request
      * (wl_data_offer.receive's fd, a clipboard paste into the guest).
-     * @param {number} pipe the `{ pipe }` id the bridge's sendOut carried
-     * @param {Uint8Array} bytes
+     * @param pipe the `{ pipe }` id the bridge's sendOut carried
+     * @param bytes
      */
     pipeWrite(pipe: number, bytes: Uint8Array) {
       waylandPipeWrite?.(pipe, bytes);

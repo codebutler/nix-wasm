@@ -67,6 +67,8 @@
 // path 9p/vsock/console use.
 
 import { VirtioWasmDevice } from "./device.ts";
+import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
+import type { Vring, VringChain } from "./vring.ts";
 
 const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
@@ -118,45 +120,64 @@ export const SND_RATE_HZ = 48000;
 const CHANNELS_MIN = 1;
 const CHANNELS_MAX = 2;
 
-/**
- * @typedef {{
- *   streamId: number,
- *   bufferBytes: number,
- *   periodBytes: number,
- *   channels: number,
- *   format: number,
- *   rate: number,
- *   rateHz: number,
- * }} SndStreamParams
- *
- * The host sink a consumer attaches via setSink(). All callbacks optional:
- * @typedef {{
- *   onParams?: (params: SndStreamParams) => void,
- *   onStart?: (streamId: number) => void,
- *   onStop?: (streamId: number) => void,
- *   onRelease?: (streamId: number) => void,
- *   onPcm?: (streamId: number, bytes: Uint8Array, params: SndStreamParams) => void,
- *   bufferedBytes?: () => number,
- * }} SndSink
- */
+/** The stream geometry the driver last set with VIRTIO_SND_R_PCM_SET_PARAMS. */
+export interface SndStreamParams {
+  streamId: number;
+  bufferBytes: number;
+  periodBytes: number;
+  channels: number;
+  format: number;
+  rate: number;
+  rateHz: number;
+}
+
+/** The host sink a consumer attaches via setSink(). All callbacks optional: */
+export interface SndSink {
+  onParams?: (params: SndStreamParams) => void;
+  onStart?: (streamId: number) => void;
+  onStop?: (streamId: number) => void;
+  onRelease?: (streamId: number) => void;
+  onPcm?: (streamId: number, bytes: Uint8Array, params: SndStreamParams) => void;
+  bufferedBytes?: () => number;
+}
+
+/** A tx buffer popped from the ring, delivered to the sink, awaiting its paced completion. */
+interface SndTxPending {
+  head: number;
+  chain: VringChain;
+  frames: number;
+  ok: boolean;
+  dueAt: number;
+}
 
 export class SndVirtioDevice extends VirtioWasmDevice {
+  forwardNotify: ForwardNotify | null;
+  sink: SndSink | null;
+  params: SndStreamParams | null;
+  prepared: boolean;
+  running: boolean;
+  consumedBytes: number;
+  _txPending: SndTxPending[];
+  _txTimer: ReturnType<typeof setTimeout> | null;
+  _playheadMs: number;
+
   /**
    * Extends the base VirtioWasmDevice opts with:
    * - `forwardNotify` ((dev, q) => void): WORKER only — forwards the kick to
    *   the main thread (where the sink lives) instead of servicing here.
    * - `sink` (SndSink): optional initial sink (tests); pc attaches later via
    *   setSink() from the snd.onReady boot hook.
-   *
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { forwardNotify?: (dev: number, q: number) => void, sink?: SndSink }} opts
    */
-  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ forwardNotify?: (dev: number,q: number) => void; sink?: SndSink; }) {
+  constructor(
+    opts: VirtioWasmDeviceOptions & {
+      forwardNotify?: ForwardNotify;
+      sink?: SndSink;
+    },
+  ) {
     super(opts);
     this.forwardNotify = opts.forwardNotify || null;
-    /** @type {SndSink | null} */
     this.sink = opts.sink || null;
     // Per-stream state (stream 0 only): last SET_PARAMS + running flag.
-    /** @type {SndStreamParams | null} */
     this.params = null;
     this.prepared = false;
     this.running = false;
@@ -164,19 +185,17 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     this.consumedBytes = 0;
     // Playback-clock completion state (_pumpTx): buffers popped from the tx
     // ring, delivered to the sink, awaiting their paced completion.
-    /** @type {{ head: number, chain: any, frames: number, ok: boolean, dueAt: number }[]} */
     this._txPending = [];
-    /** @type {ReturnType<typeof setTimeout> | null} */
     this._txTimer = null;
     this._playheadMs = 0;
   }
 
   /** Attach/replace the host sink (the pc AudioWorklet or a test recorder). */
-  setSink(sink) {
+  setSink(sink: SndSink | null): void {
     this.sink = sink;
   }
 
-  reset() {
+  reset(): void {
     this._pauseTx();
     this._txPending = [];
     this.params = null;
@@ -185,12 +204,12 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     super.reset();
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     return 1n << VIRTIO_F_VERSION_1;
   }
 
   // struct virtio_snd_config { __le32 jacks; __le32 streams; __le32 chmaps; }
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(12);
     const dv = new DataView(cfg.buffer);
     dv.setUint32(0, 0, true); // jacks
@@ -202,7 +221,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q) {
+  onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the sink is on the main thread — forward the kick.
@@ -224,7 +243,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
   // ---- controlq ----
 
   /** Drain the control vq: parse each request, write the response, push used. */
-  _serviceControl() {
+  _serviceControl(): void {
     const vr = this.vring(SND_VQ_CONTROL);
     if (!vr) {
       this.log("[virtio-snd] control notify before queue setup");
@@ -234,7 +253,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     let serviced = 0;
     while ((chain = vr.next())) {
       const req = vr.readOut(chain);
-      let resp;
+      let resp: Uint8Array;
       try {
         resp = this._handleControl(req);
       } catch (e) {
@@ -249,14 +268,14 @@ export class SndVirtioDevice extends VirtioWasmDevice {
   }
 
   /** struct virtio_snd_hdr { __le32 code; } response helper. */
-  _hdr(code, extra = 0) {
+  _hdr(code: number, extra = 0): Uint8Array {
     const b = new Uint8Array(SND_HDR_LEN + extra);
     new DataView(b.buffer).setUint32(0, code >>> 0, true);
     return b;
   }
 
   /** Parse + answer one control request; returns the response bytes. */
-  _handleControl(req) {
+  _handleControl(req: Uint8Array): Uint8Array {
     if (req.length < SND_HDR_LEN) return this._hdr(VIRTIO_SND_S_BAD_MSG);
     const dv = new DataView(req.buffer, req.byteOffset, req.byteLength);
     const code = dv.getUint32(0, true);
@@ -368,7 +387,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
    * buffer is completed against the PLAYBACK CLOCK (_pumpTx) — see the
    * completion-model header note.
    */
-  _serviceTx() {
+  _serviceTx(): void {
     const vr = this.vring(SND_VQ_TX);
     if (!vr) {
       this.log("[virtio-snd] tx notify before queue setup");
@@ -424,7 +443,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
    * pacing (writes block until a period "plays"), which bounds how far ahead
    * the sink can buffer.
    */
-  _pumpTx() {
+  _pumpTx(): void {
     if (this._txTimer != null) return;
     const vr = this.vring(SND_VQ_TX);
     if (!vr) return;
@@ -447,7 +466,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
   }
 
   /** Write one tx buffer's virtio_snd_pcm_status and push it used. */
-  _completeTx(vr, pending) {
+  _completeTx(vr: Vring, pending: Omit<SndTxPending, "dueAt">): void {
     // struct virtio_snd_pcm_status { __le32 status; __le32 latency_bytes; }
     const st = new Uint8Array(SND_PCM_STATUS_LEN);
     const sdv = new DataView(st.buffer);
@@ -459,7 +478,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
   }
 
   /** STOP: pause the playback clock (pending buffers stay until START/RELEASE). */
-  _pauseTx() {
+  _pauseTx(): void {
     if (this._txTimer != null) {
       clearTimeout(this._txTimer);
       this._txTimer = null;
@@ -471,7 +490,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
    * further sink delivery) — the driver's sync_stop waits for ALL messages to
    * complete (msg_empty) before hw_free, so nothing may stay held.
    */
-  _completePendingTx() {
+  _completePendingTx(): void {
     this._pauseTx();
     const vr = this.vring(SND_VQ_TX);
     if (!vr) return;

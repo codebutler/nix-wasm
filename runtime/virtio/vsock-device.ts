@@ -57,6 +57,7 @@
 // lost-wakeup race.
 
 import { VirtioWasmDevice } from "./device.ts";
+import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
 
 // ---- virtio-vsock constants (uapi/linux/virtio_vsock.h) ----
 export const VSOCK_HDR_LEN = 44;
@@ -93,7 +94,7 @@ export const VIRTIO_VSOCK_SHUTDOWN_SEND = 2;
 // vq capacity since each packet is one chain.
 const HOST_BUF_ALLOC = 256 * 1024;
 
-function decodeHdr(view, off) {
+function decodeHdr(view: DataView | Uint8Array, off: number) {
   const dv =
     view instanceof DataView ? view : new DataView(view.buffer, view.byteOffset, view.byteLength);
   return {
@@ -118,10 +119,22 @@ function decodeHdr(view, off) {
  * the connection down. This is the surface the future pc /Ctl consumer uses.
  */
 class VsockConnection {
+  _dev: VsockVirtioDevice;
+  hostPort: number;
+  guestPort: number;
+  open: boolean;
+  peerBufAlloc: number;
+  peerFwdCnt: number;
+  txCnt: number;
+  rxFwdCnt: number;
+  _onData: ((bytes: Uint8Array) => void) | null;
+  _onClose: (() => void) | null;
+  _pendingTx: Uint8Array[];
+
   /**
-   * @param {VsockVirtioDevice} dev
-   * @param {number} hostPort  the host-side (local) port
-   * @param {number} guestPort the guest-side (remote) port
+   * @param dev
+   * @param hostPort  the host-side (local) port
+   * @param guestPort the guest-side (remote) port
    */
   constructor(dev: VsockVirtioDevice, hostPort: number, guestPort: number) {
     this._dev = dev;
@@ -134,33 +147,31 @@ class VsockConnection {
     this.txCnt = 0; // total payload bytes we (host) have sent the guest
     // Host's own rx accounting (what we advertise to the guest).
     this.rxFwdCnt = 0; // bytes we (host) have consumed from the guest
-    /** @type {((bytes: Uint8Array) => void) | null} */
     this._onData = null;
-    /** @type {(() => void) | null} */
     this._onClose = null;
     this._pendingTx = []; // bytes queued while over-credit / before rx buffers
   }
 
   /** Subscribe to guest→host payload bytes. */
-  onData(cb) {
+  onData(cb: (bytes: Uint8Array) => void): this {
     this._onData = cb;
     return this;
   }
 
   /** Subscribe to connection teardown (guest RST/SHUTDOWN or host close). */
-  onClose(cb) {
+  onClose(cb: () => void): this {
     this._onClose = cb;
     return this;
   }
 
   /** Bytes the guest will currently accept (its advertised window minus inflight). */
-  creditAvailable() {
+  creditAvailable(): number {
     const inflight = (this.txCnt - this.peerFwdCnt) >>> 0;
     return Math.max(0, this.peerBufAlloc - inflight);
   }
 
   /** Queue payload bytes to the guest as OP_RW packets, honoring guest credit. */
-  write(bytes) {
+  write(bytes: Uint8Array | ArrayLike<number> | ArrayBuffer): boolean {
     if (!this.open) return false;
     const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     this._pendingTx.push(buf);
@@ -169,36 +180,45 @@ class VsockConnection {
   }
 
   /** Half/full close: SHUTDOWN both directions then RST. */
-  close() {
+  close(): void {
     if (!this.open) return;
     this._dev._closeConnection(this, true);
   }
 
   /** Internal: deliver received payload to the consumer + advance rx fwd_cnt. */
-  _deliver(payload) {
+  _deliver(payload: Uint8Array): void {
     this.rxFwdCnt = (this.rxFwdCnt + payload.length) >>> 0;
     if (this._onData) this._onData(payload);
   }
 }
 
 export class VsockVirtioDevice extends VirtioWasmDevice {
+  guestCid: bigint;
+  forwardNotify: ForwardNotify | null;
+  _listeners: Map<number, (conn: VsockConnection) => void>;
+  _conns: Map<string, VsockConnection>;
+  _servicingTx: boolean;
+  _rearmTx: boolean;
+  _nextHostPort: number;
+
   /**
    * Extends the base VirtioWasmDevice opts with:
    * - `guestCid` (number): CID served in config space (default VSOCK_GUEST_CID=3).
    * - `forwardNotify` ((dev, q) => void): WORKER only — forwards the kick to the
    *   main thread (where the socket callbacks live) instead of servicing here.
-   *
-   * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { guestCid?: number, forwardNotify?: (dev: number, q: number) => void }} opts
    */
-  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ guestCid?: number; forwardNotify?: (dev: number,q: number) => void; }) {
+  constructor(
+    opts: VirtioWasmDeviceOptions & {
+      guestCid?: number;
+      forwardNotify?: ForwardNotify;
+    },
+  ) {
     super(opts);
     this.guestCid = BigInt((opts.guestCid ?? VSOCK_GUEST_CID) >>> 0);
     this.forwardNotify = opts.forwardNotify || null;
     // Host-side listeners: port -> (connection) => void.
-    /** @type {Map<number, (conn: VsockConnection) => void>} */
     this._listeners = new Map();
     // Active connections keyed by `${hostPort}:${guestPort}`.
-    /** @type {Map<string, VsockConnection>} */
     this._conns = new Map();
     // Re-entrancy guard on the tx drain (a kick mid-drain re-scans).
     this._servicingTx = false;
@@ -207,7 +227,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
     this._nextHostPort = 1024;
   }
 
-  getFeatures() {
+  getFeatures(): bigint {
     // VIRTIO_F_VERSION_1 only. STREAM is the mandatory baseline transport mode;
     // we do not offer the optional SEQPACKET/DGRAM features, so the guest driver
     // negotiates plain stream sockets.
@@ -216,7 +236,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
 
   // struct virtio_vsock_config { __le64 guest_cid; } — serve the guest CID at
   // offset 0, zero past the end.
-  configRead(offset, bytes) {
+  configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(8);
     new DataView(cfg.buffer).setBigUint64(0, this.guestCid, true);
     for (let i = 0; i < bytes.length; i++) {
@@ -232,15 +252,13 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * invoked with a VsockConnection once the guest completes the OP_REQUEST →
    * OP_RESPONSE handshake. The future pc /Ctl consumer calls
    * `dev.listen(CTL_PORT, conn => …)` and reads/writes /Ctl messages on `conn`.
-   * @param {number} port
-   * @param {(conn: VsockConnection) => void} onConnection
    */
   listen(port: number, onConnection: (conn: VsockConnection) => void) {
     this._listeners.set(port >>> 0, onConnection);
   }
 
   /** Stop listening on a port. */
-  unlisten(port) {
+  unlisten(port: number): void {
     this._listeners.delete(port >>> 0);
   }
 
@@ -249,9 +267,8 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * VsockConnection immediately; it becomes usable once the guest replies
    * OP_RESPONSE (the caller should wait on onData/onClose). Mostly for tests and
    * symmetry — /Ctl is guest-initiated.
-   * @param {number} guestPort
    */
-  connect(guestPort: number) {
+  connect(guestPort: number): VsockConnection {
     const hostPort = this._nextHostPort++;
     const conn = new VsockConnection(this, hostPort, guestPort >>> 0);
     this._conns.set(this._key(conn), conn);
@@ -260,13 +277,13 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
     return conn;
   }
 
-  _key(conn) {
+  _key(conn: VsockConnection): string {
     return `${conn.hostPort}:${conn.guestPort}`;
   }
 
   // ---- notify / tx drain ----
 
-  onNotify(q) {
+  onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the socket callbacks are on the main thread — forward.
@@ -292,7 +309,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * and raise the IRQ. Re-entrancy-safe (a kick mid-drain re-scans). Synchronous:
    * the protocol work is pure shared-memory + JS callback dispatch.
    */
-  _serviceTx() {
+  _serviceTx(): void {
     const vr = this.vring(VSOCK_VQ_TX);
     if (!vr) {
       this.log("[virtio-vsock] tx notify before queue setup");
@@ -326,7 +343,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
   }
 
   /** Parse + dispatch one guest→host packet. */
-  _handleTxPacket(pkt) {
+  _handleTxPacket(pkt: Uint8Array): void {
     if (pkt.length < VSOCK_HDR_LEN) {
       this.log(`[virtio-vsock] short tx packet (${pkt.length} < ${VSOCK_HDR_LEN})`);
       return;
@@ -423,7 +440,14 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * raising the IRQ. Returns false if no rx buffer is available (the caller
    * should retry on the next VSOCK_VQ_RX kick). src=host (CID 2), dst=guest.
    */
-  _pushRx(srcPort, dstPort, op, payload, flags, conn) {
+  _pushRx(
+    srcPort: number,
+    dstPort: number,
+    op: number,
+    payload: Uint8Array | null,
+    flags: number | undefined,
+    conn: VsockConnection | null,
+  ): boolean {
     const vr = this.vring(VSOCK_VQ_RX);
     if (!vr) return false;
     const chain = vr.next();
@@ -456,12 +480,12 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
   }
 
   /** Emit a control packet (no payload) on a connection (host→guest). */
-  _sendCtl(conn, op, flags) {
+  _sendCtl(conn: VsockConnection, op: number, flags?: number): boolean {
     return this._pushRx(conn.hostPort, conn.guestPort, op, null, flags, conn);
   }
 
   /** Emit a bare RST for an (hostPort, guestPort) with no connection object. */
-  _sendRst(hostPort, guestPort) {
+  _sendRst(hostPort: number, guestPort: number): boolean {
     return this._pushRx(hostPort, guestPort, VIRTIO_VSOCK_OP_RST, null, 0, null);
   }
 
@@ -470,7 +494,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * by the guest's advertised credit and rx-buffer availability. Bytes that
    * don't fit stay queued for the next credit update / rx refill.
    */
-  _flushConnection(conn) {
+  _flushConnection(conn: VsockConnection): void {
     if (!conn.open) return;
     while (conn._pendingTx.length) {
       const credit = conn.creditAvailable();
@@ -487,7 +511,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
   }
 
   /** Re-flush every connection (called on an rx-ring refill). */
-  _flushAll() {
+  _flushAll(): void {
     for (const conn of this._conns.values()) this._flushConnection(conn);
   }
 
@@ -496,7 +520,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * guest first (host-initiated/full close); otherwise it's an ack of a guest
    * RST. Fires onClose and forgets the connection.
    */
-  _closeConnection(conn, sendShutdown) {
+  _closeConnection(conn: VsockConnection, sendShutdown: boolean): void {
     if (!conn.open && !this._conns.has(this._key(conn))) return;
     if (sendShutdown) {
       this._sendCtl(

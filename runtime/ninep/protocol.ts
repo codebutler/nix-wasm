@@ -76,10 +76,12 @@ export const P9 = {
   Rclunk: 121,
   Tremove: 122,
   Rremove: 123,
-};
+} as const;
 
 /** Reverse map: type number → name (handy for logs/tests). */
-export const MSG_NAME = Object.fromEntries(Object.entries(P9).map(([k, v]) => [v, k]));
+export const MSG_NAME: Record<number, string> = Object.fromEntries(
+  Object.entries(P9).map(([k, v]) => [v, k]),
+);
 
 // ── qid.type bits ────────────────────────────────────────────────────────
 export const QT = {
@@ -128,232 +130,455 @@ export const DOTL_VERSION = "9P2000.L";
 // rdev, atime, mtime, ctime, ino, size, blocks. We always fill these.
 export const GETATTR_BASIC = 0x000007ff;
 
-// ── Per-message field schema ───────────────────────────────────────────────
-// Field kinds: u8 u16 u32 u64 str qid data | wname (u16-counted str[]) |
-// qids (u16-counted qid[]). The generic encoder/decoder walks these so each
-// message is one table row, not a bespoke function.
-const SCHEMA = {
-  [P9.Tversion]: [
-    ["msize", "u32"],
-    ["version", "str"],
-  ],
-  [P9.Rversion]: [
-    ["msize", "u32"],
-    ["version", "str"],
-  ],
-  [P9.Tauth]: [
-    ["afid", "u32"],
-    ["uname", "str"],
-    ["aname", "str"],
-    ["n_uname", "u32"],
-  ],
-  [P9.Rauth]: [["aqid", "qid"]],
-  [P9.Tattach]: [
-    ["fid", "u32"],
-    ["afid", "u32"],
-    ["uname", "str"],
-    ["aname", "str"],
-    ["n_uname", "u32"],
-  ],
-  [P9.Rattach]: [["qid", "qid"]],
-  [P9.Rlerror]: [["ecode", "u32"]],
-  [P9.Tstatfs]: [["fid", "u32"]],
-  // `fstype` is the wire's f_type; named to avoid colliding with the message
-  // `type` discriminator the schema dispatch keys on.
-  [P9.Rstatfs]: [
-    ["fstype", "u32"],
-    ["bsize", "u32"],
-    ["blocks", "u64"],
-    ["bfree", "u64"],
-    ["bavail", "u64"],
-    ["files", "u64"],
-    ["ffree", "u64"],
-    ["fsid", "u64"],
-    ["namelen", "u32"],
-  ],
-  [P9.Tlopen]: [
-    ["fid", "u32"],
-    ["flags", "u32"],
-  ],
-  [P9.Rlopen]: [
-    ["qid", "qid"],
-    ["iounit", "u32"],
-  ],
-  [P9.Tlcreate]: [
-    ["fid", "u32"],
-    ["name", "str"],
-    ["flags", "u32"],
-    ["mode", "u32"],
-    ["gid", "u32"],
-  ],
-  [P9.Rlcreate]: [
-    ["qid", "qid"],
-    ["iounit", "u32"],
-  ],
-  [P9.Tsymlink]: [
-    ["fid", "u32"],
-    ["name", "str"],
-    ["symtgt", "str"],
-    ["gid", "u32"],
-  ],
-  [P9.Rsymlink]: [["qid", "qid"]],
-  [P9.Tmknod]: [
-    ["dfid", "u32"],
-    ["name", "str"],
-    ["mode", "u32"],
-    ["major", "u32"],
-    ["minor", "u32"],
-    ["gid", "u32"],
-  ],
-  [P9.Rmknod]: [["qid", "qid"]],
-  [P9.Trename]: [
-    ["fid", "u32"],
-    ["dfid", "u32"],
-    ["name", "str"],
-  ],
-  [P9.Rrename]: [],
-  [P9.Treadlink]: [["fid", "u32"]],
-  [P9.Rreadlink]: [["target", "str"]],
-  [P9.Tgetattr]: [
-    ["fid", "u32"],
-    ["request_mask", "u64"],
-  ],
-  [P9.Rgetattr]: [
-    ["valid", "u64"],
-    ["qid", "qid"],
-    ["mode", "u32"],
-    ["uid", "u32"],
-    ["gid", "u32"],
-    ["nlink", "u64"],
-    ["rdev", "u64"],
-    ["size", "u64"],
-    ["blksize", "u64"],
-    ["blocks", "u64"],
-    ["atime_sec", "u64"],
-    ["atime_nsec", "u64"],
-    ["mtime_sec", "u64"],
-    ["mtime_nsec", "u64"],
-    ["ctime_sec", "u64"],
-    ["ctime_nsec", "u64"],
-    ["btime_sec", "u64"],
-    ["btime_nsec", "u64"],
-    ["gen", "u64"],
-    ["data_version", "u64"],
-  ],
-  [P9.Tsetattr]: [
-    ["fid", "u32"],
-    ["valid", "u32"],
-    ["mode", "u32"],
-    ["uid", "u32"],
-    ["gid", "u32"],
-    ["size", "u64"],
-    ["atime_sec", "u64"],
-    ["atime_nsec", "u64"],
-    ["mtime_sec", "u64"],
-    ["mtime_nsec", "u64"],
-  ],
-  [P9.Rsetattr]: [],
-  [P9.Txattrwalk]: [
-    ["fid", "u32"],
-    ["newfid", "u32"],
-    ["name", "str"],
-  ],
-  [P9.Treaddir]: [
-    ["fid", "u32"],
-    ["offset", "u64"],
-    ["count", "u32"],
-  ],
-  [P9.Rreaddir]: [["data", "data"]],
-  [P9.Tfsync]: [
-    ["fid", "u32"],
-    ["datasync", "u32"],
-  ],
-  [P9.Rfsync]: [],
-  // Byte-range locks (net/9p TLOCK "dbdqqds" / TGETLOCK "dbqqds"). v9fs keeps
-  // local lock state (locks_lock_file_wait) before consulting the server, so a
-  // single-client server can always grant (see server.js).
-  [P9.Tlock]: [
-    ["fid", "u32"],
-    ["locktype", "u8"],
-    ["flags", "u32"],
-    ["start", "u64"],
-    ["length", "u64"],
-    ["proc_id", "u32"],
-    ["client_id", "str"],
-  ],
-  [P9.Rlock]: [["status", "u8"]],
-  [P9.Tgetlock]: [
-    ["fid", "u32"],
-    ["locktype", "u8"],
-    ["start", "u64"],
-    ["length", "u64"],
-    ["proc_id", "u32"],
-    ["client_id", "str"],
-  ],
-  [P9.Rgetlock]: [
-    ["locktype", "u8"],
-    ["start", "u64"],
-    ["length", "u64"],
-    ["proc_id", "u32"],
-    ["client_id", "str"],
-  ],
-  [P9.Tmkdir]: [
-    ["dfid", "u32"],
-    ["name", "str"],
-    ["mode", "u32"],
-    ["gid", "u32"],
-  ],
-  [P9.Rmkdir]: [["qid", "qid"]],
-  [P9.Trenameat]: [
-    ["olddirfid", "u32"],
-    ["oldname", "str"],
-    ["newdirfid", "u32"],
-    ["newname", "str"],
-  ],
-  [P9.Rrenameat]: [],
-  [P9.Tunlinkat]: [
-    ["dirfid", "u32"],
-    ["name", "str"],
-    ["flags", "u32"],
-  ],
-  [P9.Runlinkat]: [],
-  [P9.Tflush]: [["oldtag", "u16"]],
-  [P9.Rflush]: [],
-  [P9.Twalk]: [
-    ["fid", "u32"],
-    ["newfid", "u32"],
-    ["wnames", "wname"],
-  ],
-  [P9.Rwalk]: [["qids", "qids"]],
-  [P9.Tread]: [
-    ["fid", "u32"],
-    ["offset", "u64"],
-    ["count", "u32"],
-  ],
-  [P9.Rread]: [["data", "data"]],
-  [P9.Twrite]: [
-    ["fid", "u32"],
-    ["offset", "u64"],
-    ["data", "data"],
-  ],
-  [P9.Rwrite]: [["count", "u32"]],
-  [P9.Tclunk]: [["fid", "u32"]],
-  [P9.Rclunk]: [],
-  [P9.Tremove]: [["fid", "u32"]],
-  [P9.Rremove]: [],
-};
+// ── Per-message types ──────────────────────────────────────────────────────
+// Field kinds on the wire: u8 u16 u32 u64 str qid data | wname (u16-counted
+// str[]) | qids (u16-counted qid[]). Each message is one interface below and
+// one case in `encode`/`decode`, which read and write its fields in wire
+// order. u64 fields are typed `number` (see the header note on precision).
+
+/** A 9P qid: type[1] version[4] path[8]. */
+export interface Qid {
+  type: number;
+  version: number;
+  path: number;
+}
+
+/** One Treaddir directory entry, as packed by `packDirent`. */
+export interface Dirent {
+  qid: Qid;
+  offset: number;
+  type: number;
+  name: string;
+}
+
+export interface Tversion {
+  type: typeof P9.Tversion;
+  tag?: number;
+  msize: number;
+  version: string;
+}
+export interface Rversion {
+  type: typeof P9.Rversion;
+  tag?: number;
+  msize: number;
+  version: string;
+}
+export interface Tauth {
+  type: typeof P9.Tauth;
+  tag?: number;
+  afid: number;
+  uname: string;
+  aname: string;
+  n_uname: number;
+}
+export interface Rauth {
+  type: typeof P9.Rauth;
+  tag?: number;
+  aqid: Qid;
+}
+export interface Tattach {
+  type: typeof P9.Tattach;
+  tag?: number;
+  fid: number;
+  afid: number;
+  uname: string;
+  aname: string;
+  n_uname: number;
+}
+export interface Rattach {
+  type: typeof P9.Rattach;
+  tag?: number;
+  qid: Qid;
+}
+export interface Rlerror {
+  type: typeof P9.Rlerror;
+  tag?: number;
+  ecode: number;
+}
+export interface Tstatfs {
+  type: typeof P9.Tstatfs;
+  tag?: number;
+  fid: number;
+}
+// `fstype` is the wire's f_type; named to avoid colliding with the message
+// `type` discriminator the codec switches on.
+export interface Rstatfs {
+  type: typeof P9.Rstatfs;
+  tag?: number;
+  fstype: number;
+  bsize: number;
+  blocks: number;
+  bfree: number;
+  bavail: number;
+  files: number;
+  ffree: number;
+  fsid: number;
+  namelen: number;
+}
+export interface Tlopen {
+  type: typeof P9.Tlopen;
+  tag?: number;
+  fid: number;
+  flags: number;
+}
+export interface Rlopen {
+  type: typeof P9.Rlopen;
+  tag?: number;
+  qid: Qid;
+  iounit: number;
+}
+export interface Tlcreate {
+  type: typeof P9.Tlcreate;
+  tag?: number;
+  fid: number;
+  name: string;
+  flags: number;
+  mode: number;
+  gid: number;
+}
+export interface Rlcreate {
+  type: typeof P9.Rlcreate;
+  tag?: number;
+  qid: Qid;
+  iounit: number;
+}
+export interface Tsymlink {
+  type: typeof P9.Tsymlink;
+  tag?: number;
+  fid: number;
+  name: string;
+  symtgt: string;
+  gid: number;
+}
+export interface Rsymlink {
+  type: typeof P9.Rsymlink;
+  tag?: number;
+  qid: Qid;
+}
+export interface Tmknod {
+  type: typeof P9.Tmknod;
+  tag?: number;
+  dfid: number;
+  name: string;
+  mode: number;
+  major: number;
+  minor: number;
+  gid: number;
+}
+export interface Rmknod {
+  type: typeof P9.Rmknod;
+  tag?: number;
+  qid: Qid;
+}
+export interface Trename {
+  type: typeof P9.Trename;
+  tag?: number;
+  fid: number;
+  dfid: number;
+  name: string;
+}
+export interface Rrename {
+  type: typeof P9.Rrename;
+  tag?: number;
+}
+export interface Treadlink {
+  type: typeof P9.Treadlink;
+  tag?: number;
+  fid: number;
+}
+export interface Rreadlink {
+  type: typeof P9.Rreadlink;
+  tag?: number;
+  target: string;
+}
+export interface Tgetattr {
+  type: typeof P9.Tgetattr;
+  tag?: number;
+  fid: number;
+  request_mask: number;
+}
+export interface Rgetattr {
+  type: typeof P9.Rgetattr;
+  tag?: number;
+  valid: number;
+  qid: Qid;
+  mode: number;
+  uid: number;
+  gid: number;
+  nlink: number;
+  rdev: number;
+  size: number;
+  blksize: number;
+  blocks: number;
+  atime_sec: number;
+  atime_nsec: number;
+  mtime_sec: number;
+  mtime_nsec: number;
+  ctime_sec: number;
+  ctime_nsec: number;
+  btime_sec: number;
+  btime_nsec: number;
+  gen: number;
+  data_version: number;
+}
+export interface Tsetattr {
+  type: typeof P9.Tsetattr;
+  tag?: number;
+  fid: number;
+  valid: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  size: number;
+  atime_sec: number;
+  atime_nsec: number;
+  mtime_sec: number;
+  mtime_nsec: number;
+}
+export interface Rsetattr {
+  type: typeof P9.Rsetattr;
+  tag?: number;
+}
+export interface Txattrwalk {
+  type: typeof P9.Txattrwalk;
+  tag?: number;
+  fid: number;
+  newfid: number;
+  name: string;
+}
+export interface Treaddir {
+  type: typeof P9.Treaddir;
+  tag?: number;
+  fid: number;
+  offset: number;
+  count: number;
+}
+export interface Rreaddir {
+  type: typeof P9.Rreaddir;
+  tag?: number;
+  data: Uint8Array;
+}
+export interface Tfsync {
+  type: typeof P9.Tfsync;
+  tag?: number;
+  fid: number;
+  datasync: number;
+}
+export interface Rfsync {
+  type: typeof P9.Rfsync;
+  tag?: number;
+}
+// Byte-range locks (net/9p TLOCK "dbdqqds" / TGETLOCK "dbqqds"). v9fs keeps
+// local lock state (locks_lock_file_wait) before consulting the server, so a
+// single-client server can always grant (see server.js).
+export interface Tlock {
+  type: typeof P9.Tlock;
+  tag?: number;
+  fid: number;
+  locktype: number;
+  flags: number;
+  start: number;
+  length: number;
+  proc_id: number;
+  client_id: string;
+}
+export interface Rlock {
+  type: typeof P9.Rlock;
+  tag?: number;
+  status: number;
+}
+export interface Tgetlock {
+  type: typeof P9.Tgetlock;
+  tag?: number;
+  fid: number;
+  locktype: number;
+  start: number;
+  length: number;
+  proc_id: number;
+  client_id: string;
+}
+export interface Rgetlock {
+  type: typeof P9.Rgetlock;
+  tag?: number;
+  locktype: number;
+  start: number;
+  length: number;
+  proc_id: number;
+  client_id: string;
+}
+export interface Tmkdir {
+  type: typeof P9.Tmkdir;
+  tag?: number;
+  dfid: number;
+  name: string;
+  mode: number;
+  gid: number;
+}
+export interface Rmkdir {
+  type: typeof P9.Rmkdir;
+  tag?: number;
+  qid: Qid;
+}
+export interface Trenameat {
+  type: typeof P9.Trenameat;
+  tag?: number;
+  olddirfid: number;
+  oldname: string;
+  newdirfid: number;
+  newname: string;
+}
+export interface Rrenameat {
+  type: typeof P9.Rrenameat;
+  tag?: number;
+}
+export interface Tunlinkat {
+  type: typeof P9.Tunlinkat;
+  tag?: number;
+  dirfid: number;
+  name: string;
+  flags: number;
+}
+export interface Runlinkat {
+  type: typeof P9.Runlinkat;
+  tag?: number;
+}
+export interface Tflush {
+  type: typeof P9.Tflush;
+  tag?: number;
+  oldtag: number;
+}
+export interface Rflush {
+  type: typeof P9.Rflush;
+  tag?: number;
+}
+export interface Twalk {
+  type: typeof P9.Twalk;
+  tag?: number;
+  fid: number;
+  newfid: number;
+  wnames: string[];
+}
+export interface Rwalk {
+  type: typeof P9.Rwalk;
+  tag?: number;
+  qids: Qid[];
+}
+export interface Tread {
+  type: typeof P9.Tread;
+  tag?: number;
+  fid: number;
+  offset: number;
+  count: number;
+}
+export interface Rread {
+  type: typeof P9.Rread;
+  tag?: number;
+  data: Uint8Array;
+}
+export interface Twrite {
+  type: typeof P9.Twrite;
+  tag?: number;
+  fid: number;
+  offset: number;
+  data: Uint8Array;
+}
+export interface Rwrite {
+  type: typeof P9.Rwrite;
+  tag?: number;
+  count: number;
+}
+export interface Tclunk {
+  type: typeof P9.Tclunk;
+  tag?: number;
+  fid: number;
+}
+export interface Rclunk {
+  type: typeof P9.Rclunk;
+  tag?: number;
+}
+export interface Tremove {
+  type: typeof P9.Tremove;
+  tag?: number;
+  fid: number;
+}
+export interface Rremove {
+  type: typeof P9.Rremove;
+  tag?: number;
+}
+
+export type P9Request =
+  | Tversion
+  | Tauth
+  | Tattach
+  | Tstatfs
+  | Tlopen
+  | Tlcreate
+  | Tsymlink
+  | Tmknod
+  | Trename
+  | Treadlink
+  | Tgetattr
+  | Tsetattr
+  | Txattrwalk
+  | Treaddir
+  | Tfsync
+  | Tlock
+  | Tgetlock
+  | Tmkdir
+  | Trenameat
+  | Tunlinkat
+  | Tflush
+  | Twalk
+  | Tread
+  | Twrite
+  | Tclunk
+  | Tremove;
+
+export type P9Reply =
+  | Rversion
+  | Rauth
+  | Rattach
+  | Rlerror
+  | Rstatfs
+  | Rlopen
+  | Rlcreate
+  | Rsymlink
+  | Rmknod
+  | Rrename
+  | Rreadlink
+  | Rgetattr
+  | Rsetattr
+  | Rreaddir
+  | Rfsync
+  | Rlock
+  | Rgetlock
+  | Rmkdir
+  | Rrenameat
+  | Runlinkat
+  | Rflush
+  | Rwalk
+  | Rread
+  | Rwrite
+  | Rclunk
+  | Rremove;
+
+/** Any 9P2000.L message this codec can encode or decode. */
+export type P9Message = P9Request | P9Reply;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 // ── Growable little-endian writer ──────────────────────────────────────────
 class Writer {
+  buf: Uint8Array;
+  view: DataView;
+  pos: number;
   constructor() {
     this.buf = new Uint8Array(64);
     this.view = new DataView(this.buf.buffer);
     this.pos = 0;
   }
-  ensure(n) {
+  ensure(n: number): void {
     if (this.pos + n <= this.buf.length) return;
     let cap = this.buf.length * 2;
     while (cap < this.pos + n) cap *= 2;
@@ -362,182 +587,380 @@ class Writer {
     this.buf = nb;
     this.view = new DataView(nb.buffer);
   }
-  u8(v) {
+  u8(v: number): void {
     this.ensure(1);
     this.view.setUint8(this.pos, v & 0xff);
     this.pos += 1;
   }
-  u16(v) {
+  u16(v: number): void {
     this.ensure(2);
     this.view.setUint16(this.pos, v & 0xffff, true);
     this.pos += 2;
   }
-  u32(v) {
+  u32(v: number): void {
     this.ensure(4);
     this.view.setUint32(this.pos, v >>> 0, true);
     this.pos += 4;
   }
-  u64(v) {
+  u64(v: number | bigint): void {
     this.ensure(8);
     this.view.setBigUint64(this.pos, BigInt(Math.trunc(Number(v))), true);
     this.pos += 8;
   }
-  raw(b) {
+  raw(b: Uint8Array): void {
     this.ensure(b.length);
     this.buf.set(b, this.pos);
     this.pos += b.length;
   }
-  str(s) {
+  str(s: string): void {
     const e = enc.encode(String(s));
     this.u16(e.length);
     this.raw(e);
   }
-  qid(q) {
+  qid(q: Qid): void {
     this.u8(q.type);
     this.u32(q.version);
     this.u64(q.path);
   }
-  data(b) {
+  data(b: Uint8Array): void {
     this.u32(b.length);
     this.raw(b);
   }
-  patchU32(off, v) {
+  wnames(v: string[]): void {
+    this.u16(v.length);
+    for (const s of v) this.str(s);
+  }
+  qids(v: Qid[]): void {
+    this.u16(v.length);
+    for (const q of v) this.qid(q);
+  }
+  patchU32(off: number, v: number): void {
     this.view.setUint32(off, v >>> 0, true);
   }
-  out() {
+  out(): Uint8Array {
     return this.buf.slice(0, this.pos);
   }
 }
 
 // ── Little-endian reader over a Uint8Array ─────────────────────────────────
 class Reader {
-  /** @param {Uint8Array|ArrayBuffer} input */
-  constructor(input: Uint8Array|ArrayBuffer) {
+  buf: Uint8Array;
+  view: DataView;
+  pos: number;
+  constructor(input: Uint8Array | ArrayBuffer) {
     this.buf = input instanceof Uint8Array ? input : new Uint8Array(input);
     this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
     this.pos = 0;
   }
-  u8() {
+  u8(): number {
     const v = this.view.getUint8(this.pos);
     this.pos += 1;
     return v;
   }
-  u16() {
+  u16(): number {
     const v = this.view.getUint16(this.pos, true);
     this.pos += 2;
     return v;
   }
-  u32() {
+  u32(): number {
     const v = this.view.getUint32(this.pos, true);
     this.pos += 4;
     return v;
   }
-  u64() {
+  u64(): number {
     const v = this.view.getBigUint64(this.pos, true);
     this.pos += 8;
     return Number(v);
   }
-  raw(n) {
+  raw(n: number): Uint8Array {
     const b = this.buf.subarray(this.pos, this.pos + n).slice();
     this.pos += n;
     return b;
   }
-  str() {
+  str(): string {
     return dec.decode(this.raw(this.u16()));
   }
-  qid() {
+  qid(): Qid {
     return { type: this.u8(), version: this.u32(), path: this.u64() };
   }
-  data() {
+  data(): Uint8Array {
     return this.raw(this.u32());
   }
-}
-
-function writeField(w, kind, v) {
-  switch (kind) {
-    case "u8":
-      w.u8(v);
-      break;
-    case "u16":
-      w.u16(v);
-      break;
-    case "u32":
-      w.u32(v);
-      break;
-    case "u64":
-      w.u64(v);
-      break;
-    case "str":
-      w.str(v);
-      break;
-    case "qid":
-      w.qid(v);
-      break;
-    case "data":
-      w.data(v);
-      break;
-    case "wname":
-      w.u16(v.length);
-      for (const s of v) w.str(s);
-      break;
-    case "qids":
-      w.u16(v.length);
-      for (const q of v) w.qid(q);
-      break;
-    default:
-      throw new Error("9p encode: bad field kind " + kind);
+  wnames(): string[] {
+    const n = this.u16();
+    const a: string[] = [];
+    for (let i = 0; i < n; i++) a.push(this.str());
+    return a;
   }
-}
-
-function readField(r, kind) {
-  switch (kind) {
-    case "u8":
-      return r.u8();
-    case "u16":
-      return r.u16();
-    case "u32":
-      return r.u32();
-    case "u64":
-      return r.u64();
-    case "str":
-      return r.str();
-    case "qid":
-      return r.qid();
-    case "data":
-      return r.data();
-    case "wname": {
-      const n = r.u16();
-      const a = [];
-      for (let i = 0; i < n; i++) a.push(r.str());
-      return a;
-    }
-    case "qids": {
-      const n = r.u16();
-      const a = [];
-      for (let i = 0; i < n; i++) a.push(r.qid());
-      return a;
-    }
-    default:
-      throw new Error("9p decode: bad field kind " + kind);
+  qids(): Qid[] {
+    const n = this.u16();
+    const a: Qid[] = [];
+    for (let i = 0; i < n; i++) a.push(this.qid());
+    return a;
   }
 }
 
 // ── Public codec ───────────────────────────────────────────────────────────
 
 /**
- * Encode a message object → framed bytes. `msg.type` selects the schema;
+ * Encode a message object → framed bytes. `msg.type` selects the body layout;
  * `msg.tag` defaults to 0; remaining keys are the body fields.
- * @param {Record<string, any>} msg
- * @returns {Uint8Array}
  */
-export function encode(msg: Record<string,any>): Uint8Array {
-  const fields = SCHEMA[msg.type];
-  if (!fields) throw new Error("9p encode: unknown type " + msg.type);
+export function encode(msg: P9Message): Uint8Array {
+  const type: number = msg.type;
   const w = new Writer();
   w.u32(0); // size placeholder, backpatched below
-  w.u8(msg.type);
+  w.u8(type);
   w.u16(msg.tag ?? 0);
-  for (const [name, kind] of fields) writeField(w, kind, msg[name]);
+  switch (msg.type) {
+    case P9.Tversion:
+      w.u32(msg.msize);
+      w.str(msg.version);
+      break;
+    case P9.Rversion:
+      w.u32(msg.msize);
+      w.str(msg.version);
+      break;
+    case P9.Tauth:
+      w.u32(msg.afid);
+      w.str(msg.uname);
+      w.str(msg.aname);
+      w.u32(msg.n_uname);
+      break;
+    case P9.Rauth:
+      w.qid(msg.aqid);
+      break;
+    case P9.Tattach:
+      w.u32(msg.fid);
+      w.u32(msg.afid);
+      w.str(msg.uname);
+      w.str(msg.aname);
+      w.u32(msg.n_uname);
+      break;
+    case P9.Rattach:
+      w.qid(msg.qid);
+      break;
+    case P9.Rlerror:
+      w.u32(msg.ecode);
+      break;
+    case P9.Tstatfs:
+      w.u32(msg.fid);
+      break;
+    case P9.Rstatfs:
+      w.u32(msg.fstype);
+      w.u32(msg.bsize);
+      w.u64(msg.blocks);
+      w.u64(msg.bfree);
+      w.u64(msg.bavail);
+      w.u64(msg.files);
+      w.u64(msg.ffree);
+      w.u64(msg.fsid);
+      w.u32(msg.namelen);
+      break;
+    case P9.Tlopen:
+      w.u32(msg.fid);
+      w.u32(msg.flags);
+      break;
+    case P9.Rlopen:
+      w.qid(msg.qid);
+      w.u32(msg.iounit);
+      break;
+    case P9.Tlcreate:
+      w.u32(msg.fid);
+      w.str(msg.name);
+      w.u32(msg.flags);
+      w.u32(msg.mode);
+      w.u32(msg.gid);
+      break;
+    case P9.Rlcreate:
+      w.qid(msg.qid);
+      w.u32(msg.iounit);
+      break;
+    case P9.Tsymlink:
+      w.u32(msg.fid);
+      w.str(msg.name);
+      w.str(msg.symtgt);
+      w.u32(msg.gid);
+      break;
+    case P9.Rsymlink:
+      w.qid(msg.qid);
+      break;
+    case P9.Tmknod:
+      w.u32(msg.dfid);
+      w.str(msg.name);
+      w.u32(msg.mode);
+      w.u32(msg.major);
+      w.u32(msg.minor);
+      w.u32(msg.gid);
+      break;
+    case P9.Rmknod:
+      w.qid(msg.qid);
+      break;
+    case P9.Trename:
+      w.u32(msg.fid);
+      w.u32(msg.dfid);
+      w.str(msg.name);
+      break;
+    case P9.Rrename:
+      break;
+    case P9.Treadlink:
+      w.u32(msg.fid);
+      break;
+    case P9.Rreadlink:
+      w.str(msg.target);
+      break;
+    case P9.Tgetattr:
+      w.u32(msg.fid);
+      w.u64(msg.request_mask);
+      break;
+    case P9.Rgetattr:
+      w.u64(msg.valid);
+      w.qid(msg.qid);
+      w.u32(msg.mode);
+      w.u32(msg.uid);
+      w.u32(msg.gid);
+      w.u64(msg.nlink);
+      w.u64(msg.rdev);
+      w.u64(msg.size);
+      w.u64(msg.blksize);
+      w.u64(msg.blocks);
+      w.u64(msg.atime_sec);
+      w.u64(msg.atime_nsec);
+      w.u64(msg.mtime_sec);
+      w.u64(msg.mtime_nsec);
+      w.u64(msg.ctime_sec);
+      w.u64(msg.ctime_nsec);
+      w.u64(msg.btime_sec);
+      w.u64(msg.btime_nsec);
+      w.u64(msg.gen);
+      w.u64(msg.data_version);
+      break;
+    case P9.Tsetattr:
+      w.u32(msg.fid);
+      w.u32(msg.valid);
+      w.u32(msg.mode);
+      w.u32(msg.uid);
+      w.u32(msg.gid);
+      w.u64(msg.size);
+      w.u64(msg.atime_sec);
+      w.u64(msg.atime_nsec);
+      w.u64(msg.mtime_sec);
+      w.u64(msg.mtime_nsec);
+      break;
+    case P9.Rsetattr:
+      break;
+    case P9.Txattrwalk:
+      w.u32(msg.fid);
+      w.u32(msg.newfid);
+      w.str(msg.name);
+      break;
+    case P9.Treaddir:
+      w.u32(msg.fid);
+      w.u64(msg.offset);
+      w.u32(msg.count);
+      break;
+    case P9.Rreaddir:
+      w.data(msg.data);
+      break;
+    case P9.Tfsync:
+      w.u32(msg.fid);
+      w.u32(msg.datasync);
+      break;
+    case P9.Rfsync:
+      break;
+    case P9.Tlock:
+      w.u32(msg.fid);
+      w.u8(msg.locktype);
+      w.u32(msg.flags);
+      w.u64(msg.start);
+      w.u64(msg.length);
+      w.u32(msg.proc_id);
+      w.str(msg.client_id);
+      break;
+    case P9.Rlock:
+      w.u8(msg.status);
+      break;
+    case P9.Tgetlock:
+      w.u32(msg.fid);
+      w.u8(msg.locktype);
+      w.u64(msg.start);
+      w.u64(msg.length);
+      w.u32(msg.proc_id);
+      w.str(msg.client_id);
+      break;
+    case P9.Rgetlock:
+      w.u8(msg.locktype);
+      w.u64(msg.start);
+      w.u64(msg.length);
+      w.u32(msg.proc_id);
+      w.str(msg.client_id);
+      break;
+    case P9.Tmkdir:
+      w.u32(msg.dfid);
+      w.str(msg.name);
+      w.u32(msg.mode);
+      w.u32(msg.gid);
+      break;
+    case P9.Rmkdir:
+      w.qid(msg.qid);
+      break;
+    case P9.Trenameat:
+      w.u32(msg.olddirfid);
+      w.str(msg.oldname);
+      w.u32(msg.newdirfid);
+      w.str(msg.newname);
+      break;
+    case P9.Rrenameat:
+      break;
+    case P9.Tunlinkat:
+      w.u32(msg.dirfid);
+      w.str(msg.name);
+      w.u32(msg.flags);
+      break;
+    case P9.Runlinkat:
+      break;
+    case P9.Tflush:
+      w.u16(msg.oldtag);
+      break;
+    case P9.Rflush:
+      break;
+    case P9.Twalk:
+      w.u32(msg.fid);
+      w.u32(msg.newfid);
+      w.wnames(msg.wnames);
+      break;
+    case P9.Rwalk:
+      w.qids(msg.qids);
+      break;
+    case P9.Tread:
+      w.u32(msg.fid);
+      w.u64(msg.offset);
+      w.u32(msg.count);
+      break;
+    case P9.Rread:
+      w.data(msg.data);
+      break;
+    case P9.Twrite:
+      w.u32(msg.fid);
+      w.u64(msg.offset);
+      w.data(msg.data);
+      break;
+    case P9.Rwrite:
+      w.u32(msg.count);
+      break;
+    case P9.Tclunk:
+      w.u32(msg.fid);
+      break;
+    case P9.Rclunk:
+      break;
+    case P9.Tremove:
+      w.u32(msg.fid);
+      break;
+    case P9.Rremove:
+      break;
+    default:
+      throw new Error("9p encode: unknown type " + type);
+  }
   w.patchU32(0, w.pos);
   return w.out();
 }
@@ -547,31 +970,429 @@ export function encode(msg: Record<string,any>): Uint8Array {
  * size[4] is consumed but not surfaced — it's redundant (a body field can also
  * be named `size`, e.g. Rgetattr), and the transport already read it to size
  * the frame slice it hands us.
- * @param {Uint8Array|ArrayBuffer} input
- * @returns {Record<string, any>}
  */
-export function decode(input: Uint8Array|ArrayBuffer): Record<string,any> {
+export function decode(input: Uint8Array | ArrayBuffer): P9Message {
   const r = new Reader(input);
   r.u32(); // size — consumed; see doc comment
   const type = r.u8();
   const tag = r.u16();
-  const fields = SCHEMA[type];
-  if (!fields) throw new Error("9p decode: unknown type " + type);
-  /** @type {Record<string, any>} */
-  const msg: Record<string,any> = { type, tag };
-  for (const [name, kind] of fields) msg[name] = readField(r, kind);
-  return msg;
+  switch (type) {
+    case P9.Tversion:
+      return {
+        type: P9.Tversion,
+        tag,
+        msize: r.u32(),
+        version: r.str(),
+      };
+    case P9.Rversion:
+      return {
+        type: P9.Rversion,
+        tag,
+        msize: r.u32(),
+        version: r.str(),
+      };
+    case P9.Tauth:
+      return {
+        type: P9.Tauth,
+        tag,
+        afid: r.u32(),
+        uname: r.str(),
+        aname: r.str(),
+        n_uname: r.u32(),
+      };
+    case P9.Rauth:
+      return {
+        type: P9.Rauth,
+        tag,
+        aqid: r.qid(),
+      };
+    case P9.Tattach:
+      return {
+        type: P9.Tattach,
+        tag,
+        fid: r.u32(),
+        afid: r.u32(),
+        uname: r.str(),
+        aname: r.str(),
+        n_uname: r.u32(),
+      };
+    case P9.Rattach:
+      return {
+        type: P9.Rattach,
+        tag,
+        qid: r.qid(),
+      };
+    case P9.Rlerror:
+      return {
+        type: P9.Rlerror,
+        tag,
+        ecode: r.u32(),
+      };
+    case P9.Tstatfs:
+      return {
+        type: P9.Tstatfs,
+        tag,
+        fid: r.u32(),
+      };
+    case P9.Rstatfs:
+      return {
+        type: P9.Rstatfs,
+        tag,
+        fstype: r.u32(),
+        bsize: r.u32(),
+        blocks: r.u64(),
+        bfree: r.u64(),
+        bavail: r.u64(),
+        files: r.u64(),
+        ffree: r.u64(),
+        fsid: r.u64(),
+        namelen: r.u32(),
+      };
+    case P9.Tlopen:
+      return {
+        type: P9.Tlopen,
+        tag,
+        fid: r.u32(),
+        flags: r.u32(),
+      };
+    case P9.Rlopen:
+      return {
+        type: P9.Rlopen,
+        tag,
+        qid: r.qid(),
+        iounit: r.u32(),
+      };
+    case P9.Tlcreate:
+      return {
+        type: P9.Tlcreate,
+        tag,
+        fid: r.u32(),
+        name: r.str(),
+        flags: r.u32(),
+        mode: r.u32(),
+        gid: r.u32(),
+      };
+    case P9.Rlcreate:
+      return {
+        type: P9.Rlcreate,
+        tag,
+        qid: r.qid(),
+        iounit: r.u32(),
+      };
+    case P9.Tsymlink:
+      return {
+        type: P9.Tsymlink,
+        tag,
+        fid: r.u32(),
+        name: r.str(),
+        symtgt: r.str(),
+        gid: r.u32(),
+      };
+    case P9.Rsymlink:
+      return {
+        type: P9.Rsymlink,
+        tag,
+        qid: r.qid(),
+      };
+    case P9.Tmknod:
+      return {
+        type: P9.Tmknod,
+        tag,
+        dfid: r.u32(),
+        name: r.str(),
+        mode: r.u32(),
+        major: r.u32(),
+        minor: r.u32(),
+        gid: r.u32(),
+      };
+    case P9.Rmknod:
+      return {
+        type: P9.Rmknod,
+        tag,
+        qid: r.qid(),
+      };
+    case P9.Trename:
+      return {
+        type: P9.Trename,
+        tag,
+        fid: r.u32(),
+        dfid: r.u32(),
+        name: r.str(),
+      };
+    case P9.Rrename:
+      return {
+        type: P9.Rrename,
+        tag,
+      };
+    case P9.Treadlink:
+      return {
+        type: P9.Treadlink,
+        tag,
+        fid: r.u32(),
+      };
+    case P9.Rreadlink:
+      return {
+        type: P9.Rreadlink,
+        tag,
+        target: r.str(),
+      };
+    case P9.Tgetattr:
+      return {
+        type: P9.Tgetattr,
+        tag,
+        fid: r.u32(),
+        request_mask: r.u64(),
+      };
+    case P9.Rgetattr:
+      return {
+        type: P9.Rgetattr,
+        tag,
+        valid: r.u64(),
+        qid: r.qid(),
+        mode: r.u32(),
+        uid: r.u32(),
+        gid: r.u32(),
+        nlink: r.u64(),
+        rdev: r.u64(),
+        size: r.u64(),
+        blksize: r.u64(),
+        blocks: r.u64(),
+        atime_sec: r.u64(),
+        atime_nsec: r.u64(),
+        mtime_sec: r.u64(),
+        mtime_nsec: r.u64(),
+        ctime_sec: r.u64(),
+        ctime_nsec: r.u64(),
+        btime_sec: r.u64(),
+        btime_nsec: r.u64(),
+        gen: r.u64(),
+        data_version: r.u64(),
+      };
+    case P9.Tsetattr:
+      return {
+        type: P9.Tsetattr,
+        tag,
+        fid: r.u32(),
+        valid: r.u32(),
+        mode: r.u32(),
+        uid: r.u32(),
+        gid: r.u32(),
+        size: r.u64(),
+        atime_sec: r.u64(),
+        atime_nsec: r.u64(),
+        mtime_sec: r.u64(),
+        mtime_nsec: r.u64(),
+      };
+    case P9.Rsetattr:
+      return {
+        type: P9.Rsetattr,
+        tag,
+      };
+    case P9.Txattrwalk:
+      return {
+        type: P9.Txattrwalk,
+        tag,
+        fid: r.u32(),
+        newfid: r.u32(),
+        name: r.str(),
+      };
+    case P9.Treaddir:
+      return {
+        type: P9.Treaddir,
+        tag,
+        fid: r.u32(),
+        offset: r.u64(),
+        count: r.u32(),
+      };
+    case P9.Rreaddir:
+      return {
+        type: P9.Rreaddir,
+        tag,
+        data: r.data(),
+      };
+    case P9.Tfsync:
+      return {
+        type: P9.Tfsync,
+        tag,
+        fid: r.u32(),
+        datasync: r.u32(),
+      };
+    case P9.Rfsync:
+      return {
+        type: P9.Rfsync,
+        tag,
+      };
+    case P9.Tlock:
+      return {
+        type: P9.Tlock,
+        tag,
+        fid: r.u32(),
+        locktype: r.u8(),
+        flags: r.u32(),
+        start: r.u64(),
+        length: r.u64(),
+        proc_id: r.u32(),
+        client_id: r.str(),
+      };
+    case P9.Rlock:
+      return {
+        type: P9.Rlock,
+        tag,
+        status: r.u8(),
+      };
+    case P9.Tgetlock:
+      return {
+        type: P9.Tgetlock,
+        tag,
+        fid: r.u32(),
+        locktype: r.u8(),
+        start: r.u64(),
+        length: r.u64(),
+        proc_id: r.u32(),
+        client_id: r.str(),
+      };
+    case P9.Rgetlock:
+      return {
+        type: P9.Rgetlock,
+        tag,
+        locktype: r.u8(),
+        start: r.u64(),
+        length: r.u64(),
+        proc_id: r.u32(),
+        client_id: r.str(),
+      };
+    case P9.Tmkdir:
+      return {
+        type: P9.Tmkdir,
+        tag,
+        dfid: r.u32(),
+        name: r.str(),
+        mode: r.u32(),
+        gid: r.u32(),
+      };
+    case P9.Rmkdir:
+      return {
+        type: P9.Rmkdir,
+        tag,
+        qid: r.qid(),
+      };
+    case P9.Trenameat:
+      return {
+        type: P9.Trenameat,
+        tag,
+        olddirfid: r.u32(),
+        oldname: r.str(),
+        newdirfid: r.u32(),
+        newname: r.str(),
+      };
+    case P9.Rrenameat:
+      return {
+        type: P9.Rrenameat,
+        tag,
+      };
+    case P9.Tunlinkat:
+      return {
+        type: P9.Tunlinkat,
+        tag,
+        dirfid: r.u32(),
+        name: r.str(),
+        flags: r.u32(),
+      };
+    case P9.Runlinkat:
+      return {
+        type: P9.Runlinkat,
+        tag,
+      };
+    case P9.Tflush:
+      return {
+        type: P9.Tflush,
+        tag,
+        oldtag: r.u16(),
+      };
+    case P9.Rflush:
+      return {
+        type: P9.Rflush,
+        tag,
+      };
+    case P9.Twalk:
+      return {
+        type: P9.Twalk,
+        tag,
+        fid: r.u32(),
+        newfid: r.u32(),
+        wnames: r.wnames(),
+      };
+    case P9.Rwalk:
+      return {
+        type: P9.Rwalk,
+        tag,
+        qids: r.qids(),
+      };
+    case P9.Tread:
+      return {
+        type: P9.Tread,
+        tag,
+        fid: r.u32(),
+        offset: r.u64(),
+        count: r.u32(),
+      };
+    case P9.Rread:
+      return {
+        type: P9.Rread,
+        tag,
+        data: r.data(),
+      };
+    case P9.Twrite:
+      return {
+        type: P9.Twrite,
+        tag,
+        fid: r.u32(),
+        offset: r.u64(),
+        data: r.data(),
+      };
+    case P9.Rwrite:
+      return {
+        type: P9.Rwrite,
+        tag,
+        count: r.u32(),
+      };
+    case P9.Tclunk:
+      return {
+        type: P9.Tclunk,
+        tag,
+        fid: r.u32(),
+      };
+    case P9.Rclunk:
+      return {
+        type: P9.Rclunk,
+        tag,
+      };
+    case P9.Tremove:
+      return {
+        type: P9.Tremove,
+        tag,
+        fid: r.u32(),
+      };
+    case P9.Rremove:
+      return {
+        type: P9.Rremove,
+        tag,
+      };
+
+    default:
+      throw new Error("9p decode: unknown type " + type);
+  }
 }
 
 /** Read just the tag from a frame (used to reply Rlerror to an undecodable msg). */
-export function peekTag(input) {
+export function peekTag(input: Uint8Array | ArrayBuffer): number {
   const b = input instanceof Uint8Array ? input : new Uint8Array(input);
   if (b.length < 7) return NOTAG;
   return new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(5, true);
 }
 
 /** Build a qid record. */
-export function makeQid(type, version, path) {
+export function makeQid(type: number, version: number, path: number): Qid {
   return { type, version, path };
 }
 
@@ -579,7 +1400,7 @@ export function makeQid(type, version, path) {
  * Pack one Treaddir dirent: qid[13] offset[8] type[1] name[s].
  * The server concatenates these into the Rreaddir `data` blob.
  */
-export function packDirent({ qid, offset, type, name }) {
+export function packDirent({ qid, offset, type, name }: Dirent): Uint8Array {
   const w = new Writer();
   w.qid(qid);
   w.u64(offset);
@@ -589,6 +1410,6 @@ export function packDirent({ qid, offset, type, name }) {
 }
 
 /** Byte length of a packed dirent without allocating (for msize budgeting). */
-export function direntSize(name) {
+export function direntSize(name: string): number {
   return 13 + 8 + 1 + 2 + enc.encode(String(name)).length;
 }
