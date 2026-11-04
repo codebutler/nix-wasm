@@ -54,8 +54,14 @@ export async function bootNixSystem(opts: {
     return new URL(p, base).href;
   };
 
-  const toUrl = (bytesOrBlob: ArrayBuffer | Blob) =>
-    URL.createObjectURL(bytesOrBlob instanceof Blob ? bytesOrBlob : new Blob([bytesOrBlob]));
+  // Blob URLs exist in browsers and Node; a host without them can only boot
+  // from URLs (baseUrl), not from bytes.
+  const toUrl = (bytesOrBlob: ArrayBuffer | Blob): string => {
+    const createObjectURL = (URL as { createObjectURL?: (blob: Blob) => string }).createObjectURL;
+    if (!createObjectURL)
+      throw new Error("bootNixSystem: this host cannot boot from bytes (no blob URLs)");
+    return createObjectURL(bytesOrBlob instanceof Blob ? bytesOrBlob : new Blob([bytesOrBlob]));
+  };
 
   const vmlinuxUrl = opts.vmlinux != null ? toUrl(opts.vmlinux) : u("vmlinux.wasm");
   const initrdUrl = opts.initramfs != null ? toUrl(opts.initramfs) : u("initramfs.cpio.gz");

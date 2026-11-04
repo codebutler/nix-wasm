@@ -30,19 +30,35 @@ import type {
   UserExecutable,
   WorkerMessage,
 } from "./kernel-host.ts";
+import type { WorkerScope } from "./worker-port.ts";
 import { VirtioWasmDevice } from "./virtio/device.ts";
 import type { VirtioWasmDeviceOptions } from "./virtio/device.ts";
 
 // This module runs as a dedicated Web Worker (the Node harness shims `self` as a
 // plain object with the same postMessage/onmessage shape).
-declare const self: DedicatedWorkerGlobalScope;
+declare const self: WorkerScope;
+
+/// An error-like value's stack, else its message (what a thrown value or a
+/// rejection reason says about itself), or undefined.
+function stackOrMessage(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as { stack?: unknown; message?: unknown };
+  return v.stack || v.message;
+}
+
+/// Wall-clock milliseconds at the epoch of performance.now(). Every engine
+/// host has performance.timeOrigin except some ahead-of-time hosts; there,
+/// the same anchor is computed once at load.
+const TIME_ORIGIN: number =
+  (performance as { timeOrigin?: number }).timeOrigin ?? Date.now() - performance.now();
 
 /// Node's process global, read only to detect the Node harness (absent in a
 /// browser worker).
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
 /// V8's ErrorConstructor extension (not in the standard lib; absent elsewhere).
-interface V8ErrorConstructor extends ErrorConstructor {
+interface V8ErrorConstructor {
+  readonly prototype: Error;
   captureStackTrace?(target: object, constructorOpt?: Function): void;
 }
 
@@ -182,7 +198,7 @@ type UserImports = {
 
 /// The worker's end of the channel to kernel-host.ts.
 interface HostPort {
-  postMessage(message: WorkerMessage, transfer?: Transferable[]): void;
+  postMessage(message: WorkerMessage, transfer?: ArrayBuffer[]): void;
 }
 
 /// What init() reads: kernel-host.ts's InitMessage, with the memory64 grow()
@@ -224,12 +240,12 @@ type WorkerInitMessage = InitMessage & {
   // detail-less-ErrorEvent problem this works around is browser-specific.
   if (typeof self.addEventListener === "function") {
     self.addEventListener("error", (e) => {
-      reportFatal((e.error && (e.error.stack || e.error.message)) || e.message || e);
+      reportFatal(stackOrMessage(e.error) || e.message || e);
       e.preventDefault();
     });
     self.addEventListener("unhandledrejection", (e) => {
       const r = e.reason;
-      reportFatal((r && (r.stack || r.message)) || r || "unhandledrejection");
+      reportFatal(stackOrMessage(r) || r || "unhandledrejection");
     });
   }
 
@@ -1212,7 +1228,7 @@ type WorkerInitMessage = InitMessage & {
       // here would silently boot the guest at the 1970 epoch, which breaks TLS certificate
       // validation ("not yet valid") and with it Cachix substitution. The clocksource itself only
       // consumes deltas, which is why this doubled as the persistent clock with no new import.
-      return BigInt(Math.round(1000 * (performance.timeOrigin + performance.now()))) * 1000n;
+      return BigInt(Math.round(1000 * (TIME_ORIGIN + performance.now()))) * 1000n;
     },
 
     // Host callbacks by the Wasm-default random number generator.
@@ -2165,8 +2181,8 @@ type WorkerInitMessage = InitMessage & {
     // frame callbacks (4f). The worker forwards VQ_IN refills via wayland_in_refill.
   };
 
-  self.onmessage = (message_event) => {
-    const data: WorkerInitMessage = message_event.data;
+  self.onmessage = (message_event: { data: WorkerInitMessage }) => {
+    const data = message_event.data;
     message_callbacks[data.method](data);
   };
 

@@ -16,8 +16,10 @@
 // the SW path (the dev-server sends real headers; `bun test` has no SW) nothing
 // changes — the worker is created directly.
 
+import type { RuntimeWorker } from "./worker-port.ts";
+
 /** @param url absolute URL of the real `{ type: "module" }` worker */
-export function createModuleWorker(url: string | URL): Worker {
+export function createModuleWorker(url: string | URL): RuntimeWorker {
   const swControlled = typeof navigator !== "undefined" && navigator.serviceWorker?.controller;
   if (!swControlled) return new Worker(url, { type: "module" });
 
