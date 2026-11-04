@@ -1,0 +1,30 @@
+runtime/worker-port.ts
+  s_d32a35bef22d9f::t_ab6e03a5b8ce9a 1-35
+  s_d32a35bef22d9f::t_3bd40b6b4ef8da 36-44
+runtime/boot-nix-system.ts
+  s_d32a35bef22d9f::t_63169228ce3671 57-64
+runtime/kernel-host.ts
+  s_d32a35bef22d9f::t_413a93a214f924 18,146,185,597-598,600-601,808,921
+runtime/kernel-worker.ts
+  s_d32a35bef22d9f::t_7c91b719ff9ccb 33,39-53,60-61,201,243,248,1231,2184-2185
+runtime/make-worker.ts
+  s_d32a35bef22d9f::t_5f8515cc1fb7ac 19-20,22
+runtime/sync-to-pc.sh
+  s_d32a35bef22d9f::t_89b76076c73568 26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7703b5197ae9845ac58d333ad5629d16613d8e07",
+  "prompts": {},
+  "sessions": {
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
