@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
-import { NetDevice, VIRTIO_NET_HDR_LEN } from "./net-device.js";
-import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
-import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.js";
+import { NetDevice, VIRTIO_NET_HDR_LEN } from "./net-device.ts";
+import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
+import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.ts";
 
 // Minimal split-vring builder in a flat memory, returning offsets + helpers.
 function makeVq(memory, base, num) {

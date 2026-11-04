@@ -4,9 +4,9 @@
 // docs/linux.md §9.4 step 1 / §16.1 ("drive the server with canned frames
 // against a Bun vfs.* adapter"). No kernel, no browser.
 import { test, expect, describe, beforeEach } from "bun:test";
-import { P9, QT, E, DOTL_VERSION, NOFID, NOTAG, encode, decode } from "./protocol.js";
-import { createNinePServer } from "./server.js";
-import { MemVfs } from "./mem-vfs.js";
+import { P9, QT, E, DOTL_VERSION, NOFID, NOTAG, encode, decode } from "./protocol.ts";
+import { createNinePServer } from "./server.ts";
+import { MemVfs } from "./mem-vfs.ts";
 
 const dec = (b) => new TextDecoder().decode(b);
 

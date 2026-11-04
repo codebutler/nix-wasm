@@ -18,7 +18,7 @@
 // `bun run test`, `tsc`, `oxlint`, and `oxfmt --check` all green.
 import { readFileSync } from "node:fs";
 import { test, expect, describe } from "bun:test";
-import { resolveArtifactsBase } from "./preview-variant.js";
+import { resolveArtifactsBase } from "./preview-variant.ts";
 
 const BASE_HREF = "https://preview.example/pr-42/demo/web/";
 

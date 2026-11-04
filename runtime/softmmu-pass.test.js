@@ -17,7 +17,7 @@ import {
   genFaultBridge,
   instrument,
   scanUnhandled,
-} from "./softmmu-pass.js";
+} from "./softmmu-pass.ts";
 
 const FIX = new URL("./test-fixtures/softmmu/", import.meta.url);
 const prog = new Uint8Array(readFileSync(new URL("prog.wasm", FIX)));

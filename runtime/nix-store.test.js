@@ -2,7 +2,7 @@
 // Tests for the read-only content-addressed /nix store VFS (Phase E/N1).
 // Headless (bun): no kernel, no browser — just the VFS surface server.js drives.
 import { test, expect, describe } from "bun:test";
-import { createNixStore } from "./nix-store.js";
+import { createNixStore } from "./nix-store.ts";
 
 const bytes = (s) => new TextEncoder().encode(s);
 const PKG = { name: "cbhello", version: "1.0", files: { "bin/cbhello": bytes("\0asm-fake-wasm") } };

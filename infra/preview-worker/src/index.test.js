@@ -24,6 +24,13 @@ test("stamps cross-origin-isolation headers on every response", async () => {
   assert.equal(res.headers.get("cross-origin-resource-policy"), "cross-origin");
 });
 
+test("serves a stripped .ts runtime module as JavaScript", async () => {
+  const env = fakeEnv({ "pr-7/boot.ts": "export {}" });
+  const res = await call(env, "/pr-7/boot.ts");
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "text/javascript; charset=utf-8");
+});
+
 test("serves a pr-<N> asset with content-type + short cache", async () => {
   const env = fakeEnv({ "pr-7/demo/web/main.js": "export {}" });
   const res = await call(env, "/pr-7/demo/web/main.js");

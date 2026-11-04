@@ -13,7 +13,7 @@ import {
   stopUnwind,
   startRewind,
   dupAddressSpace,
-} from "../../asyncify.js";
+} from "../../asyncify.ts";
 
 // A mock that faithfully models Binaryen's asyncify state transitions: the only
 // thing capture_stack / the orchestrator can observe is asyncify_get_state() and

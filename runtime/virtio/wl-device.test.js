@@ -6,7 +6,7 @@
 // in-worker WlServer stub, which still uses inReply) and the host-side injectIn
 // IN-delivery (bytes, and server→client fds → VFD_NEW + VFD_RECV).
 import { test, expect } from "bun:test";
-import { WlDevice } from "./wl-device.js";
+import { WlDevice } from "./wl-device.ts";
 
 // virtwl ctrl types / responses (mirror wl-device.js).
 const VFD_SEND = 0x102;

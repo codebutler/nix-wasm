@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { ConsoleVirtioDevice } from "./console-device.js";
-import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
-import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.js";
+import { ConsoleVirtioDevice } from "./console-device.ts";
+import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
+import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.ts";
 
 // virtio-console single-port queue indices (mirrors console-device.js).
 const RECEIVEQ = 0; // host -> guest

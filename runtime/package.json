@@ -9,7 +9,7 @@
   },
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p jsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
     "lint": "oxlint --max-warnings 0 .",
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt --write --threads=1 . && oxfmt --write --threads=1 .",

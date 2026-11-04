@@ -6,10 +6,10 @@
 // and the fork/clone replay contract (Track 0 §4).
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.js";
-import { genCanonicalThunk, CANONICAL_PARAMS } from "./ffi-codegen.js";
-import { translateUser } from "./mmu-uaccess.js";
-import { NR_MMU_FAULT } from "./softmmu-pass.js";
+import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.ts";
+import { genCanonicalThunk, CANONICAL_PARAMS } from "./ffi-codegen.ts";
+import { translateUser } from "./mmu-uaccess.ts";
+import { NR_MMU_FAULT } from "./softmmu-pass.ts";
 
 const FIX = new URL("./test-fixtures/dylink/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIX)));

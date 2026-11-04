@@ -18,9 +18,9 @@
 //   ln -sfn /path/to/nix-wasm/.artifacts-nix-nommu runtime/demo/web/artifacts-nommu
 // No param → the shipped software-MMU/real-fork default.
 import { init, Terminal, FitAddon } from "./vendor/ghostty/ghostty.mjs";
-import { bootNixSystem, MemVfs } from "../../index.js";
+import { bootNixSystem, MemVfs } from "../../index.ts";
 import { getWaylandCompositor } from "./wayland-compositor.js";
-import { resolveArtifactsBase } from "../../preview-variant.js";
+import { resolveArtifactsBase } from "../../preview-variant.ts";
 
 const status = document.getElementById("status");
 const dec = new TextDecoder();

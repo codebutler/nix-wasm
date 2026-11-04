@@ -130,7 +130,7 @@
 // Exit 0 pass / 1 fail (expected today — see session record) / 2
 // inconclusive (boot panic — re-run).
 import { bootNode } from "./boot-node.mjs";
-import { MemVfs } from "../../ninep/mem-vfs.js";
+import { MemVfs } from "../../ninep/mem-vfs.ts";
 
 const vfs = MemVfs.from({ Home: {} });
 const s = await bootNode({ nix: true, vfs });

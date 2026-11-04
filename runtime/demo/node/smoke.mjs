@@ -7,7 +7,7 @@
 // install-then-compile proof.
 // Exit: 0 pass / 1 fail / 2 inconclusive (boot panic — re-run).
 import { bootNode, primeLocalNixCache, describeGuestOom } from "./boot-node.mjs";
-import { MemVfs } from "../../ninep/mem-vfs.js";
+import { MemVfs } from "../../ninep/mem-vfs.ts";
 
 const vfs = MemVfs.from({
   Home: {

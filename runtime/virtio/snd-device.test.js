@@ -20,9 +20,9 @@ import {
   SND_HDR_LEN,
   SND_PCM_INFO_LEN,
   SND_PCM_STATUS_LEN,
-} from "./snd-device.js";
-import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
-import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.js";
+} from "./snd-device.ts";
+import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
+import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.ts";
 
 // Minimal split-vring builder in flat memory (mirrored from vsock-device.test.js).
 function makeVq(memory, base, num) {

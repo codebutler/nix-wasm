@@ -73,7 +73,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { bootNode, primeLocalNixCache } from "./boot-node.mjs";
-import { MemVfs } from "../../ninep/mem-vfs.js";
+import { MemVfs } from "../../ninep/mem-vfs.ts";
 
 const FIXTURE_DIR = process.env.AUTOTOOLS_FIXTURE;
 if (!FIXTURE_DIR) {

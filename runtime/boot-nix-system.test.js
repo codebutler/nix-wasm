@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { test, expect } from "bun:test";
-import { bootNixSystem } from "./boot-nix-system.js";
+import { bootNixSystem } from "./boot-nix-system.ts";
 
 test("bytes-mode: vmlinux/initramfs become blob URLs; nixCacheBaseUrl drives the cache", async () => {
   let captured;
