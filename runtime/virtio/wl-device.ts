@@ -151,7 +151,7 @@ type WlInReply =
 
 /** True when a fd payload is a host pipe rather than shm bytes. */
 function isPipeFd(payload: WlFd): payload is WlPipeFd {
-  return !!(payload && !(payload instanceof Uint8Array) && payload.pipe !== undefined);
+  return !(payload instanceof Uint8Array) && payload.pipe !== undefined;
 }
 
 export class WlDevice extends VirtioWasmDevice {

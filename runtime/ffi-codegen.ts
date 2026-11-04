@@ -115,7 +115,15 @@ const sleb = (n: number): number[] => {
   }
   return out;
 };
-const vec = (items: Array<number | number[]>): number[] => [...uleb(items.length), ...items.flat()];
+// A wasm vector: the item count, then each item's bytes (a byte, or a run of them).
+const vec = (items: Array<number | number[]>): number[] => {
+  const out = uleb(items.length);
+  for (const item of items) {
+    if (typeof item === "number") out.push(item);
+    else for (const b of item) out.push(b);
+  }
+  return out;
+};
 const str = (s: string): number[] => vec([...s].map((c) => c.charCodeAt(0)));
 const section = (id: number, payload: number[]): number[] => [
   id,

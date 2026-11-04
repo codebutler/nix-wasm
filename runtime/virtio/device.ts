@@ -75,7 +75,7 @@ export class VirtioWasmDevice {
     this.shared = sharedQueues;
     // The interrupt-target CPU is DERIVED from the online mask, never chosen by
     // a device. Lowest online CPU; defaults to 0 under maxcpus=1.
-    const cpus = onlineCpus ? [...onlineCpus] : [0];
+    const cpus = onlineCpus ? Array.from(onlineCpus) : [0];
     this.irqCpu = cpus.length ? Math.min(...cpus) : 0;
     this.log = log || (() => {});
   }

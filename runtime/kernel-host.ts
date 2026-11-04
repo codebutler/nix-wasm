@@ -909,8 +909,10 @@ export const linux = async ({
 
     worker.onerror = (e) => {
       // pc: surface the real cause instead of re-throwing the opaque Event.
-      const detail = `${e?.message || e} @ ${e?.filename || "?"}:${e?.lineno || 0}:${e?.colno || 0}`;
-      console.error("[kernel worker error]", detail, e?.error || e);
+      // A detail-less event has an empty message; the event itself is logged below.
+      const message = e.message || "worker error (no message)";
+      const detail = `${message} @ ${e.filename || "?"}:${e.lineno ?? 0}:${e.colno ?? 0}`;
+      console.error("[kernel worker error]", detail, e.error ?? e);
       log("[worker error] " + detail);
     };
 
