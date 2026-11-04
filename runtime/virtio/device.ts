@@ -40,7 +40,7 @@ export interface VirtioWasmDeviceOptions {
   /** guest export */
   raiseInterrupt: RaiseInterrupt;
   /** online CPU mask (default {0}) */
-  onlineCpus?: Set<number> | number[];
+  onlineCpus?: number[];
   /**
    * cross-worker queue-layout store (a queue set up on one worker must be
    * serviceable from another; see shared-queues.js).
@@ -75,7 +75,7 @@ export class VirtioWasmDevice {
     this.shared = sharedQueues;
     // The interrupt-target CPU is DERIVED from the online mask, never chosen by
     // a device. Lowest online CPU; defaults to 0 under maxcpus=1.
-    const cpus = onlineCpus ? Array.from(onlineCpus) : [0];
+    const cpus = onlineCpus ? [...onlineCpus] : [0];
     this.irqCpu = cpus.length ? Math.min(...cpus) : 0;
     this.log = log || (() => {});
   }

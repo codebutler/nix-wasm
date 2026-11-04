@@ -42,7 +42,7 @@ export interface EchoDeviceFactoryOptions {
   raiseInterrupt: RaiseInterrupt;
   dev?: number;
   irq?: number;
-  onlineCpus?: Set<number> | number[];
+  onlineCpus?: number[];
   sharedQueues?: SharedQueues;
   log?: (s: string) => void;
 }
