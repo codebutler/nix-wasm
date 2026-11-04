@@ -1,0 +1,21 @@
+runtime/virtio/device.ts
+  s_d32a35bef22d9f::t_275cf39e961e32 43,78
+runtime/virtio/echo-device.ts
+  s_d32a35bef22d9f::t_25e2a5c84eb7a0 45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d10bee8eee9c562ac9ee9daff67c02c38fc5ab54",
+  "prompts": {},
+  "sessions": {
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}

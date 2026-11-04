@@ -1,0 +1,19 @@
+runtime/dylink.ts
+  s_d32a35bef22d9f::t_4f62018b7b0bf9 848-850,854,859,866-878
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cae9ae29365b1d2306a08f059957c0f28c825150",
+  "prompts": {},
+  "sessions": {
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
