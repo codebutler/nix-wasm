@@ -20,7 +20,7 @@ export async function bootNixSystem(opts: {
   baseUrl?: string | URL; // baseUrl-mode: dir holding the artifacts
   vmlinux?: ArrayBuffer | Blob; // bytes-mode: kernel wasm bytes
   initramfs?: ArrayBuffer | Blob; // bytes-mode: initramfs.cpio.gz bytes
-  squashfs?: ArrayBuffer | (() => Promise<ArrayBuffer>);
+  squashfs?: ArrayBuffer | (() => Promise<ArrayBuffer>); // optional in bytes-mode; omitted = no squashfs (preseeded state disk)
   stateDisk?: { image: ArrayBuffer | SharedArrayBuffer | Uint8Array; onDirty?: () => void }; // #177: RW /dev/vdb; >64 MiB must be a full SharedArrayBuffer
   nixCacheBaseUrl?: string; // bytes-mode: the lazy nix-cache base URL
   onModuleCached?: () => void;
@@ -71,7 +71,9 @@ export async function bootNixSystem(opts: {
   if (useNix) {
     if (typeof opts.squashfs === "function") squashfs = await opts.squashfs();
     else if (opts.squashfs) squashfs = opts.squashfs;
-    else squashfs = await (await fetch(u("base.squashfs"))).arrayBuffer();
+    // Preseeded installed images ship no squashfs (the system lives on the
+    // state disk), so bytes-mode may omit it.
+    else if (hasBaseUrl) squashfs = await (await fetch(u("base.squashfs"))).arrayBuffer();
   }
 
   const nixCacheBase =

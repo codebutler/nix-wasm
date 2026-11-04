@@ -8,6 +8,7 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
+    "noImplicitOverride": true,
     "skipLibCheck": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable", "WebWorker"]
   },

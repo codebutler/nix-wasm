@@ -126,7 +126,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
     this._pending = new Uint8Array(0);
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     // VIRTIO_CONSOLE_F_SIZE (bit 0): the guest reads cols/rows from config space
     // and honours config-change interrupts (terminal resize). We deliberately do
     // NOT offer VIRTIO_CONSOLE_F_MULTIPORT (bit 1) — F_SIZE is independent of it,
@@ -141,7 +141,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * Read at probe (initial winsize) and on every config-change interrupt. Falls
    * back to 80x24 until the first resize so the tty never boots at 0x0.
    */
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     const { cols, rows } = this.shared.getConfigSize(this.dev);
     const cfg = new Uint8Array(CONFIG_BYTES);
     const dv = new DataView(cfg.buffer);
@@ -166,7 +166,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
     if (this.configIrq != null) this._raise(this.irqCpu, this.configIrq);
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the sink + input buffer are on the main thread — forward.

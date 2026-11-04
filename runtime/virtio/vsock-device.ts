@@ -229,7 +229,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
     this._nextHostPort = 1024;
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     // VIRTIO_F_VERSION_1 only. STREAM is the mandatory baseline transport mode;
     // we do not offer the optional SEQPACKET/DGRAM features, so the guest driver
     // negotiates plain stream sockets.
@@ -238,7 +238,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
 
   // struct virtio_vsock_config { __le64 guest_cid; } — serve the guest CID at
   // offset 0, zero past the end.
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(8);
     new DataView(cfg.buffer).setBigUint64(0, this.guestCid, true);
     for (let i = 0; i < bytes.length; i++) {
@@ -285,7 +285,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
 
   // ---- notify / tx drain ----
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the socket callbacks are on the main thread — forward.

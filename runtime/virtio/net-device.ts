@@ -32,11 +32,11 @@ export class NetDevice extends VirtioWasmDevice {
     this._sink = null;
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     return VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS;
   }
 
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     bytes.fill(0);
     // config space: [0..5] mac, [6..7] status (u16 LE)
     for (let i = 0; i < bytes.length; i++) {
@@ -56,7 +56,7 @@ export class NetDevice extends VirtioWasmDevice {
     this._sink = fn;
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     if (q !== TX) return; // RX is host-driven via pushRx
     const vr = this.vring(TX);
     if (!vr) return;

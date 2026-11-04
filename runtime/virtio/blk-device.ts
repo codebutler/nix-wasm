@@ -51,7 +51,7 @@ export class BlkDevice extends VirtioWasmDevice {
     this.capacity = BigInt(Math.floor(this.image.length / BLK_SECTOR));
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     let f = 1n << VIRTIO_F_VERSION_1;
     if (this.readOnly) f |= 1n << VIRTIO_BLK_F_RO;
     return f;
@@ -59,7 +59,7 @@ export class BlkDevice extends VirtioWasmDevice {
 
   // virtio-blk config space: u64 capacity at offset 0 (little-endian, sectors).
   // The guest only reads offsets 0-7; fill the requested slice from that buffer.
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     const buf = new Uint8Array(8);
     new DataView(buf.buffer).setBigUint64(0, this.capacity, true);
     for (let i = 0; i < bytes.length; i++) {
@@ -68,7 +68,7 @@ export class BlkDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     if (this.forwardNotify) {
       this.forwardNotify(this.dev, q >>> 0);
       return;
