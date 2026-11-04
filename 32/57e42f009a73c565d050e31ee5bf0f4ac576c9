@@ -1,0 +1,47 @@
+runtime/dylink.ts
+  s_d32a35bef22d9f::t_42c28fbdd0531c 49-56,640,679,804,870,924,979
+runtime/ffi-codegen.ts
+  s_d32a35bef22d9f::t_10f3c82bb52727 39-51,57,59
+runtime/kernel-host.ts
+  s_d32a35bef22d9f::t_bac90652e4fbc2 100-101,397,945,998,1004,1009,1012
+runtime/kernel-worker.ts
+  s_d32a35bef22d9f::t_182c52e663a10b 59-64,68,149-270,408,420,974-977,1024,1425,1480-1481
+runtime/ninep/mem-vfs.ts
+  s_689a4b3c615236::t_6f914394088e2e 118,141,203,208,242
+runtime/ninep/protocol.ts
+  s_d32a35bef22d9f::t_37af6eccf6da38 650-651,974,1388-1390
+runtime/virtio/net-device.test.js
+  s_d32a35bef22d9f::t_a4557ba2e21ad3 56
+runtime/virtio/net-device.ts
+  s_d32a35bef22d9f::t_d1ea9dd2cedc0d 20,30
+runtime/virtio/vring.ts
+  s_d32a35bef22d9f::t_e56d96fab9cca4 151
+runtime/virtio/vsock-device.ts
+  s_d32a35bef22d9f::t_d89eef2f8a9a91 182,184
+runtime/virtio/wl-device.ts
+  s_689a4b3c615236::t_0992c6e0de6770 191,255,299,302,304,320,323,341,347
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3257e42f009a73c565d050e31ee5bf0f4ac576c9",
+  "prompts": {},
+  "sessions": {
+    "s_689a4b3c615236": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55bcd3c6-1d3e-49b4-8cc8-0c0cfa177cd1",
+        "model": "unknown"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
