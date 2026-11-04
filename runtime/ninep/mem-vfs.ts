@@ -115,7 +115,7 @@ export class MemVfs implements NinePVfs {
     const build = (parentPath: string, obj: MemSeedTree) => {
       for (const [name, val] of Object.entries(obj)) {
         const path = parentPath === "/" ? "/" + name : parentPath + "/" + name;
-        if (val && typeof val === "object" && !(val instanceof Uint8Array)) {
+        if (typeof val === "object" && !(val instanceof Uint8Array)) {
           fs._mkdirSync(path);
           build(path, val);
         } else {
@@ -138,7 +138,7 @@ export class MemVfs implements NinePVfs {
       if (!childId) return null;
       cur = this.nodes.get(childId);
     }
-    return cur || null;
+    return cur ?? null;
   }
 
   _record(node: MemNode, path: string): VfsRecord {
@@ -200,12 +200,12 @@ export class MemVfs implements NinePVfs {
     node.type = record.type || "file";
     node.modifiedAt = this._tick();
     if (node.type === "folder") {
-      node.children = node.children || new Map();
+      node.children = node.children ?? new Map();
     } else if (node.type === "alias") {
       node.target = record.target || "";
       delete node.bytes;
     } else {
-      node.bytes = record.bytes || new Uint8Array(0);
+      node.bytes = record.bytes ?? new Uint8Array(0);
       node.mime = record.mime;
       delete node.children;
     }
@@ -239,7 +239,7 @@ export class MemVfs implements NinePVfs {
     const node = this._resolve(path);
     if (!node) throw vfsError("ENOENT", path);
     if (node.type === "folder") throw vfsError("EISDIR", path);
-    return new Blob([node.bytes || new Uint8Array(0)]);
+    return new Blob([node.bytes ?? new Uint8Array(0)]);
   }
 
   async write(path: string, record: VfsWriteRecord): Promise<VfsRecord> {

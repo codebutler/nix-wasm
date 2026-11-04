@@ -151,7 +151,7 @@ type WlInReply =
 
 /** True when a fd payload is a host pipe rather than shm bytes. */
 function isPipeFd(payload: WlFd): payload is WlPipeFd {
-  return !!(payload && !(payload instanceof Uint8Array) && payload.pipe !== undefined);
+  return !(payload instanceof Uint8Array) && payload.pipe !== undefined;
 }
 
 export class WlDevice extends VirtioWasmDevice {
@@ -188,7 +188,7 @@ export class WlDevice extends VirtioWasmDevice {
     // guest's and is reused once closed, so the host writes only into a pipe
     // it knows is open (see guestPipe).
     this._guestPipes = new Set();
-    this._bridge = opts.waylandBridge || null;
+    this._bridge = opts.waylandBridge ?? null;
     // Phase 2 2c: log shm region checksums + wire opcodes to prove the pixel
     // path. Off by default; opt in via the bridge for a debug session.
     this._shmDebug = !!opts.shmDebug;
@@ -252,7 +252,7 @@ export class WlDevice extends VirtioWasmDevice {
    *  Greenfield's `fds` array, or null if the region isn't backed yet. */
   _resolveShmFd(vfdId: number): Uint8Array | null {
     const ctx = this.contexts.get(vfdId);
-    const region = ctx?.region || this._shmRegions?.get(vfdId);
+    const region = ctx?.region ?? this._shmRegions?.get(vfdId);
     if (!region || !region.size) return null;
     const offset = region.offset || region.pfn * 4096;
     if (offset <= 0) {
@@ -296,17 +296,12 @@ export class WlDevice extends VirtioWasmDevice {
    *    single VFD_RECV: bytes (the keymap) become a FILL vfd; `{ pipe: n }` is
    *    host pipe n (n < 2^29), a vfd the guest writes into — its data comes back
    *    through the bridge's onPipeData(n) and its close through onPipeClose(n). */
-  injectIn(clientId: number, data: Uint8Array | ArrayBuffer, fds?: WlFd[]): void {
+  injectIn(clientId: number, data: Uint8Array, fds?: WlFd[]): void {
     const id = clientId >>> 0;
-    const bytes = data
-      ? data instanceof Uint8Array
-        ? data
-        : new Uint8Array(data)
-      : new Uint8Array(0);
     if (fds && fds.length) {
-      for (const msg of this._buildFdDelivery(id, bytes, fds)) this._queueRaw(msg);
+      for (const msg of this._buildFdDelivery(id, data, fds)) this._queueRaw(msg);
     } else {
-      this._queueIn(id, bytes);
+      this._queueIn(id, data);
     }
     this._flushPendingIn();
   }
@@ -322,11 +317,10 @@ export class WlDevice extends VirtioWasmDevice {
    *  called (the host routes SENDs to the compositor instead).
    *  @param clientId  ctx vfd_id the SEND came from
    *  @param data  the client→server wire bytes */
-  serveLocal(clientId: number, data: Uint8Array | ArrayBuffer): void {
+  serveLocal(clientId: number, data: Uint8Array): void {
     const id = clientId >>> 0;
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const server = this._serverFor(id);
-    const reply = server.handle(bytes);
+    const reply = server.handle(data);
     if (reply.length) {
       this.log(`[virtio-wl] wl-server produced ${reply.length}B reply -> IN queue`);
       this.injectIn(id, reply);
@@ -344,14 +338,13 @@ export class WlDevice extends VirtioWasmDevice {
   /** Public: write bytes into a GUEST-created pipe vfd (one the guest made with
    *  VIRTWL_IOCTL_NEW_PIPE_READ and passed in a SEND, e.g. the fd of
    *  wl_data_offer.receive). The guest reads them as a byte stream. */
-  pipeWrite(vfdId: number, data: Uint8Array | ArrayLike<number> | ArrayBuffer): void {
+  pipeWrite(vfdId: number, data: Uint8Array): void {
     const id = vfdId >>> 0;
     if (!this._guestPipes.has(id)) {
       this.log(`[virtio-wl] pipe write to closed guest pipe ${id} dropped`);
       return;
     }
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    if (bytes.length) this._queueIn(id, bytes);
+    if (data.length) this._queueIn(id, data);
     this._flushPendingIn();
   }
 

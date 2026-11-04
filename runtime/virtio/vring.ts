@@ -28,6 +28,17 @@ export interface VringCursor {
   store: (v: number) => void;
 }
 
+/** A cursor over a plain number, for a queue whose avail index no other worker shares. */
+function localCursor(): VringCursor {
+  let value = 0;
+  return {
+    load: () => value,
+    store: (v: number) => {
+      value = v;
+    },
+  };
+}
+
 /** One descriptor's buffer: a linear-memory byte offset and length. */
 export interface VringSegment {
   addr: number;
@@ -53,12 +64,7 @@ export class Vring {
   avail: number;
   used: number;
   num: number;
-  /**
-   * Host-side index into the avail ring (backed by `cursor` when given).
-   * `declare`d, not a class field: the constructor either installs an accessor
-   * over the shared cursor or assigns a plain number, so no field is emitted.
-   */
-  declare lastAvail: number;
+  #cursor: VringCursor;
 
   /**
    * @param memory  shared kernel memory (buffer may detach on grow)
@@ -73,14 +79,15 @@ export class Vring {
     this.avail = layout.avail;
     this.used = layout.used;
     this.num = layout.num;
-    if (cursor) {
-      Object.defineProperty(this, "lastAvail", {
-        get: () => cursor.load(),
-        set: (v: number) => cursor.store(v),
-      });
-    } else {
-      this.lastAvail = 0; // host-side index into the avail ring
-    }
+    this.#cursor = cursor ?? localCursor();
+  }
+
+  /** Host-side index into the avail ring (kept in the cursor). */
+  get lastAvail(): number {
+    return this.#cursor.load();
+  }
+  set lastAvail(v: number) {
+    this.#cursor.store(v);
   }
 
   // Re-fetch the DataView: memory.buffer detaches when the wasm memory grows.
@@ -148,7 +155,7 @@ export class Vring {
    * Write `bytes` into a chain's writable (in) segments, truncating to the
    * available writable space. Returns the number of bytes written.
    */
-  writeIn(chain: VringChain, bytes: ArrayLike<number>): number {
+  writeIn(chain: VringChain, bytes: Uint8Array): number {
     const v = this._dv();
     let si = 0;
     for (const s of chain.in) {

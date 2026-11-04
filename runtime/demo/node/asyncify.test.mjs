@@ -51,7 +51,7 @@ test("makeCaptureStack: NORMAL call triggers unwind, records ctlPtr, returns 0",
     () => inst,
     () => 99,
   );
-  const ret = capture(0x18000);
+  const ret = capture.importFn(0x18000);
   assert.equal(ret, 0, "the unwind-triggering call returns 0 (discarded by the unwind)");
   assert.equal(capture.ctlPtr, 0x18000, "ctlPtr recorded for the later rewind");
   assert.equal(inst.calls.unwindPtr, 0x18000, "start_unwind got the ctl pointer");
@@ -65,11 +65,11 @@ test("makeCaptureStack: REWINDING re-entry stops rewind and returns the fork res
     () => inst,
     () => forkResult,
   );
-  capture(0x18000); // unwind
+  capture.importFn(0x18000); // unwind
   stopUnwind(inst);
   forkResult = 4242; // orchestrator sets the parent's return AFTER the unwind
   startRewind(inst, capture.ctlPtr);
-  const ret = capture(0x18000); // re-entry during rewind
+  const ret = capture.importFn(0x18000); // re-entry during rewind
   assert.equal(ret, 4242, "capture_stack returns the fork result on the rewind side");
   assert.equal(inst.calls.stopRewind, 1, "stop_rewind called exactly once");
   assert.equal(inst.exports.asyncify_get_state(), ASYNCIFY_STATE.NORMAL);
@@ -83,12 +83,12 @@ test("full double-return cycle through the helpers (parent + child)", () => {
     () => parent,
     () => parentRet,
   );
-  assert.equal(pcap(0x18000), 0);
+  assert.equal(pcap.importFn(0x18000), 0);
   assert.ok(isPendingUnwind(parent));
   stopUnwind(parent);
   parentRet = 7; // the child pid
   startRewind(parent, pcap.ctlPtr);
-  assert.equal(pcap(0x18000), 7, "parent fork() returns child pid");
+  assert.equal(pcap.importFn(0x18000), 7, "parent fork() returns child pid");
 
   // Child side: a distinct instance, fork() returns 0.
   const child = mockInstance();
@@ -99,7 +99,7 @@ test("full double-return cycle through the helpers (parent + child)", () => {
   // The child never runs the NORMAL/unwind pass — it is BORN mid-rewind from the
   // copied image, so the orchestrator arms the rewind directly.
   startRewind(child, 0x18000);
-  assert.equal(ccap(0x18000), 0, "child fork() returns 0");
+  assert.equal(ccap.importFn(0x18000), 0, "child fork() returns 0");
   assert.equal(parent.calls.unwindPtr, 0x18000);
   assert.equal(child.calls.unwindPtr, null, "child never unwinds — it rewinds a copied image");
 });

@@ -138,7 +138,7 @@ function bootSide(module, h, { pgd, side, stackPtr, forkResult }) {
       __memory_base: new WebAssembly.Global({ value: "i32", mutable: false }, MEMORY_BASE),
       __wasm_syscall_2: h.makeFault(pgd, side),
       log_i: (v) => logs.push(Number(v) | 0),
-      capture_stack: capture,
+      capture_stack: capture.importFn,
     },
   });
   inst.exports.__mmu_pt_base.value = pgd;

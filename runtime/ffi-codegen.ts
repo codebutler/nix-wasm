@@ -36,14 +36,27 @@ export interface FfiSignature {
   result: WasmValType | null;
 }
 
+// A wasm number value as JavaScript sees it: i32, f32 and f64 are numbers, an
+// i64 is a bigint.
+export type WasmValue = number | bigint;
+
+// A wasm function as JavaScript calls it: number values in, at most one out.
+export type WasmFunction = (...args: WasmValue[]) => WasmValue | void;
+
+// Whether an export is a function (the other exports are globals, memories and
+// tables).
+export function isFunctionExport(value: WebAssembly.ExportValue): value is WasmFunction {
+  return typeof value === "function";
+}
+
 // The host pieces a soft-MMU (checked) generated module is wired to: the
 // task's page-table root, musl's syscall2 trap, the stack pointer global and
 // the TLS accessor.
 export interface MmuImports {
   ptBase: number;
-  syscall2: Function;
+  syscall2: (...args: WasmValue[]) => WasmValue;
   stackPointer: WebAssembly.Global;
-  getTlsBase: Function;
+  getTlsBase: () => WasmValue;
 }
 
 // The control exports instrument() adds to a checked module.
@@ -102,7 +115,15 @@ const sleb = (n: number): number[] => {
   }
   return out;
 };
-const vec = (items: Array<number | number[]>): number[] => [...uleb(items.length), ...items.flat()];
+// A wasm vector: the item count, then each item's bytes (a byte, or a run of them).
+const vec = (items: Array<number | number[]>): number[] => {
+  const out = uleb(items.length);
+  for (const item of items) {
+    if (typeof item === "number") out.push(item);
+    else for (const b of item) out.push(b);
+  }
+  return out;
+};
 const str = (s: string): number[] => vec([...s].map((c) => c.charCodeAt(0)));
 const section = (id: number, payload: number[]): number[] => [
   id,

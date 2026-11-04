@@ -31,14 +31,7 @@ function asyncifyExports(instance: WebAssembly.Instance): AsyncifyExports {
   return instance.exports as WebAssembly.Exports & AsyncifyExports;
 }
 
-// The capture_stack import, carrying the last control-buffer pointer it saw.
-export interface CaptureStack {
-  (ctlPtr: number): number;
-  ctlPtr: number;
-}
-
-// makeCaptureStack(getInstance, getForkResult) -> the `capture_stack` host
-// import function (env.capture_stack on the user instance).
+// The capture_stack import and the last control-buffer pointer it saw.
 //
 //   getInstance()   -> the user WebAssembly.Instance. Late-bound (a thunk)
 //                      because the import object is assembled BEFORE the instance
@@ -48,29 +41,38 @@ export interface CaptureStack {
 //                      Read lazily so the orchestrator can set it AFTER the
 //                      unwind completes and BEFORE it starts the rewind.
 //
-// The returned function records the control-buffer pointer the user passed in
-// `.ctlPtr` (the orchestrator needs it to drive asyncify_start_rewind). State
-// machine mirrors the spike's do_fork exactly:
+// `importFn` is the host import (env.capture_stack on the user instance). It
+// records the control-buffer pointer the user passed in `ctlPtr` (the
+// orchestrator needs it to drive asyncify_start_rewind). State machine mirrors
+// the spike's do_fork exactly:
 //   NORMAL  (the fork() call): record ctl_ptr, asyncify_start_unwind(ctl_ptr),
 //           return 0 (discarded by the unwind).
 //   REWINDING (re-entry during rewind): asyncify_stop_rewind(), return the
 //           fork result (the second of the double-return).
+export class CaptureStack {
+  ctlPtr = 0;
+  readonly importFn: (ctlPtr: number) => number;
+
+  constructor(getInstance: () => WebAssembly.Instance, getForkResult: () => number) {
+    this.importFn = (ctlPtr: number): number => {
+      const inst = asyncifyExports(getInstance());
+      if (inst.asyncify_get_state() === ASYNCIFY_STATE.REWINDING) {
+        inst.asyncify_stop_rewind();
+        return getForkResult();
+      }
+      this.ctlPtr = ctlPtr >>> 0;
+      inst.asyncify_start_unwind(this.ctlPtr);
+      return 0;
+    };
+  }
+}
+
+// makeCaptureStack(getInstance, getForkResult) -> a new CaptureStack.
 export function makeCaptureStack(
   getInstance: () => WebAssembly.Instance,
   getForkResult: () => number,
 ): CaptureStack {
-  const fn = (ctlPtr: number): number => {
-    const inst = asyncifyExports(getInstance());
-    if (inst.asyncify_get_state() === ASYNCIFY_STATE.REWINDING) {
-      inst.asyncify_stop_rewind();
-      return getForkResult();
-    }
-    fn.ctlPtr = ctlPtr >>> 0;
-    inst.asyncify_start_unwind(fn.ctlPtr);
-    return 0;
-  };
-  fn.ctlPtr = 0;
-  return fn;
+  return new CaptureStack(getInstance, getForkResult);
 }
 
 // True iff `instance` is parked mid-unwind — i.e. its entry export (_start /

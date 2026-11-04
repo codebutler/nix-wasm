@@ -40,7 +40,7 @@ export interface VirtioWasmDeviceOptions {
   /** guest export */
   raiseInterrupt: RaiseInterrupt;
   /** online CPU mask (default {0}) */
-  onlineCpus?: Set<number> | number[];
+  onlineCpus?: number[];
   /**
    * cross-worker queue-layout store (a queue set up on one worker must be
    * serviceable from another; see shared-queues.js).
