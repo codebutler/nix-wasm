@@ -201,8 +201,8 @@ type WorkerInitMessage = InitMessage & {
   let variant: string;
   let arch_bits: 32 | 64;
   let Ulong: (value: UlongValue) => UlongValue;
-  let memory: KernelMemory = null; // Note: memory.buffer has to be re-accessed after growing the memory!
-  let locks: TaskLocks = null;
+  let memory: KernelMemory | null = null; // Note: memory.buffer has to be re-accessed after growing the memory!
+  let locks: TaskLocks | null = null;
   const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
 
@@ -242,6 +242,12 @@ type WorkerInitMessage = InitMessage & {
   // When off, syscalls take the upstream zero-overhead path (no wrapper try/
   // catch, no logging). Enable for a debug session by setting `trace_syscalls`
   // in the worker init message (the init handler spreads `...options`).
+  /// `e.message` when the thrown value has one (what `e && e.message` read).
+  const message_of = (e: unknown): unknown =>
+    (typeof e === "object" || typeof e === "function") && e !== null && "message" in e
+      ? e.message
+      : undefined;
+
   let trace_enabled = false;
   let syscall_trace_budget = 120;
   const syscall_logged =
@@ -257,7 +263,7 @@ type WorkerInitMessage = InitMessage & {
         // (call_indirect type check fails). The wrappers are (sp, tp, nr,
         // arg0..argN), so nr is args[2]. Skip the BENIGN exec/sigreturn unwind
         // exceptions (host glue control flow) — only real traps are interesting.
-        if (!/should be ignored/.test(String((e && e.message) || e))) {
+        if (!/should be ignored/.test(String(message_of(e) || e))) {
           console.error(
             `[user-exec ${runner_name}] TRAP at syscall nr=${args[2]} args=[${args.slice(3).join(", ")}] : ${e}`,
           );
@@ -326,18 +332,18 @@ type WorkerInitMessage = InitMessage & {
   };
 
   /// SAB-backed storage for last process in switch_to (when it returns back from another task).
-  let switch_to_last_task: Uint32Array = null;
+  let switch_to_last_task: Uint32Array | null = null;
 
   /// The vmlinux instance, to handle boot, idle, kthreads and syscalls etc.
-  let vmlinux_instance: VmlinuxInstance = null;
+  let vmlinux_instance: VmlinuxInstance | null = null;
 
   /// The user executable (if any) to run when we're not in vmlinux.
-  let user_executable: Promise<WebAssembly.Module> = null;
-  let user_executable_params: UserExecutableParams = null;
+  let user_executable: Promise<WebAssembly.Module> | null = null;
+  let user_executable_params: UserExecutableParams | null = null;
 
   /// The user executabe instance, or null. Try using the instance variable in the promise over this one if possible.
-  let user_executable_instance: UserInstance = null;
-  let user_executable_imports: UserImports = null;
+  let user_executable_instance: UserInstance | null = null;
+  let user_executable_imports: UserImports | null = null;
 
   /// pc (#126 Track C / #130): per-process dynamic linking (dlopen/dlsym).
   /// dyn_loader is built LAZILY on the first dl host-import call (parsing the
@@ -349,14 +355,14 @@ type WorkerInitMessage = InitMessage & {
   /// tables. dyn_replay carries a cloning parent's side-module snapshot into
   /// this (child) worker; it is replayed right after the user instance exists,
   /// before any user code runs (Track 0 §4 step 3).
-  let dyn_loader: DynamicLoader = null;
-  let dyn_replay: DynSnapshot = null;
-  let user_executable_range: { bin_start: number; bin_end: number } = null;
+  let dyn_loader: DynamicLoader | null = null;
+  let dyn_replay: DynSnapshot | null = null;
+  let user_executable_range: { bin_start: number; bin_end: number } | null = null;
 
   /// pc (#130): the per-process runtime-FFI trampoline cache (runtime/
   /// ffi-codegen.js) — built lazily on the first __wasm_ffi_call, sharing this
   /// process's Memory + function table.
-  let ffi_trampolines: FfiTrampolines = null;
+  let ffi_trampolines: FfiTrampolines | null = null;
 
   /// Flag that a clone callback should be called instead of _start().
   /// (ret_from_fork's i32 result once the task has run, hence the number.)
@@ -374,7 +380,7 @@ type WorkerInitMessage = InitMessage & {
   /// _Fork seam calls it; asyncify unwinds the caller's stack and the run loop
   /// (run_user_entry) drives the kernel clone + the dual rewind. One fn per
   /// worker; late-binds the instance (exec replaces it).
-  let capture_stack_fn: ReturnType<typeof makeCaptureStack> = null;
+  let capture_stack_fn: ReturnType<typeof makeCaptureStack> | null = null;
 
   /// pc (#128/#129): THIS worker's own page-table root — the pt_base baked into
   /// its user instance's __mmu_pt_base at instantiation (its task's mm->pgd).
@@ -402,6 +408,25 @@ type WorkerInitMessage = InitMessage & {
 
   const V8Error: V8ErrorConstructor = Error;
 
+  /// A value a code path cannot run without: the old code would have thrown a
+  /// TypeError on null/undefined here, so throw a clear error instead.
+  const required = <T>(value: T | null | undefined, what: string): T => {
+    if (value === null || value === undefined)
+      throw new Error(`[Runner ${runner_name}] ${what} is not available`);
+    return value;
+  };
+  /// The shared kernel memory (set by init() before any wasm runs).
+  const kernel_memory = (): KernelMemory => required(memory, "kernel memory");
+  /// The vmlinux exports (set once vmlinux_setup() has instantiated it).
+  const vmlinux = (): VmlinuxExports => required(vmlinux_instance, "vmlinux instance").exports;
+  /// The current user image's instance, imports and load params.
+  const user_instance = (): UserInstance =>
+    required(user_executable_instance, "user executable instance");
+  const user_imports = (): UserImports =>
+    required(user_executable_imports, "user executable imports");
+  const user_params = (): UserExecutableParams =>
+    required(user_executable_params, "user executable params");
+
   /// Why a Trap was thrown (see the throw sites and user_executable_error).
   type TrapKind = "panic" | "reload_program" | "signal_return";
 
@@ -416,7 +441,7 @@ type WorkerInitMessage = InitMessage & {
     }
   }
 
-  const log = (message: string) => {
+  const log = (message: string | undefined) => {
     port.postMessage({
       method: "log",
       message: "[Runner " + runner_name + "]: " + message,
@@ -496,28 +521,28 @@ type WorkerInitMessage = InitMessage & {
   const ensure_dyn_loader = () => {
     if (!dyn_loader) {
       dyn_loader = new DynamicLoader({
-        memory,
-        table: user_executable_imports.env.__indirect_function_table,
-        baseEnv: user_executable_imports.env,
+        memory: kernel_memory(),
+        table: user_imports().env.__indirect_function_table,
+        baseEnv: user_imports().env,
         archBits: arch_bits,
         log: (m) => log(m),
         mmu: own_pt_base
           ? {
               ptBase: own_pt_base,
-              syscall2: user_executable_imports.env.__wasm_syscall_2,
-              stackPointer: user_executable_imports.env.__stack_pointer,
-              getTlsBase: user_executable_instance.exports.__get_tls_base,
+              syscall2: user_imports().env.__wasm_syscall_2,
+              stackPointer: user_imports().env.__stack_pointer,
+              // An MMU image is softmmu-instrumented, and the pass refuses one
+              // without __get_tls_base (#179).
+              getTlsBase: required(user_instance().exports.__get_tls_base, "__get_tls_base export"),
             }
           : undefined,
       });
+      const range = required(user_executable_range, "user executable range");
       dyn_loader.registerMain({
-        instance: user_executable_instance,
-        bytes: new Uint8Array(memory.buffer).subarray(
-          user_executable_range.bin_start,
-          user_executable_range.bin_end,
-        ),
-        memoryBase: Number(user_executable_params.data_start),
-        tableBase: Number(user_executable_params.table_start),
+        instance: user_instance(),
+        bytes: new Uint8Array(kernel_memory().buffer).subarray(range.bin_start, range.bin_end),
+        memoryBase: Number(user_params().data_start),
+        tableBase: Number(user_params().table_start),
       });
     }
     return dyn_loader;
@@ -528,14 +553,15 @@ type WorkerInitMessage = InitMessage & {
   const ensure_ffi = () => {
     if (!ffi_trampolines) {
       ffi_trampolines = new FfiTrampolines({
-        memory,
-        table: user_executable_imports.env.__indirect_function_table,
+        memory: kernel_memory(),
+        table: user_imports().env.__indirect_function_table,
         mmu: own_pt_base
           ? {
               ptBase: own_pt_base,
-              syscall2: user_executable_imports.env.__wasm_syscall_2,
-              stackPointer: user_executable_imports.env.__stack_pointer,
-              getTlsBase: user_executable_instance.exports.__get_tls_base,
+              syscall2: user_imports().env.__wasm_syscall_2,
+              stackPointer: user_imports().env.__stack_pointer,
+              // As in ensure_dyn_loader: an MMU image always exports it.
+              getTlsBase: required(user_instance().exports.__get_tls_base, "__get_tls_base export"),
             }
           : undefined,
       });
@@ -552,13 +578,15 @@ type WorkerInitMessage = InitMessage & {
   };
 
   const lock_notify = (lock: LockName, count?: number) => {
-    Atomics.store(locks._memory, locks[lock], 1);
-    Atomics.notify(locks._memory, locks[lock], count || 1);
+    const l = required(locks, "task locks");
+    Atomics.store(l._memory, l[lock], 1);
+    Atomics.notify(l._memory, l[lock], count || 1);
   };
 
   const lock_wait = (lock: LockName) => {
-    Atomics.wait(locks._memory, locks[lock], 0);
-    Atomics.store(locks._memory, locks[lock], 0);
+    const l = required(locks, "task locks");
+    Atomics.wait(l._memory, l[lock], 0);
+    Atomics.store(l._memory, l[lock], 0);
   };
 
   const serialize_me = () => {
@@ -573,13 +601,13 @@ type WorkerInitMessage = InitMessage & {
     if (own_pt_base && user_executable_instance && user_executable_instance.exports.__mmu_pt_base) {
       user_executable_instance.exports.__mmu_pt_base.value = own_pt_base;
     }
-    return switch_to_last_task[0]; // last_task was written by the caller just prior to waking.
+    return required(switch_to_last_task, "last_task store")[0]; // last_task was written by the caller just prior to waking.
   };
 
   /// Wayland Phase 1 (1b): cross-worker virtio queue-layout store (SAB),
   /// attached in init(). Shared so a queue set up on the boot worker is
   /// serviceable from a userspace task worker.
-  let virtio_queues: SharedQueues = null;
+  let virtio_queues: SharedQueues | null = null;
 
   /// squashfs image bytes for the seed BlkDevice (VW_DEV_BLK=3); set from the
   /// boot message in init(). Zero-length when no squashfs was provided (--no-nix).
@@ -587,8 +615,8 @@ type WorkerInitMessage = InitMessage & {
   /// #177: RW state-disk image + dirty bitmap (VW_DEV_BLK_STATE=1 → /dev/vdb).
   /// SharedArrayBuffer views handed in via the boot message; absent → no state
   /// disk (installer-only / busybox boots).
-  let stateDiskImage: Uint8Array = null;
-  let stateDiskDirty: Uint8Array = null;
+  let stateDiskImage: Uint8Array | null = null;
+  let stateDiskDirty: Uint8Array | null = null;
 
   /// Wayland Phase 1 (1a/1b): the JS virtio device models for the `virtio_wasm`
   /// transport, keyed by the host device index `dev` the guest passes in every
@@ -653,7 +681,7 @@ type WorkerInitMessage = InitMessage & {
   const publish_raised_irqs_addr = () => {
     if (raised_irqs_published) return;
     try {
-      const fn = vmlinux_instance.exports.wasm_raised_irqs_ptr;
+      const fn = vmlinux().wasm_raised_irqs_ptr;
       if (typeof fn === "function") {
         port.postMessage({ method: "wayland_irq_addr", addr: Number(fn(0)) >>> 0 });
         raised_irqs_published = true;
@@ -665,16 +693,27 @@ type WorkerInitMessage = InitMessage & {
     }
   };
 
+  /// A buffer this worker transfers to the host. The devices hand over
+  /// .slice()/Uint8Array.from() copies, which own a plain ArrayBuffer; a
+  /// SharedArrayBuffer cannot be transferred (postMessage would throw a
+  /// DataCloneError), so say so clearly instead.
+  const transferable = (buffer: ArrayBufferLike): ArrayBuffer => {
+    if (!(buffer instanceof ArrayBuffer)) {
+      throw new Error(`[Runner ${runner_name}] cannot transfer a shared buffer to the host`);
+    }
+    return buffer;
+  };
+
   const virtio_devices: Map<number, VirtioWasmDevice> = new Map();
-  const get_virtio_device = (dev: number): VirtioWasmDevice | null => {
+  const get_virtio_device = (dev: number): VirtioWasmDevice | null | undefined => {
     const id = dev >>> 0;
     let d = virtio_devices.get(id);
     if (!d && vmlinux_instance && virtio_queues) {
       const common: VirtioWasmDeviceOptions & { waylandBridge?: WaylandBridge } = {
         dev: id,
         irq: VIRTIO_WASM_IRQ_BASE + id,
-        memory,
-        raiseInterrupt: (cpu, irq) => vmlinux_instance.exports.raise_interrupt(cpu, irq),
+        memory: kernel_memory(),
+        raiseInterrupt: (cpu, irq) => vmlinux().raise_interrupt(cpu, irq),
         onlineCpus: [0], // maxcpus=1
         sharedQueues: virtio_queues,
         log: (m) => log(m),
@@ -695,9 +734,7 @@ type WorkerInitMessage = InitMessage & {
         // to this SEND" was the wrong model. Single producer per direction: worker
         // owns OUT, host owns IN.
         common.waylandBridge = {
-          // `data` here and in onPipeData is a .slice() copy, so it owns a plain
-          // (non-shared, transferable) ArrayBuffer.
-          sendOut: (clientId, data: Uint8Array<ArrayBuffer>, fds) => {
+          sendOut: (clientId, data, fds) => {
             // A shm fd crosses as its place in shared memory; a guest pipe as
             // its vfd id ({ pipe }), for the host to write into.
             const fdViews = fds.map((v) =>
@@ -720,11 +757,12 @@ type WorkerInitMessage = InitMessage & {
             port.postMessage({ method: "wayland_close", dev: id, clientId: clientId >>> 0 }),
           // The guest wrote into, or closed, a pipe the host created (the
           // compositor reading a guest clipboard selection).
-          onPipeData: (pipe, data: Uint8Array<ArrayBuffer>) =>
-            port.postMessage(
-              { method: "wayland_pipe_data", dev: id, pipe: pipe >>> 0, buffer: data.buffer },
-              [data.buffer],
-            ),
+          onPipeData: (pipe, data) => {
+            const buffer = transferable(data.buffer);
+            port.postMessage({ method: "wayland_pipe_data", dev: id, pipe: pipe >>> 0, buffer }, [
+              buffer,
+            ]);
+          },
           onPipeClose: (pipe) =>
             port.postMessage({ method: "wayland_pipe_close", dev: id, pipe: pipe >>> 0 }),
           // A guest pipe opened or closed: the host writes only into open ones.
@@ -746,7 +784,7 @@ type WorkerInitMessage = InitMessage & {
         // host instance runs server.handle() and raises the completion IRQ via the
         // raised_irqs self-wake. Publish that wake address (9P needs it even with
         // no wayland device present).
-        const m = ninepVirtioByDev.get(id);
+        const m = required(ninepVirtioByDev.get(id), "9P channel " + id); // has(id) above
         d = new NinePVirtioDevice({
           ...common,
           tag: m.tag,
@@ -783,7 +821,7 @@ type WorkerInitMessage = InitMessage & {
           ...common,
           image,
           readOnly: false,
-          dirtyBitmap: stateDiskDirty,
+          dirtyBitmap: stateDiskDirty ?? undefined, // BlkDevice treats both as "none"
           onDirty: () => port.postMessage({ method: "blk_dirty", dev: id }),
         });
       } else if (id === VW_DEV_NET) {
@@ -794,9 +832,9 @@ type WorkerInitMessage = InitMessage & {
         // shared queue-layout SAB + raised_irqs self-wake, so a parked idle CPU
         // is woken without this worker servicing a postMessage (the wl pattern).
         const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
-        // Each frame is a Uint8Array.from() copy: a plain, transferable ArrayBuffer.
-        net.setFrameSink((frame: Uint8Array<ArrayBuffer>) => {
-          port.postMessage({ method: "net_out", dev: id, frame: frame.buffer }, [frame.buffer]);
+        net.setFrameSink((frame) => {
+          const buffer = transferable(frame.buffer);
+          port.postMessage({ method: "net_out", dev: id, frame: buffer }, [buffer]);
         });
         d = net;
       } else if (id === VW_DEV_BLK) {
@@ -870,7 +908,7 @@ type WorkerInitMessage = InitMessage & {
         method: "create_and_run_task",
         prev_task: prev_task,
         new_task: new_task,
-        name: get_cstring(memory, name),
+        name: get_cstring(kernel_memory(), name),
 
         // For user tasks, there is user code to load first before trying to run
         // it. pc (new exec ABI): pass the binary's byte range in the SHARED
@@ -927,7 +965,7 @@ type WorkerInitMessage = InitMessage & {
 
     /// Kernel panic. We can't proceed.
     wasm_panic: (msg) => {
-      const message = "Kernel panic: " + get_cstring(memory, msg);
+      const message = "Kernel panic: " + get_cstring(kernel_memory(), msg);
       console.error(message);
       log(message);
 
@@ -940,7 +978,8 @@ type WorkerInitMessage = InitMessage & {
       try {
         throw new Error();
       } catch (error) {
-        const memory_u8 = new Uint8Array(memory.buffer);
+        if (!(error instanceof Error)) throw error; // it is the Error thrown just above
+        const memory_u8 = new Uint8Array(kernel_memory().buffer);
         const encoded = text_encoder.encode(error.stack).slice(0, max_size - 1);
         memory_u8.set(encoded, stack_trace);
         memory_u8[stack_trace + encoded.length] = 0;
@@ -994,7 +1033,10 @@ type WorkerInitMessage = InitMessage & {
       dyn_replay = null;
       ffi_trampolines = null;
       user_executable_range = { bin_start, bin_end };
-      let bytes: Uint8Array<ArrayBuffer> = new Uint8Array(memory.buffer).slice(bin_start, bin_end);
+      let bytes: Uint8Array<ArrayBuffer> = new Uint8Array(kernel_memory().buffer).slice(
+        bin_start,
+        bin_end,
+      );
       // pc (#128 software MMU): a nonzero pt_base means the MMU kernel — the
       // user code must go through the per-access translate. Instrument the image
       // AT LOAD, right here, so EVERY execed binary (busybox, nix, any tool) runs
@@ -1094,7 +1136,8 @@ type WorkerInitMessage = InitMessage & {
         // Exec has been called and we should not return from the syscall. Collapse the call stack of the user
         // executable. When collapsed, run the new user executable that was already preloaded by wasm_load_executable().
         // This takes precedence of signal handlers or signal return - no reason to run any old user code!
-        if (vmlinux_instance.exports.wasm_collapse) {
+        const kernel = vmlinux();
+        if (kernel.wasm_collapse) {
           // #175: MMU-fork kernels export wasm_collapse(), which raises a GENUINE wasm trap
           // (unreachable). Unlike a host JS throw (below), a real trap is NOT catchable by user
           // wasm-EH catch/catch_all — so nix's fork child (execve wrapped in catch(...) under
@@ -1103,7 +1146,7 @@ type WorkerInitMessage = InitMessage & {
           // .catch this RuntimeError is the deliberate collapse. See probes: a trap stays
           // uncatchable across the __wasm_syscall_N and wasm_user_mode_tail JS import frames.
           reload_pending = true;
-          vmlinux_instance.exports.wasm_collapse(); // never returns (traps)
+          kernel.wasm_collapse(); // never returns (traps)
           throw new Error("wasm_collapse() returned (it should trap)!");
         }
         // Legacy NOMMU path: no catch_all is ever live across exec (posix_spawn execs from a C
@@ -1114,15 +1157,18 @@ type WorkerInitMessage = InitMessage & {
         // If exec() happens, we will slip out in the catch-else clause, ensuring the sigreturn does not proceed.
         if (flow & 1) {
           try {
-            if (user_executable_instance.exports.__libc_handle_signal) {
+            if (user_instance().exports.__libc_handle_signal) {
               // Setup signal frame...
-              user_executable_imports.env.__stack_pointer.value =
-                vmlinux_instance.exports.get_user_stack_pointer();
-              user_executable_instance.exports.__set_tls_base(
-                vmlinux_instance.exports.get_user_tls_base(),
-              );
+              user_imports().env.__stack_pointer.value = vmlinux().get_user_stack_pointer();
+              required(
+                user_instance().exports.__set_tls_base,
+                "__set_tls_base export",
+              )(vmlinux().get_user_tls_base());
 
-              user_executable_instance.exports.__libc_handle_signal();
+              required(
+                user_instance().exports.__libc_handle_signal,
+                "__libc_handle_signal export",
+              )();
               throw new Error(
                 "Wasm function __libc_handle_signal() returned (it should never return)!",
               );
@@ -1132,11 +1178,11 @@ type WorkerInitMessage = InitMessage & {
           } catch (error) {
             if (error instanceof Trap && error.kind == "signal_return") {
               // ...restore signal frame.
-              user_executable_imports.env.__stack_pointer.value =
-                vmlinux_instance.exports.get_user_stack_pointer();
-              user_executable_instance.exports.__set_tls_base(
-                vmlinux_instance.exports.get_user_tls_base(),
-              );
+              user_imports().env.__stack_pointer.value = vmlinux().get_user_stack_pointer();
+              required(
+                user_instance().exports.__set_tls_base,
+                "__set_tls_base export",
+              )(vmlinux().get_user_tls_base());
             } else {
               // Either a genuine error, or a Trap() from exec() (signal handlers are allowed to call exec()).
               throw error;
@@ -1177,7 +1223,7 @@ type WorkerInitMessage = InitMessage & {
 
       const data = new Uint8Array(count);
       crypto.getRandomValues(data);
-      new Uint8Array(memory.buffer).set(data, buffer);
+      new Uint8Array(kernel_memory().buffer).set(data, buffer);
 
       return count;
     },
@@ -1319,8 +1365,8 @@ type WorkerInitMessage = InitMessage & {
           const tag = user_executable_imports && user_executable_imports.env.__cpp_exception;
           if (!tag || !(error instanceof WebAssembly.Exception) || !error.is(tag)) return null;
           const ptr = Number(error.getArg(tag, 0));
-          const dv = new DataView(memory.buffer);
-          const u8 = new Uint8Array(memory.buffer);
+          const dv = new DataView(kernel_memory().buffer);
+          const u8 = new Uint8Array(kernel_memory().buffer);
           const cstr = (p: number, max = 256) => {
             if (p < 8 || p + max > u8.length) return null;
             let s = "";
@@ -1426,7 +1472,7 @@ type WorkerInitMessage = InitMessage & {
         console.error(error);
 
         if (vmlinux_instance) {
-          vmlinux_instance.exports.raise_exception();
+          vmlinux().raise_exception();
           throw new Error("raise_exception() returned");
         } else {
           // Only log stack if vmlinux is not up already - it will dump stacks itself.
@@ -1451,46 +1497,55 @@ type WorkerInitMessage = InitMessage & {
           // Notify the main thread about init task so that it knows where it resides in memory.
           port.postMessage({
             method: "start_primary",
-            init_task: vmlinux_instance.exports.init_task.value,
+            init_task: vmlinux().init_task.value,
           });
 
           // Setup the boot command line. We have the luxury to be able to write to it directly. The maximum length is
           // not set here but is set by COMMAND_LINE_SIZE (defaults to 512 bytes).
           const cmdline = message.boot_cmdline + "\0";
-          const cmdline_buffer = Number(vmlinux_instance.exports.boot_command_line.value);
-          new Uint8Array(memory.buffer).set(text_encoder.encode(cmdline), cmdline_buffer);
+          const cmdline_buffer = Number(vmlinux().boot_command_line.value);
+          new Uint8Array(kernel_memory().buffer).set(text_encoder.encode(cmdline), cmdline_buffer);
 
           // Grow the memory to fit initrd and copy it.
           //
           // All typed arrays and views on memory.buffer become invalid by growing and need to be re-created. grow()
           // will return the old size, which becomes our base address for initrd.
+          // (The host hands CPU 0 its initrd; it only drops its own copy afterwards.)
+          if (!message.initrd) throw new Error("primary_cpu init message has no initrd");
           if (arch_bits == 64) {
             const initrd_start =
-              memory.grow(BigInt(((message.initrd.byteLength + 0xffff) / 0x10000) | 0)) * 0x10000n;
+              kernel_memory().grow(BigInt(((message.initrd.byteLength + 0xffff) / 0x10000) | 0)) *
+              0x10000n;
             const initrd_end = initrd_start + BigInt(message.initrd.byteLength);
-            new Uint8Array(memory.buffer).set(new Uint8Array(message.initrd), Number(initrd_start));
-            new DataView(memory.buffer).setBigUint64(
-              Number(vmlinux_instance.exports.initrd_start.value),
+            new Uint8Array(kernel_memory().buffer).set(
+              new Uint8Array(message.initrd),
+              Number(initrd_start),
+            );
+            new DataView(kernel_memory().buffer).setBigUint64(
+              Number(vmlinux().initrd_start.value),
               initrd_start,
               true,
             );
-            new DataView(memory.buffer).setBigUint64(
-              Number(vmlinux_instance.exports.initrd_end.value),
+            new DataView(kernel_memory().buffer).setBigUint64(
+              Number(vmlinux().initrd_end.value),
               initrd_end,
               true,
             );
           } else {
             const initrd_start =
-              memory.grow(((message.initrd.byteLength + 0xffff) / 0x10000) | 0) * 0x10000;
+              kernel_memory().grow(((message.initrd.byteLength + 0xffff) / 0x10000) | 0) * 0x10000;
             const initrd_end = initrd_start + message.initrd.byteLength;
-            new Uint8Array(memory.buffer).set(new Uint8Array(message.initrd), initrd_start);
-            new DataView(memory.buffer).setUint32(
-              Number(vmlinux_instance.exports.initrd_start.value),
+            new Uint8Array(kernel_memory().buffer).set(
+              new Uint8Array(message.initrd),
+              initrd_start,
+            );
+            new DataView(kernel_memory().buffer).setUint32(
+              Number(vmlinux().initrd_start.value),
               initrd_start,
               true,
             );
-            new DataView(memory.buffer).setUint32(
-              Number(vmlinux_instance.exports.initrd_end.value),
+            new DataView(kernel_memory().buffer).setUint32(
+              Number(vmlinux().initrd_end.value),
               initrd_end,
               true,
             );
@@ -1500,18 +1555,19 @@ type WorkerInitMessage = InitMessage & {
           //
           // _start sets up the Wasm global __stack_pointer to init_stack and calls start_kernel(). Note that this will
           // grow the memory and thus all views on memory.buffer become invalid.
-          vmlinux_instance.exports._start();
+          vmlinux()._start();
 
           // _start() will never return, unless it fails to allocate all memoy it wants to.
           throw new Error("_start did not even succeed in allocating 16 pages of RAM, aborting...");
         } else if (message.runner_type == "secondary_cpu") {
           // start_secondary() will never return. It can be killed by terminate() on this Worker.
-          vmlinux_instance.exports._start_secondary(Ulong(message.idle_task));
+          // The host starts every secondary CPU with its idle task (start_secondary).
+          vmlinux()._start_secondary(Ulong(required(message.idle_task, "secondary_cpu idle_task")));
 
           throw new Error("start_secondary returned");
         } else if (message.runner_type == "task") {
           // A fresh task, possibly serialized on CPU 0 before secondaries are brought up.
-          should_call_clone_callback = vmlinux_instance.exports.ret_from_fork(
+          should_call_clone_callback = vmlinux().ret_from_fork(
             Ulong(message.prev_task),
             Ulong(message.new_task),
           );
@@ -1531,15 +1587,15 @@ type WorkerInitMessage = InitMessage & {
       };
 
       const user_executable_setup = () => {
-        const stack_pointer = vmlinux_instance.exports.get_user_stack_pointer();
-        const tls_base = vmlinux_instance.exports.get_user_tls_base();
+        const stack_pointer = vmlinux().get_user_stack_pointer();
+        const tls_base = vmlinux().get_user_tls_base();
 
         user_executable_imports = {
           env: {
-            memory: memory,
+            memory: kernel_memory(),
             __memory_base: new WebAssembly.Global(
               { value: `i${arch_bits}`, mutable: false },
-              Ulong(user_executable_params.data_start),
+              Ulong(user_params().data_start),
             ),
             __stack_pointer: new WebAssembly.Global(
               { value: `i${arch_bits}`, mutable: true },
@@ -1549,16 +1605,16 @@ type WorkerInitMessage = InitMessage & {
             // a table smaller than the binary's declared initial fails
             // instantiate. 4096 remains the floor for safety.
             __indirect_function_table: new WebAssembly.Table({
-              initial: Math.max(4096, user_executable_params.table_initial || 0),
+              initial: Math.max(4096, user_params().table_initial || 0),
               element: "anyfunc",
             }),
             __table_base: new WebAssembly.Global(
               { value: `i${arch_bits}`, mutable: false },
-              Ulong(user_executable_params.table_start),
+              Ulong(user_params().table_start),
             ),
             __table_base32: new WebAssembly.Global(
               { value: "i32", mutable: false },
-              Number(user_executable_params.table_start),
+              Number(user_params().table_start),
             ),
 
             // To be correct, we should save AND restore these globals between the user instance and vmlinux instance:
@@ -1575,10 +1631,10 @@ type WorkerInitMessage = InitMessage & {
             // To make syscalls faster (allowing them to not go through a slow JavaScript wrapper), we skip transferring
             // them back to the user instance. They always have to be transferred to vmlinux at syscall sites, as a
             // signal being handled in its return path would need to save (and restore) them on its signal stack.
-            __wasm_syscall_0: syscall_logged(vmlinux_instance.exports.wasm_syscall_0),
-            __wasm_syscall_1: syscall_logged(vmlinux_instance.exports.wasm_syscall_1),
-            __wasm_syscall_2: syscall_logged(vmlinux_instance.exports.wasm_syscall_2),
-            __wasm_syscall_3: syscall_logged(vmlinux_instance.exports.wasm_syscall_3),
+            __wasm_syscall_0: syscall_logged(vmlinux().wasm_syscall_0),
+            __wasm_syscall_1: syscall_logged(vmlinux().wasm_syscall_1),
+            __wasm_syscall_2: syscall_logged(vmlinux().wasm_syscall_2),
+            __wasm_syscall_3: syscall_logged(vmlinux().wasm_syscall_3),
             // pc: futex_time64 (nr=422) split-arity shim — see patch 0015.
             // glib's g_futex_simple calls __NR_futex_time64 with 4 args
             // (uaddr, op, val, utime) via __wasm_syscall_4.  The kernel's
@@ -1591,12 +1647,12 @@ type WorkerInitMessage = InitMessage & {
             __wasm_syscall_4: syscall_logged((sp, tp, nr, a0, a1, a2, a3) => {
               // nr is a Number (wasm32) or BigInt (wasm64); compare both
               if (nr == 422) {
-                return vmlinux_instance.exports.wasm_syscall_6(sp, tp, nr, a0, a1, a2, a3, 0, 0);
+                return vmlinux().wasm_syscall_6(sp, tp, nr, a0, a1, a2, a3, 0, 0);
               }
-              return vmlinux_instance.exports.wasm_syscall_4(sp, tp, nr, a0, a1, a2, a3);
+              return vmlinux().wasm_syscall_4(sp, tp, nr, a0, a1, a2, a3);
             }),
-            __wasm_syscall_5: syscall_logged(vmlinux_instance.exports.wasm_syscall_5),
-            __wasm_syscall_6: syscall_logged(vmlinux_instance.exports.wasm_syscall_6),
+            __wasm_syscall_5: syscall_logged(vmlinux().wasm_syscall_5),
+            __wasm_syscall_6: syscall_logged(vmlinux().wasm_syscall_6),
 
             __wasm_abort: () => {
               debugger;
@@ -1609,7 +1665,7 @@ type WorkerInitMessage = InitMessage & {
             // imports a module asks for). One fn per worker, late-binding the
             // instance; ctlPtr is recorded per call for the run loop's rewind.
             capture_stack: (capture_stack_fn ||= makeCaptureStack(
-              () => user_executable_instance,
+              () => user_instance(),
               () => fork_result,
             )),
 
@@ -1662,7 +1718,12 @@ type WorkerInitMessage = InitMessage & {
             // into the surface's clean failure code, never a wrong read.
             __wasm_dl_probe: (bufPtr, bufLen, outPtr) => {
               try {
-                const b = readUser(memory.buffer, own_pt_base, Number(bufPtr), Number(bufLen));
+                const b = readUser(
+                  kernel_memory().buffer,
+                  own_pt_base,
+                  Number(bufPtr),
+                  Number(bufLen),
+                );
                 const r = ensure_dyn_loader().probe(b);
                 if (typeof r === "number") return r;
                 const out = new Uint8Array(12);
@@ -1670,7 +1731,7 @@ type WorkerInitMessage = InitMessage & {
                 odv.setUint32(0, r.memSize, true);
                 odv.setUint32(4, r.memAlign, true); // log2, as in dylink.0
                 odv.setUint32(8, r.tableSize, true);
-                writeUser(memory.buffer, own_pt_base, Number(outPtr), out);
+                writeUser(kernel_memory().buffer, own_pt_base, Number(outPtr), out);
                 return 0;
               } catch (e) {
                 if (!(e instanceof UserFault)) throw e;
@@ -1681,7 +1742,12 @@ type WorkerInitMessage = InitMessage & {
             __wasm_dlopen: (bufPtr, bufLen, memoryBase, flags) => {
               if (Number(bufPtr) === 0) return 1; // dlopen(NULL) → the main program
               try {
-                const b = readUser(memory.buffer, own_pt_base, Number(bufPtr), Number(bufLen));
+                const b = readUser(
+                  kernel_memory().buffer,
+                  own_pt_base,
+                  Number(bufPtr),
+                  Number(bufLen),
+                );
                 // musl RTLD_GLOBAL = 0x100; default (RTLD_LOCAL) modules don't
                 // serve symbols to later loads or RTLD_DEFAULT searches.
                 return ensure_dyn_loader().load(b, Number(memoryBase), {
@@ -1698,7 +1764,7 @@ type WorkerInitMessage = InitMessage & {
               try {
                 return ensure_dyn_loader().dlsym(
                   Number(handle),
-                  readUserCString(memory.buffer, own_pt_base, Number(namePtr)),
+                  readUserCString(kernel_memory().buffer, own_pt_base, Number(namePtr)),
                 );
               } catch (e) {
                 if (!(e instanceof UserFault)) throw e;
@@ -1729,7 +1795,7 @@ type WorkerInitMessage = InitMessage & {
                 // parameter count, so 257 is its absolute representable max.
                 // Reject nonsense before readUser can allocate from it.
                 if (len < 2 || len > 257) return 1;
-                const sig = readUser(memory.buffer, own_pt_base, Number(sigPtr), len);
+                const sig = readUser(kernel_memory().buffer, own_pt_base, Number(sigPtr), len);
                 const CODES: (WasmValType | null)[] = [null, "i32", "i64", "f32", "f64"];
                 const np = sig[0];
                 if (sig.length !== 2 + np || sig[1] >= CODES.length) return 1;
@@ -1829,10 +1895,10 @@ type WorkerInitMessage = InitMessage & {
         //   has been overridden with CLONE_SETTLS, it will be copied from the old task to the new one. This is mostly
         //   useful when CLONE_VFORK is used, in which case the new task can borrow the TLS until it calls exec or exit.
         // The import object carries a WebAssembly.Tag the lib's Imports type omits (see UserEnv).
-        let woken = user_executable.then((user_module) =>
+        let woken = required(user_executable, "user executable module").then((user_module) =>
           WebAssembly.instantiate(
             user_module,
-            user_executable_imports as Record<string, EnvImports> as WebAssembly.Imports,
+            user_imports() as Record<string, EnvImports> as WebAssembly.Imports,
           ),
         );
 
@@ -1847,12 +1913,12 @@ type WorkerInitMessage = InitMessage & {
           // instantiate, before pt_base could be set, and place data through a
           // zero table) and re-exports it as __mmu_start — run it now, after
           // pt_base and before relocs.
-          if (instance.exports.__mmu_pt_base && user_executable_params.pt_base) {
-            instance.exports.__mmu_pt_base.value = user_executable_params.pt_base;
+          if (instance.exports.__mmu_pt_base && user_params().pt_base) {
+            instance.exports.__mmu_pt_base.value = user_params().pt_base;
             // pc (#128/#129): remember OUR immutable root so serialize_me can
             // restore it after a context switch clobbers the instance global
             // with a foreign pgd (see own_pt_base's declaration).
-            own_pt_base = user_executable_params.pt_base;
+            own_pt_base = user_params().pt_base;
           }
           if (instance.exports.__mmu_start) {
             instance.exports.__mmu_start();
@@ -1900,7 +1966,7 @@ type WorkerInitMessage = InitMessage & {
             `__wasm_apply_data_relocs check: present=${!!instance.exports.__wasm_apply_data_relocs} ` +
               `should_call_clone_callback(=clone child, NOT a fresh exec)=${should_call_clone_callback} ` +
               `${should_call_clone_callback ? "SKIPPING (shared/COW parent memory already relocated)" : "applying"} ` +
-              `data_start=0x${Number(user_executable_params.data_start).toString(16)} ` +
+              `data_start=0x${Number(user_params().data_start).toString(16)} ` +
               `bin=[0x${user_executable_range ? Number(user_executable_range.bin_start).toString(16) : "?"}..` +
               `0x${user_executable_range ? Number(user_executable_range.bin_end).toString(16) : "?"}]`,
           );
@@ -1912,7 +1978,7 @@ type WorkerInitMessage = InitMessage & {
             // on a clone(), it is none of our business to do that. It's up to the libc to do that as part of pthreads.
             // Indeed, for example on a clone with CLONE_VFORK, the right thing to do may be to borrow the parent's TLS.
             // Unfortunately, LLVM does not export __tls_base directly on dynamic libraries, so we go through a wrapper.
-            instance.exports.__set_tls_base(tls_base);
+            required(instance.exports.__set_tls_base, "__set_tls_base export")(tls_base);
           }
           user_executable_instance = instance;
 
@@ -1948,14 +2014,14 @@ type WorkerInitMessage = InitMessage & {
             throw new Error("Wasm function " + label + " returned (it should never return)!");
           }
           stopUnwind(instance);
-          const ctl = capture_stack_fn.ctlPtr;
+          const ctl = required(capture_stack_fn, "capture_stack").ctlPtr; // set by user_executable_setup()
           // The true fork-time user SP/TLS — fork bypasses syscall entry (the
           // unwind returned out of the entry export), so the kernel's pt_regs
           // still hold the LAST syscall's stale values; wasm_fork_current
           // stamps these before kernel_clone so the child resumes correctly.
-          const sp = user_executable_imports.env.__stack_pointer.value;
+          const sp = user_imports().env.__stack_pointer.value;
           const tls = instance.exports.__get_tls_base ? instance.exports.__get_tls_base() : 0;
-          const pid = vmlinux_instance.exports.wasm_fork_current(Ulong(sp), Ulong(tls), Ulong(ctl));
+          const pid = vmlinux().wasm_fork_current(Ulong(sp), Ulong(tls), Ulong(ctl));
           fork_result = Number(pid); // -errno on failure; musl __syscall_ret handles it
           startRewind(instance, ctl);
           // loop: re-enter the same export; asyncify fast-forwards to the
@@ -1982,7 +2048,11 @@ type WorkerInitMessage = InitMessage & {
           should_call_clone_callback = false;
           fork_result = 0;
           startRewind(instance, ctl);
-          run_user_entry(instance, () => instance.exports._start(), "_start (fork rewind)");
+          run_user_entry(
+            instance,
+            () => required(instance.exports._start, "_start export")(),
+            "_start (fork rewind)",
+          );
         } else if (should_call_clone_callback) {
           // We have to reset this state, because if the clone callback calls exec, we have to run _start() instead!
           should_call_clone_callback = false;
@@ -1990,7 +2060,8 @@ type WorkerInitMessage = InitMessage & {
           if (instance.exports.__libc_clone_callback) {
             run_user_entry(
               instance,
-              () => instance.exports.__libc_clone_callback(),
+              () =>
+                required(instance.exports.__libc_clone_callback, "__libc_clone_callback export")(),
               "__libc_clone_callback()",
             );
           } else {
@@ -2012,7 +2083,7 @@ type WorkerInitMessage = InitMessage & {
             // just keeps the pre-fix behaviour (fine on NOMMU) — but LOUD on the MMU, see #179 below.
             if (instance.exports.__wasm_early_tp_init) {
               instance.exports.__wasm_early_tp_init();
-            } else if (user_executable_params.pt_base) {
+            } else if (user_params().pt_base) {
               // pc (#179): on the software MMU the seed is NOT optional — without
               // it the first TLS-touching ctor stores through a null `struct
               // pthread` (libc++ ios_base::Init -> errno at VA 0x1c) and the
@@ -2036,7 +2107,11 @@ type WorkerInitMessage = InitMessage & {
 
             // TLS: somewhat incorrectly contains 0 instead of the TP before exec(). Since we will anyway not care about
             // its value (__wasm_apply_data_relocs() called would have overwritten it in this case) it does not matter.
-            run_user_entry(instance, () => instance.exports._start(), "_start()");
+            run_user_entry(
+              instance,
+              () => required(instance.exports._start, "_start export")(),
+              "_start()",
+            );
           } else {
             throw new Error("Wasm function _start() not defined!");
           }

@@ -44,8 +44,8 @@ import type { WlFd } from "./virtio/wl-device.ts";
 /** Lock words a task's worker waits on, plus the SAB view they live in. */
 export interface TaskLocks {
   serialize: number;
-  /** Set right after the literal is built, so Object.keys() counts only the lock words. */
-  _memory?: Int32Array;
+  /** One Int32 per lock word above (sized from the words alone, before this is added). */
+  _memory: Int32Array;
 }
 export type LockName = "serialize";
 
@@ -73,7 +73,7 @@ export interface CpuRunnerOptions {
   runner_type: "primary_cpu" | "secondary_cpu";
   idle_task: number | undefined;
   boot_cmdline?: string;
-  initrd?: ArrayBuffer;
+  initrd?: ArrayBuffer | null;
 }
 export interface TaskRunnerOptions {
   runner_type: "task";
@@ -123,7 +123,8 @@ export interface WorkerMessageMap {
   exec_module_add: { hash: string; module: WebAssembly.Module; table_initial: number };
   release_task: { dead_task: number };
   serialize_tasks: { prev_task: number; next_task: number };
-  wayland_out: { dev: number; clientId: number; buffer: ArrayBuffer; fds?: WaylandFdView[] };
+  /** Not transferred (a copy), so any ArrayBufferLike; the host only views it. */
+  wayland_out: { dev: number; clientId: number; buffer: ArrayBufferLike; fds?: WaylandFdView[] };
   wayland_in_refill: { dev: number };
   virtio9p_notify: { dev: number; q: number };
   virtioconsole_notify: { dev: number; q: number };
@@ -157,18 +158,22 @@ export interface LinuxOptions {
   variant: string;
   vmlinux: WebAssembly.Module;
   boot_cmdline: string;
-  initrd: ArrayBuffer;
+  initrd: ArrayBuffer | null;
   log: (text: string) => void;
   ninep_server?: NinePServer;
   console_sink?: (idx: number, bytes: Uint8Array) => void;
   vsock?: { onReady?: (device: VsockVirtioDevice) => void };
   snd?: { onReady?: (device: SndVirtioDevice) => void };
   virtio_queues: SharedArrayBuffer;
-  squashfs?: ArrayBuffer;
+  squashfs?: ArrayBuffer | null;
   stateDisk?: { image: ArrayBuffer | SharedArrayBuffer | Uint8Array; onDirty?: () => void };
   wayland?: WaylandHostBridge;
   on_module_cached?: () => void;
 }
+
+/** `e.stack` when there is one, else `e` itself (for log lines). */
+const errorText = (e: unknown): unknown =>
+  e && typeof e === "object" && "stack" in e && e.stack ? e.stack : e;
 
 /** Whether a pushed-in fd is a `{ pipe }` (else it is bytes). */
 const isPipeFd = (f: Uint8Array | { pipe: number } | ArrayBuffer): f is { pipe: number } =>
@@ -299,6 +304,13 @@ export const linux = async ({
 
   /// Dict of tasks.
   const tasks: Map<number, Runner> = new Map();
+  // A task the protocol names must have a runner; the old object lookup crashed
+  // on a missing one too, so say which.
+  const task_runner = (task: number): Runner => {
+    const runner = tasks.get(task);
+    if (!runner) throw new Error("[Main]: no runner for task " + task);
+    return runner;
+  };
 
   /// pc (new exec ABI): the host-side compiled-Module cache (keyed by an opaque
   /// per-inode token) is GONE. binfmt_wasm now places the user binary as a byte
@@ -489,7 +501,7 @@ export const linux = async ({
         try {
           vsock.onReady(hostVsockDevice);
         } catch (e) {
-          log("[vsock] onReady threw: " + (e && e.stack ? e.stack : e));
+          log("[vsock] onReady threw: " + errorText(e));
         }
       }
     }
@@ -523,7 +535,7 @@ export const linux = async ({
         try {
           snd.onReady(hostSndDevice);
         } catch (e) {
-          log("[snd] onReady threw: " + (e && e.stack ? e.stack : e));
+          log("[snd] onReady threw: " + errorText(e));
         }
       }
     }
@@ -564,7 +576,9 @@ export const linux = async ({
       // in this special case tell us where it is so that we can register it.
       log("Starting cpu 0 with init_task " + message.init_task);
       // Number(): on wasm64 init_task is a BigInt; every other task id is a Number.
-      tasks.set(Number(message.init_task), cpus.get(0));
+      const cpu0 = cpus.get(0);
+      if (!cpu0) throw new Error("start_primary arrived but CPU 0 has no runner");
+      tasks.set(Number(message.init_task), cpu0);
     },
 
     start_secondary: (message) => {
@@ -590,9 +604,10 @@ export const linux = async ({
         }
       }
 
-      if (cpus.get(message.cpu)) {
+      const runner = cpus.get(message.cpu);
+      if (runner) {
         log("[Main]: Stopping CPU " + message.cpu);
-        cpus.get(message.cpu).worker.terminate();
+        runner.worker.terminate();
         cpus.delete(message.cpu);
       } else {
         log(
@@ -613,7 +628,8 @@ export const linux = async ({
     exec_module_add: (message) => {
       if (!exec_module_cache.has(message.hash)) {
         if (exec_module_cache.size >= EXEC_MODULE_CACHE_MAX) {
-          exec_module_cache.delete(exec_module_cache.keys().next().value);
+          const oldest = exec_module_cache.keys().next().value;
+          if (oldest !== undefined) exec_module_cache.delete(oldest);
         }
         exec_module_cache.set(message.hash, {
           module: message.module,
@@ -630,16 +646,18 @@ export const linux = async ({
       // next_task was previously suspended, wake it up.
 
       // Tell the next task where we switched from, so that it can finish the task switch.
-      tasks.get(message.next_task).last_task[0] = message.prev_task;
+      const next_runner = task_runner(message.next_task);
+      next_runner.last_task[0] = message.prev_task;
 
-      tasks.get(message.prev_task).running = false;
-      tasks.get(message.next_task).running = true;
+      const prev_runner = task_runner(message.prev_task);
+      prev_runner.running = false;
+      next_runner.running = true;
 
       // Release the above write of last_task and wake up the task.
-      lock_notify(tasks.get(message.next_task).locks, "serialize");
+      lock_notify(next_runner.locks, "serialize");
 
       // In case the task was dying, we're now done. prev_task will wait in serialize_me() but never be scheduled again.
-      if (tasks.get(message.prev_task).kill) {
+      if (prev_runner.kill) {
         kill_task(message.prev_task);
       }
     },
@@ -721,7 +739,8 @@ export const linux = async ({
       // is keeping up (desiredSize > 0). Before a tap attaches, frames would
       // buffer unbounded; after close/error, enqueue would throw in this handler.
       if (!netLinkUp || netController == null) return;
-      if (!(netController.desiredSize > 0)) return; // queue full — drop rather than buffer unbounded
+      const desired = netController.desiredSize;
+      if (!(desired !== null && desired > 0)) return; // queue full — drop rather than buffer unbounded
       try {
         netController.enqueue(new Uint8Array(message.frame));
       } catch {
@@ -823,6 +842,7 @@ export const linux = async ({
     const runner = make_vmlinux_runner(name, options);
     cpus.set(cpu, runner);
     if (cpu != 0) {
+      if (idle_task === undefined) throw new Error("CPU " + cpu + " started without an idle task");
       tasks.set(idle_task, runner); // For CPU 0, start_primary does this registration for us.
     }
   };
@@ -853,7 +873,7 @@ export const linux = async ({
   };
 
   const kill_task = (dead_task: number) => {
-    const task = tasks.get(dead_task);
+    const task = task_runner(dead_task);
     if (task.running) {
       // Case 1: current task is killing itself => we know that the reaped task is currently running (probably kthread).
       //
@@ -874,10 +894,13 @@ export const linux = async ({
     // Note: SharedWorker does not seem to allow WebAssembly Module or Memory instances posted.
     const worker = createModuleWorker(worker_url); // name dropped (Blob-shim path can't set it)
 
-    let locks: TaskLocks = {
+    const lock_words = {
       serialize: 0,
     };
-    locks._memory = new Int32Array(new SharedArrayBuffer(Object.keys(locks).length * 4));
+    const locks: TaskLocks = {
+      ...lock_words,
+      _memory: new Int32Array(new SharedArrayBuffer(Object.keys(lock_words).length * 4)),
+    };
 
     // Store for last task when wasm_serialize() returns in switch_to(). Needed for each task, both normal ones and each
     // CPUs idle tasks (first called init_task (PID 0), not to be confused with init (PID 1) which is a normal task).
@@ -985,7 +1008,7 @@ export const linux = async ({
       const fdBufs =
         fds && fds.length
           ? fds.map((f) => (f instanceof Uint8Array ? f : isPipeFd(f) ? f : new Uint8Array(f)))
-          : null;
+          : undefined; // injectIn treats a missing fd list like the old null
       dev.injectIn(clientId >>> 0, buf, fdBufs);
     },
 

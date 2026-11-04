@@ -264,10 +264,12 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
   };
   if (opts.exports) {
     for (const [name, val] of Object.entries(opts.exports)) addExport(name, val);
-  } else {
+  } else if (opts.vfs) {
     addExport("/", { vfs: opts.vfs, root: opts.root || "/" });
   }
-  const defaultExport = exportsByName.get("/") || [...exportsByName.values()][0];
+  // Undefined only for a server given no backend at all; Tattach then fails.
+  const defaultExport: { vfs: NinePVfs; root: string } | undefined =
+    exportsByName.get("/") || [...exportsByName.values()][0];
 
   // Pick the backend + its root path for a Tattach `aname`. A registered export
   // wins; otherwise fall back to treating `aname` as a subpath of the default
@@ -276,6 +278,9 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
   function resolveAttach(aname: string): { vfs: NinePVfs; path: string } {
     const exp = exportsByName.get(normAname(aname));
     if (exp) return { vfs: exp.vfs, path: exp.root };
+    // No backend: this used to crash on the missing export, which handle()
+    // turned into Rlerror(EIO); a plain Error maps to the same errno.
+    if (!defaultExport) throw new Error("9p: no backend to attach " + aname);
     const base = defaultExport.root || "/";
     const path = !aname || aname === "/" ? base : joinPath(base, aname);
     return { vfs: defaultExport.vfs, path };
@@ -317,6 +322,12 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
     return f;
   }
 
+  // A path the handler just created must stat. If the backend lost it, fail
+  // the request (Rlerror EIO, as the old crash in qidOf did) with a clear error.
+  function created(rec: VfsRecord | null, path: string): VfsRecord {
+    if (!rec) throw new Error("9p: " + path + " is missing right after it was created");
+    return rec;
+  }
   function qidOf(rec: VfsRecord): Qid {
     const t = rec.type === "folder" ? QT.DIR : rec.type === "alias" ? QT.SYMLINK : QT.FILE;
     const version = Math.floor((rec.modifiedAt ?? 0) / 1000) >>> 0;
@@ -544,7 +555,7 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
         const rec = await f.vfs.stat(path);
         f.opened = true;
         f.dirents = null;
-        return { type: P9.Rlcreate, qid: qidOf(rec), iounit: 0 };
+        return { type: P9.Rlcreate, qid: qidOf(created(rec, path)), iounit: 0 };
       }
 
       case P9.Tmkdir: {
@@ -552,7 +563,7 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
         const path = joinName(f.path, m.name);
         await f.vfs.mkdir(path);
         const rec = await f.vfs.stat(path);
-        return { type: P9.Rmkdir, qid: qidOf(rec) };
+        return { type: P9.Rmkdir, qid: qidOf(created(rec, path)) };
       }
 
       case P9.Tsymlink: {
@@ -560,7 +571,7 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
         const path = joinName(f.path, m.name);
         await f.vfs.write(path, { type: "alias", target: m.symtgt });
         const rec = await f.vfs.stat(path);
-        return { type: P9.Rsymlink, qid: qidOf(rec) };
+        return { type: P9.Rsymlink, qid: qidOf(created(rec, path)) };
       }
 
       case P9.Treadlink: {
@@ -728,7 +739,7 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
     const f = c && c.fids.get(fid);
     return f ? f.path : "?";
   }
-  function traceRpc(cid: number, m: P9Message, reply: P9Reply): void {
+  function traceRpc(out: (line: string) => void, cid: number, m: P9Message, reply: P9Reply): void {
     const req = P9_NAMES[m.type] || `T#${m.type}`;
     const rep = P9_NAMES[reply.type] || `R#${reply.type}`;
     let d = "";
@@ -755,7 +766,7 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
     if (reply.type === P9.Rlerror) r = ` errno=${reply.ecode}`;
     else if (reply.type === P9.Rwrite) r = ` count=${reply.count}`;
     else if (reply.type === P9.Rread) r = ` bytes=${reply.data ? reply.data.length : 0}`;
-    trace(`cid=${cid} tag=${m.tag} ${req}(${d}) -> ${rep}${r}`);
+    out(`cid=${cid} tag=${m.tag} ${req}(${d}) -> ${rep}${r}`);
   }
 
   /**
@@ -774,11 +785,11 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
     try {
       const reply = await dispatch(cid, m);
       reply.tag = m.tag;
-      if (trace) traceRpc(cid, m, reply);
+      if (trace) traceRpc(trace, cid, m, reply);
       return encode(reply);
     } catch (err) {
       const ecode = errnoFromError(err);
-      if (trace) traceRpc(cid, m, { type: P9.Rlerror, ecode });
+      if (trace) traceRpc(trace, cid, m, { type: P9.Rlerror, ecode });
       return encode({ type: P9.Rlerror, tag: m.tag, ecode });
     }
   }

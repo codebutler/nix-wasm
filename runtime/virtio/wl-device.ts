@@ -120,6 +120,14 @@ interface ShmRegion {
   pending: boolean;
 }
 
+/** WlDevice's constructor options: the base device's plus the Wayland hooks. */
+export interface WlDeviceOptions extends VirtioWasmDeviceOptions {
+  /** Phase 4f bridge hook (see the constructor's note). */
+  waylandBridge?: WaylandBridge;
+  /** Phase 2 2c: log shm region checksums + wire opcodes. */
+  shmDebug?: boolean;
+}
+
 /** What the device remembers about one guest vfd (ctx, pipe or shm buffer). */
 interface WlContext {
   type: number;
@@ -167,12 +175,7 @@ export class WlDevice extends VirtioWasmDevice {
    *   host→guest path). Without this hook the device falls back to the local
    *   WlServer (Phase 1 1d behavior + tests), which still uses inReply.
    */
-  constructor(
-    opts: VirtioWasmDeviceOptions & {
-      waylandBridge?: WaylandBridge;
-      shmDebug?: boolean;
-    },
-  ) {
+  constructor(opts: WlDeviceOptions) {
     super(opts);
     this._nextVfdId = 1; // host-allocated vfd ids would set the HOST bit; the
     // guest allocates ctx/pipe ids itself, so we only echo them back.
@@ -493,8 +496,8 @@ export class WlDevice extends VirtioWasmDevice {
       const chain = vr.next();
       if (!chain) break;
       const entry = this._pendingIn.shift();
-      const { vfdId, data } = entry;
-      const msg = entry.raw ? entry.raw : this._vfdRecv(vfdId, data);
+      if (!entry) break; // unreachable: the loop condition checked the length
+      const msg = entry.raw ? entry.raw : this._vfdRecv(entry.vfdId, entry.data);
       const cap = vr.inCapacity(chain);
       if (msg.length > cap) {
         this.log(`[virtio-wl] IN buffer too small (${cap} < ${msg.length}); truncating`);
@@ -506,10 +509,11 @@ export class WlDevice extends VirtioWasmDevice {
         this.log(`[virtio-wl] IN push: raw ctrl type=0x${type.toString(16)} (used ${written}B)`);
       } else {
         this.log(
-          `[virtio-wl] IN push: VFD_RECV vfd_id=${vfdId} ${data.length}B wayland (used ${written}B)`,
+          `[virtio-wl] IN push: VFD_RECV vfd_id=${entry.vfdId} ${entry.data.length}B wayland (used ${written}B)`,
         );
       }
-      if (!entry.raw && this._shmDebug && data.length <= 512) {
+      if (!entry.raw && this._shmDebug && entry.data.length <= 512) {
+        const data = entry.data;
         const ddv = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const parts: string[] = [];
         for (let o = 0; o + 8 <= data.length; ) {

@@ -379,8 +379,9 @@ function buildSigLookup(
     }
     let result: WasmValType | null = null;
     if (t.results.length === 1) {
-      result = VT_NAME[t.results[0]];
-      if (!result) return null;
+      const r = VT_NAME[t.results[0]];
+      if (!r) return null;
+      result = r;
     }
     return { params, result };
   };
@@ -419,12 +420,12 @@ export const DL_ERRNO = { ENOENT: 2, ENOMEM: 12, EINVAL: 22, ENOEXEC: 8 };
 interface DlModule {
   handle: number;
   name: string;
-  bytes: Uint8Array | null;
+  bytes: Uint8Array | null; // null only for the main module (the kernel owns it)
   memoryBase: number;
   tableBase: number;
   tableCount: number;
   global: boolean;
-  instance: WebAssembly.Instance;
+  instance: WebAssembly.Instance | null; // null only while its load() is instantiating it
   elemSlots: Map<string, number>;
   dynSlots: Map<string, number>;
   fpcast: boolean;
@@ -441,6 +442,15 @@ type DlOp =
   | { op: "load"; module: number }
   | { op: "install"; module: number; name: string }
   | { op: "grow"; count: number };
+
+// A module's instance. Only a record whose load() is still in progress has
+// none: load() pushes it before instantiating so its GOT imports resolve
+// against the chain. Reaching it then raises the same TypeError the untyped
+// `m.instance.exports` did (see resolveExport).
+function instanceOf(m: DlModule): WebAssembly.Instance {
+  if (m.instance === null) throw new TypeError(`[dylink] ${m.name} is not instantiated yet`);
+  return m.instance;
+}
 
 // A host env import object. lib.dom's WebAssembly.ImportValue leaves out
 // WebAssembly.Tag, which the worker's env carries (__cpp_exception) and side
@@ -602,7 +612,7 @@ export class DynamicLoader {
   resolveExport(name: string): { module: DlModule; value: WebAssembly.ExportValue } | null {
     for (const m of this.modules) {
       if (!m.global) continue;
-      const v = m.instance.exports[name];
+      const v = instanceOf(m).exports[name];
       if (v !== undefined) return { module: m, value: v };
     }
     return null;
@@ -727,10 +737,11 @@ export class DynamicLoader {
       info.elem ? info.elem.funcIndices.length : 0,
     );
 
+    const ownedBytes = replay ? bytes : bytes.slice(); // own copy — the guest may free its buffer
     const record: DlModule = {
       handle: this.modules.length + 1,
       name,
-      bytes: replay ? bytes : bytes.slice(), // own copy — the guest may free its buffer
+      bytes: ownedBytes,
       memoryBase,
       tableBase: 0, // assigned below, after fallible resolution
       tableCount,
@@ -754,11 +765,12 @@ export class DynamicLoader {
       // Always compile from an owned, non-shared copy: `bytes` may be a view
       // over the guest's SharedArrayBuffer-backed memory, which the
       // WebAssembly.Module constructor rejects.
-      let moduleBytes: Uint8Array = record.bytes;
+      let moduleBytes: Uint8Array = ownedBytes;
       if (this.mmu && !isInstrumented(moduleBytes)) {
         moduleBytes = softmmuInstrument(moduleBytes, {
           checked: true,
-          faultTableIndex: this.faultTableIndex,
+          // Set whenever mmu is; instrument() tests it with `!= null`.
+          faultTableIndex: this.faultTableIndex ?? undefined,
         });
       }
       // record.bytes is an owned slice (or replay's own ArrayBuffer), and
@@ -901,7 +913,7 @@ export class DynamicLoader {
       search = [m];
     }
     for (const m of search) {
-      const v = m.instance.exports[name];
+      const v = instanceOf(m).exports[name];
       if (v === undefined) continue;
       if (typeof v === "function") return this.functionAddress(m, name, v);
       if (v instanceof WebAssembly.Global) return this.dataAddress(m, v);
@@ -917,12 +929,17 @@ export class DynamicLoader {
     return {
       modules: this.modules
         .filter((m) => m.handle !== 1)
-        .map((m) => ({
-          name: m.name,
-          bytes: m.bytes.slice().buffer,
-          memoryBase: m.memoryBase,
-          global: m.global,
-        })),
+        .map((m) => {
+          // Only the main module (filtered out above) has no retained bytes.
+          const bytes = m.bytes;
+          if (bytes === null) throw new TypeError(`[dylink] ${m.name} has no retained bytes`);
+          return {
+            name: m.name,
+            bytes: bytes.slice().buffer,
+            memoryBase: m.memoryBase,
+            global: m.global,
+          };
+        }),
       opLog: this.opLog.map((e) => ({ ...e })),
     };
   }
@@ -952,7 +969,7 @@ export class DynamicLoader {
         this.opLog.push({ ...entry });
       } else {
         const m = this.modules[entry.module];
-        const fn = m.instance.exports[entry.name];
+        const fn = instanceOf(m).exports[entry.name];
         if (typeof fn !== "function") {
           throw new Error(`[dylink] replay: ${m.name} lost export ${entry.name}`);
         }

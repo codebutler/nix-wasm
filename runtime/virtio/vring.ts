@@ -53,8 +53,12 @@ export class Vring {
   avail: number;
   used: number;
   num: number;
-  /** Host-side index into the avail ring (backed by `cursor` when given). */
-  lastAvail: number;
+  /**
+   * Host-side index into the avail ring (backed by `cursor` when given).
+   * `declare`d, not a class field: the constructor either installs an accessor
+   * over the shared cursor or assigns a plain number, so no field is emitted.
+   */
+  declare lastAvail: number;
 
   /**
    * @param memory  shared kernel memory (buffer may detach on grow)

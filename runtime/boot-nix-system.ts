@@ -47,7 +47,12 @@ export async function bootNixSystem(opts: {
         "file:///",
       )
     : null;
-  const u = (p: string) => new URL(p, base).href;
+  // Only reached for an artifact the caller passed no bytes for; new URL(p, null)
+  // threw here before, so name what is missing.
+  const u = (p: string) => {
+    if (!base) throw new Error(`bootNixSystem: no baseUrl to fetch ${p} from`);
+    return new URL(p, base).href;
+  };
 
   const toUrl = (bytesOrBlob: ArrayBuffer | Blob) =>
     URL.createObjectURL(bytesOrBlob instanceof Blob ? bytesOrBlob : new Blob([bytesOrBlob]));

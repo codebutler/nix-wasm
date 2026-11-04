@@ -94,6 +94,14 @@ export const VIRTIO_VSOCK_SHUTDOWN_SEND = 2;
 // vq capacity since each packet is one chain.
 const HOST_BUF_ALLOC = 256 * 1024;
 
+/** VsockVirtioDevice's constructor options: the base device's plus: */
+export interface VsockDeviceOptions extends VirtioWasmDeviceOptions {
+  /** CID served in config space (default VSOCK_GUEST_CID=3). */
+  guestCid?: number;
+  /** WORKER only — forwards the kick to the main thread (where the socket callbacks live). */
+  forwardNotify?: ForwardNotify;
+}
+
 function decodeHdr(view: DataView | Uint8Array, off: number) {
   const dv =
     view instanceof DataView ? view : new DataView(view.buffer, view.byteOffset, view.byteLength);
@@ -207,12 +215,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * - `forwardNotify` ((dev, q) => void): WORKER only — forwards the kick to the
    *   main thread (where the socket callbacks live) instead of servicing here.
    */
-  constructor(
-    opts: VirtioWasmDeviceOptions & {
-      guestCid?: number;
-      forwardNotify?: ForwardNotify;
-    },
-  ) {
+  constructor(opts: VsockDeviceOptions) {
     super(opts);
     this.guestCid = BigInt((opts.guestCid ?? VSOCK_GUEST_CID) >>> 0);
     this.forwardNotify = opts.forwardNotify || null;

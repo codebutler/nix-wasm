@@ -26,13 +26,12 @@ export interface MemSeedTree {
 }
 
 // One stored node. Folders carry a children Map(name→id); byte files `bytes`
-// (+ `mime`); aliases (symlinks) a `target`. `type` and `modifiedAt` are set
-// by every writer, right after a fresh node is made.
+// (+ `mime`); aliases (symlinks) a `target`.
 interface MemNode {
   id: string;
-  type?: string;
+  type: string;
   name: string;
-  modifiedAt?: number;
+  modifiedAt: number;
   children?: Map<string, string>;
   bytes?: Uint8Array<ArrayBuffer>;
   target?: string;
@@ -46,6 +45,13 @@ function vfsError(code: string, path: string): Error & { code: string } {
 
 const ROOT_ID = "__root__";
 const enc = new TextEncoder();
+
+// A folder's children. Every writer that makes a node a folder gives it a
+// map (_mkdirSync, _writeSync), so a folder without one is a corrupt tree.
+function childrenOf(node: MemNode): Map<string, string> {
+  if (!node.children) throw new Error("MemVfs: folder node " + node.id + " has no children");
+  return node.children;
+}
 
 function normalize(path: string): string {
   const segs: string[] = [];
@@ -91,6 +97,14 @@ export class MemVfs implements NinePVfs {
   _tick(): number {
     return (this._clock += 1000);
   }
+  // The node a folder's child id names. Every id in a children map is in
+  // `nodes` (they are added and removed together), so a miss is a corrupt tree.
+  _node(id: string): MemNode {
+    const node = this.nodes.get(id);
+    if (!node) throw new Error("MemVfs: dangling node id " + id);
+    return node;
+  }
+
   _id(): string {
     return "n" + ++this._seq;
   }
@@ -116,11 +130,11 @@ export class MemVfs implements NinePVfs {
 
   _resolve(path: string): MemNode | null {
     const p = normalize(path);
-    if (p === "/") return this.nodes.get(ROOT_ID);
+    if (p === "/") return this.nodes.get(ROOT_ID) ?? null;
     let cur = this.nodes.get(ROOT_ID);
     for (const seg of p.slice(1).split("/")) {
       if (!cur || cur.type !== "folder") return null;
-      const childId = cur.children.get(seg);
+      const childId = childrenOf(cur).get(seg);
       if (!childId) return null;
       cur = this.nodes.get(childId);
     }
@@ -171,15 +185,18 @@ export class MemVfs implements NinePVfs {
       modifiedAt: this._tick(),
     };
     this.nodes.set(node.id, node);
-    parent.children.set(basename(path), node.id);
+    childrenOf(parent).set(basename(path), node.id);
     return this._record(node, path);
   }
 
   _writeSync(path: string, record: VfsWriteRecord): VfsRecord {
     const parent = this._parentFolder(path);
     const name = basename(path);
-    const existingId = parent.children.get(name);
-    const node: MemNode = existingId ? this.nodes.get(existingId) : { id: this._id(), name };
+    const existingId = childrenOf(parent).get(name);
+    // A fresh node's type and mtime are set just below, like an existing one's.
+    const node: MemNode = existingId
+      ? this._node(existingId)
+      : { id: this._id(), name, type: "file", modifiedAt: 0 };
     node.type = record.type || "file";
     node.modifiedAt = this._tick();
     if (node.type === "folder") {
@@ -193,7 +210,7 @@ export class MemVfs implements NinePVfs {
       delete node.children;
     }
     this.nodes.set(node.id, node);
-    parent.children.set(name, node.id);
+    childrenOf(parent).set(name, node.id);
     return this._record(node, path);
   }
 
@@ -210,8 +227,8 @@ export class MemVfs implements NinePVfs {
     if (node.type !== "folder") throw vfsError("ENOTDIR", path);
     const base = normalize(path);
     const out: VfsRecord[] = [];
-    for (const [name, id] of node.children) {
-      const child = this.nodes.get(id);
+    for (const [name, id] of childrenOf(node)) {
+      const child = this._node(id);
       out.push(this._record(child, base === "/" ? "/" + name : base + "/" + name));
     }
     out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -228,7 +245,7 @@ export class MemVfs implements NinePVfs {
   async write(path: string, record: VfsWriteRecord): Promise<VfsRecord> {
     this._assertWritable("write", path);
     // Convert a Blob payload into raw bytes (what we store internally).
-    let bytes: Uint8Array<ArrayBuffer> = record.bytes;
+    let bytes: Uint8Array<ArrayBuffer> | undefined = record.bytes;
     if (!bytes && record.blob instanceof Blob)
       bytes = new Uint8Array(await record.blob.arrayBuffer());
     if (!bytes && typeof record.body === "string") bytes = enc.encode(record.body);
@@ -244,9 +261,10 @@ export class MemVfs implements NinePVfs {
     this._assertWritable("remove", path);
     const node = this._resolve(path);
     if (!node) throw vfsError("ENOENT", path);
-    if (node.type === "folder" && node.children.size > 0) throw vfsError("ENOTEMPTY", path);
-    const parent = this._resolve(dirname(path));
-    parent.children.delete(basename(path));
+    if (node.type === "folder" && childrenOf(node).size > 0) throw vfsError("ENOTEMPTY", path);
+    // `path` resolved, so its parent exists and is a folder.
+    const parent = this._parentFolder(path);
+    childrenOf(parent).delete(basename(path));
     this.nodes.delete(node.id);
   }
 
@@ -255,16 +273,17 @@ export class MemVfs implements NinePVfs {
     this._assertWritable("move", dstPath);
     const node = this._resolve(srcPath);
     if (!node) throw vfsError("ENOENT", srcPath);
-    const srcParent = this._resolve(dirname(srcPath));
+    // `srcPath` resolved, so its parent exists and is a folder.
+    const srcParent = this._parentFolder(srcPath);
     const dstParent = this._parentFolder(dstPath);
     const dstName = basename(dstPath);
     // Clobber any existing destination (move semantics).
-    const clashId = dstParent.children.get(dstName);
+    const clashId = childrenOf(dstParent).get(dstName);
     if (clashId && clashId !== node.id) this.nodes.delete(clashId);
-    srcParent.children.delete(basename(srcPath));
+    childrenOf(srcParent).delete(basename(srcPath));
     node.name = dstName;
     node.modifiedAt = this._tick();
-    dstParent.children.set(dstName, node.id);
+    childrenOf(dstParent).set(dstName, node.id);
     return this._record(node, dstPath);
   }
 

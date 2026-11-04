@@ -35,15 +35,14 @@
 import { VirtioWasmDevice } from "./device.ts";
 import type { ForwardNotify, VirtioWasmDeviceOptions } from "./device.ts";
 import type { VringChain } from "./vring.ts";
+import type { NinePServer } from "../ninep/server.ts";
+
+// Re-exported for callers that type a 9P server alongside this device.
+export type { NinePServer };
 
 // virtio-9p feature bits (uapi/linux/virtio_9p.h + virtio_config.h).
 const VIRTIO_9P_MOUNT_TAG = 0n; // device carries a mount tag in config space
 const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
-
-/** The 9P server a main-thread NinePVirtioDevice services its vq with. */
-export interface NinePServer {
-  handle(bytes: Uint8Array, cid?: number): Promise<Uint8Array> | Uint8Array;
-}
 
 /** NinePVirtioDevice constructor options (the base opts plus these). */
 export interface NinePVirtioDeviceOptions extends VirtioWasmDeviceOptions {
@@ -126,6 +125,9 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
       this.log(`[virtio-9p ${this.tag}] service() with no server`);
       return;
     }
+    // `server` is assigned only in the constructor, so this is the same object
+    // the closures below would read from `this.server`.
+    const server = this.server;
     if (this._servicing) {
       this._rearm = true;
       return;
@@ -151,7 +153,7 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
           work.map(async ({ chain, req }) => {
             let reply: Uint8Array;
             try {
-              reply = await this.server.handle(req, this.cid);
+              reply = await server.handle(req, this.cid);
             } catch (e) {
               // server.handle is supposed to encode errors as Rlerror; if it
               // throws anyway, complete the chain (0-length) so the guest's

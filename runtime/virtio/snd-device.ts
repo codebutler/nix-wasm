@@ -141,6 +141,14 @@ export interface SndSink {
   bufferedBytes?: () => number;
 }
 
+/** SndVirtioDevice's constructor options: the base device's plus: */
+export interface SndDeviceOptions extends VirtioWasmDeviceOptions {
+  /** WORKER only — forwards the kick to the main thread (where the sink lives). */
+  forwardNotify?: ForwardNotify;
+  /** optional initial sink (tests); pc attaches later via setSink(). */
+  sink?: SndSink;
+}
+
 /** A tx buffer popped from the ring, delivered to the sink, awaiting its paced completion. */
 interface SndTxPending {
   head: number;
@@ -168,12 +176,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
    * - `sink` (SndSink): optional initial sink (tests); pc attaches later via
    *   setSink() from the snd.onReady boot hook.
    */
-  constructor(
-    opts: VirtioWasmDeviceOptions & {
-      forwardNotify?: ForwardNotify;
-      sink?: SndSink;
-    },
-  ) {
+  constructor(opts: SndDeviceOptions) {
     super(opts);
     this.forwardNotify = opts.forwardNotify || null;
     this.sink = opts.sink || null;
@@ -497,7 +500,9 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     let serviced = 0;
     // First the clock queue (already popped from the ring)…
     while (this._txPending.length) {
-      this._completeTx(vr, this._txPending.shift());
+      const pending = this._txPending.shift();
+      if (!pending) break; // unreachable: the loop condition checked the length
+      this._completeTx(vr, pending);
       serviced++;
     }
     // …then anything still parked in the ring (pre-START buffers).
