@@ -2071,7 +2071,7 @@ type WorkerInitMessage = InitMessage & {
           // genuinely-absent weak symbol has address 0 (NULL) — exactly what the
           // referencing C code's `&sym != NULL` guard tests for. We don't have a
           // dynamic linker; the static-link answer is NULL. So resolve every
-          // GOT.func/GOT.mem request to a fresh i{arch_bits} global of 0.
+          // GOT.func/GOT.mem import to a fresh i{arch_bits} global of 0.
           //
           // First triggered by glib (M3a): glib's slice allocator references
           // `__lsan_enable`/`__lsan_ignore_object` as weak-undefined (its
@@ -2080,24 +2080,9 @@ type WorkerInitMessage = InitMessage & {
           // the lsan path is skipped, which is correct. Shared across the whole
           // glib/GTK stack (and any future weak-undefined-address consumer);
           // mirrors the env.* weak-undefined-function stubs above.
-          "GOT.func": new Proxy(
-            {},
-            {
-              get: (_target, prop) =>
-                typeof prop === "string"
-                  ? new WebAssembly.Global({ value: `i${arch_bits}`, mutable: true }, Ulong(0))
-                  : undefined,
-            },
-          ),
-          "GOT.mem": new Proxy(
-            {},
-            {
-              get: (_target, prop) =>
-                typeof prop === "string"
-                  ? new WebAssembly.Global({ value: `i${arch_bits}`, mutable: true }, Ulong(0))
-                  : undefined,
-            },
-          ),
+          // Filled from the module's own import list once it is compiled (below).
+          "GOT.func": {},
+          "GOT.mem": {},
         };
 
         // Instantiate a user Wasm Module. This will implicitly run __wasm_init_memory, which will effectively:
@@ -2119,12 +2104,27 @@ type WorkerInitMessage = InitMessage & {
         //   has been overridden with CLONE_SETTLS, it will be copied from the old task to the new one. This is mostly
         //   useful when CLONE_VFORK is used, in which case the new task can borrow the TLS until it calls exec or exit.
         // The import object carries a WebAssembly.Tag the lib's Imports type omits (see UserEnv).
-        const woken = required(user_executable, "user executable module").then((user_module) =>
-          WebAssembly.instantiate(
+        const woken = required(user_executable, "user executable module").then((user_module) => {
+          const imports = user_imports();
+          for (const imp of WebAssembly.Module.imports(user_module)) {
+            if (imp.kind !== "global") continue;
+            const table =
+              imp.module === "GOT.func"
+                ? imports["GOT.func"]
+                : imp.module === "GOT.mem"
+                  ? imports["GOT.mem"]
+                  : null;
+            if (table)
+              table[imp.name] = new WebAssembly.Global(
+                { value: `i${arch_bits}`, mutable: true },
+                Ulong(0),
+              );
+          }
+          return WebAssembly.instantiate(
             user_module,
-            user_imports() as Record<string, EnvImports> as WebAssembly.Imports,
-          ),
-        );
+            imports as Record<string, EnvImports> as WebAssembly.Imports,
+          );
+        });
 
         return woken.then((instance) => {
           const exports = bindUserExports(instance.exports);
