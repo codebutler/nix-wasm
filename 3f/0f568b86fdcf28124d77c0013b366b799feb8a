@@ -1,0 +1,19 @@
+runtime/kernel-worker.ts
+  s_d32a35bef22d9f::t_a86c212ac5ee06 2074,2083-2085,2107-2123,2125-2127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3f0f568b86fdcf28124d77c0013b366b799feb8a",
+  "prompts": {},
+  "sessions": {
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
