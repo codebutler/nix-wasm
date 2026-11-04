@@ -205,7 +205,7 @@ export class WlDevice extends VirtioWasmDevice {
     return ctx.server;
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     // VIRTIO_WL_F_TRANS_FLAGS (bit 0) — new flag semantics. We don't claim
     // SEND_FENCES (bit 1; that's the virtgpu path we don't support).
     return 1n; // 1 << VIRTIO_WL_F_TRANS_FLAGS
@@ -386,11 +386,11 @@ export class WlDevice extends VirtioWasmDevice {
   }
 
   // virtio_wl_config is empty; nothing to serve.
-  configRead(_offset: number, bytes: Uint8Array): void {
+  override configRead(_offset: number, bytes: Uint8Array): void {
     bytes.fill(0);
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     if (q >>> 0 === VIRTWL_VQ_OUT) {
       this._serviceOut();
     } else if (q >>> 0 === VIRTWL_VQ_IN) {

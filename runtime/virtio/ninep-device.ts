@@ -84,14 +84,14 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
     this._rearm = false;
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     return (1n << VIRTIO_9P_MOUNT_TAG) | (1n << VIRTIO_F_VERSION_1);
   }
 
   // struct virtio_9p_config { __virtio16 tag_len; __u8 tag[]; } — little-endian.
   // The guest driver reads tag_len (offset 0) then tag (offset 2). Serve the
   // requested slice from that buffer, zero-padding past the end.
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(2 + this._tagBytes.length);
     new DataView(cfg.buffer).setUint16(0, this._tagBytes.length, true);
     cfg.set(this._tagBytes, 2);
@@ -101,7 +101,7 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the 9P server is on the main thread — forward the kick.

@@ -198,7 +198,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     this.sink = sink;
   }
 
-  reset(): void {
+  override reset(): void {
     this._pauseTx();
     this._txPending = [];
     this.params = null;
@@ -207,12 +207,12 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     super.reset();
   }
 
-  getFeatures(): bigint {
+  override getFeatures(): bigint {
     return 1n << VIRTIO_F_VERSION_1;
   }
 
   // struct virtio_snd_config { __le32 jacks; __le32 streams; __le32 chmaps; }
-  configRead(offset: number, bytes: Uint8Array): void {
+  override configRead(offset: number, bytes: Uint8Array): void {
     const cfg = new Uint8Array(12);
     const dv = new DataView(cfg.buffer);
     dv.setUint32(0, 0, true); // jacks
@@ -224,7 +224,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
     }
   }
 
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     const qi = q >>> 0;
     if (this.forwardNotify) {
       // Worker side: the sink is on the main thread — forward the kick.

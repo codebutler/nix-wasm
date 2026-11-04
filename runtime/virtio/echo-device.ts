@@ -13,7 +13,7 @@ import type { RaiseInterrupt } from "./device.ts";
 import type { VringChain } from "./vring.ts";
 
 export class EchoDevice extends VirtioWasmDevice {
-  onNotify(q: number): void {
+  override onNotify(q: number): void {
     const vr = this.vring(q);
     if (!vr) {
       this.log(`[virtio-echo] notify for unknown queue ${q}`);

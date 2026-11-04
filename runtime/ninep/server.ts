@@ -50,8 +50,8 @@ import type { Dirent, P9Message, P9Reply, Qid } from "./protocol.ts";
 export interface VfsRecord {
   /** Stable inode id, interned into qid.path (falls back to `path`). */
   id?: string;
-  /** "folder" | "alias" (a symlink) | anything else = a byte file. */
-  type: string;
+  /** "folder" | "alias" (a symlink) | anything else, or none, = a byte file. */
+  type?: string;
   name: string;
   path: string;
   modifiedAt?: number;
