@@ -845,6 +845,24 @@ export class DynamicLoader {
         { value: this.archBits === 64 ? "i64" : "i32", mutable },
         this.ulong(v),
       );
+    // The GOT tables hold only globals: each symbol's address.
+    const gotMem: Record<string, WebAssembly.Global> = {};
+    const gotFunc: Record<string, WebAssembly.Global> = {};
+    for (const imp of info.imports) {
+      if (imp.module === "GOT.mem") {
+        const r = this.resolveExport(imp.name);
+        gotMem[imp.name] = g(
+          r && r.value instanceof WebAssembly.Global ? this.dataAddress(r.module, r.value) : 0,
+        );
+      } else if (imp.module === "GOT.func") {
+        const r = this.resolveExport(imp.name);
+        gotFunc[imp.name] = g(
+          r && isFunctionExport(r.value)
+            ? this.functionAddress(r.module, imp.name, r.value, false)
+            : 0,
+        );
+      }
+    }
     const imports: Record<string, EnvImports> = {
       env: {
         ...envImports,
@@ -855,24 +873,9 @@ export class DynamicLoader {
         __table_base32: new WebAssembly.Global({ value: "i32", mutable: false }, tableBase),
         __stack_pointer: this.baseEnv.__stack_pointer,
       },
-      "GOT.mem": {},
-      "GOT.func": {},
+      "GOT.mem": gotMem,
+      "GOT.func": gotFunc,
     };
-    for (const imp of info.imports) {
-      if (imp.module === "GOT.mem") {
-        const r = this.resolveExport(imp.name);
-        imports["GOT.mem"][imp.name] = g(
-          r && r.value instanceof WebAssembly.Global ? this.dataAddress(r.module, r.value) : 0,
-        );
-      } else if (imp.module === "GOT.func") {
-        const r = this.resolveExport(imp.name);
-        imports["GOT.func"][imp.name] = g(
-          r && isFunctionExport(r.value)
-            ? this.functionAddress(r.module, imp.name, r.value, false)
-            : 0,
-        );
-      }
-    }
 
     let instance;
     try {
