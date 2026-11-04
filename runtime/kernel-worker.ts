@@ -266,18 +266,20 @@ interface HostCallbacks {
   wasm_user_mode_tail(flow: number): void;
   wasm_cpu_clock_get_monotonic(): bigint;
   wasm_random_get_bytes(buffer: number, count: number): number;
+  /// The ring addresses are i64 in both builds.
   wasm_virtio_setup_queue(
     dev: number,
     q: number,
-    desc: number,
-    avail: number,
-    used: number,
+    desc: bigint,
+    avail: bigint,
+    used: bigint,
     num: number,
   ): void;
   wasm_virtio_notify(dev: number, q: number): void;
   wasm_virtio_get_features(dev: number): bigint;
-  wasm_virtio_config_read(dev: number, off: number, buf: number, len: number): void;
-  wasm_virtio_config_write(dev: number, off: number, buf: number, len: number): void;
+  /// The buffer address is i64 in both builds.
+  wasm_virtio_config_read(dev: number, off: number, buf: bigint, len: number): void;
+  wasm_virtio_config_write(dev: number, off: number, buf: bigint, len: number): void;
   wasm_virtio_reset(dev: number): void;
 }
 
@@ -342,17 +344,17 @@ const wasm64HostCallbacks = (c: HostCallbacks) => {
       avail: UlongValue,
       used: UlongValue,
       num: UlongValue,
-    ) => c.wasm_virtio_setup_queue(n(dev), n(q), n(desc), n(avail), n(used), n(num)),
+    ) => c.wasm_virtio_setup_queue(n(dev), n(q), BigInt(desc), BigInt(avail), BigInt(used), n(num)),
     wasm_virtio_notify: (dev: UlongValue, q: UlongValue) => c.wasm_virtio_notify(n(dev), n(q)),
     wasm_virtio_get_features: (dev: UlongValue) => c.wasm_virtio_get_features(n(dev)),
     wasm_virtio_config_read: (dev: UlongValue, off: UlongValue, buf: UlongValue, len: UlongValue) =>
-      c.wasm_virtio_config_read(n(dev), n(off), n(buf), n(len)),
+      c.wasm_virtio_config_read(n(dev), n(off), BigInt(buf), n(len)),
     wasm_virtio_config_write: (
       dev: UlongValue,
       off: UlongValue,
       buf: UlongValue,
       len: UlongValue,
-    ) => c.wasm_virtio_config_write(n(dev), n(off), n(buf), n(len)),
+    ) => c.wasm_virtio_config_write(n(dev), n(off), BigInt(buf), n(len)),
     wasm_virtio_reset: (dev: UlongValue) => c.wasm_virtio_reset(n(dev)),
   } satisfies { [K in keyof HostCallbacks]: unknown };
 };
@@ -1487,11 +1489,11 @@ type WorkerInitMessage = InitMessage & {
     },
     wasm_virtio_config_read: (dev, off, buf, len) => {
       const d = get_virtio_device(dev);
-      if (d) d.configRead(Number(off), d.memView(buf, len));
+      if (d) d.configRead(off, d.memView(buf, len));
     },
     wasm_virtio_config_write: (dev, off, buf, len) => {
       const d = get_virtio_device(dev);
-      if (d) d.configWrite(Number(off), d.memView(buf, len));
+      if (d) d.configWrite(off, d.memView(buf, len));
     },
     wasm_virtio_reset: (dev) => {
       const d = get_virtio_device(dev);
