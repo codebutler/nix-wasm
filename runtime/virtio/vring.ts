@@ -148,7 +148,7 @@ export class Vring {
    * Write `bytes` into a chain's writable (in) segments, truncating to the
    * available writable space. Returns the number of bytes written.
    */
-  writeIn(chain: VringChain, bytes: ArrayLike<number>): number {
+  writeIn(chain: VringChain, bytes: Uint8Array): number {
     const v = this._dv();
     let si = 0;
     for (const s of chain.in) {

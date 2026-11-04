@@ -97,7 +97,8 @@ export type InitMessage = RunnerOptions & {
   squashfs: SharedArrayBuffer | null;
   stateDisk: SharedArrayBuffer;
   stateDiskDirty: SharedArrayBuffer;
-  exec_modules: Map<string, ExecModuleEntry>;
+  /** The compiled-Module cache's entries (content hash, entry). */
+  exec_modules: [string, ExecModuleEntry][];
 };
 
 /** A shm fd (its place in shared memory) or a guest pipe, as a worker posts it. */
@@ -175,10 +176,6 @@ export interface LinuxOptions {
 /** `e.stack` when there is one, else `e` itself (for log lines). */
 const errorText = (e: unknown): unknown =>
   e && typeof e === "object" && "stack" in e && e.stack ? e.stack : e;
-
-/** Whether a pushed-in fd is a `{ pipe }` (else it is bytes). */
-const isPipeFd = (f: Uint8Array | { pipe: number } | ArrayBuffer): f is { pipe: number } =>
-  !!f && "pipe" in f && f.pipe !== undefined;
 
 /** One running worker: a CPU's boot+idle task or a task. */
 interface Runner {
@@ -397,7 +394,7 @@ export const linux = async ({
         onlineCpus: [0], // maxcpus=1
         sharedQueues: hostWlQueues,
         log,
-        mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02],
+        mac: Uint8Array.of(0x52, 0x54, 0x00, 0xcb, 0x00, 0x02),
       });
     }
     return hostNetDevice;
@@ -945,7 +942,7 @@ export const linux = async ({
       // pc (#128 MMU boot speed): snapshot of the compiled-Module cache (clones
       // share compiled code — cheap). Workers created before a module was first
       // compiled miss it and fall back to instrument+compile (then post it back).
-      exec_modules: exec_module_cache,
+      exec_modules: Array.from(exec_module_cache),
     };
     worker.postMessage(init_msg);
 
@@ -998,30 +995,21 @@ export const linux = async ({
     // no-ops cleanly (logs "deferred") if the IN queue isn't set up yet
     // (pre-handshake) or the wake addr hasn't been published yet.
     // clientId: ctx vfd_id; bytes: wire bytes; fds: server→client fd payloads (keymap)
-    wayland_push_in: (
-      clientId: number,
-      bytes: Uint8Array | ArrayBuffer,
-      fds?: (Uint8Array | { pipe: number } | ArrayBuffer)[],
-    ) => {
+    wayland_push_in: (clientId: number, bytes: Uint8Array, fds?: WlFd[]) => {
       const dev = hostWl();
       if (!dev) {
         log("[wayland] push_in dropped: host idle-wake not armed yet");
         return;
       }
-      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const fdBufs =
-        fds && fds.length
-          ? fds.map((f) => (f instanceof Uint8Array ? f : isPipeFd(f) ? f : new Uint8Array(f)))
-          : undefined; // injectIn treats a missing fd list like the old null
-      dev.injectIn(clientId >>> 0, buf, fdBufs);
+      dev.injectIn(clientId >>> 0, bytes, fds);
     },
 
     // Wayland: write into, or hang up, a GUEST pipe (a fd the guest passed in a
     // request, e.g. wl_data_offer.receive) — a clipboard transfer into the guest.
-    wayland_pipe_write: (pipe: number, bytes: Uint8Array | ArrayBuffer) => {
+    wayland_pipe_write: (pipe: number, bytes: Uint8Array) => {
       const dev = hostWl();
       if (!dev) return log("[wayland] pipe write dropped: host idle-wake not armed yet");
-      dev.pipeWrite(pipe >>> 0, bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+      dev.pipeWrite(pipe >>> 0, bytes);
     },
     wayland_pipe_close: (pipe: number) => {
       const dev = hostWl();

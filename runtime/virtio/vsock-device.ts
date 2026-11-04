@@ -179,10 +179,9 @@ class VsockConnection {
   }
 
   /** Queue payload bytes to the guest as OP_RW packets, honoring guest credit. */
-  write(bytes: Uint8Array | ArrayLike<number> | ArrayBuffer): boolean {
+  write(bytes: Uint8Array): boolean {
     if (!this.open) return false;
-    const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    this._pendingTx.push(buf);
+    this._pendingTx.push(bytes);
     this._dev._flushConnection(this);
     return true;
   }

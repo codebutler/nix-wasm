@@ -17,7 +17,7 @@ const RX = 0,
 /** NetDevice constructor options: the base opts plus an optional MAC. */
 export interface NetDeviceOptions extends VirtioWasmDeviceOptions {
   /** 6-byte MAC address (default 52:54:00:cb:00:02) */
-  mac?: ArrayLike<number>;
+  mac?: Uint8Array;
 }
 
 export class NetDevice extends VirtioWasmDevice {
@@ -27,7 +27,7 @@ export class NetDevice extends VirtioWasmDevice {
 
   constructor(opts: NetDeviceOptions) {
     super(opts);
-    this.mac = Uint8Array.from(opts.mac || [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02]);
+    this.mac = Uint8Array.from(opts.mac ?? [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02]);
     this._linkUp = true;
     this._sink = null;
   }

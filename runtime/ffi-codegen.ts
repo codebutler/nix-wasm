@@ -36,14 +36,27 @@ export interface FfiSignature {
   result: WasmValType | null;
 }
 
+// A wasm number value as JavaScript sees it: i32, f32 and f64 are numbers, an
+// i64 is a bigint.
+export type WasmValue = number | bigint;
+
+// A wasm function as JavaScript calls it: number values in, at most one out.
+export type WasmFunction = (...args: WasmValue[]) => WasmValue | void;
+
+// Whether an export is a function (the other exports are globals, memories and
+// tables).
+export function isFunctionExport(value: WebAssembly.ExportValue): value is WasmFunction {
+  return typeof value === "function";
+}
+
 // The host pieces a soft-MMU (checked) generated module is wired to: the
 // task's page-table root, musl's syscall2 trap, the stack pointer global and
 // the TLS accessor.
 export interface MmuImports {
   ptBase: number;
-  syscall2: Function;
+  syscall2: (...args: WasmValue[]) => WasmValue;
   stackPointer: WebAssembly.Global;
-  getTlsBase: Function;
+  getTlsBase: () => WasmValue;
 }
 
 // The control exports instrument() adds to a checked module.

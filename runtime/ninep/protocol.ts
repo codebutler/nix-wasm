@@ -647,8 +647,8 @@ class Reader {
   buf: Uint8Array;
   view: DataView;
   pos: number;
-  constructor(input: Uint8Array | ArrayBuffer) {
-    this.buf = input instanceof Uint8Array ? input : new Uint8Array(input);
+  constructor(input: Uint8Array) {
+    this.buf = input;
     this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
     this.pos = 0;
   }
@@ -971,7 +971,7 @@ export function encode(msg: P9Message): Uint8Array {
  * be named `size`, e.g. Rgetattr), and the transport already read it to size
  * the frame slice it hands us.
  */
-export function decode(input: Uint8Array | ArrayBuffer): P9Message {
+export function decode(input: Uint8Array): P9Message {
   const r = new Reader(input);
   r.u32(); // size — consumed; see doc comment
   const type = r.u8();
@@ -1385,10 +1385,9 @@ export function decode(input: Uint8Array | ArrayBuffer): P9Message {
 }
 
 /** Read just the tag from a frame (used to reply Rlerror to an undecodable msg). */
-export function peekTag(input: Uint8Array | ArrayBuffer): number {
-  const b = input instanceof Uint8Array ? input : new Uint8Array(input);
-  if (b.length < 7) return NOTAG;
-  return new DataView(b.buffer, b.byteOffset, b.byteLength).getUint16(5, true);
+export function peekTag(input: Uint8Array): number {
+  if (input.length < 7) return NOTAG;
+  return new DataView(input.buffer, input.byteOffset, input.byteLength).getUint16(5, true);
 }
 
 /** Build a qid record. */

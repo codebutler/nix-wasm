@@ -53,7 +53,7 @@ function mkDevice() {
     memory,
     raiseInterrupt: (cpu, irq) => irqs.push([cpu, irq]),
     sharedQueues: shared,
-    mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02],
+    mac: Uint8Array.of(0x52, 0x54, 0x00, 0xcb, 0x00, 0x02),
   });
   return { memory, d, irqs, makeVq };
 }

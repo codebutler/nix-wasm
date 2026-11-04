@@ -56,10 +56,16 @@ const TIME_ORIGIN: number =
 /// browser worker).
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
+/// A function or class a captured stack trace starts below (V8 omits its frame
+/// and every frame above it).
+type StackTraceBoundary =
+  | ((...args: never[]) => unknown)
+  | (abstract new (...args: never[]) => unknown);
+
 /// V8's ErrorConstructor extension (not in the standard lib; absent elsewhere).
 interface V8ErrorConstructor {
   readonly prototype: Error;
-  captureStackTrace?(target: object, constructorOpt?: Function): void;
+  captureStackTrace?(target: object, constructorOpt?: StackTraceBoundary): void;
 }
 
 /// A wasm integer of the kernel's word size: number on wasm32, bigint on wasm64.
@@ -140,10 +146,128 @@ interface UserInstance extends WebAssembly.Instance {
   readonly exports: UserExports;
 }
 
-/// A host import vmlinux calls. Arguments are wasm integers: i32 arrives as a
-/// number, and on wasm64 init() wraps every callback to convert its i64
-/// (bigint) arguments to number first and its result back to bigint.
-type HostCallback = (...args: number[]) => UlongValue | void;
+/// The host imports vmlinux calls, in their wasm32 form: every argument is an
+/// i32 (a number). The two i64 results are bigints. On wasm64 vmlinux passes
+/// and takes kernel words as i64; wasm64HostCallbacks() adapts these.
+interface HostCallbacks {
+  wasm_start_cpu(cpu: number, idle_task: number): void;
+  wasm_stop_cpu(cpu: number): void;
+  wasm_create_and_run_task(
+    prev_task: number,
+    new_task: number,
+    name: number,
+    bin_start: number,
+    bin_end: number,
+    data_start: number,
+    table_start: number,
+    pt_base: number,
+    fork_ctl: number,
+  ): number;
+  wasm_release_task(dead_task: number): void;
+  wasm_serialize_tasks(prev_task: number, next_task: number): number;
+  wasm_panic(msg: number): never;
+  wasm_dump_stacktrace(stack_trace: number, max_size: number): void;
+  __mmu_set_pt_base(pt_base: number): void;
+  wasm_load_executable(
+    bin_start: number,
+    bin_end: number,
+    data_start: number,
+    table_start: number,
+    pt_base: number,
+  ): number;
+  wasm_user_mode_tail(flow: number): void;
+  wasm_cpu_clock_get_monotonic(): bigint;
+  wasm_random_get_bytes(buffer: number, count: number): number;
+  wasm_virtio_setup_queue(
+    dev: number,
+    q: number,
+    desc: number,
+    avail: number,
+    used: number,
+    num: number,
+  ): void;
+  wasm_virtio_notify(dev: number, q: number): void;
+  wasm_virtio_get_features(dev: number): bigint;
+  wasm_virtio_config_read(dev: number, off: number, buf: number, len: number): void;
+  wasm_virtio_config_write(dev: number, off: number, buf: number, len: number): void;
+  wasm_virtio_reset(dev: number): void;
+}
+
+/// The host imports as a wasm64 vmlinux calls them: kernel words arrive as
+/// i64 (bigint) and every result goes back as an i64. Each argument is
+/// truncated to a number, which holds for memories under 4G.
+const wasm64HostCallbacks = (c: HostCallbacks) => {
+  const n = Number;
+  return {
+    wasm_start_cpu: (cpu: UlongValue, idle_task: UlongValue) =>
+      c.wasm_start_cpu(n(cpu), n(idle_task)),
+    wasm_stop_cpu: (cpu: UlongValue) => c.wasm_stop_cpu(n(cpu)),
+    wasm_create_and_run_task: (
+      prev_task: UlongValue,
+      new_task: UlongValue,
+      name: UlongValue,
+      bin_start: UlongValue,
+      bin_end: UlongValue,
+      data_start: UlongValue,
+      table_start: UlongValue,
+      pt_base: UlongValue,
+      fork_ctl: UlongValue,
+    ) =>
+      BigInt(
+        c.wasm_create_and_run_task(
+          n(prev_task),
+          n(new_task),
+          n(name),
+          n(bin_start),
+          n(bin_end),
+          n(data_start),
+          n(table_start),
+          n(pt_base),
+          n(fork_ctl),
+        ),
+      ),
+    wasm_release_task: (dead_task: UlongValue) => c.wasm_release_task(n(dead_task)),
+    wasm_serialize_tasks: (prev_task: UlongValue, next_task: UlongValue) =>
+      BigInt(c.wasm_serialize_tasks(n(prev_task), n(next_task))),
+    wasm_panic: (msg: UlongValue) => c.wasm_panic(n(msg)),
+    wasm_dump_stacktrace: (stack_trace: UlongValue, max_size: UlongValue) =>
+      c.wasm_dump_stacktrace(n(stack_trace), n(max_size)),
+    __mmu_set_pt_base: (pt_base: UlongValue) => c.__mmu_set_pt_base(n(pt_base)),
+    wasm_load_executable: (
+      bin_start: UlongValue,
+      bin_end: UlongValue,
+      data_start: UlongValue,
+      table_start: UlongValue,
+      pt_base: UlongValue,
+    ) =>
+      BigInt(
+        c.wasm_load_executable(n(bin_start), n(bin_end), n(data_start), n(table_start), n(pt_base)),
+      ),
+    wasm_user_mode_tail: (flow: UlongValue) => c.wasm_user_mode_tail(n(flow)),
+    wasm_cpu_clock_get_monotonic: () => c.wasm_cpu_clock_get_monotonic(),
+    wasm_random_get_bytes: (buffer: UlongValue, count: UlongValue) =>
+      BigInt(c.wasm_random_get_bytes(n(buffer), n(count))),
+    wasm_virtio_setup_queue: (
+      dev: UlongValue,
+      q: UlongValue,
+      desc: UlongValue,
+      avail: UlongValue,
+      used: UlongValue,
+      num: UlongValue,
+    ) => c.wasm_virtio_setup_queue(n(dev), n(q), n(desc), n(avail), n(used), n(num)),
+    wasm_virtio_notify: (dev: UlongValue, q: UlongValue) => c.wasm_virtio_notify(n(dev), n(q)),
+    wasm_virtio_get_features: (dev: UlongValue) => c.wasm_virtio_get_features(n(dev)),
+    wasm_virtio_config_read: (dev: UlongValue, off: UlongValue, buf: UlongValue, len: UlongValue) =>
+      c.wasm_virtio_config_read(n(dev), n(off), n(buf), n(len)),
+    wasm_virtio_config_write: (
+      dev: UlongValue,
+      off: UlongValue,
+      buf: UlongValue,
+      len: UlongValue,
+    ) => c.wasm_virtio_config_write(n(dev), n(off), n(buf), n(len)),
+    wasm_virtio_reset: (dev: UlongValue) => c.wasm_virtio_reset(n(dev)),
+  } satisfies { [K in keyof HostCallbacks]: unknown };
+};
 
 /// The user executable's `env` imports (see user_executable_setup()).
 /// lib.dom's WebAssembly.ImportValue predates the exception-handling proposal
@@ -281,7 +405,7 @@ type WorkerInitMessage = InitMessage & {
         // exceptions (host glue control flow) — only real traps are interesting.
         if (!/should be ignored/.test(String(message_of(e) || e))) {
           console.error(
-            `[user-exec ${runner_name}] TRAP at syscall nr=${args[2]} args=[${args.slice(3).join(", ")}] : ${e}`,
+            `[user-exec ${runner_name}] TRAP at syscall nr=${args[2]} args=[${args.slice(3).map(String).join(", ")}] : ${e}`,
           );
         }
         throw e;
@@ -293,7 +417,7 @@ type WorkerInitMessage = InitMessage & {
       if (rn < 0 && rn > -4096 && syscall_trace_budget > 0) {
         syscall_trace_budget--;
         console.error(
-          `[user-exec ${runner_name}] syscall nr=${args[2]} = ${rn} args=[${args.slice(3).join(", ")}]`,
+          `[user-exec ${runner_name}] syscall nr=${args[2]} = ${rn} args=[${args.slice(3).map(String).join(", ")}]`,
         );
       }
       return r;
@@ -847,7 +971,10 @@ type WorkerInitMessage = InitMessage & {
         // by the MAIN-thread NetDevice (kernel-host hostNet()) over the same
         // shared queue-layout SAB + raised_irqs self-wake, so a parked idle CPU
         // is woken without this worker servicing a postMessage (the wl pattern).
-        const net = new NetDevice({ ...common, mac: [0x52, 0x54, 0x00, 0xcb, 0x00, 0x02] });
+        const net = new NetDevice({
+          ...common,
+          mac: Uint8Array.of(0x52, 0x54, 0x00, 0xcb, 0x00, 0x02),
+        });
         net.setFrameSink((frame) => {
           const buffer = transferable(frame.buffer);
           port.postMessage({ method: "net_out", dev: id, frame: buffer }, [buffer]);
@@ -894,7 +1021,7 @@ type WorkerInitMessage = InitMessage & {
   };
 
   /// Callbacks from within Linux/Wasm out to our host code (cpu is not neccessarily ours).
-  const host_callbacks: Record<string, HostCallback> = {
+  const host_callbacks: HostCallbacks = {
     /// Start secondary CPU.
     wasm_start_cpu: (cpu, idle_task) => {
       // New web workers cannot be spawned from within a Worker in most browsers. It can currently not be spawned from
@@ -1288,19 +1415,6 @@ type WorkerInitMessage = InitMessage & {
       arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
       Ulong = arch_bits == 32 ? Number : BigInt;
 
-      if (arch_bits == 64) {
-        // Quick hack that truncates parameters to 32-bit Number, then upsamples them to BigInt. Ugly but works in practice for memories <4G.
-        for (const method in host_callbacks) {
-          const original = host_callbacks[method];
-          host_callbacks[method] = function (...args: UlongValue[]) {
-            const result = original(...args.map(Number));
-            if (typeof result !== "undefined") {
-              return BigInt(result);
-            }
-          };
-        }
-      }
-
       runner_name = message.runner_name;
       if (message.trace_syscalls) trace_enabled = true; // pc (#139): opt-in deep-debug syscall tracing (off by default)
       // pc (#128 MMU boot speed): compiled-Module cache seeded by the host at
@@ -1308,7 +1422,7 @@ type WorkerInitMessage = InitMessage & {
       // modules first compiled AFTER this worker was created aren't in it, which
       // is fine: exec falls back to instrument+compile and posts the result back
       // for future workers.
-      if (message.exec_modules) exec_modules = message.exec_modules;
+      if (message.exec_modules) exec_modules = new Map(message.exec_modules);
       memory = message.memory;
       locks = message.locks;
       switch_to_last_task = message.last_task; // Only defined for tasks and CPU 0 (init task).
@@ -1363,7 +1477,8 @@ type WorkerInitMessage = InitMessage & {
 
       let import_object = {
         env: {
-          ...host_callbacks,
+          // On wasm64 the callbacks take and return i64 words (see wasm64HostCallbacks).
+          ...(arch_bits == 64 ? wasm64HostCallbacks(host_callbacks) : host_callbacks),
           memory: message.memory,
         },
       };

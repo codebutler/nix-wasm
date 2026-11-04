@@ -46,8 +46,14 @@
 // synchronous guest import call, and this code runs in a Worker where sync
 // compilation is unrestricted.
 
-import { genCanonicalThunk } from "./ffi-codegen.ts";
-import type { FfiSignature, MmuControlExports, MmuImports, WasmValType } from "./ffi-codegen.ts";
+import { genCanonicalThunk, isFunctionExport } from "./ffi-codegen.ts";
+import type {
+  FfiSignature,
+  MmuControlExports,
+  MmuImports,
+  WasmFunction,
+  WasmValType,
+} from "./ffi-codegen.ts";
 import { genFaultBridge, instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.ts";
 
 const textDecoder = new TextDecoder("utf-8");
@@ -631,7 +637,7 @@ export class DynamicLoader {
    *   by replaying the load itself — logging them too would double-install on
    *   replay and shift every later index.
    */
-  functionAddress(m: DlModule, name: string, fn: Function, logged: boolean = true): number {
+  functionAddress(m: DlModule, name: string, fn: WasmFunction, logged: boolean = true): number {
     const slot = m.elemSlots.get(name);
     if (slot !== undefined) return m.tableBase + slot;
     const cached = m.dynSlots.get(name);
@@ -670,7 +676,7 @@ export class DynamicLoader {
    * MODULES are cached per raw signature; each target gets its own (cheap)
    * instance binding the import.
    */
-  #canonicalThunk(sig: FfiSignature, fn: Function): WebAssembly.ExportValue {
+  #canonicalThunk(sig: FfiSignature, fn: WasmFunction): WebAssembly.ExportValue {
     const key = `${sig.params.join(",")}->${sig.result ?? ""}`;
     let mod = this.thunkModules.get(key);
     if (!mod) {
@@ -795,7 +801,7 @@ export class DynamicLoader {
       }
       if (imp.kind === KIND_FUNC) {
         const r = this.resolveExport(imp.name);
-        if (r && typeof r.value === "function") {
+        if (r && isFunctionExport(r.value)) {
           envImports[imp.name] = r.value;
         } else if (typeof this.baseEnv[imp.name] !== "undefined") {
           envImports[imp.name] = this.baseEnv[imp.name];
@@ -861,7 +867,7 @@ export class DynamicLoader {
       } else if (imp.module === "GOT.func") {
         const r = this.resolveExport(imp.name);
         imports["GOT.func"][imp.name] = g(
-          r && typeof r.value === "function"
+          r && isFunctionExport(r.value)
             ? this.functionAddress(r.module, imp.name, r.value, false)
             : 0,
         );
@@ -915,7 +921,7 @@ export class DynamicLoader {
     for (const m of search) {
       const v = instanceOf(m).exports[name];
       if (v === undefined) continue;
-      if (typeof v === "function") return this.functionAddress(m, name, v);
+      if (isFunctionExport(v)) return this.functionAddress(m, name, v);
       if (v instanceof WebAssembly.Global) return this.dataAddress(m, v);
     }
     return 0;
@@ -970,7 +976,7 @@ export class DynamicLoader {
       } else {
         const m = this.modules[entry.module];
         const fn = instanceOf(m).exports[entry.name];
-        if (typeof fn !== "function") {
+        if (!isFunctionExport(fn)) {
           throw new Error(`[dylink] replay: ${m.name} lost export ${entry.name}`);
         }
         // Re-install at a fresh slot; growth order matches the original log,
