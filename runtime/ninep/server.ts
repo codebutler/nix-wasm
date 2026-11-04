@@ -132,6 +132,8 @@ interface Fid {
   opened?: boolean;
   dirents?: Dirent[] | null;
   writer?: VfsWriter | null;
+  /** The path this fid's deferred writer owns (see closeConflictingWriter). */
+  writerPath?: string | null;
 }
 
 // Per-connection (cid) state: negotiated msize + the fid namespace.
@@ -385,14 +387,42 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
   // append Blob parts without reading and rewriting the complete file for
   // every 9P packet. Keep the writer on the fid: Linux normally sends cp(1)
   // output as monotonically increasing Twrites and Tclunk is the close seam.
+  //
+  // Only one deferred writer may own a backend/path at a time. A second fid
+  // must first make the previous writer durable, then reopen from those bytes;
+  // otherwise two independent Blob snapshots can clunk in the opposite order
+  // and silently replace each other's writes.
+  const writerOwners = new WeakMap<NinePVfs, Map<string, Fid>>();
+
+  function ownersFor(vfs: NinePVfs): Map<string, Fid> {
+    let owners = writerOwners.get(vfs);
+    if (!owners) {
+      owners = new Map();
+      writerOwners.set(vfs, owners);
+    }
+    return owners;
+  }
+
   async function closeWriter(f: Fid): Promise<void> {
     const writer = f?.writer;
+    const path = f?.writerPath;
     f.writer = null;
+    f.writerPath = null;
+    if (path) {
+      const owners = ownersFor(f.vfs);
+      if (owners.get(path) === f) owners.delete(path);
+    }
     if (writer) await writer.close();
+  }
+
+  async function closeConflictingWriter(f: Fid): Promise<void> {
+    const owner = ownersFor(f.vfs).get(f.path);
+    if (owner && owner !== f) await closeWriter(owner);
   }
 
   async function openWriter(f: Fid, append: boolean): Promise<VfsWriter | null> {
     if (typeof f.vfs.openWrite !== "function") return null;
+    await closeConflictingWriter(f);
     await closeWriter(f);
     f.writer = await f.vfs.openWrite(f.path, {
       append,
@@ -400,6 +430,8 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
       versioning: false,
       deferPersistence: true,
     });
+    f.writerPath = f.path;
+    ownersFor(f.vfs).set(f.path, f);
     return f.writer;
   }
 
@@ -595,6 +627,14 @@ export function createNinePServer(opts: NinePServerOptions): NinePServer {
       case P9.Twrite: {
         const f = getFid(cid, m.fid);
         const data = m.data;
+        await closeConflictingWriter(f);
+        // A conflicting fid may have closed this fid's deferred writer. Reopen
+        // at the now-durable EOF when the guest continues sequentially.
+        if (!f.writer && typeof f.vfs.openWrite === "function") {
+          const rec = await f.vfs.stat(f.path);
+          const size = rec ? await sizeOf(f.vfs, rec) : 0;
+          if (m.offset === size) await openWriter(f, true);
+        }
         if (f.writer && m.offset === f.writer.size) {
           await f.writer.write(data);
           return { type: P9.Rwrite, count: data.length };
