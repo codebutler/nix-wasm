@@ -15,6 +15,7 @@
 // blocks the top-level module-worker script served through the SW's
 // reconstructed COEP response (net::ERR_BLOCKED_BY_RESPONSE → opaque ErrorEvent).
 import { createModuleWorker } from "./make-worker.ts";
+import type { RuntimeWorker } from "./worker-port.ts";
 // Wayland (idle wake): the main thread injects unsolicited server→client events
 // into the guest's virtio_wl IN vring itself (the worker is parked in
 // arch_cpu_idle's wait64 and can't service a postMessage). It reuses the worker's
@@ -142,7 +143,7 @@ export type WorkerMessageMethod = keyof WorkerMessageMap;
 export type WorkerMessageOf<M extends WorkerMessageMethod> = { method: M } & WorkerMessageMap[M];
 export type WorkerMessage = { [M in WorkerMessageMethod]: WorkerMessageOf<M> }[WorkerMessageMethod];
 type WorkerMessageHandlers = {
-  [M in WorkerMessageMethod]: (message: WorkerMessageOf<M>, worker: Worker) => void;
+  [M in WorkerMessageMethod]: (message: WorkerMessageOf<M>, worker: RuntimeWorker) => void;
 };
 
 /** The worker→main Greenfield bridge (Wayland Phase 4f); every hook is optional here. */
@@ -181,7 +182,7 @@ const isPipeFd = (f: Uint8Array | { pipe: number } | ArrayBuffer): f is { pipe: 
 
 /** One running worker: a CPU's boot+idle task or a task. */
 interface Runner {
-  worker: Worker;
+  worker: RuntimeWorker;
   locks: TaskLocks;
   last_task: Uint32Array;
   running: boolean;
@@ -593,8 +594,11 @@ export const linux = async ({
     stop_secondary: (message) => {
       if (message.cpu <= 0) {
         // If you arrive here, you probably got panic():ed with a broken stack.
+        // confirm() exists only in a browser window; elsewhere this stops.
+        const ask = (globalThis as { confirm?: (message: string) => boolean }).confirm;
         if (
-          !confirm(
+          !ask ||
+          !ask(
             "Trying to stop secondary cpu with ID 0.\n\n" +
               "You probably got panic():ed with a broken stack. Continue?\n\n" +
               " (Say ok if you know what you are doing and want to catch the panic, otherwise cancel.)",
@@ -801,7 +805,7 @@ export const linux = async ({
   // Generic over the method so the handler and its message stay correlated.
   const dispatch_message = <M extends WorkerMessageMethod>(
     data: WorkerMessageOf<M>,
-    worker: Worker,
+    worker: RuntimeWorker,
   ) => {
     message_callbacks[data.method](data, worker);
   };
@@ -914,7 +918,7 @@ export const linux = async ({
     };
 
     // The protocol is trusted, not validated: an unknown method throws here.
-    worker.onmessage = (message_event: MessageEvent<WorkerMessage>) => {
+    worker.onmessage = (message_event: { data: WorkerMessage }) => {
       const data = message_event.data;
       dispatch_message(data, worker);
     };

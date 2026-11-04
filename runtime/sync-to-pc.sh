@@ -23,7 +23,7 @@ mkdir -p "$DEST/ninep" "$DEST/virtio"
 # unresolved-import check below when a pc-side harness first ran a real sync.
 # pc's kernel worker 404'd on ./asyncify.js and died detail-less before any
 # code ran. The completeness check below now fails the sync instead.)
-cp "$SRC"/{index.ts,abi.js,boot.ts,boot-nix-system.ts,session.ts,nix-cache.ts,nix-store.ts,kernel-host.ts,kernel-worker.ts,make-worker.ts,dylink.ts,ffi-codegen.ts,asyncify.ts,softmmu-pass.ts,mmu-uaccess.ts} "$DEST/"
+cp "$SRC"/{index.ts,abi.js,boot.ts,boot-nix-system.ts,session.ts,nix-cache.ts,nix-store.ts,kernel-host.ts,kernel-worker.ts,make-worker.ts,worker-port.ts,dylink.ts,ffi-codegen.ts,asyncify.ts,softmmu-pass.ts,mmu-uaccess.ts} "$DEST/"
 cp "$SRC"/ninep/{protocol.ts,server.ts,mem-vfs.ts} "$DEST/ninep/"
 # Wayland Phase 1 (1a/1b/1c/1d): the virtio_wasm transport device models + the
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
