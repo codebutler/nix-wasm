@@ -23,8 +23,8 @@ mkdir -p "$DEST/ninep" "$DEST/virtio"
 # unresolved-import check below when a pc-side harness first ran a real sync.
 # pc's kernel worker 404'd on ./asyncify.js and died detail-less before any
 # code ran. The completeness check below now fails the sync instead.)
-cp "$SRC"/{index.js,abi.js,boot.js,boot-nix-system.js,session.js,nix-cache.js,nix-store.js,kernel-host.js,kernel-worker.js,make-worker.js,dylink.js,ffi-codegen.js,asyncify.js,softmmu-pass.js,mmu-uaccess.js} "$DEST/"
-cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
+cp "$SRC"/{index.ts,abi.js,boot.ts,boot-nix-system.ts,session.ts,nix-cache.ts,nix-store.ts,kernel-host.ts,kernel-worker.ts,make-worker.ts,dylink.ts,ffi-codegen.ts,asyncify.ts,softmmu-pass.ts,mmu-uaccess.ts} "$DEST/"
+cp "$SRC"/ninep/{protocol.ts,server.ts,mem-vfs.ts} "$DEST/ninep/"
 # Wayland Phase 1 (1a/1b/1c/1d): the virtio_wasm transport device models + the
 # virtio_wl device. Engine files only — the *.test.js bun harnesses stay in
 # nix-wasm. wl-server.js is the Phase-1 in-worker stub; pc's Phase-2 inversion
@@ -39,7 +39,7 @@ cp "$SRC"/ninep/{protocol.js,server.js,mem-vfs.js} "$DEST/ninep/"
 # pc attaches its AudioWorklet sink via the snd.onReady boot hook.
 # blk-disk.js is the #177 CBHD dirty-sector journal for the RW state blk
 # (BlkDevice + kernel-host saveDisk import it).
-cp "$SRC"/virtio/{device.js,vring.js,shared-queues.js,echo-device.js,wl-device.js,wl-server.js,net-device.js,blk-device.js,blk-disk.js,ninep-device.js,console-device.js,vsock-device.js,snd-device.js} "$DEST/virtio/"
+cp "$SRC"/virtio/{device.ts,vring.ts,shared-queues.ts,echo-device.ts,wl-device.ts,wl-server.ts,net-device.ts,blk-device.ts,blk-disk.ts,ninep-device.ts,console-device.ts,vsock-device.ts,snd-device.ts} "$DEST/virtio/"
 
 # Completeness check: every relative import in the synced tree must resolve to
 # a synced file. The copy lists above are hardcoded, so a new engine module
@@ -57,7 +57,7 @@ while IFS= read -r f; do
       check_failed=1
     fi
   done < <(sed -n 's/^import[^"]*"\(\.[^"]*\)".*/\1/p' "$f")
-done < <(find "$DEST" -name '*.js')
+done < <(find "$DEST" -name '*.js' -o -name '*.ts')
 if [ "$check_failed" != 0 ]; then
   echo "ERROR: synced engine has unresolved imports; aborting (DEST left in place for inspection)." >&2
   exit 1

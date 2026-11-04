@@ -2,13 +2,13 @@
 // wasm-softmmu-pass.mjs — CLI wrapper for the software-MMU instrumentation pass
 // (#126 Track A / #128), the build-step entry point (a nix derivation runs this,
 // mirroring how fpcast-emu / dynsym-inject are build steps). The pass logic +
-// its tests live in runtime/softmmu-pass.js.
+// its tests live in runtime/softmmu-pass.test.js.
 //
 // Usage: node scripts/wasm-softmmu-pass.mjs IN.wasm OUT.wasm [--export-controls]
 //   --export-controls  export __mmu_pt_base (global) + __mmu_translate (func)
 //                      so the kernel/harness can set the page-table root.
 import { readFileSync, writeFileSync } from "node:fs";
-import { instrument } from "../runtime/softmmu-pass.js";
+import { instrument } from "../runtime/softmmu-pass.ts";
 
 const args = process.argv.slice(2);
 const exportControls = args.includes("--export-controls");

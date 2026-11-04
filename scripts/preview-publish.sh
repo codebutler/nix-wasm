@@ -71,7 +71,8 @@ RCLONE_FLAGS=(--s3-no-check-bucket --retries 3 --low-level-retries 3 --contimeou
 if [ -z "${R2_ACCESS_KEY_ID:-}" ]; then
   echo "==> DRY-RUN (R2_ACCESS_KEY_ID unset) — commands that WOULD run:"
   echo "  rclone copy '$STAGE' 'r2:$BUCKET/cas/$BUILDHASH' --ignore-existing ${RCLONE_FLAGS[@]}"
-  echo "  rclone sync '$ROOT/runtime' 'r2:$BUCKET/pr-$PR' --delete-during \\"
+  echo "  node scripts/strip-runtime-types.mjs '$ROOT/runtime' <tmp>/runtime"
+  echo "  rclone sync <tmp>/runtime 'r2:$BUCKET/pr-$PR' --delete-during \\"
   echo "    --exclude 'node_modules/**' --exclude 'demo/node/**' --exclude '*.test.js' \\"
   echo "    --exclude '.git/**' --transfers 16 --checkers 32 ${RCLONE_FLAGS[@]}"
   echo "  printf '%s' '<preview.json>' | rclone rcat 'r2:$BUCKET/pr-$PR/demo/web/preview.json' ${RCLONE_FLAGS[@]}"
@@ -84,8 +85,12 @@ echo "==> rclone copy → cas/$BUILDHASH (skip-existing) …"
 rclone copy "$STAGE" "r2:$BUCKET/cas/$BUILDHASH" --ignore-existing --transfers 8 "${RCLONE_FLAGS[@]}" -v
 
 # 6. Sync the frontend tree (only changed files upload; --delete-during prunes removed).
+# The runtime is TypeScript; the bucket serves files as they are, so upload a
+# copy with the types stripped (names unchanged: imports use the .ts names).
+FRONTEND="$(mktemp -d)"
+node "$ROOT/scripts/strip-runtime-types.mjs" "$ROOT/runtime" "$FRONTEND/runtime"
 echo "==> rclone sync runtime/ → pr-$PR …"
-rclone sync "$ROOT/runtime" "r2:$BUCKET/pr-$PR" --delete-during \
+rclone sync "$FRONTEND/runtime" "r2:$BUCKET/pr-$PR" --delete-during \
   --exclude 'node_modules/**' --exclude 'demo/node/**' --exclude '*.test.js' --exclude '.git/**' \
   --transfers 16 --checkers 32 "${RCLONE_FLAGS[@]}" -v
 
