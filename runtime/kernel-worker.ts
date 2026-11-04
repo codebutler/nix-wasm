@@ -1,26 +1,24 @@
-// @ts-nocheck
 // oxlint-disable -- vendored upstream linux-wasm host runtime (adapted from linux.js/linux-worker.js); exempt from our lint rules, like pc's vendor/ tree
 // SPDX-License-Identifier: GPL-2.0-only
-// @ts-nocheck — vendored upstream glue (wasm/BigInt browser-isms; not pc-typed)
 //
 // Adapted from linux-wasm's runtime/linux-worker.js (Joel Severin, GPL-2.0) —
 // the per-task Web Worker that runs vmlinux/user wasm over the shared memory.
 // pc additions (ticket #74) are marked "pc:". The 9P filesystem rides the stock
 // virtio-9p transport (issue #10), serviced by the main-thread host devices —
 // this worker only forwards the vq kick. See vendor/linux-wasm/SOURCE.md.
-import { DynamicLoader } from "./dylink.js";
-import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.js";
-import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
-import { UserFault, readUser, readUserCString, writeUser } from "./mmu-uaccess.js";
-import { FfiTrampolines } from "./ffi-codegen.js";
-import { WlDevice } from "./virtio/wl-device.js";
-import { NetDevice } from "./virtio/net-device.js";
-import { BlkDevice } from "./virtio/blk-device.js";
-import { NinePVirtioDevice } from "./virtio/ninep-device.js";
-import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/console-device.js";
-import { VsockVirtioDevice } from "./virtio/vsock-device.js";
-import { SndVirtioDevice } from "./virtio/snd-device.js";
-import { SharedQueues } from "./virtio/shared-queues.js";
+import { DynamicLoader } from "./dylink.ts";
+import { makeCaptureStack, isPendingUnwind, stopUnwind, startRewind } from "./asyncify.ts";
+import { instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.ts";
+import { UserFault, readUser, readUserCString, writeUser } from "./mmu-uaccess.ts";
+import { FfiTrampolines } from "./ffi-codegen.ts";
+import { WlDevice } from "./virtio/wl-device.ts";
+import { NetDevice } from "./virtio/net-device.ts";
+import { BlkDevice } from "./virtio/blk-device.ts";
+import { NinePVirtioDevice } from "./virtio/ninep-device.ts";
+import { ConsoleVirtioDevice, CONSOLE_BASE, CONSOLE_DEVICES } from "./virtio/console-device.ts";
+import { VsockVirtioDevice } from "./virtio/vsock-device.ts";
+import { SndVirtioDevice } from "./virtio/snd-device.ts";
+import { SharedQueues } from "./virtio/shared-queues.ts";
 
 (function (console) {
   let port = self;
@@ -484,8 +482,8 @@ import { SharedQueues } from "./virtio/shared-queues.js";
     }
   };
 
-  /** @type {Map<number, import("./virtio/device.js").VirtioWasmDevice>} */
-  const virtio_devices = new Map();
+  /** @type {Map<number, import("./virtio/device.ts").VirtioWasmDevice>} */
+  const virtio_devices: Map<number,import("./virtio/device.ts").VirtioWasmDevice> = new Map();
   const get_virtio_device = (dev) => {
     const id = dev >>> 0;
     let d = virtio_devices.get(id);

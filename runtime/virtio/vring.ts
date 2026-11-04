@@ -26,7 +26,7 @@ export class Vring {
    *   external host-side avail cursor (shared across workers); defaults to a
    *   per-instance counter.
    */
-  constructor(memory, layout, cursor) {
+  constructor(memory: WebAssembly.Memory, layout: { desc: number; avail: number; used: number; num: number; }, cursor: { load: () => number; store: (v: number) => void; }) {
     this.memory = memory;
     this.desc = layout.desc;
     this.avail = layout.avail;

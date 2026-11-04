@@ -13,9 +13,9 @@ import {
   VIRTIO_VSOCK_OP_SHUTDOWN,
   VIRTIO_VSOCK_SHUTDOWN_RCV,
   VIRTIO_VSOCK_SHUTDOWN_SEND,
-} from "./vsock-device.js";
-import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
-import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.js";
+} from "./vsock-device.ts";
+import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
+import { VRING_DESC_F_NEXT, VRING_DESC_F_WRITE } from "./vring.ts";
 
 // Minimal split-vring builder in flat memory (mirrored from ninep-device.test.js).
 function makeVq(memory, base, num) {

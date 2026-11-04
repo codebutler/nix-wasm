@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
-import { instrument } from "../../softmmu-pass.js";
+import { instrument } from "../../softmmu-pass.ts";
 import { bootNode } from "./boot-node.mjs";
 
 const vmlinuxPath = process.env.MMU_VMLINUX;

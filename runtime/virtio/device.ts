@@ -14,7 +14,7 @@
 // raiseIrq() via the online-CPU mask (default {0}); a device model never picks
 // a CPU itself.
 
-import { Vring } from "./vring.js";
+import { Vring } from "./vring.ts";
 
 export class VirtioWasmDevice {
   /**
@@ -25,12 +25,12 @@ export class VirtioWasmDevice {
    * @param {WebAssembly.Memory} opts.memory  shared kernel memory
    * @param {(cpu:number, irq:number)=>void} opts.raiseInterrupt  guest export
    * @param {Set<number>|number[]} [opts.onlineCpus]  online CPU mask (default {0})
-   * @param {import("./shared-queues.js").SharedQueues} opts.sharedQueues
+   * @param {import("./shared-queues.ts").SharedQueues} opts.sharedQueues
    *   cross-worker queue-layout store (a queue set up on one worker must be
    *   serviceable from another; see shared-queues.js).
    * @param {(s:string)=>void} [opts.log]
    */
-  constructor({ dev, irq, memory, raiseInterrupt, onlineCpus, sharedQueues, log }) {
+  constructor({ dev, irq, memory, raiseInterrupt, onlineCpus, sharedQueues, log }: { dev: number; irq: number; memory: WebAssembly.Memory; raiseInterrupt: (cpu: number,irq: number) => void; onlineCpus?: Set<number>|number[]; sharedQueues: import("./shared-queues.ts").SharedQueues; log?: (s: string) => void; }) {
     this.dev = dev >>> 0;
     this.irq = irq;
     this.memory = memory;

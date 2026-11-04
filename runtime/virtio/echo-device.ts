@@ -7,8 +7,8 @@
 // irq. The inverse is a content-sensitive proof that the host read the guest's
 // bytes AND the guest reads the host's reply — on BOTH queues (multi-vq proof).
 
-import { VirtioWasmDevice } from "./device.js";
-import { SharedQueues, makeSharedQueues } from "./shared-queues.js";
+import { VirtioWasmDevice } from "./device.ts";
+import { SharedQueues, makeSharedQueues } from "./shared-queues.ts";
 
 export class EchoDevice extends VirtioWasmDevice {
   onNotify(q) {

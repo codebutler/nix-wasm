@@ -42,10 +42,10 @@ function andByte(bitmap, i, mask) {
  * @param {{ clear?: boolean }} [opts]
  * @returns {Uint8Array} CBHD bytes (empty overlay when no dirties)
  */
-export function packDirtySectors(image, dirtyBitmap, opts = {}) {
+export function packDirtySectors(image: Uint8Array, dirtyBitmap: Uint8Array, opts: { clear?: boolean; } = {}): Uint8Array {
   const sectors = Math.floor(image.length / BLK_SECTOR);
   /** @type {number[]} */
-  const dirty = [];
+  const dirty: number[] = [];
   for (let s = 0; s < sectors; s++) {
     const bi = s >> 3;
     const bit = 1 << (s & 7);
@@ -80,7 +80,7 @@ export function packDirtySectors(image, dirtyBitmap, opts = {}) {
  * @param {Uint8Array} image
  * @param {Uint8Array} overlay
  */
-export function applyDirtyOverlay(image, overlay) {
+export function applyDirtyOverlay(image: Uint8Array, overlay: Uint8Array) {
   if (overlay.byteLength < 16) throw new Error("blk overlay: truncated header");
   if (overlay[0] !== 0x43 || overlay[1] !== 0x42 || overlay[2] !== 0x48 || overlay[3] !== 0x44) {
     throw new Error("blk overlay: bad magic");
@@ -126,7 +126,7 @@ export function dirtyBitmapBytes(capacityBytes) {
  * @param {{ stubBytes?: number, maxCopyBytes?: number }} [opts]
  * @returns {{ imageBuffer: SharedArrayBuffer, dirtyBuffer: SharedArrayBuffer, persistable: boolean }}
  */
-export function createStateDiskBacking(image, opts = {}) {
+export function createStateDiskBacking(image: ArrayBuffer|SharedArrayBuffer|Uint8Array|null|undefined, opts: { stubBytes?: number; maxCopyBytes?: number; } = {}): { imageBuffer: SharedArrayBuffer; dirtyBuffer: SharedArrayBuffer; persistable: boolean; } {
   const stubBytes = opts.stubBytes ?? 1024 * 1024;
   const maxCopyBytes = opts.maxCopyBytes ?? STATE_DISK_COPY_MAX_BYTES;
 
@@ -190,7 +190,7 @@ export function createStateDiskBacking(image, opts = {}) {
  * @param {number} sector
  * @param {number} count
  */
-export function markDirty(dirtyBitmap, sector, count) {
+export function markDirty(dirtyBitmap: Uint8Array, sector: number, count: number) {
   for (let i = 0; i < count; i++) {
     const s = sector + i;
     orByte(dirtyBitmap, s >> 3, 1 << (s & 7));
@@ -198,7 +198,7 @@ export function markDirty(dirtyBitmap, sector, count) {
 }
 
 /** @param {Uint8Array} dirtyBitmap */
-export function dirtySectorCount(dirtyBitmap) {
+export function dirtySectorCount(dirtyBitmap: Uint8Array) {
   let n = 0;
   for (let i = 0; i < dirtyBitmap.length; i++) {
     let b = loadByte(dirtyBitmap, i);

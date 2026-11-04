@@ -38,7 +38,7 @@ import {
   peekTag,
   makeQid,
   packDirent,
-} from "./protocol.js";
+} from "./protocol.ts";
 
 /** Reverse opcode → name map, for the opt-in RPC tracer (createNinePServer). */
 const P9_NAMES = Object.fromEntries(Object.entries(P9).map(([k, v]) => [v, k]));
@@ -145,7 +145,12 @@ const enc = new TextEncoder();
  *   trace?: (line: string) => void,
  * }} opts
  */
-export function createNinePServer(opts) {
+export function createNinePServer(opts: {
+vfs?: any; root?: string;
+exports?: Record<string,any>;
+msize?: number; uid?: number; gid?: number;
+trace?: (line: string) => void;
+}) {
   const maxMsize = opts.msize || 65536;
   const uid = opts.uid ?? 0;
   const gid = opts.gid ?? 0;
@@ -206,7 +211,7 @@ export function createNinePServer(opts) {
   // fid → { path, vfs, opened?, dirents? } — the fid carries its backend, set
   // at Tattach and inherited through Twalk.
   /** @type {Map<number, { msize: number, fids: Map<number, any> }>} */
-  const conns = new Map();
+  const conns: Map<number,{ msize: number; fids: Map<number,any>; }> = new Map();
   function conn(cid) {
     let c = conns.get(cid);
     if (!c) {
@@ -667,7 +672,7 @@ export function createNinePServer(opts) {
    * @param {number} [cid]
    * @returns {Promise<Uint8Array>}
    */
-  async function handle(reqBytes, cid = 0) {
+  async function handle(reqBytes: Uint8Array, cid: number = 0): Promise<Uint8Array> {
     let m;
     try {
       m = decode(reqBytes);

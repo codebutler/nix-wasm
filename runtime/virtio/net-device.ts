@@ -4,7 +4,7 @@
 //   guest TX  -> strip virtio-net header -> frameSink(frame)
 //   pushRx(frame) -> prepend zeroed header -> guest RX -> raiseIrq()
 // The pc side (js/vnet/) connects frameSink/pushRx to a tcpip.js tap port.
-import { VirtioWasmDevice } from "./device.js";
+import { VirtioWasmDevice } from "./device.ts";
 
 export const VIRTIO_NET_HDR_LEN = 12; // modern virtio_net header (no mrg_rxbuf)
 const VIRTIO_NET_F_MAC = 1n << 5n;

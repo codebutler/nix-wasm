@@ -48,7 +48,7 @@
 
 // opcode -> { k:'load'|'store', n:name }. VALTYPE gives the value type on the
 // stack (loads push it, stores consume it) — used to pick the store's scratch.
-const MEM_OPS = {
+const MEM_OPS: Record<number,{ k: string; n: string; }> = {
   0x28: { k: "load", n: "i32_load" },
   0x29: { k: "load", n: "i64_load" },
   0x2a: { k: "load", n: "f32_load" },
@@ -73,7 +73,7 @@ const MEM_OPS = {
   0x3d: { k: "store", n: "i64_store16" },
   0x3e: { k: "store", n: "i64_store32" },
 };
-const VALTYPE = {
+const VALTYPE: Record<string,string> = {
   i32_store: "i32",
   i64_store: "i64",
   f32_store: "f32",
@@ -85,7 +85,7 @@ const VALTYPE = {
   i64_store32: "i64",
 };
 
-const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
+const VT: Record<string,number> = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 // #128 PAGE-CROSSING scalar accesses: a multi-byte load/store whose
 // `(ea & 0xfff) + width > 0x1000` spans TWO virtual pages, which map to two
@@ -96,7 +96,7 @@ const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 // translation, memory is flat/contiguous.) These tables drive the split: for
 // width>=2 accesses the pass emits a fast within-page path + a byte-wise slow
 // path (`__mmu_{load,store}_bytes`) that translates EACH byte's page separately.
-const ACCESS_W = {
+const ACCESS_W: Record<number,number> = {
   0x28: 4,
   0x29: 8,
   0x2a: 4,
@@ -122,7 +122,7 @@ const ACCESS_W = {
   0x3e: 4,
 };
 // Result value-type of each load op (the `if`/`block` result type on the split).
-const LOAD_RESVT = {
+const LOAD_RESVT: Record<number,number> = {
   0x28: VT.i32,
   0x29: VT.i64,
   0x2a: VT.f32,
@@ -142,7 +142,7 @@ const LOAD_RESVT = {
 // op's result type: wrap/reinterpret/sign-extend. Opcodes: 0xa7 i32.wrap_i64,
 // 0xbe f32.reinterpret_i32, 0xbf f64.reinterpret_i64, 0xc1 i32.extend16_s,
 // 0xc3 i64.extend16_s, 0xc4 i64.extend32_s. (8/16u/32u already zero-extended.)
-const LOAD_POST = {
+const LOAD_POST: Record<number,number[]> = {
   0x28: [0xa7],
   0x29: [],
   0x2a: [0xa7, 0xbe],
@@ -157,7 +157,7 @@ const LOAD_POST = {
 // Convert a store's typed value (already on the stack) to the i64 the byte
 // helper stores from (it uses only the low `width` bytes). Opcodes: 0xad
 // i64.extend_i32_u, 0xbc i32.reinterpret_f32, 0xbd i64.reinterpret_f64.
-const STORE_TOI64 = {
+const STORE_TOI64: Record<number,number[]> = {
   0x36: [0xad],
   0x37: [],
   0x38: [0xbc, 0xad],
@@ -246,10 +246,10 @@ export const NR_MMU_FAULT = 244; // __NR_arch_specific_syscall (asm-generic/unis
  *
  * @returns {Uint8Array}
  */
-export function genFaultBridge() {
-  const name = (v) => vec([...v].map((c) => c.charCodeAt(0)));
-  const sec = (id, body) => [id, ...u(body.length), ...body];
-  const functype = (params, results) => [0x60, ...vec(params), ...vec(results)];
+export function genFaultBridge(): Uint8Array {
+  const name = (v: string) => vec([...v].map((c) => c.charCodeAt(0)));
+  const sec = (id: number, body: number[]) => [id, ...u(body.length), ...body];
+  const functype = (params: number[], results: number[]) => [0x60, ...vec(params), ...vec(results)];
   const types = sec(
     1,
     vec([
@@ -303,13 +303,19 @@ export function genFaultBridge() {
 }
 
 /** Fault `kind` for an atomic op: RMW/cmpxchg/store need write permission. */
-function atomicFaultKind(sub) {
+/** @param {number} sub @returns {number} */
+function atomicFaultKind(sub: number): number {
   return sub >= 0x17 ? 1 : 0;
 }
 
 /** [name, nextIndex] — read a wasm length-prefixed name at `i`. */
-function readName(b, i) {
-  let len;
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {[string, number]}
+ */
+function readName(b: Uint8Array, i: number): [string,number] {
+  let len = 0;
   [len, i] = readU(b, i);
   let str = "";
   for (let k = 0; k < len; k++) str += String.fromCharCode(b[i + k]);
@@ -317,19 +323,23 @@ function readName(b, i) {
 }
 
 /** Parse the import section into ordered func/global entries (index == position). */
-function parseImportsDetailed(body) {
+/**
+ * @param {Uint8Array} body
+ * @returns {{funcs: {module: string, name: string, typeIdx: number}[], globals: {module: string, name: string, valtype: number, mutable: number}[]}}
+ */
+function parseImportsDetailed(body: Uint8Array): { funcs: { module: string; name: string; typeIdx: number; }[]; globals: { module: string; name: string; valtype: number; mutable: number; }[]; } {
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(body, 0);
-  const funcs = [];
-  const globals = [];
+  const funcs: { module: string; name: string; typeIdx: number; }[] = [];
+  const globals: { module: string; name: string; valtype: number; mutable: number; }[] = [];
   for (let k = 0; k < n; k++) {
-    let mod, name;
+    let mod = "", name = "";
     [mod, i] = readName(body, i);
     [name, i] = readName(body, i);
     const ek = body[i++];
     if (ek === 0x00) {
-      let t;
+      let t = 0;
       [t, i] = readU(body, i);
       funcs.push({ module: mod, name, typeIdx: t });
     } else if (ek === 0x01) {
@@ -362,21 +372,25 @@ function parseImportsDetailed(body) {
 }
 
 /** Parse the type section into [{params:[valtype…], results:[valtype…]}]. */
-function parseTypeEntries(typeBody) {
+/**
+ * @param {Uint8Array | null} typeBody
+ * @returns {{params: number[], results: number[]}[]}
+ */
+function parseTypeEntries(typeBody: Uint8Array|null): { params: number[]; results: number[]; }[] {
   if (!typeBody) return [];
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(typeBody, 0);
-  const out = [];
+  const out: { params: number[]; results: number[]; }[] = [];
   for (let k = 0; k < n; k++) {
     if (typeBody[i++] !== 0x60) throw new Error("softmmu: bad functype");
-    let np;
+    let np = 0;
     [np, i] = readU(typeBody, i);
-    const params = [];
+    const params: number[] = [];
     for (let p = 0; p < np; p++) params.push(typeBody[i++]);
-    let nr;
+    let nr = 0;
     [nr, i] = readU(typeBody, i);
-    const results = [];
+    const results: number[] = [];
     for (let r = 0; r < nr; r++) results.push(typeBody[i++]);
     out.push({ params, results });
   }
@@ -384,15 +398,15 @@ function parseTypeEntries(typeBody) {
 }
 
 /**
- * @typedef {{
- *   syscallFuncIdx?: number,
- *   spGlobalIdx?: number,
- *   tlsFuncIdx?: number,
- *   faultTableIndex?: number,
- *   faultTypeIdx?: number,
- *   checkedTranslateFunc?: number,
- * }} CheckedContext
  */
+type CheckedContext = {
+  syscallFuncIdx?: number;
+  spGlobalIdx?: number;
+  tlsFuncIdx?: number;
+  faultTableIndex?: number;
+  faultTypeIdx?: number;
+  checkedTranslateFunc?: number | null;
+};
 
 /**
  * Resolve + validate the three imports `checked: true` requires. Throws a
@@ -408,7 +422,7 @@ function parseTypeEntries(typeBody) {
  *   index is known, so `rewriteFuncBody`'s inline checked path (#202 §6.2)
  *   can call it as the combined predicate's out-of-line "slow" arm.
  */
-function resolveCheckedImports(importSec, typeSec, exportSec) {
+function resolveCheckedImports(importSec: { id: number; body: Uint8Array; }|undefined, typeSec: { id: number; body: Uint8Array; }|undefined, exportSec: { id: number; body: Uint8Array; }|undefined): CheckedContext {
   if (!importSec) {
     throw new Error(
       'softmmu: checked mode requires imports for "__wasm_syscall_2", ' +
@@ -478,19 +492,24 @@ function resolveCheckedImports(importSec, typeSec, exportSec) {
 }
 
 /** Find an exported FUNCTION's index by name (export kind 0). -1 if absent. */
-function findExportFuncIdx(exportSec, name) {
+/**
+ * @param {{id: number, body: Uint8Array} | undefined} exportSec
+ * @param {string} name
+ * @returns {number}
+ */
+function findExportFuncIdx(exportSec: { id: number; body: Uint8Array; }|undefined, name: string): number {
   if (!exportSec) return -1;
   const b = exportSec.body;
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(b, 0);
   for (let k = 0; k < n; k++) {
-    let len;
+    let len = 0;
     [len, i] = readU(b, i);
-    const nm = String.fromCharCode(...b.subarray(i, i + len));
+    const nm = String.fromCharCode(...Array.from(b.subarray(i, i + len)));
     i += len;
     const kind = b[i++];
-    let idx;
+    let idx = 0;
     [idx, i] = readU(b, i);
     if (kind === 0 && nm === name) return idx;
   }
@@ -514,7 +533,7 @@ function findExportFuncIdx(exportSec, name) {
 // Built programmatically from the wasm threads opcode layout to avoid a ~50-row
 // hand transcription. atomic.fence (0x03) has no memarg and is copied verbatim.
 const ATOMIC_OPS = (() => {
-  const t = {};
+  const t: Record<number,{ opsAbove: string[]; result: boolean; }> = {};
   t[0x00] = { opsAbove: ["i32"], result: true }; // memory.atomic.notify(count)
   t[0x01] = { opsAbove: ["i32", "i64"], result: true }; // wait32(expected,timeout)
   t[0x02] = { opsAbove: ["i64", "i64"], result: true }; // wait64(expected,timeout)
@@ -537,10 +556,15 @@ const ATOMIC_OPS = (() => {
 
 // ---- leb + section helpers --------------------------------------------------
 
-function readU(b, i) {
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {[number, number]}
+ */
+function readU(b: Uint8Array, i: number): [number,number] {
   let r = 0,
     sh = 0,
-    x;
+    x = 0;
   do {
     x = b[i++];
     r += (x & 0x7f) * 2 ** sh;
@@ -548,10 +572,15 @@ function readU(b, i) {
   } while (x & 0x80);
   return [r, i];
 }
-function readS(b, i) {
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {[number, number]}
+ */
+function readS(b: Uint8Array, i: number): [number,number] {
   let r = 0,
     sh = 0,
-    x;
+    x = 0;
   do {
     x = b[i++];
     r |= (x & 0x7f) << sh;
@@ -560,9 +589,13 @@ function readS(b, i) {
   if (sh < 32 && x & 0x40) r |= -1 << sh;
   return [r, i];
 }
-function u(n) {
-  const out = [];
-  let v = n >>> 0;
+/**
+ * @param {number | null | undefined} n
+ * @returns {number[]}
+ */
+function u(n: number|null|undefined): number[] {
+  const out: number[] = [];
+  let v = (n ?? 0) >>> 0;
   do {
     let x = v & 0x7f;
     v >>>= 7;
@@ -571,10 +604,14 @@ function u(n) {
   } while (v);
   return out;
 }
-function s(n) {
-  const out = [];
+/**
+ * @param {number | null | undefined} n
+ * @returns {number[]}
+ */
+function s(n: number|null|undefined): number[] {
+  const out: number[] = [];
   let more = true;
-  let v = n | 0;
+  let v = (n ?? 0) | 0;
   while (more) {
     let x = v & 0x7f;
     v >>= 7;
@@ -584,7 +621,14 @@ function s(n) {
   }
   return out;
 }
-const vec = (items) => [...u(items.length), ...items.flat()];
+const vec = (items: Array<number | number[]>): number[] => {
+  const out = u(items.length);
+  for (const item of items) {
+    if (typeof item === "number") out.push(item);
+    else for (const x of item) out.push(x);
+  }
+  return out;
+};
 
 /**
  * Concatenate an ordered list of byte chunks (each a `number[]` or `Uint8Array`)
@@ -598,7 +642,7 @@ const vec = (items) => [...u(items.length), ...items.flat()];
  * @param {Array<number[]|Uint8Array>} chunks
  * @returns {Uint8Array}
  */
-export function concatBytes(chunks) {
+export function concatBytes(chunks: Array<number[]|Uint8Array>): Uint8Array {
   let total = 0;
   for (const c of chunks) total += c.length;
   const out = new Uint8Array(total);
@@ -662,13 +706,19 @@ export function concatBytes(chunks) {
  * a reader can trust either encoding appearing anywhere in the output.
  */
 export class ByteSink {
-  constructor(initialCapacity = 1 << 16) {
+  buf: Uint8Array;
+  len: number;
+
+  constructor(initialCapacity: number = 1 << 16) {
     this.buf = new Uint8Array(Math.max(initialCapacity, 64));
     this.len = 0;
   }
 
-  /** Grow the backing store (geometric doubling) so `extra` more bytes fit. */
-  _ensure(extra) {
+  /**
+   * Grow the backing store (geometric doubling) so `extra` more bytes fit.
+   * @param {number} extra
+   */
+  _ensure(extra: number) {
     if (this.len + extra <= this.buf.length) return;
     let cap = this.buf.length * 2;
     while (cap < this.len + extra) cap *= 2;
@@ -677,16 +727,24 @@ export class ByteSink {
     this.buf = next;
   }
 
-  /** Append one or more raw bytes — drop-in replacement for `Array.push`. */
-  push(...byteArgs) {
+  /**
+   * Append one or more raw bytes — drop-in replacement for `Array.push`.
+   * @param {...number} byteArgs
+   * @returns {number}
+   */
+  push(...byteArgs: number[]): number {
     this._ensure(byteArgs.length);
     this.buf.set(byteArgs, this.len);
     this.len += byteArgs.length;
     return this.len;
   }
 
-  /** Append every byte of an array-like (`number[]` or `Uint8Array`), no spread. */
-  pushBytes(bytesArrayLike) {
+  /**
+   * Append every byte of an array-like (`number[]` or `Uint8Array`), no spread.
+   * @param {number[] | Uint8Array} bytesArrayLike
+   * @returns {number}
+   */
+  pushBytes(bytesArrayLike: number[] | Uint8Array): number {
     const n = bytesArrayLike.length;
     this._ensure(n);
     this.buf.set(bytesArrayLike, this.len);
@@ -694,8 +752,73 @@ export class ByteSink {
     return this.len;
   }
 
-  /** Reserve `n` raw placeholder bytes (uninitialized-value = 0), return their offset. */
-  reserve(n) {
+  /**
+   * Append one byte. Returns the sink, so appends chain:
+   * `out.byte(0x41).s(22).byte(0x76)`. The hot path uses these instead of the
+   * variadic `push(...)`: a rest parameter allocates an array per call, and
+   * spread arguments add another (measured: the per-call arrays were most of
+   * the pass's time compiled ahead of time, and a large share under V8).
+   * @param {number} x
+   * @returns {ByteSink}
+   */
+  byte(x: number): ByteSink {
+    if (this.len >= this.buf.length) this._ensure(1);
+    this.buf[this.len++] = x;
+    return this;
+  }
+
+  /**
+   * Append `n` as a minimal unsigned LEB128 — the bytes `u(n)` returns,
+   * without building the array.
+   * @param {number | null | undefined} n
+   * @returns {ByteSink}
+   */
+  u(n: number|null|undefined): ByteSink {
+    let v = (n ?? 0) >>> 0;
+    do {
+      let x = v & 0x7f;
+      v >>>= 7;
+      if (v) x |= 0x80;
+      this.byte(x);
+    } while (v);
+    return this;
+  }
+
+  /**
+   * Append `n` as a minimal signed LEB128 — the bytes `s(n)` returns,
+   * without building the array.
+   * @param {number | null | undefined} n
+   * @returns {ByteSink}
+   */
+  s(n: number|null|undefined): ByteSink {
+    let more = true;
+    let v = (n ?? 0) | 0;
+    while (more) {
+      let x = v & 0x7f;
+      v >>= 7;
+      if ((v === 0 && !(x & 0x40)) || (v === -1 && x & 0x40)) more = false;
+      else x |= 0x80;
+      this.byte(x);
+    }
+    return this;
+  }
+
+  /**
+   * Append every byte of an array-like; chains like `byte`.
+   * @param {number[] | Uint8Array} bytesArrayLike
+   * @returns {ByteSink}
+   */
+  bytes(bytesArrayLike: number[] | Uint8Array): ByteSink {
+    this.pushBytes(bytesArrayLike);
+    return this;
+  }
+
+  /**
+   * Reserve `n` raw placeholder bytes (uninitialized-value = 0), return their offset.
+   * @param {number} n
+   * @returns {number}
+   */
+  reserve(n: number): number {
     this._ensure(n);
     const off = this.len;
     this.len += n;
@@ -709,7 +832,11 @@ export class ByteSink {
    * significant bits remain), and the fifth never does — see the class doc
    * comment for why this is spec-legal and V8-verified.
    */
-  patch5(offset, value) {
+  /**
+   * @param {number} offset
+   * @param {number} value
+   */
+  patch5(offset: number, value: number) {
     let v = value >>> 0;
     for (let k = 0; k < 4; k++) {
       this.buf[offset + k] = 0x80 | (v & 0x7f);
@@ -718,8 +845,11 @@ export class ByteSink {
     this.buf[offset + 4] = v & 0x7f;
   }
 
-  /** Reserve 5 bytes and immediately patch them — for a value known up-front. */
-  pushPadded5(value) {
+  /**
+   * Reserve 5 bytes and immediately patch them — for a value known up-front.
+   * @param {number} value
+   */
+  pushPadded5(value: number) {
     const off = this.reserve(5);
     this.patch5(off, value);
   }
@@ -731,13 +861,17 @@ export class ByteSink {
 }
 
 /** Split a module into [{id, body}] (body excludes id + size). */
-function splitSections(bytes) {
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{id: number, body: Uint8Array}[]}
+ */
+function splitSections(bytes: Uint8Array): { id: number; body: Uint8Array; }[] {
   if (bytes[0] !== 0 || bytes[1] !== 0x61) throw new Error("not wasm");
-  const out = [];
+  const out: { id: number; body: Uint8Array; }[] = [];
   let i = 8;
   while (i < bytes.length) {
     const id = bytes[i++];
-    let size;
+    let size = 0;
     [size, i] = readU(bytes, i);
     out.push({ id, body: bytes.subarray(i, i + size) });
     i += size;
@@ -751,7 +885,12 @@ function splitSections(bytes) {
  * Skip a blocktype immediate (empty 0x40, a single valtype, or an s33 type
  * index) — used by block/loop/if AND the exception-handling `try`/`try_table`.
  */
-function skipBlockType(b, i) {
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {number}
+ */
+function skipBlockType(b: Uint8Array, i: number): number {
   if (
     b[i] === 0x40 ||
     b[i] === 0x7f ||
@@ -769,7 +908,12 @@ function skipBlockType(b, i) {
 }
 
 /** Index just past the instruction at `i` (opcode + immediates), non-recursing. */
-function skipInstr(b, i) {
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {number}
+ */
+function skipInstr(b: Uint8Array, i: number): number {
   const op = b[i++];
   switch (op) {
     case 0x02: // block
@@ -789,7 +933,7 @@ function skipInstr(b, i) {
     case 0x1f: {
       // try_table (standard) — blocktype + vec(catch clause)
       i = skipBlockType(b, i);
-      let n;
+      let n = 0;
       [n, i] = readU(b, i);
       for (let k = 0; k < n; k++) {
         const ck = b[i++]; // 0 catch, 1 catch_ref, 2 catch_all, 3 catch_all_ref
@@ -813,7 +957,7 @@ function skipInstr(b, i) {
       return i;
     case 0x0e: {
       // br_table
-      let n;
+      let n = 0;
       [n, i] = readU(b, i);
       for (let k = 0; k < n; k++) [, i] = readU(b, i);
       [, i] = readU(b, i);
@@ -829,7 +973,7 @@ function skipInstr(b, i) {
       return i;
     case 0x1c: {
       // select t*
-      let n;
+      let n = 0;
       [n, i] = readU(b, i);
       i += n;
       return i;
@@ -884,8 +1028,13 @@ function skipInstr(b, i) {
   }
 }
 
-function skipFC(b, i) {
-  let sub;
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {number}
+ */
+function skipFC(b: Uint8Array, i: number): number {
+  let sub = 0;
   [sub, i] = readU(b, i);
   switch (sub) {
     case 0:
@@ -925,8 +1074,13 @@ function skipFC(b, i) {
       throw new Error(`softmmu: unknown 0xfc ${sub}`);
   }
 }
-function skipAtomic(b, i) {
-  let sub;
+/**
+ * @param {Uint8Array} b
+ * @param {number} i
+ * @returns {number}
+ */
+function skipAtomic(b: Uint8Array, i: number): number {
+  let sub = 0;
   [sub, i] = readU(b, i);
   if (sub === 3) {
     i++;
@@ -972,7 +1126,7 @@ function skipAtomic(b, i) {
  *   correct two (non-adjacent) physical frames. In helper mode a width>=2 access
  *   ALWAYS takes the byte helper (no inline fast path — keeps the over-limit
  *   function compact). Null (unit-test direct calls) = pre-fix raw access.
- * @param {ByteSink} sink #202: the byte sink to APPEND this function's rewritten
+ * @param {ByteSink | undefined} sink #202: the byte sink to APPEND this function's rewritten
  *   body into (local-decl vec + instructions, no size prefix — the caller owns
  *   framing/backpatching the size field). Callers stream every function
  *   directly into ONE shared whole-module sink (see `instrument()`), so this
@@ -986,15 +1140,15 @@ function skipAtomic(b, i) {
  * @returns {void}
  */
 export function rewriteFuncBody(
-  code,
-  numParams,
-  ptBaseGlobal,
-  bulkFns,
-  checked = null,
-  helper = null,
-  splitFns = null,
-  sink = undefined,
-) {
+  code: Uint8Array,
+  numParams: number,
+  ptBaseGlobal: number,
+  bulkFns: { memcpy: number; memfill: number; meminit: Map<number,number>; }|null,
+  checked: CheckedContext|null = null,
+  helper: { translateFunc: number; checkedTranslateFunc: number|null; }|null = null,
+  splitFns: { loadBytes: number; storeBytes: number; }|null = null,
+  sink: ByteSink|undefined = undefined,
+): void {
   if (!sink) throw new Error("softmmu: rewriteFuncBody requires a ByteSink `sink` argument");
   // #202 P2-4: `checkedTranslateFunc` is JSDoc-optional on `checked` (it's
   // attached by `instrument()` after `resolveCheckedImports` returns it), but
@@ -1007,12 +1161,12 @@ export function rewriteFuncBody(
     throw new Error("softmmu: checked context is missing checkedTranslateFunc");
   }
   let i = 0;
-  let nLocals;
+  let nLocals = 0;
   [nLocals, i] = readU(code, 0);
   const localsStart = i;
   let existingLocalCount = 0;
   for (let k = 0; k < nLocals; k++) {
-    let cnt;
+    let cnt = 0;
     [cnt, i] = readU(code, i);
     existingLocalCount += cnt;
     i++; // valtype
@@ -1034,8 +1188,8 @@ export function rewriteFuncBody(
   //       the final phys computation.
   const base = numParams + existingLocalCount;
   const EA = base;
-  const VAL = { i32: base + 1, i64: base + 2, f32: base + 3, f64: base + 4 };
-  const B = { i32: base + 5, i64: base + 6 };
+  const VAL: Record<string,number> = { i32: base + 1, i64: base + 2, f32: base + 3, f64: base + 4 };
+  const B: Record<string,number> = { i32: base + 5, i64: base + 6 };
   const PGD_E = base + 7;
   const PTE = base + 8;
 
@@ -1043,17 +1197,19 @@ export function rewriteFuncBody(
   // ONE sink — see `instrument()`), not a fresh accumulator per call. Every
   // `out.push(...)` call below is UNCHANGED from the pre-#202 number[] version
   // — ByteSink.push is a drop-in, Array.push-compatible variadic append.
-  const out = sink;
+  // The guard at the top threw when `sink` was missing; say so to the type so
+  // the closures below call ByteSink directly.
+  const out = (sink as ByteSink);
   // new local-decl vec: existing 6 groups + 1 more (pgd_e+pte) when checked
-  out.push(...u(nLocals + 6 + (checked ? 1 : 0)));
+  out.u(nLocals + 6 + (checked ? 1 : 0));
   out.pushBytes(code.subarray(localsStart, localsEnd));
-  out.push(...u(2), VT.i32); // ea + val_i32
-  out.push(...u(1), VT.i64); // val_i64
-  out.push(...u(1), VT.f32); // val_f32
-  out.push(...u(1), VT.f64); // val_f64
-  out.push(...u(1), VT.i32); // b_i32
-  out.push(...u(1), VT.i64); // b_i64
-  if (checked) out.push(...u(2), VT.i32); // pgd_e + pte (A2 scratch)
+  out.u(2).byte(VT.i32); // ea + val_i32
+  out.u(1).byte(VT.i64); // val_i64
+  out.u(1).byte(VT.f32); // val_f32
+  out.u(1).byte(VT.f64); // val_f64
+  out.u(1).byte(VT.i32); // b_i32
+  out.u(1).byte(VT.i64); // b_i64
+  if (checked) out.u(2).byte(VT.i32); // pgd_e + pte (A2 scratch)
 
   // emit the inline translate producing `phys` on the stack from `ea` in $EA.
   // TWO-LEVEL walk matching the kernel arch layer (design §2 revised: the
@@ -1090,39 +1246,39 @@ export function rewriteFuncBody(
   // safe. This function's EXTERNAL contract (leaves phys on the stack,
   // caller emits the raw op) is UNCHANGED — only the internal shape of the
   // checked case changed, so every caller below needed no edits.
-  const emitTranslate = (kind) => {
+  const emitTranslate = (kind: number) => {
     if (helper) {
       // #164: helper-call translate — call the appended walk function instead
       // of inlining it, keeping this (over-limit) function under V8's max
       // function size. `$EA` already holds the effective address (the load/
       // store/atomic emit set it), exactly as the inline path expects.
-      out.push(0x20, ...u(EA)); // local.get ea
+      out.byte(0x20).u(EA); // local.get ea
       if (checked) {
-        out.push(0x41, ...s(kind)); // i32.const kind (fault access-kind)
-        out.push(0x10, ...u(helper.checkedTranslateFunc)); // call __mmu_translate_ck -> phys
+        out.byte(0x41).s(kind); // i32.const kind (fault access-kind)
+        out.byte(0x10).u(helper.checkedTranslateFunc); // call __mmu_translate_ck -> phys
       } else {
-        out.push(0x10, ...u(helper.translateFunc)); // call __mmu_translate -> phys
+        out.byte(0x10).u(helper.translateFunc); // call __mmu_translate -> phys
       }
       return;
     }
     if (!checked) {
-      out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
-      out.push(0x20, ...u(EA)); // local.get ea
-      out.push(0x41, ...s(22), 0x76); // i32.const 22 ; i32.shr_u  -> pgd index
-      out.push(0x41, ...s(2), 0x74); // i32.const 2 ; i32.shl      -> *4
-      out.push(0x6a); // i32.add -> pt_base + pgdi*4
-      out.push(0x28, 0x02, ...u(0)); // i32.load align=2 off=0 -> pgd_e (RAW)
-      out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
-      out.push(0x20, ...u(EA)); // local.get ea
-      out.push(0x41, ...s(12), 0x76); // >>> 12
-      out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff -> pte index
-      out.push(0x41, ...s(2), 0x74); // << 2
-      out.push(0x6a); // i32.add
-      out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
-      out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
-      out.push(0x20, ...u(EA)); // local.get ea
-      out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-      out.push(0x6a); // i32.add -> phys
+      out.byte(0x23).u(ptBaseGlobal); // global.get pt_base
+      out.byte(0x20).u(EA); // local.get ea
+      out.byte(0x41).s(22).byte(0x76); // i32.const 22 ; i32.shr_u  -> pgd index
+      out.byte(0x41).s(2).byte(0x74); // i32.const 2 ; i32.shl      -> *4
+      out.byte(0x6a); // i32.add -> pt_base + pgdi*4
+      out.byte(0x28).byte(0x02).u(0); // i32.load align=2 off=0 -> pgd_e (RAW)
+      out.byte(0x41).s(-4096).byte(0x71); // & ~0xfff -> pte-table base
+      out.byte(0x20).u(EA); // local.get ea
+      out.byte(0x41).s(12).byte(0x76); // >>> 12
+      out.byte(0x41).s(0x3ff).byte(0x71); // & 0x3ff -> pte index
+      out.byte(0x41).s(2).byte(0x74); // << 2
+      out.byte(0x6a); // i32.add
+      out.byte(0x28).byte(0x02).u(0); // i32.load -> pte (RAW)
+      out.byte(0x41).s(-4096).byte(0x71); // & ~0xfff -> page base
+      out.byte(0x20).u(EA); // local.get ea
+      out.byte(0x41).s(0xfff).byte(0x71); // & 0xfff
+      out.byte(0x6a); // i32.add -> phys
       return;
     }
     // CHECKED, inline (#202 §6.2): compute the combined present+permission
@@ -1136,20 +1292,20 @@ export function rewriteFuncBody(
     // "cold" arm is a 3-instruction call — the hot (present) path pays for
     // the predicate once and nothing else.
     emitCheckedPresentPredicate(kind);
-    out.push(0x04, VT.i32); // if (result i32)
+    out.byte(0x04).byte(VT.i32); // if (result i32)
     // fast arm: phys = (pte & ~0xfff) + (ea & 0xfff), pte from the LOCAL
     // (the stack copy from the predicate's tee was already consumed by the
     // permission test above).
-    out.push(0x20, ...u(PTE)); // local.get pte
-    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> page base
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-    out.push(0x6a); // add -> phys
-    out.push(0x05); // else
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(kind)); // i32.const kind
-    out.push(0x10, ...u(checked.checkedTranslateFunc)); // call __mmu_translate_ck -> phys
-    out.push(0x0b); // end if
+    out.byte(0x20).u(PTE); // local.get pte
+    out.byte(0x41).s(-4096).byte(0x71); // & ~0xfff -> page base
+    out.byte(0x20).u(EA); // local.get ea
+    out.byte(0x41).s(0xfff).byte(0x71); // & 0xfff
+    out.byte(0x6a); // add -> phys
+    out.byte(0x05); // else
+    out.byte(0x20).u(EA); // local.get ea
+    out.byte(0x41).s(kind); // i32.const kind
+    out.byte(0x10).u(checked.checkedTranslateFunc); // call __mmu_translate_ck -> phys
+    out.byte(0x0b); // end if
   };
 
   // emitCheckedPresentPredicate(kind) (#202 §6.2): the shared "walk both
@@ -1201,29 +1357,29 @@ export function rewriteFuncBody(
   // read as truthy and take the fast arm, writing straight through to the
   // shared physical page instead of faulting into `do_wp_page`. See the
   // dedicated COW/mprotect unit tests for exactly that case.
-  const emitCheckedPresentPredicate = (kind) => {
+  const emitCheckedPresentPredicate = (kind: number) => {
     // level 1 (unconditional): pgd_e = u32[ pt_base + (ea>>>22)<<2 ]
-    out.push(0x23, ...u(ptBaseGlobal)); // global.get pt_base
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(22), 0x76); // >>> 22
-    out.push(0x41, ...s(2), 0x74); // << 2
-    out.push(0x6a); // add
-    out.push(0x28, 0x02, ...u(0)); // i32.load -> pgd_e (RAW)
-    out.push(0x22, ...u(PGD_E)); // local.tee pgd_e (keep a copy on stack)
-    out.push(0x41, ...s(0)); // i32.const 0
-    out.push(0x47); // i32.ne -> (pgd_e != 0)  [stack: bool1]
+    out.byte(0x23).u(ptBaseGlobal); // global.get pt_base
+    out.byte(0x20).u(EA); // local.get ea
+    out.byte(0x41).s(22).byte(0x76); // >>> 22
+    out.byte(0x41).s(2).byte(0x74); // << 2
+    out.byte(0x6a); // add
+    out.byte(0x28).byte(0x02).u(0); // i32.load -> pgd_e (RAW)
+    out.byte(0x22).u(PGD_E); // local.tee pgd_e (keep a copy on stack)
+    out.byte(0x41).s(0); // i32.const 0
+    out.byte(0x47); // i32.ne -> (pgd_e != 0)  [stack: bool1]
     // level 2 (unconditional — see the correctness note above): pte =
     // u32[ (pgd_e & ~0xfff) + ((ea>>>12 & 0x3ff)<<2) ]. Read pgd_e from the
     // LOCAL here — the stack currently holds bool1, not a reusable pgd_e copy.
-    out.push(0x20, ...u(PGD_E)); // local.get pgd_e
-    out.push(0x41, ...s(-4096), 0x71); // & ~0xfff -> pte-table base
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(12), 0x76); // >>> 12
-    out.push(0x41, ...s(0x3ff), 0x71); // & 0x3ff
-    out.push(0x41, ...s(2), 0x74); // << 2
-    out.push(0x6a); // add
-    out.push(0x28, 0x02, ...u(0)); // i32.load -> pte (RAW)
-    out.push(0x22, ...u(PTE)); // local.tee pte (keep a copy on stack)
+    out.byte(0x20).u(PGD_E); // local.get pgd_e
+    out.byte(0x41).s(-4096).byte(0x71); // & ~0xfff -> pte-table base
+    out.byte(0x20).u(EA); // local.get ea
+    out.byte(0x41).s(12).byte(0x76); // >>> 12
+    out.byte(0x41).s(0x3ff).byte(0x71); // & 0x3ff
+    out.byte(0x41).s(2).byte(0x74); // << 2
+    out.byte(0x6a); // add
+    out.byte(0x28).byte(0x02).u(0); // i32.load -> pte (RAW)
+    out.byte(0x22).u(PTE); // local.tee pte (keep a copy on stack)
     // permission test, normalised to a 0/1 boolean via i32.eq (not the
     // negated i32.ne the old per-level branch used — this value is ANDed
     // straight into the combined predicate, not gating a fault branch on its
@@ -1234,13 +1390,13 @@ export function rewriteFuncBody(
     // duplicate it via do_wp_page rather than walking through to the shared
     // physical page.
     if (kind === 1) {
-      out.push(0x41, ...s(3), 0x71); // & 3 (present|write)
-      out.push(0x41, ...s(3), 0x46); // i32.const 3 ; i32.eq -> (pte&3) == 3
+      out.byte(0x41).s(3).byte(0x71); // & 3 (present|write)
+      out.byte(0x41).s(3).byte(0x46); // i32.const 3 ; i32.eq -> (pte&3) == 3
     } else {
-      out.push(0x41, ...s(1), 0x71); // & 1 (present)
-      out.push(0x41, ...s(1), 0x46); // i32.const 1 ; i32.eq -> (pte&1) == 1
+      out.byte(0x41).s(1).byte(0x71); // & 1 (present)
+      out.byte(0x41).s(1).byte(0x46); // i32.const 1 ; i32.eq -> (pte&1) == 1
     }
-    out.push(0x71); // i32.and -> bool1 & bool2 (both already 0/1 booleans)
+    out.byte(0x71); // i32.and -> bool1 & bool2 (both already 0/1 booleans)
   };
 
   // emitCheckedSplitLoad/Store (#202 §6.2): the CHECKED, non-helper,
@@ -1255,44 +1411,44 @@ export function rewriteFuncBody(
   // of `emitTranslateCall`), so it correctly covers both reasons the fast
   // path can be rejected (not present, OR straddles a page) without this
   // caller needing to distinguish them.
-  const emitCheckedSplitLoad = (op, W) => {
+  const emitCheckedSplitLoad = (op: number, W: number) => {
     emitCheckedPresentPredicate(0); // kind=0 read
-    out.push(0x20, ...u(EA)); // local.get ea
-    out.push(0x41, ...s(0xfff), 0x71); // & 0xfff
-    out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W)  (i32.le_u)
-    out.push(0x71); // AND into the combined predicate
-    out.push(0x04, LOAD_RESVT[op]); // if (result <loadvt>)
-    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
-    out.push(0x41, ...s(-4096), 0x71);
-    out.push(0x20, ...u(EA));
-    out.push(0x41, ...s(0xfff), 0x71);
-    out.push(0x6a); // -> phys
-    out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
-    out.push(0x05); // else
-    out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes)); // -> i64
-    out.push(...LOAD_POST[op]); // post-process to loadvt
-    out.push(0x0b); // end if
+    out.byte(0x20).u(EA); // local.get ea
+    out.byte(0x41).s(0xfff).byte(0x71); // & 0xfff
+    out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W)  (i32.le_u)
+    out.byte(0x71); // AND into the combined predicate
+    out.byte(0x04).byte(LOAD_RESVT[op]); // if (result <loadvt>)
+    out.byte(0x20).u(PTE); // fast arm: phys from pte/ea
+    out.byte(0x41).s(-4096).byte(0x71);
+    out.byte(0x20).u(EA);
+    out.byte(0x41).s(0xfff).byte(0x71);
+    out.byte(0x6a); // -> phys
+    out.byte(op).byte(0x00).u(0); // raw load, align 0 off 0
+    out.byte(0x05); // else
+    out.byte(0x20).u(EA).byte(0x41).s(W).byte(0x10).u(splitFns!.loadBytes); // -> i64
+    out.bytes(LOAD_POST[op]); // post-process to loadvt
+    out.byte(0x0b); // end if
   };
-  const emitCheckedSplitStore = (op, W, vl) => {
+  const emitCheckedSplitStore = (op: number, W: number, vl: number) => {
     emitCheckedPresentPredicate(1); // kind=1 write
-    out.push(0x20, ...u(EA));
-    out.push(0x41, ...s(0xfff), 0x71);
-    out.push(0x41, ...s(0x1000 - W), 0x4d);
-    out.push(0x71); // AND into the combined predicate
-    out.push(0x04, 0x40); // if (void)
-    out.push(0x20, ...u(PTE)); // fast arm: phys from pte/ea
-    out.push(0x41, ...s(-4096), 0x71);
-    out.push(0x20, ...u(EA));
-    out.push(0x41, ...s(0xfff), 0x71);
-    out.push(0x6a); // -> phys
-    out.push(0x20, ...u(vl)); // local.get val
-    out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
-    out.push(0x05); // else
-    out.push(0x20, ...u(EA)); // ea
-    out.push(0x20, ...u(vl)); // val (typed)
-    out.push(...STORE_TOI64[op]); // -> i64
-    out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
-    out.push(0x0b); // end if
+    out.byte(0x20).u(EA);
+    out.byte(0x41).s(0xfff).byte(0x71);
+    out.byte(0x41).s(0x1000 - W).byte(0x4d);
+    out.byte(0x71); // AND into the combined predicate
+    out.byte(0x04).byte(0x40); // if (void)
+    out.byte(0x20).u(PTE); // fast arm: phys from pte/ea
+    out.byte(0x41).s(-4096).byte(0x71);
+    out.byte(0x20).u(EA);
+    out.byte(0x41).s(0xfff).byte(0x71);
+    out.byte(0x6a); // -> phys
+    out.byte(0x20).u(vl); // local.get val
+    out.byte(op).byte(0x00).u(0); // raw store, align 0 off 0
+    out.byte(0x05); // else
+    out.byte(0x20).u(EA); // ea
+    out.byte(0x20).u(vl); // val (typed)
+    out.bytes(STORE_TOI64[op]); // -> i64
+    out.byte(0x41).s(W).byte(0x10).u(splitFns!.storeBytes); // store_bytes(ea,val,W)
+    out.byte(0x0b); // end if
   };
 
   i = localsEnd;
@@ -1300,22 +1456,22 @@ export function rewriteFuncBody(
     const op = code[i];
     const m = MEM_OPS[op];
     if (m) {
-      let offset;
+      let offset = 0;
       let j = i + 1;
       [, j] = readU(code, j); // align hint — dropped (we access at natural width)
       [offset, j] = readU(code, j);
       if (m.k === "load") {
         // stack: va  ->  ea = va + offset (in $EA), then phys, then raw load
-        if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
-        out.push(0x21, ...u(EA)); // local.set ea
+        if (offset !== 0) out.byte(0x41).s(offset).byte(0x6a);
+        out.byte(0x21).u(EA); // local.set ea
         const W = ACCESS_W[op];
         if (splitFns && W >= 2 && helper) {
           // #128 helper mode: a width>=2 access ALWAYS takes the byte-wise slow
           // path (correct for any straddle; no inline fast path so the already-
           // over-limit function stays compact). load_bytes(ea,W) -> i64, then
           // post-process into the op's result type.
-          out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes));
-          out.push(...LOAD_POST[op]);
+          out.byte(0x20).u(EA).byte(0x41).s(W).byte(0x10).u(splitFns.loadBytes);
+          out.bytes(LOAD_POST[op]);
         } else if (splitFns && W >= 2 && checked) {
           // #202 §6.2: CHECKED + page-crossing, non-helper — ONE combined
           // predicate (present+permission AND page-fits) instead of the A1
@@ -1328,34 +1484,34 @@ export function rewriteFuncBody(
           // ((ea&0xfff) <= 0x1000-W), else the byte-wise slow path that
           // translates each byte's page separately. Both leave the op's
           // result value on the stack (the `if`'s result type).
-          out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
-          out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
-          out.push(0x04, LOAD_RESVT[op]); // if (result <loadvt>)
+          out.byte(0x20).u(EA).byte(0x41).s(0xfff).byte(0x71); // ea & 0xfff
+          out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W) (i32.le_u)
+          out.byte(0x04).byte(LOAD_RESVT[op]); // if (result <loadvt>)
           emitTranslate(0); // -> phys (kind=0 load)
-          out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
-          out.push(0x05); // else
-          out.push(0x20, ...u(EA), 0x41, ...s(W), 0x10, ...u(splitFns.loadBytes)); // -> i64
-          out.push(...LOAD_POST[op]); // post-process to loadvt
-          out.push(0x0b); // end if
+          out.byte(op).byte(0x00).u(0); // raw load, align 0 off 0
+          out.byte(0x05); // else
+          out.byte(0x20).u(EA).byte(0x41).s(W).byte(0x10).u(splitFns.loadBytes); // -> i64
+          out.bytes(LOAD_POST[op]); // post-process to loadvt
+          out.byte(0x0b); // end if
         } else {
           emitTranslate(0); // -> phys (kind=0 load)
-          out.push(op, 0x00, ...u(0)); // raw load, align 0 off 0
+          out.byte(op).byte(0x00).u(0); // raw load, align 0 off 0
         }
       } else {
         // stack: va, value  ->  save value, ea, phys, value, raw store
         const vl = VAL[VALTYPE[m.n]];
-        out.push(0x21, ...u(vl)); // local.set val
-        if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
-        out.push(0x21, ...u(EA)); // local.set ea
+        out.byte(0x21).u(vl); // local.set val
+        if (offset !== 0) out.byte(0x41).s(offset).byte(0x6a);
+        out.byte(0x21).u(EA); // local.set ea
         const W = ACCESS_W[op];
         if (splitFns && W >= 2 && helper) {
           // #128 helper mode: width>=2 store ALWAYS byte-wise (see the load
           // branch). store_bytes(ea, val_as_i64, W) writes the low W bytes,
           // translating each byte's page (write-kind) separately.
-          out.push(0x20, ...u(EA)); // ea
-          out.push(0x20, ...u(vl)); // val (typed)
-          out.push(...STORE_TOI64[op]); // -> i64
-          out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
+          out.byte(0x20).u(EA); // ea
+          out.byte(0x20).u(vl); // val (typed)
+          out.bytes(STORE_TOI64[op]); // -> i64
+          out.byte(0x41).s(W).byte(0x10).u(splitFns.storeBytes); // store_bytes(ea,val,W)
         } else if (splitFns && W >= 2 && checked) {
           // #202 §6.2: CHECKED + page-crossing, non-helper — see
           // emitCheckedSplitStore's doc comment (mirrors the load case above).
@@ -1363,22 +1519,22 @@ export function rewriteFuncBody(
         } else if (splitFns && W >= 2) {
           // #128 A1 (unchecked) inline mode — BYTE-IDENTICAL to before #202:
           // fast within-page path else byte-wise slow path.
-          out.push(0x20, ...u(EA), 0x41, ...s(0xfff), 0x71); // ea & 0xfff
-          out.push(0x41, ...s(0x1000 - W), 0x4d); // <= (0x1000-W) (i32.le_u)
-          out.push(0x04, 0x40); // if (void)
+          out.byte(0x20).u(EA).byte(0x41).s(0xfff).byte(0x71); // ea & 0xfff
+          out.byte(0x41).s(0x1000 - W).byte(0x4d); // <= (0x1000-W) (i32.le_u)
+          out.byte(0x04).byte(0x40); // if (void)
           emitTranslate(1); // -> phys (kind=1 store)
-          out.push(0x20, ...u(vl)); // local.get val
-          out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
-          out.push(0x05); // else
-          out.push(0x20, ...u(EA)); // ea
-          out.push(0x20, ...u(vl)); // val (typed)
-          out.push(...STORE_TOI64[op]); // -> i64
-          out.push(0x41, ...s(W), 0x10, ...u(splitFns.storeBytes)); // store_bytes(ea,val,W)
-          out.push(0x0b); // end if
+          out.byte(0x20).u(vl); // local.get val
+          out.byte(op).byte(0x00).u(0); // raw store, align 0 off 0
+          out.byte(0x05); // else
+          out.byte(0x20).u(EA); // ea
+          out.byte(0x20).u(vl); // val (typed)
+          out.bytes(STORE_TOI64[op]); // -> i64
+          out.byte(0x41).s(W).byte(0x10).u(splitFns.storeBytes); // store_bytes(ea,val,W)
+          out.byte(0x0b); // end if
         } else {
           emitTranslate(1); // -> phys (kind=1 store)
-          out.push(0x20, ...u(vl)); // local.get val
-          out.push(op, 0x00, ...u(0)); // raw store, align 0 off 0
+          out.byte(0x20).u(vl); // local.get val
+          out.byte(op).byte(0x00).u(0); // raw store, align 0 off 0
         }
       }
       i = j;
@@ -1386,7 +1542,7 @@ export function rewriteFuncBody(
     }
     if (op === 0xfe) {
       // atomic op (0xfe prefix). fence (0x03) has no memarg → copy verbatim.
-      let sub;
+      let sub = 0;
       let j = i + 1;
       [sub, j] = readU(code, j);
       const a = ATOMIC_OPS[sub];
@@ -1397,26 +1553,26 @@ export function rewriteFuncBody(
         i = next;
         continue;
       }
-      let align, offset;
+      let align = 0, offset = 0;
       [align, j] = readU(code, j);
       [offset, j] = readU(code, j);
       // stack: addr, [op0], [op1]  (op1 on top). Pop operands top-first into
       // scratch (slot 0 = VAL[type], slot 1 = B[type]).
       const scratch = a.opsAbove.map((tp, idx) => (idx === 0 ? VAL[tp] : B[tp]));
       for (let k = a.opsAbove.length - 1; k >= 0; k--) {
-        out.push(0x21, ...u(scratch[k])); // local.set
+        out.byte(0x21).u(scratch[k]); // local.set
       }
       // addr on top → ea = addr + offset
-      if (offset !== 0) out.push(0x41, ...s(offset), 0x6a);
-      out.push(0x21, ...u(EA)); // local.set ea
+      if (offset !== 0) out.byte(0x41).s(offset).byte(0x6a);
+      out.byte(0x21).u(EA); // local.set ea
       emitTranslate(atomicFaultKind(sub)); // -> phys
       // restore operands in order
       for (let k = 0; k < a.opsAbove.length; k++) {
-        out.push(0x20, ...u(scratch[k])); // local.get
+        out.byte(0x20).u(scratch[k]); // local.get
       }
       // raw atomic at phys. Atomics REQUIRE natural alignment → keep the
       // ORIGINAL align (translate preserves it); offset folded into phys → 0.
-      out.push(0xfe, ...u(sub), ...u(align), ...u(0));
+      out.byte(0xfe).u(sub).u(align).u(0);
       i = j;
       continue;
     }
@@ -1427,18 +1583,18 @@ export function rewriteFuncBody(
       // truncs, data.drop, table ops) copies verbatim.
       const [sub, at] = readU(code, i + 1);
       if (sub === 10) {
-        out.push(0x10, ...u(bulkFns.memcpy)); // call __mmu_memcpy(d,s,n)
+        out.byte(0x10).u(bulkFns.memcpy); // call __mmu_memcpy(d,s,n)
         i = skipInstr(code, i);
         continue;
       }
       if (sub === 11) {
-        out.push(0x10, ...u(bulkFns.memfill)); // call __mmu_memfill(d,v,n)
+        out.byte(0x10).u(bulkFns.memfill); // call __mmu_memfill(d,v,n)
         i = skipInstr(code, i);
         continue;
       }
       if (sub === 8) {
         const seg = readU(code, at)[0];
-        out.push(0x10, ...u(bulkFns.meminit.get(seg))); // call __mmu_meminit_<seg>(d,s,n)
+        out.byte(0x10).u(bulkFns.meminit.get(seg)); // call __mmu_meminit_<seg>(d,s,n)
         i = skipInstr(code, i);
         continue;
       }
@@ -1454,13 +1610,18 @@ export function rewriteFuncBody(
 
 // ---- module surgery ---------------------------------------------------------
 
-function countImports(importBody, kind) {
+/**
+ * @param {Uint8Array} importBody
+ * @param {number} kind
+ * @returns {number}
+ */
+function countImports(importBody: Uint8Array, kind: number): number {
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(importBody, 0);
   let count = 0;
   for (let k = 0; k < n; k++) {
-    let len;
+    let len = 0;
     [len, i] = readU(importBody, i);
     i += len;
     [len, i] = readU(importBody, i);
@@ -1491,19 +1652,23 @@ function countImports(importBody, kind) {
 }
 
 /** Param count of every type in the type section (by type index). */
-function typeParamCounts(typeBody) {
+/**
+ * @param {Uint8Array | null} typeBody
+ * @returns {number[]}
+ */
+function typeParamCounts(typeBody: Uint8Array|null): number[] {
   if (!typeBody) return [];
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(typeBody, 0);
   const out = [];
   for (let k = 0; k < n; k++) {
     if (typeBody[i++] !== 0x60) throw new Error("softmmu: bad functype");
-    let np;
+    let np = 0;
     [np, i] = readU(typeBody, i);
     out.push(np);
     i += np; // param valtypes
-    let nr;
+    let nr = 0;
     [nr, i] = readU(typeBody, i);
     i += nr; // result valtypes
   }
@@ -1511,14 +1676,18 @@ function typeParamCounts(typeBody) {
 }
 
 /** Defined-function type indices, in order. */
-function definedFuncTypes(funcBody) {
+/**
+ * @param {Uint8Array | null} funcBody
+ * @returns {number[]}
+ */
+function definedFuncTypes(funcBody: Uint8Array|null): number[] {
   if (!funcBody) return [];
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(funcBody, 0);
   const out = [];
   for (let k = 0; k < n; k++) {
-    let t;
+    let t = 0;
     [t, i] = readU(funcBody, i);
     out.push(t);
   }
@@ -1529,24 +1698,28 @@ function definedFuncTypes(funcBody) {
  * Whole-module op scan: atomics/SIMD/bulk presence + the set of data-segment
  * indices used by memory.init (each gets a per-segment translate helper).
  */
-export function scanUnhandled(bytes) {
+/**
+ * @param {Uint8Array} bytes
+ * @returns {{atomics: boolean, simd: boolean, bulk: boolean, initSegs: number[]}}
+ */
+export function scanUnhandled(bytes: Uint8Array): { atomics: boolean; simd: boolean; bulk: boolean; initSegs: number[]; } {
   const secs = splitSections(bytes);
   const code = secs.find((x) => x.id === 10);
   if (!code) return { atomics: false, simd: false, bulk: false, initSegs: [] };
   let atomics = false;
   let simd = false;
   let bulk = false;
-  const initSegs = new Set();
+  const initSegs: Set<number> = new Set();
   const b = code.body;
   let i = 0;
-  let n;
+  let n = 0;
   [n, i] = readU(b, 0);
   for (let f = 0; f < n; f++) {
-    let size;
+    let size = 0;
     [size, i] = readU(b, i);
     const end = i + size;
     let j = i;
-    let nl;
+    let nl = 0;
     [nl, j] = readU(b, j);
     for (let k = 0; k < nl; k++) {
       [, j] = readU(b, j);
@@ -1612,7 +1785,8 @@ const I = {
 const VOID = 0x40;
 
 // c = min(c, t) using select (locals c, t already set)
-function emitMinCT(o, c, t) {
+/** @param {number[]} o @param {number} c @param {number} t */
+function emitMinCT(o: number[], c: number, t: number) {
   o.push(
     I.lget,
     ...u(c),
@@ -1629,7 +1803,8 @@ function emitMinCT(o, c, t) {
   );
 }
 // c = min(c, n)
-function emitMinCN(o, c, n) {
+/** @param {number[]} o @param {number} c @param {number} n */
+function emitMinCN(o: number[], c: number, n: number) {
   o.push(
     I.lget,
     ...u(c),
@@ -1646,11 +1821,13 @@ function emitMinCN(o, c, n) {
   );
 }
 // t = PAGE - (x & 0xfff)   (forward chunk bound for operand x)
-function emitFwdBound(o, x, dst) {
+/** @param {number[]} o @param {number} x @param {number} dst */
+function emitFwdBound(o: number[], x: number, dst: number) {
   o.push(I.i32c, ...s(4096), I.lget, ...u(x), I.i32c, ...s(0xfff), I.and, I.sub, I.lset, ...u(dst));
 }
 // t = ((x + n - 1) & 0xfff) + 1   (backward chunk bound)
-function emitBwdBound(o, x, n, dst) {
+/** @param {number[]} o @param {number} x @param {number} n @param {number} dst */
+function emitBwdBound(o: number[], x: number, n: number, dst: number) {
   o.push(
     I.lget,
     ...u(x),
@@ -1686,7 +1863,13 @@ function emitBwdBound(o, x, n, dst) {
  * the inline scalar/atomic translate's present check — instead of silently
  * walking a zero PTE and landing on page 0.
  */
-function emitTranslateCall(o, translateFunc, ckFunc, kind) {
+/**
+ * @param {number[]} o
+ * @param {number} translateFunc
+ * @param {number | null | undefined} ckFunc
+ * @param {number} kind
+ */
+function emitTranslateCall(o: number[], translateFunc: number, ckFunc: number|null|undefined, kind: number) {
   if (ckFunc != null) {
     o.push(I.i32c, ...s(kind), I.call, ...u(ckFunc));
   } else {
@@ -1702,13 +1885,13 @@ function emitTranslateCall(o, translateFunc, ckFunc, kind) {
  *   helper — when given, dest chunks fault in with kind=1 (write) and src
  *   chunks with kind=0 (read); omit/null for the unchecked A1 fast path.
  */
-function memcpyHelperBody(translateFunc, ckFunc = null) {
+function memcpyHelperBody(translateFunc: number, ckFunc: number|null = null) {
   const d = 0,
     sp = 1,
     n = 2,
     c = 3,
     t = 4;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(1), ...u(2), VT.i32); // locals: c, t
   // if (d > s && d < s + n) -> backward, else forward
   o.push(I.block, VOID); // A ($forward)
@@ -1762,12 +1945,12 @@ function memcpyHelperBody(translateFunc, ckFunc = null) {
  *   helper — when given, dest chunks fault in with kind=1 (write); omit/null
  *   for the unchecked A1 fast path.
  */
-function memfillHelperBody(translateFunc, ckFunc = null) {
+function memfillHelperBody(translateFunc: number, ckFunc: number|null = null) {
   const d = 0,
     v = 1,
     n = 2,
     c = 3;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
@@ -1794,12 +1977,12 @@ function memfillHelperBody(translateFunc, ckFunc = null) {
  *   for the unchecked A1 fast path.
  * @param {number} seg the data-segment index
  */
-function meminitHelperBody(translateFunc, ckFunc, seg) {
+function meminitHelperBody(translateFunc: number, ckFunc: number|null, seg: number) {
   const d = 0,
     sp = 1,
     n = 2,
     c = 3;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(1), ...u(1), VT.i32); // local: c
   o.push(I.block, VOID, I.loop, VOID);
   o.push(I.lget, ...u(n), I.eqz, I.br_if, ...u(1));
@@ -1829,12 +2012,12 @@ function meminitHelperBody(translateFunc, ckFunc, seg) {
  * @param {number} translateFunc plain `__mmu_translate(va)` index
  * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
  */
-function loadBytesHelperBody(translateFunc, ckFunc = null) {
+function loadBytesHelperBody(translateFunc: number, ckFunc: number|null = null) {
   const EA = 0,
     W = 1,
     I = 2,
     RES = 3;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(2), ...u(1), VT.i32, ...u(1), VT.i64); // locals: i(i32), res(i64)
   o.push(0x42, 0x00, 0x21, ...u(RES)); // res = 0
   o.push(0x41, 0x00, 0x21, ...u(I)); // i = 0
@@ -1866,12 +2049,12 @@ function loadBytesHelperBody(translateFunc, ckFunc = null) {
  * @param {number} translateFunc plain `__mmu_translate(va)` index
  * @param {number|null} ckFunc checked `__mmu_translate_ck(va,kind)` index (or null)
  */
-function storeBytesHelperBody(translateFunc, ckFunc = null) {
+function storeBytesHelperBody(translateFunc: number, ckFunc: number|null = null) {
   const EA = 0,
     VAL = 1,
     W = 2,
     I = 3;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(1), ...u(1), VT.i32); // local: i (i32)
   o.push(0x41, 0x00, 0x21, ...u(I)); // i = 0
   o.push(0x02, 0x40, 0x03, 0x40); // block $done ; loop $loop
@@ -1905,13 +2088,13 @@ function storeBytesHelperBody(translateFunc, ckFunc = null) {
  * @param {number} ptBaseGlobal the pt_base global index
  * @param {CheckedContext} checkedCtx
  */
-function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
+function checkedTranslateBody(ptBaseGlobal: number, checkedCtx: CheckedContext) {
   const VA = 0;
   const KIND = 1;
   const PGD_E = 2;
   const PTE = 3;
   const NEED = 4;
-  const o = [];
+  const o: number[] = [];
   o.push(...u(1), ...u(3), VT.i32); // locals: pgd_e, pte, need (all i32)
   const emitFault = () => {
     if (checkedCtx.faultTableIndex != null) {
@@ -2003,22 +2186,22 @@ function checkedTranslateBody(ptBaseGlobal, checkedCtx) {
  * @param {Uint8Array} bytes
  * @returns {boolean}
  */
-export function isInstrumented(bytes) {
+export function isInstrumented(bytes: Uint8Array): boolean {
   if (bytes[0] !== 0 || bytes[1] !== 0x61) return false;
   let i = 8;
   while (i < bytes.length) {
     const id = bytes[i++];
-    let sz;
+    let sz = 0;
     [sz, i] = readU(bytes, i);
     if (id !== 7) {
       i += sz;
       continue;
     }
-    let n;
+    let n = 0;
     let j = i;
     [n, j] = readU(bytes, j);
     for (let k = 0; k < n; k++) {
-      let len;
+      let len = 0;
       [len, j] = readU(bytes, j);
       const name = new TextDecoder().decode(bytes.subarray(j, j + len));
       if (name === "__mmu_pt_base") return true;
@@ -2031,17 +2214,21 @@ export function isInstrumented(bytes) {
   return false;
 }
 
-/** #152 diagnostic: the wasm "name" custom-section module name, or null. */
-function moduleName(bytes) {
+/**
+ * #152 diagnostic: the wasm "name" custom-section module name, or null.
+ * @param {Uint8Array} bytes
+ * @returns {string | null}
+ */
+function moduleName(bytes: Uint8Array): string|null {
   try {
     for (const s of splitSections(bytes)) {
       if (s.id !== 0) continue; // custom section
-      let i, nm;
+      let i = 0, nm = "";
       [nm, i] = readName(s.body, 0);
       if (nm !== "name") continue;
       while (i < s.body.length) {
         const sub = s.body[i++];
-        let sz;
+        let sz = 0;
         [sz, i] = readU(s.body, i);
         if (sub === 0) return readName(s.body, i)[0]; // module-name subsection
         i += sz;
@@ -2072,13 +2259,18 @@ function moduleName(bytes) {
  *   fallback on small functions.
  * @returns {Uint8Array}
  */
-export function instrument(bytes, opts = {}) {
+export function instrument(bytes: Uint8Array, opts: {
+exportControls?: boolean;
+checked?: boolean;
+inlineLimit?: number;
+faultTableIndex?: number;
+} = {}): Uint8Array {
   const unhandled = scanUnhandled(bytes);
   if (unhandled.simd) throw new Error("softmmu: module uses SIMD memory ops (unhandled)");
   // atomics ARE translated (ATOMIC_OPS / the 0xfe path in rewriteFuncBody).
 
   const secs = splitSections(bytes);
-  const byId = (id) => secs.find((x) => x.id === id);
+  const byId = (id: number) => secs.find((x) => x.id === id);
   const importSec = byId(2);
   const typeSec = byId(1);
   const funcSec = byId(3);
@@ -2095,8 +2287,7 @@ export function instrument(bytes, opts = {}) {
   // module — a few hundred bytes) or a real program (KiB+). That discriminates
   // "a non-libc generated module reached the exec/instrument path" from "a real
   // program lost its keep-alive import".
-  /** @type {CheckedContext|null} */
-  let checkedCtx;
+  let checkedCtx: CheckedContext|null = null;
   try {
     checkedCtx = opts.checked
       ? opts.faultTableIndex != null
@@ -2143,11 +2334,9 @@ export function instrument(bytes, opts = {}) {
     checkedCtx.faultTypeIdx = checkedTranslateType;
   }
   const translateFunc = nImpFuncs + nDefFuncs;
-  const bulkFns = {
-    memcpy: translateFunc + 1,
-    memfill: translateFunc + 2,
-    meminit: new Map(unhandled.initSegs.map((seg, k) => [seg, translateFunc + 3 + k])),
-  };
+  const meminit: Map<number,number> = new Map();
+  unhandled.initSegs.forEach((seg, k) => meminit.set(seg, translateFunc + 3 + k));
+  const bulkFns = { memcpy: translateFunc + 1, memfill: translateFunc + 2, meminit };
   const nAppended = 2 + unhandled.initSegs.length; // memcpy + memfill + per-seg meminit (translate counted separately)
   const checkedTranslateFunc = checkedCtx ? translateFunc + 1 + nAppended : null;
   // #202 §6.2: the INLINE checked translate's combined-predicate fast path
@@ -2236,15 +2425,15 @@ export function instrument(bytes, opts = {}) {
   // binary — now exists as bytes exactly ONCE (inside that one sink), not
   // three times over. `sink` is the SAME sink the rest of the module streams
   // into; this function does not allocate a section-sized buffer of its own.
-  const emitCodeSectionBody = (sink) => {
+  const emitCodeSectionBody = (sink: ByteSink) => {
     // function-count vector: fully known BEFORE any function is written (nCode
     // from the original module + the fixed appended-helper count), so it stays
     // a plain MINIMAL LEB — no backpatch needed (unlike the two fields below).
-    sink.push(...u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2)); // +2: load_bytes/store_bytes
+    sink.u(nCode + 1 + nAppended + (checkedCtx ? 1 : 0) + 2); // +2: load_bytes/store_bytes
     let ci = 0;
     [, ci] = readU(cb, 0); // skip the original function-count field (== nCode)
     for (let f = 0; f < nCode; f++) {
-      let size;
+      let size = 0;
       [size, ci] = readU(cb, ci);
       const body = cb.subarray(ci, ci + size);
       ci += size;
@@ -2292,8 +2481,8 @@ export function instrument(bytes, opts = {}) {
     // written (no retry possible — these are fixed, hand-built bodies), so
     // they keep the plain minimal-LEB length-prefix form, unchanged from
     // before #202.
-    const appendFixed = (body) => {
-      sink.push(...u(body.length));
+    const appendFixed = (body: number[]) => {
+      sink.u(body.length);
       sink.pushBytes(body);
     };
     appendFixed(translateBody);
@@ -2313,7 +2502,7 @@ export function instrument(bytes, opts = {}) {
 
   // --- type section: append (i32)->i32, (i32,i32,i32)->(), and (checked
   // only) (i32,i32)->i32 -------------------------------------------------
-  const typeExistingTail = typeSec ? typeSec.body.subarray(u(nTypes).length) : [];
+  const typeExistingTail = typeSec ? typeSec.body.subarray(u(nTypes).length) : new Uint8Array(0);
   const newTypeBody = [
     ...u(nTypes + 2 + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes types
     ...typeExistingTail,
@@ -2355,7 +2544,7 @@ export function instrument(bytes, opts = {}) {
 
   // --- function section: append the translate helper's type index, then the
   // bulk helpers', then (checked only) the checked translate helper's -------
-  const funcExistingTail = funcSec ? funcSec.body.subarray(u(nDefFuncs).length) : [];
+  const funcExistingTail = funcSec ? funcSec.body.subarray(u(nDefFuncs).length) : new Uint8Array(0);
   const newFuncBody = [
     ...u(nDefFuncs + 1 + nAppended + (checkedCtx ? 1 : 0) + 2), // +2: load_bytes/store_bytes
     ...funcExistingTail,
@@ -2367,7 +2556,7 @@ export function instrument(bytes, opts = {}) {
   ];
 
   // --- global section: append pt_base (i32 mutable, init 0) -------------------
-  const globalExistingTail = globalSec ? globalSec.body.subarray(u(nDefGlobals).length) : [];
+  const globalExistingTail = globalSec ? globalSec.body.subarray(u(nDefGlobals).length) : new Uint8Array(0);
   const newGlobalBody = [
     ...u(nDefGlobals + 1),
     ...globalExistingTail,
@@ -2385,8 +2574,8 @@ export function instrument(bytes, opts = {}) {
   // __mmu_translate_ck) are the optional introspection controls.
   const exSec = byId(7);
   const nEx = exSec ? readU(exSec.body, 0)[0] : 0;
-  const exTail = exSec ? exSec.body.subarray(u(nEx).length) : [];
-  const nb = (str) => vec([...str].map((c) => c.charCodeAt(0)));
+  const exTail = exSec ? exSec.body.subarray(u(nEx).length) : new Uint8Array(0);
+  const nb = (str: string) => vec([...str].map((c) => c.charCodeAt(0)));
   const adds = [
     [...nb("__mmu_pt_base"), 0x03, ...u(ptBaseGlobal)],
     ...(startFunc !== null ? [[...nb("__mmu_start"), 0x00, ...u(startFunc)]] : []),
@@ -2404,8 +2593,7 @@ export function instrument(bytes, opts = {}) {
   // ByteSink doc comment for why: #202 streams it directly into the shared
   // output sink instead of building a separate whole-section copy first).
   const CODE_SECTION_STREAM = Symbol("softmmu:code-section-stream");
-  /** @type {Map<number, number[]|Uint8Array|typeof CODE_SECTION_STREAM>} */
-  const replaced = new Map();
+  const replaced: Map<number,number[]|Uint8Array|typeof CODE_SECTION_STREAM> = new Map();
   replaced.set(1, newTypeBody);
   replaced.set(3, newFuncBody);
   replaced.set(6, newGlobalBody);
@@ -2414,7 +2602,7 @@ export function instrument(bytes, opts = {}) {
   const present = new Set(secs.map((x) => x.id));
 
   const outSecs = [];
-  const emitMissingBefore = (id) => {
+  const emitMissingBefore = (id: number) => {
     for (const nid of [1, 3, 6, 7, 10]) {
       if (nid < id && !present.has(nid) && replaced.has(nid)) {
         outSecs.push({ id: nid, body: replaced.get(nid) });
@@ -2442,13 +2630,13 @@ export function instrument(bytes, opts = {}) {
   const out = new ByteSink(Math.max(bytes.length * 7, 1 << 16));
   out.pushBytes([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
   for (const sec of outSecs) {
-    out.push(sec.id);
+    out.byte(sec.id);
     const szOff = out.reserve(5);
     const bodyStart = out.len;
     if (sec.body === CODE_SECTION_STREAM) {
       emitCodeSectionBody(out);
     } else {
-      out.pushBytes(sec.body);
+      out.pushBytes((sec.body as number[] | Uint8Array));
     }
     out.patch5(szOff, out.len - bodyStart);
   }

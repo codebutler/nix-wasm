@@ -13,7 +13,7 @@ import {
   makeQid,
   packDirent,
   direntSize,
-} from "./protocol.js";
+} from "./protocol.ts";
 
 const enc = (s) => new TextEncoder().encode(s);
 const dec = (b) => new TextDecoder().decode(b);

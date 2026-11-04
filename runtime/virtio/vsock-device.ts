@@ -56,7 +56,7 @@
 // (kernel-host raiseHostWlIrq). The OR-before-notify in that path means no
 // lost-wakeup race.
 
-import { VirtioWasmDevice } from "./device.js";
+import { VirtioWasmDevice } from "./device.ts";
 
 // ---- virtio-vsock constants (uapi/linux/virtio_vsock.h) ----
 export const VSOCK_HDR_LEN = 44;
@@ -123,7 +123,7 @@ class VsockConnection {
    * @param {number} hostPort  the host-side (local) port
    * @param {number} guestPort the guest-side (remote) port
    */
-  constructor(dev, hostPort, guestPort) {
+  constructor(dev: VsockVirtioDevice, hostPort: number, guestPort: number) {
     this._dev = dev;
     this.hostPort = hostPort >>> 0;
     this.guestPort = guestPort >>> 0;
@@ -190,7 +190,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    *
    * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { guestCid?: number, forwardNotify?: (dev: number, q: number) => void }} opts
    */
-  constructor(opts) {
+  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ guestCid?: number; forwardNotify?: (dev: number,q: number) => void; }) {
     super(opts);
     this.guestCid = BigInt((opts.guestCid ?? VSOCK_GUEST_CID) >>> 0);
     this.forwardNotify = opts.forwardNotify || null;
@@ -235,7 +235,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * @param {number} port
    * @param {(conn: VsockConnection) => void} onConnection
    */
-  listen(port, onConnection) {
+  listen(port: number, onConnection: (conn: VsockConnection) => void) {
     this._listeners.set(port >>> 0, onConnection);
   }
 
@@ -251,7 +251,7 @@ export class VsockVirtioDevice extends VirtioWasmDevice {
    * symmetry — /Ctl is guest-initiated.
    * @param {number} guestPort
    */
-  connect(guestPort) {
+  connect(guestPort: number) {
     const hostPort = this._nextHostPort++;
     const conn = new VsockConnection(this, hostPort, guestPort >>> 0);
     this._conns.set(this._key(conn), conn);

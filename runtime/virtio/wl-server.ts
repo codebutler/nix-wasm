@@ -65,7 +65,7 @@ function align4(n) {
  * @param {number} opcode     event opcode
  * @param {Array<{u32?:number, str?:string}>} args  ordered argument list
  */
-function buildMessage(objectId, opcode, args) {
+function buildMessage(objectId: number, opcode: number, args: Array<{ u32?: number; str?: string; }>) {
   // First pass: compute body size.
   let body = 0;
   for (const a of args) {
@@ -119,7 +119,7 @@ function concat(parts) {
  */
 export class WlServer {
   /** @param {(s:string)=>void} [log] */
-  constructor(log) {
+  constructor(log: (s: string) => void) {
     this.log = log || (() => {});
     this.registries = new Set(); // registry object ids the client created
     this.boundIds = new Set(); // ids bound via wl_registry.bind
@@ -132,7 +132,7 @@ export class WlServer {
    * @param {Uint8Array} bytes
    * @returns {Uint8Array}
    */
-  handle(bytes) {
+  handle(bytes: Uint8Array): Uint8Array {
     const replies = [];
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let off = 0;

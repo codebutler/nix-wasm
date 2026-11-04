@@ -13,7 +13,7 @@
 //
 //   LINUX_WASM_ARTIFACTS=file:///path/to/artifacts/ node demo/node/blk-rw-smoke.mjs
 import { bootNode } from "./boot-node.mjs";
-import { applyDirtyOverlay, BLK_SECTOR } from "../../virtio/blk-disk.js";
+import { applyDirtyOverlay, BLK_SECTOR } from "../../virtio/blk-disk.ts";
 
 const STATE_BYTES = 16 * 1024 * 1024; // 16 MiB is enough for mkfs + a marker
 const MARKER = "pc-linux-g1-alive";

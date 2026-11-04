@@ -33,14 +33,14 @@
 //   6. one virtual address, two values — and the pre-fork physical page intact.
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
-import { instrument, NR_MMU_FAULT } from "./softmmu-pass.js";
+import { instrument, NR_MMU_FAULT } from "./softmmu-pass.ts";
 import {
   ASYNCIFY_STATE,
   makeCaptureStack,
   isPendingUnwind,
   stopUnwind,
   startRewind,
-} from "./asyncify.js";
+} from "./asyncify.ts";
 
 const FIX = new URL("test-fixtures/softmmu/", import.meta.url);
 const PAGE = 4096;

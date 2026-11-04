@@ -36,7 +36,7 @@
  *   set under a preview.json that IS present — deliberately never falls back
  *   to booting the default guest under a URL that claims a variant it isn't.
  */
-export function resolveArtifactsBase(preview, variant, baseHref) {
+export function resolveArtifactsBase(preview: { artifactsBase?: string; variants?: Record<string,{ artifactsBase: string; }>; }|null, variant: string|null, baseHref: string): string {
   if (variant) {
     const variantBase = preview?.variants?.[variant]?.artifactsBase;
     if (variantBase) return new URL(variantBase, baseHref).href;

@@ -22,7 +22,7 @@
 // Built on MemVfs (js/linux/ninep/mem-vfs.js) for the in-memory tree, with
 // readOnlyPrefixes=["/"] so the whole store rejects writes.
 
-import { MemVfs } from "./ninep/mem-vfs.js";
+import { MemVfs } from "./ninep/mem-vfs.ts";
 
 // Nix's base32 alphabet (RFC 4648 minus e, o, t, u). We use it MSB-first over
 // the leading SHA-256 bytes — deterministic + content-addressed; not the exact
@@ -104,7 +104,7 @@ function erofs(op) {
  *   is rooted at `/nix` (so `/store/<path>` here is `/nix/store/<path>` in the
  *   guest), plus a `storePaths` array of the absolute guest paths created.
  */
-export async function createNixStore(packages = []) {
+export async function createNixStore(packages: Array<{ name: string; version?: string; files: Record<string,Uint8Array>; }> = []): Promise<any> {
   const store = {};
   const storePaths = [];
   for (const pkg of packages) {

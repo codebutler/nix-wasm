@@ -51,7 +51,7 @@
 // (raiseHostWlIrq): the receiveq write happens before the OR-into-raised_irqs[0] +
 // notify, so there is no lost-wakeup race.
 
-import { VirtioWasmDevice } from "./device.js";
+import { VirtioWasmDevice } from "./device.ts";
 
 // Number of single-port console devices the transport registers = number of hvc
 // lines the guest exposes (hvc0..hvc{N-1}). MUST match the kernel transport's
@@ -104,7 +104,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    *
    * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { sink?: (bytes: Uint8Array) => void, forwardNotify?: (dev: number, q: number) => void, configIrq?: number }} opts
    */
-  constructor(opts) {
+  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ sink?: (bytes: Uint8Array) => void; forwardNotify?: (dev: number,q: number) => void; configIrq?: number; }) {
     super(opts);
     this.sink = opts.sink || null;
     this.forwardNotify = opts.forwardNotify || null;
@@ -152,7 +152,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * @param {number} cols
    * @param {number} rows
    */
-  setSize(cols, rows) {
+  setSize(cols: number, rows: number) {
     this.shared.setConfigSize(this.dev, cols >>> 0, rows >>> 0);
     if (this.configIrq != null) this._raise(this.irqCpu, this.configIrq);
   }
@@ -203,7 +203,7 @@ export class ConsoleVirtioDevice extends VirtioWasmDevice {
    * inbufs are fine and leftovers are kept.
    * @param {Uint8Array} bytes
    */
-  pushRx(bytes) {
+  pushRx(bytes: Uint8Array) {
     if (bytes && bytes.length) {
       if (this._pending.length === 0) {
         this._pending = Uint8Array.from(bytes);

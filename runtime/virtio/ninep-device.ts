@@ -32,7 +32,7 @@
 // happens before the notify, so there is no lost-wakeup race (the next wait64
 // sees the pending bit and returns immediately).
 
-import { VirtioWasmDevice } from "./device.js";
+import { VirtioWasmDevice } from "./device.ts";
 
 // virtio-9p feature bits (uapi/linux/virtio_9p.h + virtio_config.h).
 const VIRTIO_9P_MOUNT_TAG = 0n; // device carries a mount tag in config space
@@ -51,7 +51,7 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
    *
    * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { tag: string, cid?: number, server?: { handle(bytes: Uint8Array, cid?: number): Promise<Uint8Array>|Uint8Array }, forwardNotify?: (dev: number, q: number) => void }} opts
    */
-  constructor(opts) {
+  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ tag: string; cid?: number; server?: { handle(bytes: Uint8Array,cid?: number): Promise<Uint8Array>|Uint8Array; }; forwardNotify?: (dev: number,q: number) => void; }) {
     super(opts);
     this.tag = opts.tag;
     this.cid = (opts.cid ?? 0) >>> 0;
@@ -101,7 +101,7 @@ export class NinePVirtioDevice extends VirtioWasmDevice {
    * 9P errors into Rlerror frames itself; the catch is a last-resort guard.
    * @param {number} q
    */
-  async service(q) {
+  async service(q: number) {
     if (!this.server) {
       this.log(`[virtio-9p ${this.tag}] service() with no server`);
       return;

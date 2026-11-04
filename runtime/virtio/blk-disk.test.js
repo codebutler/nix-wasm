@@ -8,7 +8,7 @@ import {
   dirtySectorCount,
   createStateDiskBacking,
   STATE_DISK_COPY_MAX_BYTES,
-} from "./blk-disk.js";
+} from "./blk-disk.ts";
 
 describe("blk-disk journal", () => {
   it("packs and applies dirty sectors round-trip", () => {

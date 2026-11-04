@@ -1,7 +1,5 @@
-// @ts-nocheck
 // oxlint-disable -- vendored upstream linux-wasm host runtime (adapted from linux.js/linux-worker.js); exempt from our lint rules, like pc's vendor/ tree
 // SPDX-License-Identifier: GPL-2.0-only
-// @ts-nocheck — vendored upstream glue (wasm/BigInt browser-isms; not pc-typed)
 //
 // Adapted from linux-wasm's runtime/linux.js (Joel Severin, GPL-2.0) — the
 // main-thread orchestrator that creates the shared memory and spawns a Web
@@ -16,24 +14,24 @@
 // coi-serviceworker) so they actually load on GitHub Pages — Chromium otherwise
 // blocks the top-level module-worker script served through the SW's
 // reconstructed COEP response (net::ERR_BLOCKED_BY_RESPONSE → opaque ErrorEvent).
-import { createModuleWorker } from "./make-worker.js";
+import { createModuleWorker } from "./make-worker.ts";
 // Wayland (idle wake): the main thread injects unsolicited server→client events
 // into the guest's virtio_wl IN vring itself (the worker is parked in
 // arch_cpu_idle's wait64 and can't service a postMessage). It reuses the worker's
 // device model over the shared queue-layout SAB so vring + avail-cursor state stay
 // consistent across the two writers. See wayland_push_in below + kernel patch 0014.
-import { SharedQueues } from "./virtio/shared-queues.js";
-import { WlDevice } from "./virtio/wl-device.js";
-import { NetDevice } from "./virtio/net-device.js";
-import { NinePVirtioDevice } from "./virtio/ninep-device.js";
+import { SharedQueues } from "./virtio/shared-queues.ts";
+import { WlDevice } from "./virtio/wl-device.ts";
+import { NetDevice } from "./virtio/net-device.ts";
+import { NinePVirtioDevice } from "./virtio/ninep-device.ts";
 import {
   ConsoleVirtioDevice,
   CONSOLE_BASE,
   CONSOLE_CONFIG_IRQ_BASE,
-} from "./virtio/console-device.js";
-import { VsockVirtioDevice } from "./virtio/vsock-device.js";
-import { SndVirtioDevice } from "./virtio/snd-device.js";
-import { createStateDiskBacking, packDirtySectors } from "./virtio/blk-disk.js";
+} from "./virtio/console-device.ts";
+import { VsockVirtioDevice } from "./virtio/vsock-device.ts";
+import { SndVirtioDevice } from "./virtio/snd-device.ts";
+import { createStateDiskBacking, packDirtySectors } from "./virtio/blk-disk.ts";
 
 /// Create a Linux machine and run it.
 // The guest console is N stock SINGLE-PORT virtio-console devices (issue #83):
@@ -125,7 +123,7 @@ export const linux = async ({
   let state_dirty_sab = null;
   let state_persistable = false;
   /** @type {(() => void) | null} */
-  let state_on_dirty = null;
+  let state_on_dirty: (() => void)|null = null;
   {
     const backing = createStateDiskBacking(stateDisk?.image);
     state_sab = backing.imageBuffer;
@@ -290,7 +288,7 @@ export const linux = async ({
   // console (hvc/vtermno) index is idx. Built lazily per console once the self-wake
   // addr is published (and only if a console_sink was provided).
   /** @type {Map<number, ConsoleVirtioDevice>} */
-  const hostConsoleDevices = new Map();
+  const hostConsoleDevices: Map<number,ConsoleVirtioDevice> = new Map();
   const hostConsole = (idx) => {
     if (!console_sink || wlRaisedIrqsAddr == null) return null;
     let d = hostConsoleDevices.get(idx);

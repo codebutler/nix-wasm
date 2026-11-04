@@ -49,7 +49,7 @@ export class UserFault extends Error {
    * @param {"load"|"store"} kind
    * @param {string} detail  which level / which test failed
    */
-  constructor(va, kind, detail) {
+  constructor(va: number, kind: "load"|"store", detail: string) {
     super(`mmu-uaccess: ${kind} fault at user VA 0x${(va >>> 0).toString(16)} (${detail})`);
     this.name = "UserFault";
     this.va = va >>> 0;
@@ -65,7 +65,7 @@ export class UserFault extends Error {
  * @param {boolean} write   require _PAGE_WRITE as well as _PAGE_PRESENT
  * @returns {number} physical offset
  */
-export function translateUser(dv, ptBase, va, write = false) {
+export function translateUser(dv: DataView, ptBase: number, va: number, write: boolean = false): number {
   va = va >>> 0;
   // EVERY address-valued quantity is normalized `>>> 0`: JS bitwise ops
   // return SIGNED 32-bit values, and both `ptBase` (an i32 crossing a host
@@ -100,7 +100,7 @@ export function translateUser(dv, ptBase, va, write = false) {
  * contiguous).
  * @returns {Uint8Array}
  */
-export function readUser(buffer, ptBase, va, len) {
+export function readUser(buffer, ptBase, va, len): Uint8Array {
   va = va >>> 0;
   len = len >>> 0;
   const u8 = new Uint8Array(buffer);
@@ -124,7 +124,7 @@ export function readUser(buffer, ptBase, va, len) {
  * `max` bounds the scan so a missing terminator cannot run away.
  * @returns {string}
  */
-export function readUserCString(buffer, ptBase, va, max = 4096) {
+export function readUserCString(buffer, ptBase, va, max = 4096): string {
   va = va >>> 0;
   const u8 = new Uint8Array(buffer);
   const dec = new TextDecoder();

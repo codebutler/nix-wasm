@@ -5,8 +5,8 @@
 //   • State (readOnly:false): installed-system disk on /dev/vdb — T_IN/T_OUT +
 //     dirty-sector journal (CBHD via blk-disk.js) for host saveDisk/apply-on-boot.
 //     Worker instances set forwardNotify so the main thread owns the journal.
-import { VirtioWasmDevice } from "./device.js";
-import { BLK_SECTOR, markDirty } from "./blk-disk.js";
+import { VirtioWasmDevice } from "./device.ts";
+import { BLK_SECTOR, markDirty } from "./blk-disk.ts";
 
 const VIRTIO_BLK_T_IN = 0; // read
 const VIRTIO_BLK_T_OUT = 1; // write
@@ -22,7 +22,7 @@ export class BlkDevice extends VirtioWasmDevice {
   /**
    * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { image: Uint8Array, readOnly?: boolean, dirtyBitmap?: Uint8Array, onDirty?: () => void, forwardNotify?: (dev: number, q: number) => void }} opts
    */
-  constructor(opts) {
+  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ image: Uint8Array; readOnly?: boolean; dirtyBitmap?: Uint8Array; onDirty?: () => void; forwardNotify?: (dev: number,q: number) => void; }) {
     super(opts);
     this.image = opts.image;
     this.readOnly = opts.readOnly !== false;

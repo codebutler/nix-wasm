@@ -8,12 +8,12 @@
  * @param {{ onKill?: () => void }} [hooks]
  * @returns {{ write(b: Uint8Array|string): void, onData(cb: (b: Uint8Array)=>void): () => void, resize(c: number, r: number): void, kill(): void, hangup(text?: string): void }}
  */
-export function makeConsoleSession(con, hooks = {}) {
+export function makeConsoleSession(con: { write(b: Uint8Array|string): void; onData(cb: (b: Uint8Array) => void): () => void; resize(c: number,r: number): void; }, hooks: { onKill?: () => void; } = {}): { write(b: Uint8Array|string): void; onData(cb: (b: Uint8Array) => void): () => void; resize(c: number,r: number): void; kill(): void; hangup(text?: string): void; } {
   let killed = false;
   /** @type {Set<(b: Uint8Array) => void>} renderer callbacks (for hangup) */
-  const listeners = new Set();
+  const listeners: Set<(b: Uint8Array) => void> = new Set();
   /** @type {Set<() => void>} console-side unsubscribers for every onData() */
-  const unsubs = new Set();
+  const unsubs: Set<() => void> = new Set();
   return {
     write(data) {
       if (!killed) con.write(data);

@@ -3,7 +3,7 @@
 // parsing + event generation (Wayland Phase 1 1d). Pure, browser-free; runs
 // under `bun test`.
 import { test, expect } from "bun:test";
-import { WlServer, _internals } from "./wl-server.js";
+import { WlServer, _internals } from "./wl-server.ts";
 
 const { buildMessage, align4 } = _internals;
 

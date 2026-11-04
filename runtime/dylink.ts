@@ -46,8 +46,8 @@
 // synchronous guest import call, and this code runs in a Worker where sync
 // compilation is unrestricted.
 
-import { genCanonicalThunk } from "./ffi-codegen.js";
-import { genFaultBridge, instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.js";
+import { genCanonicalThunk } from "./ffi-codegen.ts";
+import { genFaultBridge, instrument as softmmuInstrument, isInstrumented } from "./softmmu-pass.ts";
 
 const textDecoder = new TextDecoder("utf-8");
 
@@ -87,7 +87,7 @@ const WASM_DYLINK_NEEDED = 2;
 
 class Cursor {
   /** @param {Uint8Array} bytes */
-  constructor(bytes, at = 0) {
+  constructor(bytes: Uint8Array, at = 0) {
     this.b = bytes;
     this.i = at;
   }
@@ -168,7 +168,19 @@ function skipLimits(c) {
  *   funcTypes: number[],
  * }}
  */
-export function parseDylinkModule(bytes) {
+export function parseDylinkModule(bytes: Uint8Array): {
+dylink: { memSize: number; memAlign: number; tableSize: number; tableAlign: number; needed: string[]; }|null;
+imports: { module: string; name: string; kind: number; }[];
+funcImportCount: number;
+tableImportInitial: number;
+exports: { name: string; kind: number; index: number; }[];
+elem: { offsetKind: "global"|"const"; offsetConst: number; funcIndices: number[]; }|null;
+dynsym: Map<string,number>;
+fpcast: boolean;
+types: { params: number[]; results: number[]; }[];
+funcImportTypes: number[];
+funcTypes: number[];
+} {
   if (
     bytes.length < 8 ||
     bytes[0] !== 0 ||
@@ -180,7 +192,7 @@ export function parseDylinkModule(bytes) {
   }
   const c = new Cursor(bytes, 8);
   /** @type {ReturnType<typeof parseDylinkModule>} */
-  const info = {
+  const info: ReturnType<typeof parseDylinkModule> = {
     dylink: null,
     imports: [],
     funcImportCount: 0,
@@ -309,7 +321,7 @@ export function parseDylinkModule(bytes) {
         // offset expr: (i32.const N | global.get G) end
         const op = c.u8();
         /** @type {"const" | "global"} */
-        let offsetKind = "const";
+        let offsetKind: "const"|"global" = "const";
         let offsetConst = 0;
         if (op === 0x41) {
           offsetKind = "const";
@@ -343,7 +355,7 @@ export function parseDylinkModule(bytes) {
  * @param {ReturnType<typeof parseDylinkModule>} info
  * @returns {(name: string) => ({ params: string[], result: string | null } | null)}
  */
-function buildSigLookup(info) {
+function buildSigLookup(info: ReturnType<typeof parseDylinkModule>): (name: string) => ({ params: string[]; result: string|null; }|null) {
   const byName = new Map();
   for (const e of info.exports) if (e.kind === KIND_FUNC) byName.set(e.name, e.index);
   const { types, funcImportTypes, funcTypes, funcImportCount } = info;
@@ -376,7 +388,7 @@ function buildSigLookup(info) {
  * @param {ReturnType<typeof parseDylinkModule>} info
  * @returns {Map<string, number>}
  */
-export function exportedElemSlots(info) {
+export function exportedElemSlots(info: ReturnType<typeof parseDylinkModule>): Map<string,number> {
   // The cb.dynsym custom section (dynsym-inject seam) is authoritative when
   // present — it survives fpcast, which renumbers elem entries to thunks and
   // breaks the export-index matching below.
@@ -442,7 +454,19 @@ export class DynamicLoader {
    *   abort, lsan stubs, …) — the FINAL fallback for a side module's unresolved
    *   env imports, exactly the set the main module gets.
    */
-  constructor({ memory, table, baseEnv, archBits = 32, log = () => {}, mmu }) {
+  constructor({ memory, table, baseEnv, archBits = 32, log = () => {}, mmu }: {
+memory: WebAssembly.Memory;
+table: WebAssembly.Table;
+baseEnv: Record<string,unknown>;
+archBits?: number;
+log?: (msg: string) => void;
+mmu?: {
+ptBase: number;
+syscall2: Function;
+stackPointer: WebAssembly.Global;
+getTlsBase: Function;
+};
+}) {
     this.memory = memory;
     this.table = table;
     this.baseEnv = baseEnv;
@@ -488,7 +512,7 @@ export class DynamicLoader {
   }
 
   /** @param {number} v */
-  ulong(v) {
+  ulong(v: number) {
     return this.archBits === 64 ? BigInt(v) : Number(v);
   }
 
@@ -498,7 +522,7 @@ export class DynamicLoader {
    *
    * @param {{ instance: WebAssembly.Instance, bytes: Uint8Array, memoryBase: number, tableBase: number }} m
    */
-  registerMain({ instance, bytes, memoryBase, tableBase }) {
+  registerMain({ instance, bytes, memoryBase, tableBase }: { instance: WebAssembly.Instance; bytes: Uint8Array; memoryBase: number; tableBase: number; }) {
     const info = parseDylinkModule(bytes);
     this.modules.push({
       handle: 1,
@@ -523,7 +547,7 @@ export class DynamicLoader {
    * @param {Uint8Array} bytes
    * @returns {{ memSize: number, memAlign: number, tableSize: number } | number} negative errno on failure
    */
-  probe(bytes) {
+  probe(bytes: Uint8Array): { memSize: number; memAlign: number; tableSize: number; }|number {
     let info;
     try {
       info = parseDylinkModule(bytes);
@@ -546,7 +570,7 @@ export class DynamicLoader {
    *
    * @param {string} name
    */
-  resolveExport(name) {
+  resolveExport(name: string) {
     for (const m of this.modules) {
       if (!m.global) continue;
       const v = m.instance.exports[name];
@@ -569,7 +593,7 @@ export class DynamicLoader {
    *   replay and shift every later index.
    * @returns {number}
    */
-  functionAddress(m, name, fn, logged = true) {
+  functionAddress(m: DlModule, name: string, fn: Function, logged: boolean = true): number {
     const slot = m.elemSlots.get(name);
     if (slot !== undefined) return m.tableBase + slot;
     const cached = m.dynSlots.get(name);
@@ -610,7 +634,7 @@ export class DynamicLoader {
    * @param {{ params: string[], result: string | null }} sig
    * @param {Function} fn
    */
-  #canonicalThunk(sig, fn) {
+  #canonicalThunk(sig: { params: string[]; result: string|null; }, fn: Function) {
     const key = `${sig.params.join(",")}->${sig.result ?? ""}`;
     let mod = this.thunkModules.get(key);
     if (!mod) {
@@ -632,7 +656,7 @@ export class DynamicLoader {
    * @param {number} index
    * @returns {boolean}
    */
-  isCanonicalSlot(index) {
+  isCanonicalSlot(index: number): boolean {
     for (const m of this.modules) {
       for (const slot of m.dynSlots.values()) {
         // A dynSlot is raw UNLESS functionAddress wrapped it in a runtime
@@ -661,7 +685,7 @@ export class DynamicLoader {
    * @param {{ name?: string, global?: boolean, replay?: boolean }} [opts]
    * @returns {number}
    */
-  load(bytes, memoryBase, opts = {}) {
+  load(bytes: Uint8Array, memoryBase: number, opts: { name?: string; global?: boolean; replay?: boolean; } = {}): number {
     const { name = "<side>", global = true, replay = false } = opts;
     let info;
     try {
@@ -680,7 +704,7 @@ export class DynamicLoader {
     );
 
     /** @type {DlModule} */
-    const record = {
+    const record: DlModule = {
       handle: this.modules.length + 1,
       name,
       bytes: replay ? bytes : bytes.slice(), // own copy — the guest may free its buffer
@@ -720,7 +744,7 @@ export class DynamicLoader {
       return -DL_ERRNO.ENOEXEC;
     }
     /** @type {Record<string, unknown>} */
-    const envImports = {};
+    const envImports: Record<string,unknown> = {};
     for (const imp of info.imports) {
       if (imp.module !== "env") continue;
       if (
@@ -780,7 +804,7 @@ export class DynamicLoader {
         this.ulong(v),
       );
     /** @type {Record<string, Record<string, unknown>>} */
-    const imports = {
+    const imports: Record<string,Record<string,unknown>> = {
       env: {
         ...envImports,
         memory: this.memory,
@@ -846,9 +870,9 @@ export class DynamicLoader {
    * @param {string} name
    * @returns {number}
    */
-  dlsym(handle, name) {
+  dlsym(handle: number, name: string): number {
     /** @type {DlModule[]} */
-    let search;
+    let search: DlModule[];
     if (handle === 0) {
       search = this.modules.filter((m) => m.global);
     } else {
@@ -890,7 +914,7 @@ export class DynamicLoader {
    *
    * @param {ReturnType<DynamicLoader["snapshot"]>} snap
    */
-  replay(snap) {
+  replay(snap: ReturnType<DynamicLoader["snapshot"]>) {
     let next = 0; // index into snap.modules, consumed by "load" entries in order
     for (const entry of snap.opLog) {
       if (entry.op === "load") {

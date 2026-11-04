@@ -11,8 +11,8 @@
 // NOTE: bytes-mode uses URL.createObjectURL + fetch(blob:) — available in the
 // browser/worker (where pc runs) and in bun; not in plain Node. Node harnesses
 // use baseUrl-mode.
-import { bootLinux } from "./boot.js";
-import { createNixCacheExport } from "./nix-cache.js";
+import { bootLinux } from "./boot.ts";
+import { createNixCacheExport } from "./nix-cache.ts";
 
 /**
  * @param {{
@@ -28,13 +28,29 @@ import { createNixCacheExport } from "./nix-cache.js";
  *   onLog?: (text: string) => void,
  *   nix?: boolean,                    // default true; false → busybox-only, no /nix
  *   wayland?: { sendOut: (clientId:number, buffer:Uint8Array, fds:(Uint8Array|{pipe:number})[])=>void, onClose?: (clientId:number)=>void, onPipeData?: (pipe:number, bytes:Uint8Array)=>void, onPipeClose?: (pipe:number)=>void },  // see bootLinux
- *   vsock?: { onReady: (device: import("./virtio/vsock-device.js").VsockVirtioDevice) => void },  // issue #10 option 3: AF_VSOCK /Ctl bridge hook, passed through to bootLinux
- *   snd?: { onReady: (device: import("./virtio/snd-device.js").SndVirtioDevice) => void },  // issue #145: virtio-snd PCM sink hook, passed through to bootLinux
+ *   vsock?: { onReady: (device: import("./virtio/vsock-device.ts").VsockVirtioDevice) => void },  // issue #10 option 3: AF_VSOCK /Ctl bridge hook, passed through to bootLinux
+ *   snd?: { onReady: (device: import("./virtio/snd-device.ts").SndVirtioDevice) => void },  // issue #145: virtio-snd PCM sink hook, passed through to bootLinux
  *   _bootLinux?: typeof bootLinux,    // test seam
  * }} opts
- * @returns {ReturnType<import('./boot.js').bootLinux>}
+ * @returns {ReturnType<import('./boot.ts').bootLinux>}
  */
-export async function bootNixSystem(opts) {
+export async function bootNixSystem(opts: {
+vfs: any;
+baseUrl?: string|URL; // baseUrl-mode: dir holding the artifacts
+vmlinux?: ArrayBuffer|Blob; // bytes-mode: kernel wasm bytes
+initramfs?: ArrayBuffer|Blob; // bytes-mode: initramfs.cpio.gz bytes
+squashfs?: ArrayBuffer|(() => Promise<ArrayBuffer>);
+stateDisk?: { image: ArrayBuffer|SharedArrayBuffer|Uint8Array; onDirty?: () => void; }; // #177: RW /dev/vdb; >64 MiB must be a full SharedArrayBuffer
+nixCacheBaseUrl?: string; // bytes-mode: the lazy nix-cache base URL
+onModuleCached?: () => void;
+cmdline?: string;
+onLog?: (text: string) => void;
+nix?: boolean; // default true; false → busybox-only, no /nix
+wayland?: { sendOut: (clientId: number,buffer: Uint8Array,fds: (Uint8Array|{ pipe: number; })[]) => void; onClose?: (clientId: number) => void; onPipeData?: (pipe: number,bytes: Uint8Array) => void; onPipeClose?: (pipe: number) => void; }; // see bootLinux
+vsock?: { onReady: (device: import("./virtio/vsock-device.ts").VsockVirtioDevice) => void; }; // issue #10 option 3: AF_VSOCK /Ctl bridge hook, passed through to bootLinux
+snd?: { onReady: (device: import("./virtio/snd-device.ts").SndVirtioDevice) => void; }; // issue #145: virtio-snd PCM sink hook, passed through to bootLinux
+_bootLinux?: typeof bootLinux; // test seam
+}): ReturnType<import('./boot.ts').bootLinux> {
   const bl = opts._bootLinux || bootLinux;
   const useNix = opts.nix !== false;
 

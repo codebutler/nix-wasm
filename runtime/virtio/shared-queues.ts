@@ -59,7 +59,7 @@ function slotBase(dev, q) {
 /** Cross-worker view over a virtio queues SAB. */
 export class SharedQueues {
   /** @param {SharedArrayBuffer} sab */
-  constructor(sab) {
+  constructor(sab: SharedArrayBuffer) {
     this.i32 = new Int32Array(sab);
   }
 

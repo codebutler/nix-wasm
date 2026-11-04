@@ -45,7 +45,7 @@ function dirname(path) {
 
 export class MemVfs {
   /** @param {{ readOnlyPrefixes?: string[] }} [opts] */
-  constructor(opts = {}) {
+  constructor(opts: { readOnlyPrefixes?: string[]; } = {}) {
     this._seq = 0;
     this._clock = 1_700_000_000_000; // deterministic mtimes
     this._readOnly = (opts.readOnlyPrefixes || []).map(normalize);

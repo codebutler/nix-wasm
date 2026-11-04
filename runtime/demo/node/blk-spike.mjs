@@ -14,8 +14,8 @@
 // the guest console transcript is dumped for diagnosis).
 import { readFile } from "node:fs/promises";
 import { installWebShims, terminateAllWorkers } from "./web-shims.mjs";
-import { bootLinux } from "../../boot.js";
-import { MemVfs } from "../../ninep/mem-vfs.js";
+import { bootLinux } from "../../boot.ts";
+import { MemVfs } from "../../ninep/mem-vfs.ts";
 
 installWebShims();
 

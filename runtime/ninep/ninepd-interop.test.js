@@ -15,7 +15,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { P9, NOFID, DOTL_VERSION, QT, encode, decode } from "./protocol.js";
+import { P9, NOFID, DOTL_VERSION, QT, encode, decode } from "./protocol.ts";
 
 const CC = process.env.CC || "cc";
 const haveCc = spawnSync(CC, ["--version"], { stdio: "ignore" }).status === 0;

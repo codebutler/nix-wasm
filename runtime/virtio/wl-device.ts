@@ -1,4 +1,3 @@
-// @ts-nocheck -- vendored linux-wasm runtime (browser-isms; not pc-typed), like
 // kernel-host.js / kernel-worker.js. Pulled into the typecheck graph once
 // kernel-host.js began importing WlDevice for host-side idle-wake injection.
 // wl-device.js — host (JS) model of the virtio-wl device for the `virtio_wasm`
@@ -27,8 +26,8 @@
 // client socket — completing wl_display_roundtrip(). Real compositing
 // (surfaces/buffers/pixels) is Phase 2 / Greenfield.
 
-import { VirtioWasmDevice } from "./device.js";
-import { WlServer } from "./wl-server.js";
+import { VirtioWasmDevice } from "./device.ts";
+import { WlServer } from "./wl-server.ts";
 
 // virtio_wl ctrl types (uapi/linux/virtio_wl.h).
 const VIRTIO_WL_CMD_VFD_NEW = 0x100;
@@ -114,7 +113,14 @@ export class WlDevice extends VirtioWasmDevice {
    *   host→guest path). Without this hook the device falls back to the local
    *   WlServer (Phase 1 1d behavior + tests), which still uses inReply.
    */
-  constructor(opts) {
+  constructor(opts: {
+waylandBridge?: {
+sendOut: (clientId: number,data: Uint8Array,fds: (Uint8Array|{ pipe: number; })[]) => void;
+onPipeData?: (pipe: number,data: Uint8Array) => void;
+onPipeClose?: (pipe: number) => void;
+onGuestPipe?: (pipe: number,open: boolean) => void;
+};
+}) {
     super(opts);
     this._nextVfdId = 1; // host-allocated vfd ids would set the HOST bit; the
     // guest allocates ctx/pipe ids itself, so we only echo them back.
@@ -235,7 +241,7 @@ export class WlDevice extends VirtioWasmDevice {
    *    single VFD_RECV: bytes (the keymap) become a FILL vfd; `{ pipe: n }` is
    *    host pipe n (n < 2^29), a vfd the guest writes into — its data comes back
    *    through the bridge's onPipeData(n) and its close through onPipeClose(n). */
-  injectIn(clientId, data, fds) {
+  injectIn(clientId: number, data: Uint8Array|ArrayBuffer, fds: (Uint8Array|{ pipe: number; })[]) {
     const id = clientId >>> 0;
     const bytes = data
       ? data instanceof Uint8Array
@@ -261,7 +267,7 @@ export class WlDevice extends VirtioWasmDevice {
    *  called (the host routes SENDs to the compositor instead).
    *  @param {number} clientId  ctx vfd_id the SEND came from
    *  @param {Uint8Array|ArrayBuffer} data  the client→server wire bytes */
-  serveLocal(clientId, data) {
+  serveLocal(clientId: number, data: Uint8Array|ArrayBuffer) {
     const id = clientId >>> 0;
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const server = this._serverFor(id);

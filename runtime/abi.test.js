@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { ENGINE_ABI } from "./index.js";
+import { ENGINE_ABI } from "./index.ts";
 import { ENGINE_ABI as DIRECT } from "./abi.js";
 
 test("ENGINE_ABI is a positive integer, exported from index and abi", () => {

@@ -412,7 +412,7 @@ class Writer {
 // ── Little-endian reader over a Uint8Array ─────────────────────────────────
 class Reader {
   /** @param {Uint8Array|ArrayBuffer} input */
-  constructor(input) {
+  constructor(input: Uint8Array|ArrayBuffer) {
     this.buf = input instanceof Uint8Array ? input : new Uint8Array(input);
     this.view = new DataView(this.buf.buffer, this.buf.byteOffset, this.buf.byteLength);
     this.pos = 0;
@@ -530,7 +530,7 @@ function readField(r, kind) {
  * @param {Record<string, any>} msg
  * @returns {Uint8Array}
  */
-export function encode(msg) {
+export function encode(msg: Record<string,any>): Uint8Array {
   const fields = SCHEMA[msg.type];
   if (!fields) throw new Error("9p encode: unknown type " + msg.type);
   const w = new Writer();
@@ -550,7 +550,7 @@ export function encode(msg) {
  * @param {Uint8Array|ArrayBuffer} input
  * @returns {Record<string, any>}
  */
-export function decode(input) {
+export function decode(input: Uint8Array|ArrayBuffer): Record<string,any> {
   const r = new Reader(input);
   r.u32(); // size — consumed; see doc comment
   const type = r.u8();
@@ -558,7 +558,7 @@ export function decode(input) {
   const fields = SCHEMA[type];
   if (!fields) throw new Error("9p decode: unknown type " + type);
   /** @type {Record<string, any>} */
-  const msg = { type, tag };
+  const msg: Record<string,any> = { type, tag };
   for (const [name, kind] of fields) msg[name] = readField(r, kind);
   return msg;
 }

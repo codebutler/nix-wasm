@@ -25,7 +25,7 @@
 // The generated module imports the SHARED memory + table, so trampoline(argPtr,
 // retPtr, funcIndex) reads typed args straight from guest memory, calls the real
 // funcref, and writes the result back — all in the process's own address space.
-import { instrument as softmmuInstrument } from "./softmmu-pass.js";
+import { instrument as softmmuInstrument } from "./softmmu-pass.ts";
 
 // wasm value-type byte encodings.
 const VT = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
@@ -97,7 +97,12 @@ const section = (id, payload) => [id, ...uleb(payload.length), ...payload];
  * }} [opts]
  * @returns {Uint8Array}
  */
-export function genTrampoline(sig, opts = {}) {
+export function genTrampoline(sig: { params: string[]; result: string|null; }, opts: {
+canonical?: boolean;
+checked?: boolean;
+sharedMemory?: boolean;
+memoryMaximum?: number;
+} = {}): Uint8Array {
   const canonical = !!opts.canonical;
   const checked = !!opts.checked;
   const memoryImport = opts.sharedMemory
@@ -186,7 +191,7 @@ export function genTrampoline(sig, opts = {}) {
  * @param {{ params: string[], result: string | null }} sig the RAW signature
  * @returns {Uint8Array}
  */
-export function genCanonicalThunk(sig) {
+export function genCanonicalThunk(sig: { params: string[]; result: string|null; }): Uint8Array {
   // type 0 = the canonical thunk type; type 1 = the raw target signature.
   const canonType = [
     0x60,
@@ -337,7 +342,16 @@ export class FfiTrampolines {
    *   },
    * }} opts
    */
-  constructor({ memory, table, mmu }) {
+  constructor({ memory, table, mmu }: {
+memory: WebAssembly.Memory;
+table: WebAssembly.Table;
+mmu?: {
+ptBase: number;
+syscall2: Function;
+stackPointer: WebAssembly.Global;
+getTlsBase: Function;
+};
+}) {
     this.memory = memory;
     this.table = table;
     this.mmu = mmu || null;
@@ -351,7 +365,7 @@ export class FfiTrampolines {
   }
 
   /** @param {{ params: string[], result: string | null }} sig @param {boolean} canonical */
-  key(sig, canonical) {
+  key(sig: { params: string[]; result: string|null; }, canonical: boolean) {
     return (
       (this.mmu ? "M:" : "N:") +
       (canonical ? "C:" : "R:") +
@@ -371,7 +385,7 @@ export class FfiTrampolines {
    * @param {number} argPtr
    * @param {number} retPtr
    */
-  call(sig, canonical, funcIndex, argPtr, retPtr) {
+  call(sig: { params: string[]; result: string|null; }, canonical: boolean, funcIndex: number, argPtr: number, retPtr: number) {
     const k = this.key(sig, canonical);
     let tramp = this.cache.get(k);
     if (!tramp) {

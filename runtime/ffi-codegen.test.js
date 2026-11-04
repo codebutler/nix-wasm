@@ -5,8 +5,8 @@
 // matching CANONICAL_PARAMS / userspace/fpcast-emu.nix).
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.js";
-import { CANONICAL_PARAMS, FfiTrampolines, genTrampoline } from "./ffi-codegen.js";
+import { DynamicLoader, exportedElemSlots, parseDylinkModule } from "./dylink.ts";
+import { CANONICAL_PARAMS, FfiTrampolines, genTrampoline } from "./ffi-codegen.ts";
 
 const FIX = new URL("./test-fixtures/ffi/", import.meta.url);
 const fixture = (name) => new Uint8Array(readFileSync(new URL(name, FIX)));

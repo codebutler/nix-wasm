@@ -66,7 +66,7 @@
 // the sink, and raises the completion IRQ via the SAME raised_irqs self-wake
 // path 9p/vsock/console use.
 
-import { VirtioWasmDevice } from "./device.js";
+import { VirtioWasmDevice } from "./device.ts";
 
 const VIRTIO_F_VERSION_1 = 32n; // modern (v1) device
 
@@ -150,7 +150,7 @@ export class SndVirtioDevice extends VirtioWasmDevice {
    *
    * @param {ConstructorParameters<typeof VirtioWasmDevice>[0] & { forwardNotify?: (dev: number, q: number) => void, sink?: SndSink }} opts
    */
-  constructor(opts) {
+  constructor(opts: ConstructorParameters<typeof VirtioWasmDevice>[0]&{ forwardNotify?: (dev: number,q: number) => void; sink?: SndSink; }) {
     super(opts);
     this.forwardNotify = opts.forwardNotify || null;
     /** @type {SndSink | null} */

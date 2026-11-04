@@ -6,7 +6,7 @@
 // per-level present tests, and the write-permission test that keeps COW
 // pages safe from host-side stores.
 import { describe, expect, test } from "bun:test";
-import { UserFault, readUser, readUserCString, translateUser, writeUser } from "./mmu-uaccess.js";
+import { UserFault, readUser, readUserCString, translateUser, writeUser } from "./mmu-uaccess.ts";
 
 const PT_BASE = 0x1000;
 const PTE_PAGE = 0x2000; // pte page for pgd index 2 (VAs 0x0080_0000..0x00bf_ffff)

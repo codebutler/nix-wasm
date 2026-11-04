@@ -51,12 +51,12 @@ const SEEDED_DIRS = new Set(["", "nar", "realisations", "log"]);
  * @param {string} baseUrl  URL of the published standard Nix cache dir (serves
  *   nix-cache-info + *.narinfo + nar/* at their relative paths).
  */
-export function createNixCacheExport(baseUrl) {
+export function createNixCacheExport(baseUrl: string) {
   const base = String(baseUrl).replace(/\/+$/, "");
   /** @type {Map<string, Promise<Blob>>} relPath → in-flight/cached blob fetch */
-  const blobCache = new Map();
+  const blobCache: Map<string,Promise<Blob>> = new Map();
   /** @type {Map<string, Promise<object|null>>} relPath → in-flight/cached HEAD probe */
-  const statCache = new Map();
+  const statCache: Map<string,Promise<object|null>> = new Map();
 
   const folderRec = (p) => ({
     id: "nix-cache:" + (p || "/"),
