@@ -1,0 +1,31 @@
+runtime/kernel-host.ts
+  s_d32a35bef22d9f::t_b1a66fcad1b7f3 173-175
+runtime/kernel-worker.ts
+  s_ea0966cc4014b6::t_dd908ad5855342 726
+runtime/tsconfig.json
+  s_d32a35bef22d9f::t_03131b9a65f72f 12-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f7959c441bac28fe3b3f7befc8c4af254d2b1cf4",
+  "prompts": {},
+  "sessions": {
+    "s_d32a35bef22d9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b68206d0-83bd-4425-b8f7-772775bceedc",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    },
+    "s_ea0966cc4014b6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0733c3a0-1f9f-4b7f-9eba-40b0be9c52ff",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Eric Butler <eric@codebutler.com>"
+    }
+  }
+}
