@@ -723,7 +723,7 @@ type WorkerInitMessage = InitMessage & {
         } else if (kind === 1) {
           // table: reftype + limits — what we came for
           i++;
-          const flags = bytes[i++];
+          i++; // the limits' flags byte
           let initial;
           [initial, i] = uleb(i);
           return initial;
@@ -808,12 +808,6 @@ type WorkerInitMessage = InitMessage & {
     let end;
     for (end = index; memory_u8[end]; ++end); // Find terminating nul-character.
     return text_decoder.decode(memory_u8.slice(index, end));
-  };
-
-  const lock_notify = (lock: LockName, count?: number) => {
-    const l = required(locks, "task locks");
-    Atomics.store(l._memory, l[lock], 1);
-    Atomics.notify(l._memory, l[lock], count || 1);
   };
 
   const lock_wait = (lock: LockName) => {

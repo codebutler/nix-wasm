@@ -170,6 +170,9 @@ export interface LinuxOptions {
   squashfs?: ArrayBuffer | null;
   stateDisk?: { image: ArrayBuffer | SharedArrayBuffer | Uint8Array; onDirty?: () => void };
   wayland?: WaylandHostBridge;
+  /** Accepted for caller compatibility but a no-op: the exec ABI compiles
+   *  user binaries from shared memory per exec, so there is no host-side
+   *  module cache whose completion this would signal. */
   on_module_cached?: () => void;
 }
 
@@ -243,10 +246,6 @@ export const linux = async ({
   // main-thread compositor and the response returns asynchronously over the IN
   // queue via wayland_push_in (no SAB reply channel).
   wayland,
-  // pc: accepted for caller API stability but now a no-op — the new exec ABI
-  // compiles user binaries from shared memory per-exec, so there is no
-  // host-side streamed-Module cache whose completion this would signal.
-  on_module_cached,
 }: LinuxOptions) => {
   const arch_bits = variant.startsWith("wasm32_") ? 32 : 64;
   const Ulong = arch_bits == 32 ? Number : BigInt;
@@ -317,17 +316,11 @@ export const linux = async ({
   /// and clone()'d workers both read the same shared range, so there is nothing
   /// to cache or marshal across workers here.
 
-  const text_decoder = new TextDecoder("utf-8");
   const text_encoder = new TextEncoder();
 
   const lock_notify = (locks: TaskLocks, lock: LockName, count?: number) => {
     Atomics.store(locks._memory, locks[lock], 1);
     Atomics.notify(locks._memory, locks[lock], count || 1);
-  };
-
-  const lock_wait = (locks: TaskLocks, lock: LockName) => {
-    Atomics.wait(locks._memory, locks[lock], 0);
-    Atomics.store(locks._memory, locks[lock], 0);
   };
 
   // Wayland (idle wake): host-side virtio_wl IN-injector. An unsolicited
