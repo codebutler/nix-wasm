@@ -21,11 +21,9 @@ let
   bt = llvm.bintools-unwrapped;
   clang = "${llvm.clang-unwrapped}/bin/clang";
   clangxx = "${llvm.clang-unwrapped}/bin/clang++";
-  # Use the same ELF/GNU-ld flag filter as the cross cc-wrapper. This custom
-  # raw-clang link used to point directly at stock wasm-ld, bypassing the
-  # filter and failing on meson's --start-group/--end-group flags (#209).
+  # Use the same ELF/GNU-ld flag filter as the cross cc-wrapper. Clang's wasm
+  # driver ignores --ld-path, so select the filter with -B for both compilers.
   filteredWasmLd = import ./toolchain/wasm-ld-filter.nix { inherit pkgs; };
-  wasmld = "${filteredWasmLd}/bin/wasm-ld";
   builtins_a = "${compilerRt}/lib/wasm32-unknown-unknown/libclang_rt.builtins.a";
 
   # Shared no-undef allow-list (#52): the host-provided imports the nix.wasm link
@@ -202,7 +200,7 @@ let
 
   # Shared C++ guest-ABI flags (wasm EH, atomics/bulk-memory, libc++ from the
   # nix-built libcxx, sysroot + kernel headers).
-  cxxCommon = "--ld-path=${wasmld} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir}"
+  cxxCommon = "-B${filteredWasmLd}/bin --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir}"
     + " --sysroot=${sysroot} -isystem ${kernelHeaders}/include -D__linux__ -D_GNU_SOURCE"
     + " -matomics -mbulk-memory -fwasm-exceptions -D__USING_WASM_EXCEPTIONS__"
     # Nix's crash-handler uses boost::stacktrace, whose default backend calls
@@ -297,7 +295,7 @@ pkgs.stdenv.mkDerivation {
 
     cat > "$WRAP/bin/wcc" <<EOF
     #!${pkgs.runtimeShell}
-    exec ${clang} --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir} --sysroot=${sysroot} -isystem ${kernelHeaders}/include \
+    exec ${clang} -B${filteredWasmLd}/bin --target=wasm32-unknown-unknown -fPIC -resource-dir=${resourceDir} --sysroot=${sysroot} -isystem ${kernelHeaders}/include \
       -D__linux__ -D_GNU_SOURCE -matomics -mbulk-memory ${depDev} "\$@" \
       -Wl,-shared -Wl,-Bsymbolic -Wl,--no-entry -Wl,--export-all \
       -Wl,--import-memory -Wl,--shared-memory -Wl,--max-memory=4294967296 \

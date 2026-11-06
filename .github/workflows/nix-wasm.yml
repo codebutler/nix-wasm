@@ -372,12 +372,13 @@ jobs:
     name: build wasm artifacts
     needs: [changes, toolchain]
     if: ${{ needs.changes.outputs.nix == 'true' }}
-    # With the toolchain + cross closure cached in Cachix,
-    # this job is substitution-only (I/O-bound) plus the cheap top layer (nix.wasm
-    # C++ + squashfs/initramfs/image). Keep this on the same x86_64 runner label
-    # as the toolchain so the derivation paths match the publisher.
+    # Warm runs substitute most dependencies from Cachix, but a changed seed
+    # closure can require hours of source builds on the Rosetta Lima runner.
+    # Keep this on the same x86_64 runner label as the toolchain so derivation
+    # paths match the publisher. The previous 180-minute limit canceled a
+    # still-progressing cold build during release validation.
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '"namespace-profile-md"' || '["self-hosted","linux","ARM64","nix-wasm"]') }}
-    timeout-minutes: 180
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 

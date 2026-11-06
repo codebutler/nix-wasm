@@ -84,13 +84,14 @@ pkgs.runCommand "wasm-nixpkgs-channel" { } ''
           inherit kernelHeaders;
           muslWasm = musl;
           exposeGuestBuildTools = true;
+          inherit forkStdenv;
         })
       ];
     };
     forkStdenv = import ./toolchain/wasm-fork-stdenv.nix {
       inherit pkgs cross muslFork;
     };
-    seedBash = forkStdenv.enableForkFor seedCross.bashNonInteractive;
+    seedBash = seedCross.bashNonInteractive;
     seedMake = forkStdenv.enableForkFor seedCross.gnumake;
     seedPackages = {
       inherit (seedCross)
